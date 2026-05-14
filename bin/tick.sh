@@ -3,7 +3,7 @@
 #
 # Usage: tick.sh <project-name>
 #
-# Loads $IGOR_HOME/projects/<project-name>.conf, finds the oldest
+# Loads $FOREMAN_HOME/projects/<project-name>.conf, finds the oldest
 # claimable issue, creates a worktree, invokes Claude, then either
 # opens a PR, posts a "no work" comment, or relies on the agent
 # having already flipped the issue (report or blocked) itself.
@@ -15,11 +15,11 @@ set -euo pipefail
 
 # ── Paths and project ──────────────────────────────────────────
 
-IGOR_HOME="${IGOR_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
-STATE_DIR="${IGOR_STATE_DIR:-$HOME/.local/state/igor}"
+FOREMAN_HOME="${FOREMAN_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
+STATE_DIR="${FOREMAN_STATE_DIR:-$HOME/.local/state/foreman}"
 PROJECT="${1:?usage: tick.sh <project-name>}"
 
-CONF="$IGOR_HOME/projects/${PROJECT}.conf"
+CONF="$FOREMAN_HOME/projects/${PROJECT}.conf"
 [ -f "$CONF" ] || { echo "tick: no conf at $CONF" >&2; exit 2; }
 
 # Defaults
@@ -36,20 +36,20 @@ ENQUEUE_CMD=""
 
 # ── Secrets ────────────────────────────────────────────────────
 
-if [ -f "$IGOR_HOME/.env" ]; then
+if [ -f "$FOREMAN_HOME/.env" ]; then
   set -a
   # shellcheck source=/dev/null
-  . "$IGOR_HOME/.env"
+  . "$FOREMAN_HOME/.env"
   set +a
 fi
-: "${CLAUDE_CODE_OAUTH_TOKEN:?CLAUDE_CODE_OAUTH_TOKEN must be set (via $IGOR_HOME/.env)}"
-: "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set (via $IGOR_HOME/.env)}"
-: "${FORGEJO_URL:?FORGEJO_URL must be set (via $IGOR_HOME/.env)}"
+: "${CLAUDE_CODE_OAUTH_TOKEN:?CLAUDE_CODE_OAUTH_TOKEN must be set (via $FOREMAN_HOME/.env)}"
+: "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set (via $FOREMAN_HOME/.env)}"
+: "${FORGEJO_URL:?FORGEJO_URL must be set (via $FOREMAN_HOME/.env)}"
 
 # ── Library ────────────────────────────────────────────────────
 
 # shellcheck source=lib/forgejo.sh
-. "$IGOR_HOME/lib/forgejo.sh"
+. "$FOREMAN_HOME/lib/forgejo.sh"
 
 # ── Lock (one tick per project at a time) ──────────────────────
 
@@ -123,10 +123,10 @@ git worktree add -b "agent/${ISSUE_NUMBER}" "$WORKTREE" "origin/${PR_BASE}"
 cd "$WORKTREE"
 
 # Helpers (agent-block, etc.) need to be on PATH inside Claude's shell.
-export PATH="$IGOR_HOME/bin:$PATH"
+export PATH="$FOREMAN_HOME/bin:$PATH"
 
 # Helpers also read these from env.
-export ISSUE_NUMBER ISSUE_TITLE FORGEJO_REPO PR_BASE IGOR_HOME
+export ISSUE_NUMBER ISSUE_TITLE FORGEJO_REPO PR_BASE FOREMAN_HOME
 
 USER_MSG=$(cat <<EOF
 You are working Forgejo issue #${ISSUE_NUMBER} in ${FORGEJO_REPO}.
@@ -143,7 +143,7 @@ log "invoking claude (timeout ${TICK_TIMEOUT})"
 set +e
 timeout --kill-after=30s "$TICK_TIMEOUT" \
   claude \
-    --append-system-prompt "$(cat "$IGOR_HOME/AGENTS.md")" \
+    --append-system-prompt "$(cat "$FOREMAN_HOME/AGENTS.md")" \
     --print "$USER_MSG"
 CLAUDE_EXIT=$?
 set -e

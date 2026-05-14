@@ -13,8 +13,8 @@
 
 set -euo pipefail
 
-IGOR_HOME="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$IGOR_HOME"
+FOREMAN_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$FOREMAN_HOME"
 
 FAIL=0
 

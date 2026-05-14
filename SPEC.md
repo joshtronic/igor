@@ -1,14 +1,14 @@
-# Igor — Specification
+# Foreman — Specification
 
 A harness for unattended Claude Code instances that work tickets from
 Forgejo and produce PRs. One robot per project, one bot identity
 across all projects (`igor`). Auth via Claude Max subscription
 (`CLAUDE_CODE_OAUTH_TOKEN`), not API key billing.
 
-This document is the authoritative description of how Igor behaves.
-The `igor/` repo holds the harness scaffolding; project repos hold
+This document is the authoritative description of how Foreman behaves.
+The `foreman/` repo holds the harness scaffolding; project repos hold
 their own context and (optionally) a producer script. Nothing in a
-project repo names "igor" — projects are unaware of the harness.
+project repo names "foreman" — projects are unaware of the harness.
 
 ---
 
@@ -56,17 +56,17 @@ by `Status/Blocked`, the assignee, and open/closed.
 ### Project-specific labels
 
 Projects may add their own namespaces (e.g., `Persona/Punk` for
-scenekids). Igor does not read them. Their semantics live in the
+scenekids). Foreman does not read them. Their semantics live in the
 project's `enqueue.sh` and in the issue bodies that producer writes.
 
 ---
 
 ## Layout
 
-### Igor repo
+### Foreman repo
 
 ```
-igor/
+foreman/
 ├── AGENTS.md              # universal unattended rules
 ├── SPEC.md                # this document
 ├── README.md
@@ -80,10 +80,10 @@ igor/
 ├── projects/
 │   └── <name>.conf        # one per project
 └── systemd/
-    ├── igor-tick@.service
-    ├── igor-tick@.timer
-    ├── igor-enqueue@.service
-    └── igor-enqueue@.timer
+    ├── foreman-tick@.service
+    ├── foreman-tick@.timer
+    ├── foreman-enqueue@.service
+    └── foreman-enqueue@.timer
 ```
 
 ### Per-project
@@ -103,7 +103,7 @@ igor/
 
 ## File responsibilities
 
-### `igor/AGENTS.md`
+### `foreman/AGENTS.md`
 
 The universal unattended rules. Loaded **only** by `tick.sh` via
 `--append-system-prompt`. Interactive Claude never sees it.
@@ -122,7 +122,7 @@ Contains:
 Project context. Auto-loaded by Claude Code in both interactive and
 unattended modes (no change from current usage). Architecture,
 commands, conventions, interactive rules. Interactive-only rules
-remain intact; they are overridden at bot runtime by `igor/AGENTS.md`.
+remain intact; they are overridden at bot runtime by `foreman/AGENTS.md`.
 
 ### `<project>/.claude/settings.json`
 
@@ -161,7 +161,7 @@ told it to. Lives wherever it makes sense within the project repo.
    `label:Agent no:assignee -label:Status/Blocked`, assigns it to
    `igor`, and creates a worktree.
 3. **Worked.** Claude runs in the worktree. Inputs: project's
-   `CLAUDE.md` (auto-loaded), `igor/AGENTS.md` (appended), issue body
+   `CLAUDE.md` (auto-loaded), `foreman/AGENTS.md` (appended), issue body
    (user message).
 4. **Outcome.** One of three:
    - **PR.** Branch pushed, PR opened with `Closes #N`. Issue closes
@@ -190,7 +190,7 @@ instance name):
 4. Create a worktree at `<state_dir>/worktrees/<repo>-<issue>`.
 5. Invoke Claude with:
    - `cwd` = worktree path
-   - `--append-system-prompt "$(cat $IGOR_HOME/AGENTS.md)"`
+   - `--append-system-prompt "$(cat $FOREMAN_HOME/AGENTS.md)"`
    - `--print "$ISSUE_BODY"`
    - Settings auto-loaded from `<worktree>/.claude/settings.json`
 6. On Claude exit, inspect worktree state:
@@ -231,7 +231,7 @@ Per invocation, scoped to one project:
 5. Exit 0.
 
 Project-specific knowledge is encapsulated in `enqueue.sh` and the
-content of the issue bodies it writes. Igor does not parse project
+content of the issue bodies it writes. Foreman does not parse project
 state.
 
 ---
@@ -243,18 +243,19 @@ A single Forgejo + server user named `igor`:
 - Forgejo API token and SSH key, with branch protection bypass on
   the base branch (necessary for the bot to push branches and have
   `Closes #N`-linked merges work uniformly).
-- Server user account, owns `~/.config/igor/`, runs the systemd user
-  units.
+- Server user account, runs the systemd user units, owns
+  `$FOREMAN_HOME/.env` (chmod 600).
 - Git authorship on all bot commits and PRs.
 
-Logs are uniformly tagged `igor:*` via systemd. One identity for
-access control, audit trail, and grep.
+systemd journals are tagged by unit name (`foreman-*`); git and
+Forgejo audit trails attribute to `igor`. One identity for access
+control, one prefix for grep.
 
 ---
 
 ## Secrets
 
-`$IGOR_HOME/.env` (chmod 600), gitignored. Contains the harness-wide
+`$FOREMAN_HOME/.env` (chmod 600), gitignored. Contains the harness-wide
 credentials:
 
 ```
@@ -268,10 +269,10 @@ load the same file via `EnvironmentFile=`.
 
 Project-specific secrets (e.g., joshing.you's `ANTHROPIC_API_KEY`,
 a future SEO worker's GSC token) stay in the project's own `.env`.
-`enqueue.sh` and the worked code source it as needed; igor itself
+`enqueue.sh` and the worked code source it as needed; foreman itself
 does not.
 
-`.gitignore` at `$IGOR_HOME` blocks `.env`, `state/`, `*.log`.
+`.gitignore` at `$FOREMAN_HOME` blocks `.env`, `state/`, `*.log`.
 
 ---
 
@@ -279,14 +280,14 @@ does not.
 
 Two systemd user-unit templates, instanced per project:
 
-- `igor-tick@<project>.timer` — runs the consumer on `TICK_INTERVAL`.
+- `foreman-tick@<project>.timer` — runs the consumer on `TICK_INTERVAL`.
   Enabled for every project.
-- `igor-enqueue@<project>.timer` — runs the producer on
+- `foreman-enqueue@<project>.timer` — runs the producer on
   `ENQUEUE_INTERVAL`. Enabled only for projects with `enqueue.sh`.
 
 Observability:
 - `systemctl --user list-timers` — schedule.
-- `journalctl --user -u 'igor-*'` — all activity.
+- `journalctl --user -u 'foreman-*'` — all activity.
 - Forgejo issue queue — current state of work.
 
 ---
@@ -316,7 +317,7 @@ REPORT_TARGETS=forgejo
 ```
 
 Adding a new project = drop a conf file + enable one or two systemd
-timer instances. No code changes in the igor repo.
+timer instances. No code changes in the foreman repo.
 
 ---
 
@@ -344,19 +345,19 @@ Checks per project:
 
 ## Out of scope
 
-Igor handles only issue → outcome work. It explicitly does **not**
+Foreman handles only issue → outcome work. It explicitly does **not**
 handle:
 
 - **Report-only jobs** (SEO sweeps, weekly summaries, cross-site
   analyses). Run those as plain cron. They may file Forgejo issues
-  into igor projects as a side effect, but they themselves are not
-  igor projects.
+  into foreman projects as a side effect, but they themselves are not
+  foreman projects.
 - **Interactive Claude.** You use Claude Code in repos normally;
-  igor is the unattended layer.
+  foreman is the unattended layer.
 - **Cross-project coordination.** Each project's issue queue is
   independent. If one process wants to queue work for another
   project's bot, it files the issue in that project's repo directly.
-- **Pipelines, ETL, long-running daemons.** Not igor's shape.
+- **Pipelines, ETL, long-running daemons.** Not foreman's shape.
 
 ---
 
