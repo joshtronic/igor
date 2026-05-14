@@ -1,0 +1,14 @@
+name: Lint
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  check-sync:
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check AGENTS.md ↔ tick.sh sync
+        run: bin/check-sync.sh

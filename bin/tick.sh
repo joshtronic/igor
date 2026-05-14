@@ -23,7 +23,7 @@ CONF="$IGOR_HOME/projects/${PROJECT}.conf"
 [ -f "$CONF" ] || { echo "tick: no conf at $CONF" >&2; exit 2; }
 
 # Defaults
-PR_BASE="main"
+PR_BASE="master"
 TICK_TIMEOUT="60m"
 ENQUEUE_INTERVAL=""
 ENQUEUE_CMD=""
@@ -159,12 +159,15 @@ ISSUE_STATE=$(jq -r .state <<<"$CURRENT")
 HAS_BLOCKED=$(jq -r '[.labels[].name] | index("Status/Blocked") != null' <<<"$CURRENT")
 
 if [ "$ISSUE_STATE" = "closed" ]; then
+  # OUTCOME: report
   log "outcome: report (issue closed by agent)"
 
 elif [ "$HAS_BLOCKED" = "true" ]; then
+  # OUTCOME: blocked
   log "outcome: blocked (Status/Blocked applied by agent)"
 
 elif [ "$COMMITS" -gt 0 ]; then
+  # OUTCOME: pr
   log "outcome: PR ($COMMITS commit(s))"
   BRANCH="agent/${ISSUE_NUMBER}"
   git push -u origin "$BRANCH"
@@ -181,6 +184,7 @@ elif [ "$COMMITS" -gt 0 ]; then
   log "PR opened"
 
 else
+  # OUTCOME: noop
   log "outcome: no work produced"
   forgejo_unassign_all "$FORGEJO_REPO" "$ISSUE_NUMBER"
   forgejo_comment "$FORGEJO_REPO" "$ISSUE_NUMBER" \
