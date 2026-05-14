@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Forgejo API helpers. Sourced by bin/tick.sh and bin/agent-*.sh.
+#
+# Requires in environment:
+#   FORGEJO_URL    — e.g., https://git.sherver.org
+#   FORGEJO_TOKEN  — bot's API token (loaded from ~/.config/igor/forgejo.env)
+#
+# Requires on PATH: curl, jq.
+
+: "${FORGEJO_URL:?FORGEJO_URL must be set}"
+: "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set}"
+
+_fj() {
+  local method="$1" path="$2" body="${3:-}"
+  if [ -n "$body" ]; then
+    curl -sf -X "$method" \
+      -H "Authorization: token $FORGEJO_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "$body" \
+      "$FORGEJO_URL/api/v1${path}"
+  else
+    curl -sf -X "$method" \
+      -H "Authorization: token $FORGEJO_TOKEN" \
+      "$FORGEJO_URL/api/v1${path}"
+  fi
+}
+
+# Oldest open issue with label:Agent, no assignee, no Status/Blocked.
+# Returns the issue JSON on stdout, or empty if none.
+forgejo_find_claimable() {
+  local repo="$1"
+  _fj GET "/repos/${repo}/issues?state=open&labels=Agent&type=issues&sort=oldest&limit=50" \
+    | jq -c '
+        map(select(
+          ((.assignees // []) | length) == 0
+          and (([.labels[].name] | index("Status/Blocked")) == null)
+        ))
+        | sort_by(.created_at)
+        | first // empty
+      '
+}
+
+forgejo_get_issue() {
+  local repo="$1" number="$2"
+  _fj GET "/repos/${repo}/issues/${number}"
+}
+
+forgejo_assign() {
+  local repo="$1" number="$2" user="$3"
+  _fj PATCH "/repos/${repo}/issues/${number}" \
+    "$(jq -n --arg u "$user" '{assignees: [$u]}')" >/dev/null
+}
+
+forgejo_unassign_all() {
+  local repo="$1" number="$2"
+  _fj PATCH "/repos/${repo}/issues/${number}" '{"assignees": []}' >/dev/null
+}
+
+forgejo_comment() {
+  local repo="$1" number="$2" body="$3"
+  _fj POST "/repos/${repo}/issues/${number}/comments" \
+    "$(jq -n --arg b "$body" '{body: $b}')" >/dev/null
+}
+
+forgejo_open_pr() {
+  local repo="$1" head="$2" base="$3" title="$4" body="$5"
+  _fj POST "/repos/${repo}/pulls" \
+    "$(jq -n \
+        --arg t "$title" --arg b "$body" \
+        --arg h "$head"  --arg ba "$base" \
+        '{title: $t, body: $b, head: $h, base: $ba}')" >/dev/null
+}
+
+# Resolve label name → id (Forgejo's add/remove label API takes IDs).
+# Cached per-process via associative array.
+declare -A _FJ_LABEL_ID_CACHE
+_forgejo_label_id() {
+  local repo="$1" name="$2" key="${repo}::${name}"
+  if [ -n "${_FJ_LABEL_ID_CACHE[$key]:-}" ]; then
+    echo "${_FJ_LABEL_ID_CACHE[$key]}"
+    return 0
+  fi
+  local id
+  id=$(_fj GET "/repos/${repo}/labels" \
+       | jq -r --arg n "$name" '.[] | select(.name == $n) | .id' \
+       | head -1)
+  [ -n "$id" ] || { echo "label not found: $name" >&2; return 1; }
+  _FJ_LABEL_ID_CACHE[$key]="$id"
+  echo "$id"
+}
+
+forgejo_add_label() {
+  local repo="$1" number="$2" name="$3"
+  local id
+  id=$(_forgejo_label_id "$repo" "$name") || return 1
+  _fj POST "/repos/${repo}/issues/${number}/labels" \
+    "$(jq -n --argjson id "$id" '{labels: [$id]}')" >/dev/null
+}
+
+forgejo_remove_label() {
+  local repo="$1" number="$2" name="$3"
+  local id
+  id=$(_forgejo_label_id "$repo" "$name") || return 1
+  _fj DELETE "/repos/${repo}/issues/${number}/labels/${id}" >/dev/null
+}
