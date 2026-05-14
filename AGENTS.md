@@ -143,5 +143,10 @@ Forgejo state to determine outcome:
 | `Status/Blocked` applied | Blocker registered |
 | None of the above | "No work produced" comment; investigated by human |
 
+<!-- OUTCOME: pr -->
+<!-- OUTCOME: report -->
+<!-- OUTCOME: blocked -->
+<!-- OUTCOME: noop -->
+
 Do not try to manage Forgejo state yourself except via the helper
 scripts. The harness reads the final state and reacts.
