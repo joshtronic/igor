@@ -73,7 +73,7 @@ foreman/
 ├── bin/
 │   ├── tick.sh            # the consumer
 │   ├── agent-block.sh     # blocker helper, called by Claude
-│   └── whats-good.sh      # validation
+│   └── validate-project.sh      # validation
 ├── lib/
 │   ├── forgejo.sh         # API helpers
 │   └── claude.sh          # invocation wrapper
@@ -321,7 +321,7 @@ timer instances. No code changes in the foreman repo.
 
 ---
 
-## Validation: `whats-good.sh`
+## Validation: `validate-project.sh`
 
 Run against a project name, or with no argument to check all
 projects. Each check exits non-zero on failure so the script is

@@ -41,7 +41,7 @@ bin/
 ├── agent-block.sh     # Claude calls this when stuck
 ├── agent-report.sh    # Claude calls this for no-diff outcomes
 ├── check-sync.sh      # CI lint: AGENTS.md ↔ tick.sh contract
-└── whats-good.sh      # validate a project's setup (TODO)
+└── validate-project.sh      # validate a project's setup (TODO)
 
 lib/forgejo.sh         # Forgejo API helpers
 
