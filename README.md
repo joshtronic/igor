@@ -62,17 +62,21 @@ Both live at `$FOREMAN_HOME/.env`, chmod 600, gitignored.
 
 ## Install
 
-User systemd units, one host per project:
+Per-project, one host:
 
 ```sh
-cp systemd/*.service systemd/*.timer ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now foreman-tick@<project>.timer
-systemctl --user enable --now foreman-enqueue@<project>.timer   # if the project has a producer
+bin/install-project.sh <project>      # copies templates, enables timers
+bin/uninstall-project.sh <project>    # disables timers; leaves templates
 ```
+
+`install-project.sh` verifies `projects/<project>.conf` exists and
+auto-enables `foreman-enqueue@<project>.timer` only if the conf
+declares an `ENQUEUE_CMD`.
 
 Per-project schedule overrides go in drop-ins at
 `~/.config/systemd/user/foreman-tick@<project>.timer.d/override.conf`.
+
+cron works fine too if you'd rather skip systemd — see [`SPEC.md`](./SPEC.md).
 
 ## Status
 
