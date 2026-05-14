@@ -45,6 +45,7 @@ fi
 : "${CLAUDE_CODE_OAUTH_TOKEN:?CLAUDE_CODE_OAUTH_TOKEN must be set (via $FOREMAN_HOME/.env)}"
 : "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set (via $FOREMAN_HOME/.env)}"
 : "${FORGEJO_URL:?FORGEJO_URL must be set (via $FOREMAN_HOME/.env)}"
+: "${BOT_USER:=igor}"
 
 # ── Library ────────────────────────────────────────────────────
 
@@ -100,7 +101,7 @@ log "claiming #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
 
 # ── Claim ──────────────────────────────────────────────────────
 
-forgejo_assign "$FORGEJO_REPO" "$ISSUE_NUMBER" igor
+forgejo_assign "$FORGEJO_REPO" "$ISSUE_NUMBER" "$BOT_USER"
 
 # ── Worktree ───────────────────────────────────────────────────
 
