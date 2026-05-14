@@ -37,16 +37,21 @@ For the full contract: [`SPEC.md`](./SPEC.md).
 
 ```
 bin/
-├── tick.sh            # the consumer (one issue per invocation)
-├── agent-block.sh     # Claude calls this when stuck
-├── agent-report.sh    # Claude calls this for no-diff outcomes
-├── check-sync.sh      # CI lint: AGENTS.md ↔ tick.sh contract
-└── validate-project.sh      # validate a project's setup (TODO)
+├── tick.sh                  # the consumer (one issue per invocation)
+├── enqueue.sh               # wrapper that runs a project's enqueue script
+├── agent-block.sh           # Claude calls this when stuck
+├── agent-report.sh          # Claude calls this for no-diff outcomes
+├── check-sync.sh            # CI lint: AGENTS.md ↔ tick.sh contract
+└── validate-project.sh      # check a project's setup
 
-lib/forgejo.sh         # Forgejo API helpers
+lib/forgejo.sh               # Forgejo API helpers
 
-AGENTS.md              # universal unattended rules — appended to Claude's system prompt
-projects/<name>.conf   # per-project config (paths, intervals, base branch)
+systemd/                     # user-unit templates (instance = project name)
+├── foreman-tick@.{service,timer}
+└── foreman-enqueue@.{service,timer}
+
+AGENTS.md                    # universal unattended rules — appended to Claude's system prompt
+projects/<name>.conf         # per-project config (paths, intervals, base branch)
 ```
 
 ## Auth
@@ -54,6 +59,20 @@ projects/<name>.conf   # per-project config (paths, intervals, base branch)
 Claude Max via `CLAUDE_CODE_OAUTH_TOKEN`. No per-call API billing —
 that's the whole point. The bot's Forgejo token in the same file.
 Both live at `$FOREMAN_HOME/.env`, chmod 600, gitignored.
+
+## Install
+
+User systemd units, one host per project:
+
+```sh
+cp systemd/*.service systemd/*.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now foreman-tick@<project>.timer
+systemctl --user enable --now foreman-enqueue@<project>.timer   # if the project has a producer
+```
+
+Per-project schedule overrides go in drop-ins at
+`~/.config/systemd/user/foreman-tick@<project>.timer.d/override.conf`.
 
 ## Status
 

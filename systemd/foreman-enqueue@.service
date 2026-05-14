@@ -1,0 +1,10 @@
+[Unit]
+Description=Foreman enqueue for project %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Code/foreman
+ExecStart=%h/Code/foreman/bin/enqueue.sh %i
+Nice=10

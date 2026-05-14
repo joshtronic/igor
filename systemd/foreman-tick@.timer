@@ -1,0 +1,14 @@
+[Unit]
+Description=Foreman tick timer for project %i
+
+[Timer]
+# First tick a couple of minutes after boot.
+OnBootSec=2min
+# Subsequent ticks measured from previous completion — prevents overlap
+# if a tick runs long. Override per-project via a drop-in at
+# ~/.config/systemd/user/foreman-tick@<project>.timer.d/override.conf
+OnUnitInactiveSec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
