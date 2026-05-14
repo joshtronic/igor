@@ -115,7 +115,7 @@ Contains:
 - Issue claim protocol.
 - Blocker protocol — when and how to call `agent-block.sh`.
 - PR conventions — size, `Closes #N`, base from `PR_BASE`.
-- The universal "no commits to `main` without a PR" rule.
+- The universal "no commits to the base branch without a PR" rule.
 
 ### `<project>/CLAUDE.md`
 
@@ -241,7 +241,7 @@ state.
 A single Forgejo + server user named `igor`:
 
 - Forgejo API token and SSH key, with branch protection bypass on
-  `main` (necessary for the bot to push branches and have
+  the base branch (necessary for the bot to push branches and have
   `Closes #N`-linked merges work uniformly).
 - Server user account, owns `~/.config/igor/`, runs the systemd user
   units.
@@ -305,8 +305,8 @@ TICK_INTERVAL=10min
 ENQUEUE_INTERVAL=6h
 ENQUEUE_CMD=scripts/enqueue.sh
 
-# Defaults to main
-PR_BASE=main
+# Defaults to master
+PR_BASE=master
 
 # Optional — where report outcomes deliver. Default: forgejo (comment
 # on the issue and close it). Future targets (email, discord) layer

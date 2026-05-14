@@ -23,7 +23,7 @@ CONF="$IGOR_HOME/projects/${PROJECT}.conf"
 [ -f "$CONF" ] || { echo "tick: no conf at $CONF" >&2; exit 2; }
 
 # Defaults
-PR_BASE="main"
+PR_BASE="master"
 TICK_TIMEOUT="60m"
 ENQUEUE_INTERVAL=""
 ENQUEUE_CMD=""

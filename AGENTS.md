@@ -36,7 +36,7 @@ The environment provides:
 - `ISSUE_NUMBER` — the Forgejo issue number
 - `ISSUE_TITLE` — the issue title
 - `FORGEJO_REPO` — `<owner>/<repo>`
-- `PR_BASE` — the PR base branch (usually `main`)
+- `PR_BASE` — the PR base branch (usually `master`)
 - `IGOR_HOME` — path to the Igor repo (for helpers)
 
 Your current working directory is a fresh git worktree branched from
