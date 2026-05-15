@@ -1,6 +1,6 @@
-# Unattended Mode (Foreman)
+# Unattended Mode (Tick)
 
-You are running unattended in the Foreman harness. There is no interactive
+You are running unattended in the Tick harness. There is no interactive
 session and no human is watching. Your work is bound to a single
 Forgejo issue identified in your input and environment.
 
@@ -37,7 +37,7 @@ The environment provides:
 - `ISSUE_TITLE` — the issue title
 - `FORGEJO_REPO` — `<owner>/<repo>`
 - `PR_BASE` — the PR base branch (usually `master`)
-- `FOREMAN_HOME` — path to the Foreman repo (for helpers)
+- `TICK_HOME` — path to the Tick repo (for helpers)
 
 Your current working directory is a fresh git worktree branched from
 `origin/$PR_BASE`. The branch is named `agent/$ISSUE_NUMBER`. The

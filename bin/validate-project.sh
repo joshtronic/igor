@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# validate-project.sh — Validate a Foreman project's setup.
+# validate-project.sh — Validate a Tick project's setup.
 #
 # Usage:
 #   validate-project.sh <name>   # check one project
@@ -10,14 +10,14 @@
 
 set -uo pipefail
 
-FOREMAN_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+TICK_HOME="$(cd "$(dirname "$0")/.." && pwd)"
 FAIL=0
 
 # Load .env so FORGEJO_TOKEN etc. are available for API checks.
-if [ -f "$FOREMAN_HOME/.env" ]; then
+if [ -f "$TICK_HOME/.env" ]; then
   set -a
   # shellcheck source=/dev/null
-  . "$FOREMAN_HOME/.env"
+  . "$TICK_HOME/.env"
   set +a
 fi
 
@@ -32,7 +32,7 @@ check_global() {
   [ -n "${FORGEJO_TOKEN:-}" ]          && pass "FORGEJO_TOKEN set"          || fail "FORGEJO_TOKEN set"          "missing from .env"
   [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && pass "CLAUDE_CODE_OAUTH_TOKEN set" || fail "CLAUDE_CODE_OAUTH_TOKEN set" "missing from .env"
 
-  local state_dir="${FOREMAN_STATE_DIR:-$HOME/.local/state/foreman}"
+  local state_dir="${TICK_STATE_DIR:-$HOME/.local/state/tick}"
   if mkdir -p "$state_dir/worktrees" 2>/dev/null && [ -w "$state_dir/worktrees" ]; then
     pass "state dir writable ($state_dir)"
   else
@@ -47,7 +47,7 @@ check_project() {
   local project="$1"
   echo "== $project =="
 
-  local conf="$FOREMAN_HOME/projects/${project}.conf"
+  local conf="$TICK_HOME/projects/${project}.conf"
   if [ ! -f "$conf" ]; then
     fail "conf file" "$conf not found"
     echo
@@ -56,7 +56,7 @@ check_project() {
   pass "conf file ($conf)"
 
   # Reset conf vars before sourcing
-  unset REPO_PATH FORGEJO_REPO TICK_INTERVAL ENQUEUE_INTERVAL ENQUEUE_CMD PR_BASE BOT_USER
+  unset REPO_PATH FORGEJO_REPO PR_BASE TICK_TIMEOUT BOT_USER
   # shellcheck source=/dev/null
   . "$conf"
 
@@ -76,15 +76,6 @@ check_project() {
     pass ".claude/settings.json present"
   else
     fail ".claude/settings.json present"
-  fi
-
-  # ENQUEUE_CMD if declared
-  if [ -n "${ENQUEUE_CMD:-}" ]; then
-    if [ -x "$REPO_PATH/$ENQUEUE_CMD" ]; then
-      pass "$ENQUEUE_CMD executable"
-    else
-      fail "$ENQUEUE_CMD executable"
-    fi
   fi
 
   # Forgejo API checks (skip if creds missing)
@@ -137,12 +128,12 @@ check_global
 if [ $# -eq 0 ]; then
   shopt -s nullglob
   found=0
-  for conf in "$FOREMAN_HOME"/projects/*.conf; do
+  for conf in "$TICK_HOME"/projects/*.conf; do
     found=1
     check_project "$(basename "$conf" .conf)"
   done
   if [ $found -eq 0 ]; then
-    echo "no projects in $FOREMAN_HOME/projects/"
+    echo "no projects in $TICK_HOME/projects/"
   fi
 else
   check_project "$1"

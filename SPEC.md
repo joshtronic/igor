@@ -1,32 +1,41 @@
-# Foreman — Specification
+# Tick — Specification
 
 A harness for unattended Claude Code instances that work tickets from
-Forgejo and produce PRs. One robot per project, one bot identity
-across all projects (`igor`). Auth via Claude Max subscription
-(`CLAUDE_CODE_OAUTH_TOKEN`), not API key billing.
+Forgejo and produce PRs. One global worker that rotates through known
+projects, one bot identity across all of them (`igor`). Auth via
+Claude Max subscription (`CLAUDE_CODE_OAUTH_TOKEN`), not API key
+billing.
 
-This document is the authoritative description of how Foreman behaves.
-The `foreman/` repo holds the harness scaffolding; project repos hold
-their own context and (optionally) a producer script. Nothing in a
-project repo names "foreman" — projects are unaware of the harness.
+This document is the authoritative description of how Tick behaves.
+The `tick/` repo holds the harness scaffolding; project repos hold
+their own context. Nothing in a project repo names "tick" — projects
+are unaware of the harness.
 
 ---
 
 ## Model
 
-Producer / consumer, bound by Forgejo issues.
+A single global consumer. `bin/tick.sh` runs on a timer. Each
+invocation:
 
-- **Producers** create Forgejo issues carrying the `Agent` label. A
-  project's scheduled `enqueue.sh` is one producer; you filing an
-  issue is another.
-- **Consumer** is the universal `tick.sh`. Each tick claims one
-  `Agent`-labeled issue, makes a worktree, invokes Claude, and
-  produces an outcome (PR / report / blocked).
-- **Every Claude invocation is bound to exactly one issue.** No
-  issue, no invocation. This is the cost gate and the audit trail.
+1. Acquires a global flock — only one tick at a time, across all
+   projects.
+2. Performs a **recovery sweep** for orphaned `igor` assignments left
+   over from an interrupted previous run.
+3. Performs **discovery** across every project's Forgejo repo, picks
+   the globally oldest claimable `Agent`-labeled issue, and works it
+   to completion.
 
-If a project has no producer and no human-filed issues, the bot does
-nothing. That is correct — there is no work.
+**Every Claude invocation is bound to exactly one issue.** No issue,
+no invocation. This is the cost gate and the audit trail.
+
+Filing issues is **out of scope.** Producers (project scripts, hand-
+filed issues, external bots) POST to Forgejo with the `Agent` label
+by whatever means they like. Tick doesn't wrap or coordinate them —
+it just consumes.
+
+If no project has claimable work, the tick does nothing. That is
+correct — there is no work.
 
 ---
 
@@ -56,34 +65,34 @@ by `Status/Blocked`, the assignee, and open/closed.
 ### Project-specific labels
 
 Projects may add their own namespaces (e.g., `Persona/Punk` for
-scenekids). Foreman does not read them. Their semantics live in the
-project's `enqueue.sh` and in the issue bodies that producer writes.
+scenekids). Tick does not read them. Their semantics live in
+whatever filed the issue and in the issue body itself.
 
 ---
 
 ## Layout
 
-### Foreman repo
+### Tick repo
 
 ```
-foreman/
+tick/
 ├── AGENTS.md              # universal unattended rules
 ├── SPEC.md                # this document
 ├── README.md
 ├── bin/
 │   ├── tick.sh            # the consumer
 │   ├── agent-block.sh     # blocker helper, called by Claude
-│   └── validate-project.sh      # validation
+│   ├── agent-report.sh    # report helper, called by Claude
+│   ├── check-sync.sh      # AGENTS.md ↔ tick.sh contract lint
+│   ├── validate-project.sh
+│   └── install.sh
 ├── lib/
-│   ├── forgejo.sh         # API helpers
-│   └── claude.sh          # invocation wrapper
+│   └── forgejo.sh         # API helpers
 ├── projects/
 │   └── <name>.conf        # one per project
 └── systemd/
-    ├── foreman-tick@.service
-    ├── foreman-tick@.timer
-    ├── foreman-enqueue@.service
-    └── foreman-enqueue@.timer
+    ├── tick.service
+    └── tick.timer
 ```
 
 ### Per-project
@@ -94,8 +103,6 @@ foreman/
 ├── .claude/
 │   ├── settings.json               # narrow bot allow-list (committed)
 │   └── settings.local.json         # interactive overrides (gitignored)
-├── scripts/
-│   └── enqueue.sh                  # optional; only for scheduled producers
 └── (reference content as needed)   # personas/, templates/, etc.
 ```
 
@@ -103,7 +110,7 @@ foreman/
 
 ## File responsibilities
 
-### `foreman/AGENTS.md`
+### `tick/AGENTS.md`
 
 The universal unattended rules. Loaded **only** by `tick.sh` via
 `--append-system-prompt`. Interactive Claude never sees it.
@@ -122,7 +129,7 @@ Contains:
 Project context. Auto-loaded by Claude Code in both interactive and
 unattended modes (no change from current usage). Architecture,
 commands, conventions, interactive rules. Interactive-only rules
-remain intact; they are overridden at bot runtime by `foreman/AGENTS.md`.
+remain intact; they are overridden at bot runtime by `tick/AGENTS.md`.
 
 ### `<project>/.claude/settings.json`
 
@@ -136,34 +143,26 @@ Interactive overrides. Gitignored. Broadens perms locally so
 interactive work isn't constrained by the bot's profile. The server
 checkout never has this file, so the bot is unaffected.
 
-### `<project>/scripts/enqueue.sh`
-
-Optional. Project-specific work detector. Plain shell — no LLM. Runs
-on the project's schedule, files a Forgejo issue with `Agent` when
-work exists, exits clean when there is none. No issue → no Claude
-tick → no cost.
-
-### Reference content
-
-Files the bot consults during work, pointed to by the issue body
-(e.g., `personas/punk.md`, `templates/post.md`). Plain project
-content; not auto-loaded. The bot reads them because the issue body
-told it to. Lives wherever it makes sense within the project repo.
-
 ---
 
 ## Issue lifecycle
 
-1. **Filed.** A producer creates a Forgejo issue. If the producer is
-   `enqueue.sh`, it applies `Agent` immediately. If the producer is
-   you, you apply `Agent` when you decide it's bot-ready.
-2. **Claimed.** Next `tick.sh` finds the oldest issue matching
-   `label:Agent no:assignee -label:Status/Blocked`, assigns it to
-   `igor`, and creates a worktree.
-3. **Worked.** Claude runs in the worktree. Inputs: project's
-   `CLAUDE.md` (auto-loaded), `foreman/AGENTS.md` (appended), issue body
+1. **Filed.** Some producer (a project's cron, a human, an external
+   bot) creates a Forgejo issue and applies the `Agent` label when
+   it's bot-ready.
+2. **Recovery sweep.** Before claiming new work, the tick checks
+   every known project for issues already assigned to `igor`. Any it
+   finds are orphans from a previous interrupted tick: it posts a
+   "previous tick interrupted — re-queueing" comment, unassigns, and
+   best-effort cleans up the leftover worktree/branch.
+3. **Claimed.** The tick queries every project for the oldest open
+   issue matching `label:Agent no:assignee -label:Status/Blocked`,
+   picks the globally oldest, assigns it to `igor`, and creates a
+   worktree.
+4. **Worked.** Claude runs in the worktree. Inputs: project's
+   `CLAUDE.md` (auto-loaded), `tick/AGENTS.md` (appended), issue body
    (user message).
-4. **Outcome.** One of three:
+5. **Outcome.** One of three:
    - **PR.** Branch pushed, PR opened with `Closes #N`. Issue closes
      when the PR merges.
    - **Report.** For analysis tasks producing no diff. Claude comments
@@ -171,9 +170,9 @@ told it to. Lives wherever it makes sense within the project repo.
    - **Blocked.** Claude calls `agent-block.sh`, which posts a comment
      describing what went wrong, applies `Status/Blocked`, and
      unassigns. The issue stays open.
-5. **Human resolution (blocked only).** You read the comment, fix
-   whatever needs fixing, remove `Status/Blocked`. The bot reclaims
-   on the next tick (because `Agent` was never removed).
+6. **Human resolution (blocked only).** You read the comment, fix
+   whatever needs fixing, remove `Status/Blocked`. The next tick
+   reclaims (because `Agent` was never removed).
 
 In all outcomes, the worktree is removed.
 
@@ -181,58 +180,45 @@ In all outcomes, the worktree is removed.
 
 ## `tick.sh` contract
 
-Per invocation, scoped to one project (passed as argument or systemd
-instance name):
+Per invocation:
 
-1. Load `projects/<name>.conf`.
-2. Query Forgejo for the oldest claimable issue. If none, exit 0.
-3. Assign the issue to `igor` (via Forgejo API).
-4. Create a worktree at `<state_dir>/worktrees/<repo>-<issue>`.
-5. Invoke Claude with:
+1. Acquire a global flock at `$TICK_STATE_DIR/lock`. If another tick
+   holds it, exit 0.
+2. Recovery sweep: for each project in `projects/*.conf`, query
+   Forgejo for open issues assigned to `$BOT_USER`. For each, comment
+   "previous tick interrupted — re-queueing," unassign, and clean up
+   the matching worktree/branch if they exist.
+3. Discovery: for each project, query for the oldest claimable issue.
+   Pick the globally oldest across all projects. If none, exit 0.
+4. Assign the issue to `$BOT_USER`.
+5. Create a worktree at `$TICK_STATE_DIR/worktrees/<project>-<issue>`,
+   branched from `origin/$PR_BASE` as `agent/<issue>`.
+6. Invoke Claude with:
    - `cwd` = worktree path
-   - `--append-system-prompt "$(cat $FOREMAN_HOME/AGENTS.md)"`
+   - `--append-system-prompt "$(cat $TICK_HOME/AGENTS.md)"`
    - `--print "$ISSUE_BODY"`
    - Settings auto-loaded from `<worktree>/.claude/settings.json`
-6. On Claude exit, inspect worktree state:
+7. On Claude exit, inspect worktree state:
    - Commits on a branch ahead of `PR_BASE` → push branch, open PR
      with `Closes #<issue>` in description. PR body is taken from
      `.git/PR_BODY.md` if the agent wrote one (preferred for
      multi-commit work); otherwise constructed from `git log`.
-   - No commits, blocker was called → cleanup only; the blocker
-     helper handled state changes.
-   - No commits, no blocker → unassign, post a generic "produced no
-     work" comment. Should be rare; investigate.
-7. Remove the worktree.
-8. Exit 0.
+   - Issue closed by the agent → report delivered, no further action.
+   - `Status/Blocked` applied by the agent → blocker registered, no
+     further action.
+   - None of the above → unassign, post a generic "produced no work"
+     comment. Should be rare; investigate.
+8. Remove the worktree.
+9. Exit 0.
 
 One issue per tick. Concurrency comes from frequency, not parallelism.
 
----
+The CLI accepts an optional project name as a debug-scope arg:
 
-## `enqueue.sh` contract
-
-Per invocation, scoped to one project:
-
-1. Determine deterministically whether work exists. **No LLM calls.**
-2. **Be idempotent.** Before filing, check Forgejo for an open issue
-   that already represents this unit of work (filed by a previous
-   `enqueue.sh` run). If one exists, do not file a duplicate. This
-   matters for projects whose detection logic might match the same
-   state across multiple runs (joshing.you's feed-date check is the
-   obvious case).
-3. If no work: exit 0.
-4. If work exists: file one Forgejo issue per discrete unit. Each
-   issue must:
-   - Carry the `Agent` label.
-   - Have a self-sufficient body: what to do, where to look, what
-     output is expected, what failure modes are recoverable. The bot
-     must be able to act on the issue alone (plus project `CLAUDE.md`
-     and any files the body references).
-5. Exit 0.
-
-Project-specific knowledge is encapsulated in `enqueue.sh` and the
-content of the issue bodies it writes. Foreman does not parse project
-state.
+```sh
+bin/tick.sh           # scan all projects, pick globally oldest
+bin/tick.sh joshing   # scope to one project (manual / debug)
+```
 
 ---
 
@@ -244,18 +230,17 @@ A single Forgejo + server user named `igor`:
   the base branch (necessary for the bot to push branches and have
   `Closes #N`-linked merges work uniformly).
 - Server user account, runs the systemd user units, owns
-  `$FOREMAN_HOME/.env` (chmod 600).
+  `$TICK_HOME/.env` (chmod 600).
 - Git authorship on all bot commits and PRs.
 
-systemd journals are tagged by unit name (`foreman-*`); git and
-Forgejo audit trails attribute to `igor`. One identity for access
-control, one prefix for grep.
+systemd journal is tagged `tick.service`; git and Forgejo audit
+trails attribute to `igor`.
 
 ---
 
 ## Secrets
 
-`$FOREMAN_HOME/.env` (chmod 600), gitignored. Contains the harness-wide
+`$TICK_HOME/.env` (chmod 600), gitignored. Contains the harness-wide
 credentials:
 
 ```
@@ -264,31 +249,32 @@ FORGEJO_URL=https://git.sherver.org
 FORGEJO_TOKEN=...
 ```
 
-Auto-exported by `tick.sh` via `set -a; . .env; set +a`. systemd units
-load the same file via `EnvironmentFile=`.
+Auto-exported by `tick.sh` via `set -a; . .env; set +a`. The systemd
+unit loads the same file via `EnvironmentFile=` if you want it there
+too (not required — `tick.sh` sources it itself).
 
-Project-specific secrets (e.g., joshing.you's `ANTHROPIC_API_KEY`,
-a future SEO worker's GSC token) stay in the project's own `.env`.
-`enqueue.sh` and the worked code source it as needed; foreman itself
-does not.
+Project-specific secrets stay in the project's own `.env`, sourced by
+whatever project script needs them. Tick itself does not.
 
-`.gitignore` at `$FOREMAN_HOME` blocks `.env`, `state/`, `*.log`.
+`.gitignore` at `$TICK_HOME` blocks `.env`, `state/`, `*.log`.
 
 ---
 
 ## Persistence
 
-Two systemd user-unit templates, instanced per project:
-
-- `foreman-tick@<project>.timer` — runs the consumer on `TICK_INTERVAL`.
-  Enabled for every project.
-- `foreman-enqueue@<project>.timer` — runs the producer on
-  `ENQUEUE_INTERVAL`. Enabled only for projects with `enqueue.sh`.
+One systemd user unit: `tick.timer` fires `tick.service` on a
+schedule (10min default). The timer uses `OnUnitInactiveSec` so
+ticks measured from previous completion never overlap; the global
+flock catches anything the scheduler doesn't.
 
 Observability:
 - `systemctl --user list-timers` — schedule.
-- `journalctl --user -u 'foreman-*'` — all activity.
+- `journalctl --user -u tick.service` — all activity.
 - Forgejo issue queue — current state of work.
+
+cron alternative: a single line like
+`*/10 * * * * $HOME/Code/tick/bin/tick.sh` works the same. The flock
+makes overlap safe.
 
 ---
 
@@ -300,24 +286,15 @@ Observability:
 # Required
 REPO_PATH=/home/josh/Code/joshing.you
 FORGEJO_REPO=joshtronic/joshing.you
-TICK_INTERVAL=10min
 
-# Optional — omit if the project has no producer
-ENQUEUE_INTERVAL=6h
-ENQUEUE_CMD=scripts/enqueue.sh
-
-# Defaults to master
-PR_BASE=master
-
-# Optional — where report outcomes deliver. Default: forgejo (comment
-# on the issue and close it). Future targets (email, discord) layer
-# additional delivery without changing the contract — the issue
-# comment is always written so the audit trail is intact.
-REPORT_TARGETS=forgejo
+# Optional
+PR_BASE=master       # default: master
+TICK_TIMEOUT=60m     # default: 60m — per-project override if needed
+BOT_USER=igor        # default: igor
 ```
 
-Adding a new project = drop a conf file + enable one or two systemd
-timer instances. No code changes in the foreman repo.
+Adding a new project = drop a conf file. No code changes, no systemd
+reload.
 
 ---
 
@@ -327,54 +304,55 @@ Run against a project name, or with no argument to check all
 projects. Each check exits non-zero on failure so the script is
 usable as a deploy gate or pre-tick sanity check.
 
-Checks per project:
-- `projects/<name>.conf` parses and has required fields.
-- `REPO_PATH` exists, is a git repo, matches `FORGEJO_REPO`.
-- Forgejo API reachable with the bot token.
-- Required labels (`Agent`, `Status/Blocked`) exist on the repo.
-- Bot user can comment, label, assign, push, open PRs.
+Global checks:
+- `FORGEJO_URL`, `FORGEJO_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` set.
+- State dir writable.
+
+Per-project checks:
+- `projects/<name>.conf` parses and has `REPO_PATH` + `FORGEJO_REPO`.
+- `REPO_PATH` is a git repo.
 - `<project>/.claude/settings.json` present.
-- `<project>/scripts/enqueue.sh` present and executable (if
-  `ENQUEUE_CMD` is set).
-- systemd units enabled for the project.
-- `CLAUDE_CODE_OAUTH_TOKEN` valid (verified with a no-op
-  `claude --print`).
-- Worktree state dir writable.
+- Forgejo repo reachable with the bot token.
+- Required labels (`Agent`, `Status/Blocked`) exist on the repo.
+- Bot user exists on Forgejo.
 
 ---
 
 ## Out of scope
 
-Foreman handles only issue → outcome work. It explicitly does **not**
-handle:
+Tick handles only `Agent`-labeled issue → outcome work. It explicitly
+does **not** handle:
 
+- **Filing issues.** Producers do that on their own — cron jobs,
+  external bots, you typing at a keyboard. Tick is a consumer.
 - **Report-only jobs** (SEO sweeps, weekly summaries, cross-site
-  analyses). Run those as plain cron. They may file Forgejo issues
-  into foreman projects as a side effect, but they themselves are not
-  foreman projects.
+  analyses) that don't fit the issue → PR/report shape. Run those as
+  plain cron. They may file Tick issues as a side effect, but they
+  themselves are not Tick projects.
 - **Interactive Claude.** You use Claude Code in repos normally;
-  foreman is the unattended layer.
+  Tick is the unattended layer.
 - **Cross-project coordination.** Each project's issue queue is
-  independent. If one process wants to queue work for another
-  project's bot, it files the issue in that project's repo directly.
-- **Pipelines, ETL, long-running daemons.** Not foreman's shape.
+  independent. The tick rotates through them; it does not link them.
+- **Pipelines, ETL, long-running daemons.** Not Tick's shape.
 
 ---
 
 ## Trade-offs accepted
 
-- **Cost gating depends on `enqueue.sh` being conservative.** A
-  noisy producer will file spurious issues that the bot will work
-  and burn tokens on. Keep producers deterministic and tight.
+- **Cost gating depends on producers being conservative.** A noisy
+  producer will file spurious issues that Tick will work and burn
+  tokens on. Producers are the project's responsibility, not Tick's.
 - **Sessions are stateless.** Each tick is a fresh Claude
   invocation. No in-session memory between ticks. Durable state
   lives in the repo, the issue, and `state/`.
-- **One project, one host.** Two hosts running ticks for the same
-  project will race on issue claim. Each project's timers are
-  enabled on exactly one host.
-- **No priority labels.** Oldest claimable wins. Urgency is
+- **One host per Tick install.** Two hosts running ticks against the
+  same Forgejo will race on issue claim. Run Tick on one host.
+- **No priority labels.** Globally oldest claimable wins. Urgency is
   expressed by ordering — file the urgent issue first, or close
   older ones.
 - **Single bot identity.** All projects share `igor`. Cleaner logs
   and one secret to manage; less audit granularity than per-project
   bots would give.
+- **Recovery, not resume.** An interrupted tick re-queues its
+  issue, losing the in-flight work. The next tick starts fresh. If
+  this becomes painful, resume can be built later.

@@ -3,7 +3,7 @@
 #
 # Requires in environment:
 #   FORGEJO_URL    — e.g., https://git.sherver.org
-#   FORGEJO_TOKEN  — bot's API token (loaded from $FOREMAN_HOME/.env)
+#   FORGEJO_TOKEN  — bot's API token (loaded from $TICK_HOME/.env)
 #
 # Requires on PATH: curl, jq.
 
@@ -43,6 +43,19 @@ forgejo_find_claimable() {
 forgejo_get_issue() {
   local repo="$1" number="$2"
   _fj GET "/repos/${repo}/issues/${number}"
+}
+
+# All open issues currently assigned to a given user.
+# Returns a JSON array (possibly empty). Filters client-side so this
+# works the same across Forgejo versions.
+forgejo_find_assigned() {
+  local repo="$1" user="$2"
+  _fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" \
+    | jq -c --arg u "$user" '
+        map(select(
+          (.assignees // []) | map(.login) | index($u) != null
+        ))
+      '
 }
 
 forgejo_assign() {

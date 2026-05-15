@@ -1,35 +1,42 @@
-# The Fuckin' Foreman
+# Tick
 
-Bossing bitches around to get that shit done.
+> SPOOOON!
 
-The Foreman is a coordinator for unattended Claude Code work. You
-(or a scheduled script) file a Forgejo issue tagged `Agent`. The
-Foreman claims it, spins up a worktree, lets Claude grind on it,
-and ships a PR. Or posts a report. Or flags `Status/Blocked` and
-waits for you to look at it.
+A harness for unattended Claude Code work. One global tick fires on a
+timer, scans every known project's Forgejo issue queue for `Agent`-
+labeled work, claims the oldest one, spins up a worktree, lets Claude
+grind on it, and ships a PR. Or posts a report. Or flags
+`Status/Blocked` and waits for you to look at it.
 
-The bot that does the actual labor is **`igor`** — separate Forgejo
-user, separate SSH key, separate everything. The Foreman gives the
-orders; igor pulls the lever. Hence the name.
+The bot that does the actual labor is **`igor`** — a separate Forgejo
+user with its own SSH key, API token, and server account. Tick fires;
+igor pulls the lever.
 
 ## How it works
 
-A producer files an issue. A consumer (`bin/tick.sh`) claims one
-issue per tick, makes a worktree, invokes Claude with the project's
-context plus the universal unattended rules, and reacts to whatever
-Claude leaves behind:
+A timer fires `bin/tick.sh`. Per tick:
 
-| What Claude did | What the Foreman does |
+1. Acquire a global flock — only one tick at a time, period.
+2. **Recovery sweep** — any open issue assigned to `igor` from a
+   previous interrupted run gets a "previous tick was interrupted —
+   re-queueing" comment and is unassigned.
+3. **Discovery** — query every configured project's Forgejo repo for
+   the oldest claimable issue (`Agent`-labeled, no assignee, not
+   `Status/Blocked`). Pick the globally oldest across all projects.
+4. **Work it** — assign to `igor`, make a worktree, invoke Claude
+   with the project's `CLAUDE.md` plus the universal `AGENTS.md`,
+   react to whatever Claude leaves behind.
+
+| What Claude did | What Tick does |
 |---|---|
 | Made commits | Push branch, open PR with `Closes #N` |
 | Closed the issue with a comment | Treat as a report — log and clean up |
 | Applied `Status/Blocked` | Log, clean up, wait for the human |
 | Nothing | Unassign, leave a "no work" comment |
 
-`bin/tick.sh` is invoked by a systemd timer per project. An optional
-`scripts/enqueue.sh` in each project repo generates issues on its
-own schedule — that's the part that knows what work exists. The
-Foreman itself is project-agnostic.
+Filing issues is not Tick's job. A project's own cron jobs, hand-filed
+issues, or external bots are all valid producers — they POST to
+Forgejo with the `Agent` label and Tick picks it up.
 
 For the full contract: [`SPEC.md`](./SPEC.md).
 
@@ -38,43 +45,41 @@ For the full contract: [`SPEC.md`](./SPEC.md).
 ```
 bin/
 ├── tick.sh                  # the consumer (one issue per invocation)
-├── enqueue.sh               # wrapper that runs a project's enqueue script
 ├── agent-block.sh           # Claude calls this when stuck
 ├── agent-report.sh          # Claude calls this for no-diff outcomes
 ├── check-sync.sh            # CI lint: AGENTS.md ↔ tick.sh contract
-└── validate-project.sh      # check a project's setup
+├── validate-project.sh      # check a project's setup
+└── install.sh               # one-time: copy units, enable timer
 
 lib/forgejo.sh               # Forgejo API helpers
 
-systemd/                     # user-unit templates (instance = project name)
-├── foreman-tick@.{service,timer}
-└── foreman-enqueue@.{service,timer}
+systemd/                     # global user units (no @ instance)
+├── tick.service
+└── tick.timer
 
 AGENTS.md                    # universal unattended rules — appended to Claude's system prompt
-projects/<name>.conf         # per-project config (paths, intervals, base branch)
+projects/<name>.conf         # per-project config (paths, base branch)
 ```
 
 ## Auth
 
 Claude Max via `CLAUDE_CODE_OAUTH_TOKEN`. No per-call API billing —
 that's the whole point. The bot's Forgejo token in the same file.
-Both live at `$FOREMAN_HOME/.env`, chmod 600, gitignored.
+Both live at `$TICK_HOME/.env`, chmod 600, gitignored.
 
 ## Install
 
-Per-project, one host:
+One time on the host:
 
 ```sh
-bin/install-project.sh <project>      # copies templates, enables timers
-bin/uninstall-project.sh <project>    # disables timers; leaves templates
+bin/install.sh    # copies units, enables tick.timer
 ```
 
-`install-project.sh` verifies `projects/<project>.conf` exists and
-auto-enables `foreman-enqueue@<project>.timer` only if the conf
-declares an `ENQUEUE_CMD`.
+Adding a project: drop `projects/<name>.conf`. The next tick will see
+it. Removing a project: delete the conf. No systemd reload needed.
 
-Per-project schedule overrides go in drop-ins at
-`~/.config/systemd/user/foreman-tick@<project>.timer.d/override.conf`.
+Schedule override goes in a drop-in at
+`~/.config/systemd/user/tick.timer.d/override.conf`.
 
 cron works fine too if you'd rather skip systemd — see [`SPEC.md`](./SPEC.md).
 
