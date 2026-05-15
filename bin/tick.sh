@@ -23,20 +23,21 @@ set -euo pipefail
 # ── Paths ──────────────────────────────────────────────────────
 
 TICK_HOME="${TICK_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
+TICK_CONFIG_DIR="${TICK_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tick}"
 TICK_STATE_DIR="${TICK_STATE_DIR:-$HOME/.local/state/tick}"
 SCOPE_PROJECT="${1:-}"
 
 # ── Secrets ────────────────────────────────────────────────────
 
-if [ -f "$TICK_HOME/.env" ]; then
+if [ -f "$TICK_CONFIG_DIR/.env" ]; then
   set -a
   # shellcheck source=/dev/null
-  . "$TICK_HOME/.env"
+  . "$TICK_CONFIG_DIR/.env"
   set +a
 fi
-: "${CLAUDE_CODE_OAUTH_TOKEN:?CLAUDE_CODE_OAUTH_TOKEN must be set (via $TICK_HOME/.env)}"
-: "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set (via $TICK_HOME/.env)}"
-: "${FORGEJO_URL:?FORGEJO_URL must be set (via $TICK_HOME/.env)}"
+: "${CLAUDE_CODE_OAUTH_TOKEN:?CLAUDE_CODE_OAUTH_TOKEN must be set (via $TICK_CONFIG_DIR/.env)}"
+: "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set (via $TICK_CONFIG_DIR/.env)}"
+: "${FORGEJO_URL:?FORGEJO_URL must be set (via $TICK_CONFIG_DIR/.env)}"
 : "${BOT_USER:=agent}"
 
 # ── Library ────────────────────────────────────────────────────
@@ -88,17 +89,17 @@ cleanup_agent_branches() {
 shopt -s nullglob
 declare -a PROJECTS
 if [ -n "$SCOPE_PROJECT" ]; then
-  [ -f "$TICK_HOME/projects/${SCOPE_PROJECT}.conf" ] \
-    || { echo "tick: no conf at $TICK_HOME/projects/${SCOPE_PROJECT}.conf" >&2; exit 2; }
+  [ -f "$TICK_CONFIG_DIR/projects/${SCOPE_PROJECT}.conf" ] \
+    || { echo "tick: no conf at $TICK_CONFIG_DIR/projects/${SCOPE_PROJECT}.conf" >&2; exit 2; }
   PROJECTS=("$SCOPE_PROJECT")
 else
-  for conf in "$TICK_HOME"/projects/*.conf; do
+  for conf in "$TICK_CONFIG_DIR"/projects/*.conf; do
     PROJECTS+=("$(basename "$conf" .conf)")
   done
 fi
 
 if [ ${#PROJECTS[@]} -eq 0 ]; then
-  log "no projects configured at $TICK_HOME/projects/"
+  log "no projects configured at $TICK_CONFIG_DIR/projects/"
   exit 0
 fi
 
@@ -108,7 +109,7 @@ fi
 
 load_project_conf() {
   local project="$1"
-  local conf="$TICK_HOME/projects/${project}.conf"
+  local conf="$TICK_CONFIG_DIR/projects/${project}.conf"
   [ -f "$conf" ] || return 1
 
   # Reset before sourcing

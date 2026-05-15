@@ -5,12 +5,13 @@
 set -uo pipefail
 
 TICK_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+TICK_CONFIG_DIR="${TICK_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tick}"
 FAIL=0
 
-if [ -f "$TICK_HOME/.env" ]; then
+if [ -f "$TICK_CONFIG_DIR/.env" ]; then
   set -a
   # shellcheck source=/dev/null
-  . "$TICK_HOME/.env"
+  . "$TICK_CONFIG_DIR/.env"
   set +a
 fi
 
@@ -37,9 +38,9 @@ echo
 # ── Per-project checks ─────────────────────────────────────────
 
 shopt -s nullglob
-confs=("$TICK_HOME"/projects/*.conf)
+confs=("$TICK_CONFIG_DIR"/projects/*.conf)
 if [ ${#confs[@]} -eq 0 ]; then
-  echo "no projects in $TICK_HOME/projects/"
+  echo "no projects in $TICK_CONFIG_DIR/projects/"
   exit $FAIL
 fi
 

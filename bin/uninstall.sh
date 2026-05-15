@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # uninstall.sh -- Stop and disable Tick's systemd timer on this host.
 #
-# Leaves projects/, agent-settings.json, .env, etc. alone -- this is
-# the inverse of install.sh only. Pair with `rm -rf` on the repo if
-# you want a full teardown.
+# Leaves ~/.config/tick/ (config, .env, projects/) and ~/.local/state/
+# tick/ alone -- this is the inverse of install.sh only. Pair with
+# `rm -rf` on those dirs and the code checkout for a full teardown.
 
 set -uo pipefail
 

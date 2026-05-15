@@ -63,6 +63,8 @@ Useful queries:
 
 ## Pieces
 
+In the repo (versioned policy + harness code):
+
 ```
 bin/
 ├── tick.sh                  # the worker (one issue per invocation)
@@ -70,18 +72,27 @@ bin/
 ├── agent-report.sh          # Claude calls this for no-diff outcomes
 ├── check-sync.sh            # CI lint: AGENTS.md <-> tick.sh contract
 ├── validate.sh              # validate global env + every project
-├── install.sh               # one-time: copy units, enable timer
+├── install.sh               # one-time: scaffold config, install units
 └── uninstall.sh             # stop, disable, remove units
 
 lib/forgejo.sh               # Forgejo API helpers
 
-systemd/                     # global user units (no @ instance)
+systemd/                     # user units (no @ instance)
 ├── tick.service
 └── tick.timer
 
 AGENTS.md                    # universal unattended rules -- appended to Claude's system prompt
 agent-settings.json          # bot's permission profile -- passed via --settings
-projects/<name>.conf         # per-project config (paths, base branch)
+```
+
+On the host (deployment-specific, not in the repo):
+
+```
+~/.local/share/tick/                 # the runtime git checkout (this repo)
+~/.config/tick/.env                  # secrets, chmod 600
+~/.config/tick/projects/<name>.conf  # per-project config (paths, base branch)
+~/.local/state/tick/                 # worktrees, flock
+~/.config/systemd/user/tick.{service,timer}
 ```
 
 ## Setup
@@ -90,7 +101,7 @@ projects/<name>.conf         # per-project config (paths, base branch)
 
 Claude Max via `CLAUDE_CODE_OAUTH_TOKEN`. No per-call API billing -- that's the
 whole point. The bot's Forgejo token lives in the same file. Both at
-`$TICK_HOME/.env`, chmod 600, gitignored.
+`~/.config/tick/.env`, chmod 600 (seeded from `.env.example` by `install.sh`).
 
 ### Bot user
 
@@ -103,14 +114,26 @@ Forgejo user needs:
 - Branch protection bypass on each repo's base branch (so the harness can push
   `agent/N` branches and `Closes #N`-linked merges work uniformly).
 
-The server account runs the systemd user units and owns `$TICK_HOME/.env`. Git
-authorship on all bot commits and PRs attributes to this user.
+The server account runs the systemd user units and owns the runtime checkout
+at `~/.local/share/tick/`, its config at `~/.config/tick/`, and its state at
+`~/.local/state/tick/`. Git authorship on all bot commits and PRs attributes
+to this user.
 
 ### Install
 
+Clone the repo into the runtime location, then run install.sh:
+
 ```sh
-bin/install.sh     # copies units, enables tick.timer
-bin/uninstall.sh   # stops, disables, removes
+git clone <forgejo-url>/tick ~/.local/share/tick
+~/.local/share/tick/bin/install.sh
+```
+
+`install.sh` scaffolds `~/.config/tick/` (seeds `.env` from `.env.example`),
+copies the systemd units, and enables `tick.timer`. Edit `~/.config/tick/.env`
+with real tokens before the first tick. Re-running is safe.
+
+```sh
+bin/uninstall.sh   # stops, disables, removes units (leaves config + state)
 ```
 
 Schedule override goes in a drop-in at
@@ -124,12 +147,12 @@ Schedule override goes in a drop-in at
 
 ### Adding a project
 
-Drop a file at `projects/<name>.conf`. The next tick will see it.  Removing a
-project: delete the conf. No systemd reload needed.
+Drop a file at `~/.config/tick/projects/<name>.conf`. The next tick will see
+it. Removing a project: delete the conf. No systemd reload needed.
 
 ```sh
 # Required
-REPO_PATH=/home/josh/Code/joshing.you
+REPO_PATH=/home/agent/Code/joshing.you
 FORGEJO_REPO=joshtronic/joshing.you
 
 # Optional
