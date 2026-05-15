@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # tick.sh -- discover and work one Agent-labeled Forgejo issue across
-# every repo the bot user has push access to.
+# every repo the bot user has push access to. One invocation = one tick.
 #
 # Usage: tick.sh
 #
 # Behavior:
-#   1. Acquire global flock -- only one tick at a time.
+#   1. Acquire global flock -- only one Igor at a time.
 #   2. Resolve bot identity from Forgejo (whoami).
 #   3. Recovery -- any open issue still assigned to the bot from a
 #      previous interrupted tick gets a comment and is unassigned so
@@ -21,49 +21,49 @@ set -euo pipefail
 
 # ── Paths ──────────────────────────────────────────────────────
 
-TICK_HOME="${TICK_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
-TICK_CONFIG_DIR="${TICK_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tick}"
-TICK_STATE_DIR="${TICK_STATE_DIR:-$HOME/.local/state/tick}"
-TICK_CODE_ROOT="${TICK_CODE_ROOT:-$HOME/Code}"
+IGOR_HOME="${IGOR_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
+IGOR_CONFIG_DIR="${IGOR_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/igor}"
+IGOR_STATE_DIR="${IGOR_STATE_DIR:-$HOME/.local/state/igor}"
+IGOR_CODE_ROOT="${IGOR_CODE_ROOT:-$HOME/Code}"
 
 # ── Secrets ────────────────────────────────────────────────────
 
-if [ -f "$TICK_CONFIG_DIR/.env" ]; then
+if [ -f "$IGOR_CONFIG_DIR/.env" ]; then
   set -a
   # shellcheck source=/dev/null
-  . "$TICK_CONFIG_DIR/.env"
+  . "$IGOR_CONFIG_DIR/.env"
   set +a
 fi
-: "${CLAUDE_CODE_OAUTH_TOKEN:?CLAUDE_CODE_OAUTH_TOKEN must be set (via $TICK_CONFIG_DIR/.env)}"
-: "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set (via $TICK_CONFIG_DIR/.env)}"
-: "${FORGEJO_URL:?FORGEJO_URL must be set (via $TICK_CONFIG_DIR/.env)}"
-TICK_TIMEOUT="${TICK_TIMEOUT:-60m}"
+: "${CLAUDE_CODE_OAUTH_TOKEN:?CLAUDE_CODE_OAUTH_TOKEN must be set (via $IGOR_CONFIG_DIR/.env)}"
+: "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set (via $IGOR_CONFIG_DIR/.env)}"
+: "${FORGEJO_URL:?FORGEJO_URL must be set (via $IGOR_CONFIG_DIR/.env)}"
+IGOR_TIMEOUT="${IGOR_TIMEOUT:-60m}"
 FORGEJO_SSH_HOST="${FORGEJO_SSH_HOST:-$(echo "$FORGEJO_URL" | sed -E 's|^[a-z]+://([^/:]+).*|\1|')}"
 
 # ── Library ────────────────────────────────────────────────────
 
 # shellcheck source=lib/forgejo.sh
-. "$TICK_HOME/lib/forgejo.sh"
+. "$IGOR_HOME/lib/forgejo.sh"
 
 # ── Resolve bot identity ──────────────────────────────────────
 
 BOT_USER=$(forgejo_whoami)
 [ -n "$BOT_USER" ] || {
-  echo "tick: failed to resolve bot user from $FORGEJO_URL/api/v1/user" >&2
+  echo "igor: failed to resolve bot user from $FORGEJO_URL/api/v1/user" >&2
   exit 3
 }
 
 # ── Global lock (one tick at a time) ──────────────────────────
 
-mkdir -p "$TICK_STATE_DIR"
-LOCK="$TICK_STATE_DIR/lock"
+mkdir -p "$IGOR_STATE_DIR"
+LOCK="$IGOR_STATE_DIR/lock"
 exec 200>"$LOCK"
 if ! flock -n 200; then
-  echo "tick: another tick is running -- exiting" >&2
+  echo "igor: another tick is running -- exiting" >&2
   exit 0
 fi
 
-log() { printf '[tick] %s\n' "$*"; }
+log() { printf '[igor] %s\n' "$*"; }
 
 # Title -> branch-safe slug. ASCII alphanumerics survive; everything
 # else collapses to '-'. Capped at 50 chars, preferring to cut on a
@@ -92,8 +92,8 @@ cleanup_agent_branches() {
   (cd "$repo" && echo "$refs" | xargs git branch -D) >/dev/null 2>&1 || true
 }
 
-# Local clone path for owner/name -> $TICK_CODE_ROOT/name.
-repo_path_for() { echo "$TICK_CODE_ROOT/$(basename "$1")"; }
+# Local clone path for owner/name -> $IGOR_CODE_ROOT/name.
+repo_path_for() { echo "$IGOR_CODE_ROOT/$(basename "$1")"; }
 
 # Worktree key: slash-free, unique per repo+issue.
 worktree_key() { printf '%s-%s' "${1//\//_}" "$2"; }
@@ -115,7 +115,7 @@ if [ "$ORPHAN_COUNT" -gt 0 ]; then
     forgejo_unassign_all "$O_REPO" "$O_NUM"
 
     O_LOCAL=$(repo_path_for "$O_REPO")
-    O_WT="$TICK_STATE_DIR/worktrees/$(worktree_key "$O_REPO" "$O_NUM")"
+    O_WT="$IGOR_STATE_DIR/worktrees/$(worktree_key "$O_REPO" "$O_NUM")"
     if [ -d "$O_LOCAL/.git" ]; then
       if [ -d "$O_WT" ]; then
         (cd "$O_LOCAL" && git worktree remove "$O_WT" --force) 2>/dev/null || rm -rf "$O_WT"
@@ -177,8 +177,8 @@ log "branch: ${BRANCH}"
 
 # Export early so agent-block.sh / agent-report.sh work for both
 # preflight (called by tick.sh) and Claude (invoked below).
-export ISSUE_NUMBER ISSUE_TITLE FORGEJO_REPO PR_BASE TICK_HOME
-export PATH="$TICK_HOME/bin:$PATH"
+export ISSUE_NUMBER ISSUE_TITLE FORGEJO_REPO PR_BASE IGOR_HOME
+export PATH="$IGOR_HOME/bin:$PATH"
 
 # ── Cleanup on exit (set before worktree creation) ────────────
 
@@ -209,7 +209,7 @@ if [ ! -d "$REPO_PATH/.git" ]; then
   mkdir -p "$(dirname "$REPO_PATH")"
   if ! git clone "$CLONE_URL" "$REPO_PATH"; then
     log "clone failed, blocking"
-    agent-block.sh "Tick could not clone \`$CLONE_URL\`. Verify the bot user has SSH access to this repo and try again."
+    agent-block.sh "Igor could not clone \`$CLONE_URL\`. Verify the bot user has SSH access to this repo and try again."
     exit 0
   fi
 fi
@@ -218,23 +218,23 @@ fi
 
 if [ ! -f "$REPO_PATH/CLAUDE.md" ]; then
   log "preflight: missing CLAUDE.md, blocking"
-  agent-block.sh "Tick cannot work this repo: \`CLAUDE.md\` is missing at the repo root.
+  agent-block.sh "Igor cannot work this repo: \`CLAUDE.md\` is missing at the repo root.
 
-Tick relies on \`CLAUDE.md\` for project conventions (test commands, code style, gotchas). Add one, remove \`Status/Blocked\`, and the next tick will re-claim this issue."
+Igor relies on \`CLAUDE.md\` for project conventions (test commands, code style, gotchas). Add one, remove \`Status/Blocked\`, and the next tick will re-claim this issue."
   exit 0
 fi
 
 # ── Worktree ──────────────────────────────────────────────────
 
-mkdir -p "$TICK_STATE_DIR/worktrees"
-WORKTREE="$TICK_STATE_DIR/worktrees/$(worktree_key "$FORGEJO_REPO" "$ISSUE_NUMBER")"
+mkdir -p "$IGOR_STATE_DIR/worktrees"
+WORKTREE="$IGOR_STATE_DIR/worktrees/$(worktree_key "$FORGEJO_REPO" "$ISSUE_NUMBER")"
 
 # Recovery should have cleared any stale path; this is a belt-and-braces check.
 if [ -e "$WORKTREE" ]; then
   log "stale worktree at $WORKTREE -- aborting"
   forgejo_unassign_all "$FORGEJO_REPO" "$ISSUE_NUMBER"
   forgejo_comment "$FORGEJO_REPO" "$ISSUE_NUMBER" \
-    "Tick aborted: stale worktree from a previous run was present at \`$WORKTREE\`. Investigate and clear before retrying."
+    "Igor aborted: stale worktree from a previous run was present at \`$WORKTREE\`. Investigate and clear before retrying."
   WORKTREE=""
   exit 4
 fi
@@ -258,13 +258,13 @@ ${ISSUE_BODY}
 EOF
 )
 
-log "invoking claude (timeout ${TICK_TIMEOUT})"
+log "invoking claude (timeout ${IGOR_TIMEOUT})"
 CLAUDE_LOG="$WORKTREE/.git/claude-output.log"
 set +e
-timeout --kill-after=30s "$TICK_TIMEOUT" \
+timeout --kill-after=30s "$IGOR_TIMEOUT" \
   claude \
-    --append-system-prompt "$(cat "$TICK_HOME/AGENTS.md")" \
-    --settings "$TICK_HOME/agent-settings.json" \
+    --append-system-prompt "$(cat "$IGOR_HOME/AGENTS.md")" \
+    --settings "$IGOR_HOME/agent-settings.json" \
     --max-turns 50 \
     --print "$USER_MSG" 2>&1 | tee "$CLAUDE_LOG"
 CLAUDE_EXIT=${PIPESTATUS[0]}
@@ -313,7 +313,7 @@ else
   [ -s "$CLAUDE_LOG" ] && TAIL=$(tail -c 4000 "$CLAUDE_LOG")
 
   forgejo_comment "$FORGEJO_REPO" "$ISSUE_NUMBER" \
-"Tick completed with no work produced and no blocker reported. Investigate. (claude exit: ${CLAUDE_EXIT})
+"Igor completed with no work produced and no blocker reported. Investigate. (claude exit: ${CLAUDE_EXIT})
 
 <details><summary>last bytes of claude output</summary>
 

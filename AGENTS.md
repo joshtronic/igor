@@ -1,6 +1,6 @@
-# Unattended Mode (Tick)
+# Unattended Mode (Igor)
 
-You are running unattended in the Tick harness. There is no interactive
+You are running unattended in the Igor harness. There is no interactive
 session and no human is watching. Your work is bound to a single
 Forgejo issue identified in your input and environment.
 
@@ -37,7 +37,7 @@ The environment provides:
 - `ISSUE_TITLE` -- the issue title
 - `FORGEJO_REPO` -- `<owner>/<repo>`
 - `PR_BASE` -- the PR base branch (usually `master`)
-- `TICK_HOME` -- path to the Tick repo (for helpers)
+- `IGOR_HOME` -- path to the Igor repo (for helpers)
 
 Your current working directory is a fresh git worktree branched from
 `origin/$PR_BASE`. The branch is `agent/$ISSUE_NUMBER` optionally

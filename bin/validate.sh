@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# validate.sh -- Validate Tick's setup: env, library deps, Forgejo
+# validate.sh -- Validate Igor's setup: env, library deps, Forgejo
 # reachability, bot identity, and accessible repos. Exits non-zero on
 # any failure.
 
 set -uo pipefail
 
-TICK_HOME="$(cd "$(dirname "$0")/.." && pwd)"
-TICK_CONFIG_DIR="${TICK_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tick}"
+IGOR_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+IGOR_CONFIG_DIR="${IGOR_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/igor}"
 FAIL=0
 
-if [ -f "$TICK_CONFIG_DIR/.env" ]; then
+if [ -f "$IGOR_CONFIG_DIR/.env" ]; then
   set -a
   # shellcheck source=/dev/null
-  . "$TICK_CONFIG_DIR/.env"
+  . "$IGOR_CONFIG_DIR/.env"
   set +a
 fi
 
@@ -26,16 +26,16 @@ echo "== env =="
 [ -n "${FORGEJO_TOKEN:-}" ]           && pass "FORGEJO_TOKEN set"           || fail "FORGEJO_TOKEN set"           "missing from .env"
 [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && pass "CLAUDE_CODE_OAUTH_TOKEN set" || fail "CLAUDE_CODE_OAUTH_TOKEN set" "missing from .env"
 
-[ -f "$TICK_HOME/agent-settings.json" ] && pass "agent-settings.json present" || fail "agent-settings.json present"
+[ -f "$IGOR_HOME/agent-settings.json" ] && pass "agent-settings.json present" || fail "agent-settings.json present"
 
-state_dir="${TICK_STATE_DIR:-$HOME/.local/state/tick}"
+state_dir="${IGOR_STATE_DIR:-$HOME/.local/state/igor}"
 if mkdir -p "$state_dir/worktrees" 2>/dev/null && [ -w "$state_dir/worktrees" ]; then
   pass "state dir writable ($state_dir)"
 else
   fail "state dir writable ($state_dir)"
 fi
 
-code_root="${TICK_CODE_ROOT:-$HOME/Code}"
+code_root="${IGOR_CODE_ROOT:-$HOME/Code}"
 if mkdir -p "$code_root" 2>/dev/null && [ -w "$code_root" ]; then
   pass "code root writable ($code_root)"
 else
@@ -52,7 +52,7 @@ if [ -z "${FORGEJO_URL:-}" ] || [ -z "${FORGEJO_TOKEN:-}" ]; then
 fi
 
 # shellcheck source=../lib/forgejo.sh
-. "$TICK_HOME/lib/forgejo.sh"
+. "$IGOR_HOME/lib/forgejo.sh"
 
 bot=$(forgejo_whoami 2>/dev/null || echo "")
 if [ -n "$bot" ]; then

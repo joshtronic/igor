@@ -3,7 +3,7 @@
 #
 # Requires in environment:
 #   FORGEJO_URL    -- e.g., https://git.sherver.org
-#   FORGEJO_TOKEN  -- bot's API token (loaded from $TICK_HOME/.env)
+#   FORGEJO_TOKEN  -- bot's API token (loaded from $IGOR_HOME/.env)
 #
 # Requires on PATH: curl, jq.
 
