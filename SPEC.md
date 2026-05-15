@@ -84,8 +84,9 @@ tick/
 │   ├── agent-block.sh     # blocker helper, called by Claude
 │   ├── agent-report.sh    # report helper, called by Claude
 │   ├── check-sync.sh      # AGENTS.md ↔ tick.sh contract lint
-│   ├── validate-project.sh
-│   └── install.sh
+│   ├── validate.sh        # global + every project
+│   ├── install.sh
+│   └── uninstall.sh
 ├── lib/
 │   └── forgejo.sh         # API helpers
 ├── projects/
@@ -309,14 +310,15 @@ reload.
 
 ---
 
-## Validation: `validate-project.sh`
+## Validation: `validate.sh`
 
-Run against a project name, or with no argument to check all
-projects. Each check exits non-zero on failure so the script is
-usable as a deploy gate or pre-tick sanity check.
+Validates global env, then every project in `projects/`. Exits
+non-zero on any failure so the script is usable as a deploy gate or
+pre-tick sanity check.
 
 Global checks:
 - `FORGEJO_URL`, `FORGEJO_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` set.
+- `agent-settings.json` present.
 - State dir writable.
 
 Per-project checks:

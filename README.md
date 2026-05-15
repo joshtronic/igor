@@ -48,8 +48,9 @@ bin/
 ├── agent-block.sh           # Claude calls this when stuck
 ├── agent-report.sh          # Claude calls this for no-diff outcomes
 ├── check-sync.sh            # CI lint: AGENTS.md ↔ tick.sh contract
-├── validate-project.sh      # check a project's setup
-└── install.sh               # one-time: copy units, enable timer
+├── validate.sh              # validate global env + every project
+├── install.sh               # one-time: copy units, enable timer
+└── uninstall.sh             # stop, disable, remove units
 
 lib/forgejo.sh               # Forgejo API helpers
 
