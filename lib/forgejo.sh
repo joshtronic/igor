@@ -2,8 +2,8 @@
 # Forgejo API helpers. Sourced by bin/tick.sh and bin/agent-*.sh.
 #
 # Requires in environment:
-#   FORGEJO_URL    — e.g., https://git.sherver.org
-#   FORGEJO_TOKEN  — bot's API token (loaded from ~/.config/igor/forgejo.env)
+#   FORGEJO_URL    -- e.g., https://git.sherver.org
+#   FORGEJO_TOKEN  -- bot's API token (loaded from $TICK_HOME/.env)
 #
 # Requires on PATH: curl, jq.
 
@@ -45,6 +45,19 @@ forgejo_get_issue() {
   _fj GET "/repos/${repo}/issues/${number}"
 }
 
+# All open issues currently assigned to a given user.
+# Returns a JSON array (possibly empty). Filters client-side so this
+# works the same across Forgejo versions.
+forgejo_find_assigned() {
+  local repo="$1" user="$2"
+  _fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" \
+    | jq -c --arg u "$user" '
+        map(select(
+          (.assignees // []) | map(.login) | index($u) != null
+        ))
+      '
+}
+
 forgejo_assign() {
   local repo="$1" number="$2" user="$3"
   _fj PATCH "/repos/${repo}/issues/${number}" \
@@ -71,35 +84,15 @@ forgejo_open_pr() {
         '{title: $t, body: $b, head: $h, base: $ba}')" >/dev/null
 }
 
-# Resolve label name → id (Forgejo's add/remove label API takes IDs).
-# Cached per-process via associative array.
-declare -A _FJ_LABEL_ID_CACHE
-_forgejo_label_id() {
-  local repo="$1" name="$2" key="${repo}::${name}"
-  if [ -n "${_FJ_LABEL_ID_CACHE[$key]:-}" ]; then
-    echo "${_FJ_LABEL_ID_CACHE[$key]}"
-    return 0
-  fi
+# Add a label by name. Forgejo's API takes label IDs, so this resolves
+# name -> id with a single API call.
+forgejo_add_label() {
+  local repo="$1" number="$2" name="$3"
   local id
   id=$(_fj GET "/repos/${repo}/labels" \
        | jq -r --arg n "$name" '.[] | select(.name == $n) | .id' \
        | head -1)
   [ -n "$id" ] || { echo "label not found: $name" >&2; return 1; }
-  _FJ_LABEL_ID_CACHE[$key]="$id"
-  echo "$id"
-}
-
-forgejo_add_label() {
-  local repo="$1" number="$2" name="$3"
-  local id
-  id=$(_forgejo_label_id "$repo" "$name") || return 1
   _fj POST "/repos/${repo}/issues/${number}/labels" \
     "$(jq -n --argjson id "$id" '{labels: [$id]}')" >/dev/null
-}
-
-forgejo_remove_label() {
-  local repo="$1" number="$2" name="$3"
-  local id
-  id=$(_forgejo_label_id "$repo" "$name") || return 1
-  _fj DELETE "/repos/${repo}/issues/${number}/labels/${id}" >/dev/null
 }
