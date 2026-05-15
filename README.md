@@ -116,8 +116,11 @@ bin/uninstall.sh   # stops, disables, removes
 Schedule override goes in a drop-in at
 `~/.config/systemd/user/tick.timer.d/override.conf`.
 
-cron works too: `*/10 * * * * $HOME/Code/tick/bin/tick.sh`. The
-global flock keeps overlapping runs safe either way.
+### Operating
+
+- Schedule: `systemctl --user list-timers tick.timer`
+- Logs: `journalctl --user -u tick.service -f`
+- Force a tick now: `systemctl --user start tick.service`
 
 ### Adding a project
 
