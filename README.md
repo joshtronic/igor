@@ -37,7 +37,7 @@ A timer fires `bin/tick.sh`. Per tick:
 | What Claude did                 | What Igor does                                                |
 |---------------------------------|---------------------------------------------------------------|
 | Made commits                    | Push branch, open PR with `Closes #N`                         |
-| Closed the issue with a comment | Treat as a report -- log and clean up                          |
+| Closed the issue with a comment | Treat as a report -- log and clean up                         |
 | Applied `Status/Blocked`        | Log, clean up, wait for the human                             |
 | Nothing                         | Unassign, leave a "no work" comment with Claude's tail output |
 
@@ -52,10 +52,10 @@ only `Agent` is custom.
 
 | State               | Labels                     | Assignee  | Open?  |
 |---------------------|----------------------------|-----------|--------|
-| Filed, not approved | -- (or `Kind/*`)            | --         | open   |
-| Approved, claimable | `Agent`                    | --         | open   |
+| Filed, not approved | -- (or `Kind/*`)           | --        | open   |
+| Approved, claimable | `Agent`                    | --        | open   |
 | In progress         | `Agent`                    | `<bot>`   | open   |
-| Blocked             | `Agent` + `Status/Blocked` | --         | open   |
+| Blocked             | `Agent` + `Status/Blocked` | --        | open   |
 | Done                | (any)                      | (any)     | closed |
 
 `Agent` is a **permission flag** ("agent's domain"), not a state. State is
