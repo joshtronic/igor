@@ -229,6 +229,7 @@ set +e
 timeout --kill-after=30s "$TICK_TIMEOUT" \
   claude \
     --append-system-prompt "$(cat "$TICK_HOME/AGENTS.md")" \
+    --max-turns 50 \
     --print "$USER_MSG"
 CLAUDE_EXIT=$?
 set -e

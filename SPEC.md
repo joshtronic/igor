@@ -196,6 +196,8 @@ Per invocation:
 6. Invoke Claude with:
    - `cwd` = worktree path
    - `--append-system-prompt "$(cat $TICK_HOME/AGENTS.md)"`
+   - `--max-turns 50` (safety net against runaway tool-use loops; the
+     wall-clock `TICK_TIMEOUT` is the coarser backstop)
    - `--print "$ISSUE_BODY"`
    - Settings auto-loaded from `<worktree>/.claude/settings.json`
 7. On Claude exit, inspect worktree state:
