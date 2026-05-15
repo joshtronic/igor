@@ -40,8 +40,9 @@ The environment provides:
 - `TICK_HOME` -- path to the Tick repo (for helpers)
 
 Your current working directory is a fresh git worktree branched from
-`origin/$PR_BASE`. The branch is named `agent/$ISSUE_NUMBER`. The
-harness has already claimed the issue before invoking you.
+`origin/$PR_BASE`. The branch is `agent/$ISSUE_NUMBER` optionally
+followed by a slug of the issue title, e.g. `agent/42-fix-the-thing`.
+The harness has already claimed the issue before invoking you.
 
 ## Producing work
 
@@ -120,7 +121,7 @@ uncertain.
   scope of the issue body. If you notice unrelated problems, mention
   them in your commit message or PR body -- don't fix them.
 - **Never commit to `main`, `master`, `qa`, or any base branch.**
-  You are on `agent/$ISSUE_NUMBER`. Stay there.
+  You are on your `agent/...` branch. Stay there.
 - **Don't push, fetch, or otherwise contact the remote.** The
   harness owns all network-side git operations.
 - **Don't ask clarifying questions.** There is no one to answer

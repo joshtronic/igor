@@ -56,6 +56,33 @@ fi
 
 log() { printf '[tick] %s\n' "$*"; }
 
+# Title -> branch-safe slug. ASCII alphanumerics survive; everything
+# else collapses to '-'. Capped at 50 chars, preferring to cut on a
+# hyphen boundary. Empty for titles with no alphanumerics.
+slugify() {
+  local s
+  s=$(printf '%s' "$1" \
+    | LC_ALL=C tr '[:upper:]' '[:lower:]' \
+    | LC_ALL=C sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
+  if [ ${#s} -gt 50 ]; then
+    s="${s:0:50}"
+    s="${s%-*}"
+    s="${s%-}"
+  fi
+  printf '%s' "$s"
+}
+
+# Delete local agent branches for issue N: bare `agent/N` plus any
+# `agent/N-<slug>` left over from a previous run (the title may have
+# been edited since, so glob rather than match exactly).
+cleanup_agent_branches() {
+  local n="$1" repo="$2" refs
+  refs=$(cd "$repo" && git for-each-ref --format='%(refname:short)' \
+    "refs/heads/agent/${n}" "refs/heads/agent/${n}-*" 2>/dev/null) || return 0
+  [ -z "$refs" ] && return 0
+  (cd "$repo" && echo "$refs" | xargs git branch -D) >/dev/null 2>&1 || true
+}
+
 # ── Discover known projects ───────────────────────────────────
 
 shopt -s nullglob
@@ -124,7 +151,7 @@ for project in "${PROJECTS[@]}"; do
     if [ -d "$wt" ]; then
       (cd "$P_REPO_PATH" && git worktree remove "$wt" --force) 2>/dev/null || rm -rf "$wt"
     fi
-    (cd "$P_REPO_PATH" && git branch -D "agent/${n}") 2>/dev/null || true
+    cleanup_agent_branches "$n" "$P_REPO_PATH"
   done < <(jq -r '.[].number' <<<"$ORPHANS")
 done
 
@@ -164,7 +191,15 @@ ISSUE_TITLE=$(jq -r .title <<<"$WINNER")
 ISSUE_BODY=$(jq -r '.body // ""' <<<"$WINNER")
 ISSUE_LABELS=$(jq -r '[.labels[].name] | join(", ")' <<<"$WINNER")
 
+SLUG=$(slugify "$ISSUE_TITLE")
+if [ -n "$SLUG" ]; then
+  BRANCH="agent/${ISSUE_NUMBER}-${SLUG}"
+else
+  BRANCH="agent/${ISSUE_NUMBER}"
+fi
+
 log "claiming ${PROJECT}#${ISSUE_NUMBER}: ${ISSUE_TITLE}"
+log "branch: ${BRANCH}"
 
 # ── Cleanup on exit (set before worktree creation) ────────────
 
@@ -177,7 +212,7 @@ cleanup() {
     (cd "$REPO_PATH" && git worktree remove "$WORKTREE" --force) 2>/dev/null || true
   fi
   if [ -n "${ISSUE_NUMBER:-}" ]; then
-    (cd "$REPO_PATH" && git branch -D "agent/${ISSUE_NUMBER}") 2>/dev/null || true
+    cleanup_agent_branches "$ISSUE_NUMBER" "$REPO_PATH"
   fi
   exit "$rc"
 }
@@ -203,7 +238,7 @@ fi
 
 cd "$REPO_PATH"
 git fetch origin --prune
-git worktree add -b "agent/${ISSUE_NUMBER}" "$WORKTREE" "origin/${PR_BASE}"
+git worktree add -b "$BRANCH" "$WORKTREE" "origin/${PR_BASE}"
 
 # ── Invoke Claude ─────────────────────────────────────────────
 
@@ -257,7 +292,6 @@ elif [ "$HAS_BLOCKED" = "true" ]; then
 elif [ "$COMMITS" -gt 0 ]; then
   # OUTCOME: pr
   log "outcome: PR ($COMMITS commit(s))"
-  BRANCH="agent/${ISSUE_NUMBER}"
   git push -u origin "$BRANCH"
 
   PR_TITLE=$(git log -1 --pretty=%s)
