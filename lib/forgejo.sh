@@ -84,35 +84,15 @@ forgejo_open_pr() {
         '{title: $t, body: $b, head: $h, base: $ba}')" >/dev/null
 }
 
-# Resolve label name → id (Forgejo's add/remove label API takes IDs).
-# Cached per-process via associative array.
-declare -A _FJ_LABEL_ID_CACHE
-_forgejo_label_id() {
-  local repo="$1" name="$2" key="${repo}::${name}"
-  if [ -n "${_FJ_LABEL_ID_CACHE[$key]:-}" ]; then
-    echo "${_FJ_LABEL_ID_CACHE[$key]}"
-    return 0
-  fi
+# Add a label by name. Forgejo's API takes label IDs, so this resolves
+# name → id with a single API call.
+forgejo_add_label() {
+  local repo="$1" number="$2" name="$3"
   local id
   id=$(_fj GET "/repos/${repo}/labels" \
        | jq -r --arg n "$name" '.[] | select(.name == $n) | .id' \
        | head -1)
   [ -n "$id" ] || { echo "label not found: $name" >&2; return 1; }
-  _FJ_LABEL_ID_CACHE[$key]="$id"
-  echo "$id"
-}
-
-forgejo_add_label() {
-  local repo="$1" number="$2" name="$3"
-  local id
-  id=$(_forgejo_label_id "$repo" "$name") || return 1
   _fj POST "/repos/${repo}/issues/${number}/labels" \
     "$(jq -n --argjson id "$id" '{labels: [$id]}')" >/dev/null
-}
-
-forgejo_remove_label() {
-  local repo="$1" number="$2" name="$3"
-  local id
-  id=$(_forgejo_label_id "$repo" "$name") || return 1
-  _fj DELETE "/repos/${repo}/issues/${number}/labels/${id}" >/dev/null
 }
