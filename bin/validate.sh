@@ -87,7 +87,7 @@ for conf in "${confs[@]}"; do
     fi
   done
 
-  bot="${BOT_USER:-igor}"
+  bot="${BOT_USER:-agent}"
   if curl -sf -H "Authorization: token $FORGEJO_TOKEN" \
         "$api/users/$bot" >/dev/null 2>&1; then
     pass "bot user '$bot' exists on Forgejo"

@@ -37,7 +37,7 @@ fi
 : "${CLAUDE_CODE_OAUTH_TOKEN:?CLAUDE_CODE_OAUTH_TOKEN must be set (via $TICK_HOME/.env)}"
 : "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set (via $TICK_HOME/.env)}"
 : "${FORGEJO_URL:?FORGEJO_URL must be set (via $TICK_HOME/.env)}"
-: "${BOT_USER:=igor}"
+: "${BOT_USER:=agent}"
 
 # ── Library ────────────────────────────────────────────────────
 
