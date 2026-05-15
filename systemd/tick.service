@@ -1,5 +1,5 @@
 [Unit]
-Description=Tick — claim and work one Forgejo issue across known projects
+Description=Tick -- claim and work one Forgejo issue across known projects
 After=network-online.target
 Wants=network-online.target
 

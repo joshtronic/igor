@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# agent-block.sh — Called by the agent from within a tick when it
+# agent-block.sh -- Called by the agent from within a tick when it
 # cannot complete the work.
 #
 # Posts the supplied reason as a comment on the current issue,
@@ -16,7 +16,7 @@ set -euo pipefail
 
 REASON="${1:?usage: agent-block.sh \"<reason>\"}"
 
-: "${ISSUE_NUMBER:?ISSUE_NUMBER not set — are you being run from a tick?}"
+: "${ISSUE_NUMBER:?ISSUE_NUMBER not set -- are you being run from a tick?}"
 : "${FORGEJO_REPO:?FORGEJO_REPO not set}"
 : "${TICK_HOME:?TICK_HOME not set}"
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# check-sync.sh — Verify the AGENTS.md ↔ tick.sh contract is in sync.
+# check-sync.sh -- Verify the AGENTS.md <-> tick.sh contract is in sync.
 #
 # Catches:
-#  1. Outcome sets diverge — a branch in tick.sh marked with
+#  1. Outcome sets diverge -- a branch in tick.sh marked with
 #     `# OUTCOME: <label>` must have a matching `<!-- OUTCOME: <label> -->`
 #     in AGENTS.md, and vice versa.
 #  2. Helper scripts referenced in AGENTS.md (anything matching

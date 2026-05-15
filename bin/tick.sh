@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tick.sh — claim one Agent-labeled Forgejo issue from any known
+# tick.sh -- claim one Agent-labeled Forgejo issue from any known
 # project and work it.
 #
 # Usage:
@@ -7,11 +7,11 @@
 #   tick.sh <project>   scope to one project (for debugging)
 #
 # Behavior:
-#   1. Acquire global flock — only one tick runs at a time.
-#   2. Recovery — any open issue assigned to $BOT_USER (orphaned from
+#   1. Acquire global flock -- only one tick runs at a time.
+#   2. Recovery -- any open issue assigned to $BOT_USER (orphaned from
 #      a previous interrupted tick) gets a comment and is unassigned
 #      so the next tick re-claims it.
-#   3. Discovery — query each project's Forgejo repo for the oldest
+#   3. Discovery -- query each project's Forgejo repo for the oldest
 #      claimable issue (Agent-labeled, no assignee, not Status/Blocked).
 #      Pick the globally oldest.
 #   4. Claim, worktree, invoke Claude, classify outcome.
@@ -50,7 +50,7 @@ mkdir -p "$TICK_STATE_DIR"
 LOCK="$TICK_STATE_DIR/lock"
 exec 200>"$LOCK"
 if ! flock -n 200; then
-  echo "tick: another tick is running — exiting" >&2
+  echo "tick: another tick is running -- exiting" >&2
   exit 0
 fi
 
@@ -116,7 +116,7 @@ for project in "${PROJECTS[@]}"; do
     [ -z "$n" ] && continue
     log "recovery: ${project}#${n} orphaned, re-queueing"
     forgejo_comment "$P_FORGEJO_REPO" "$n" \
-      "Previous tick was interrupted before completion. Re-queueing — the next tick will pick this up."
+      "Previous tick was interrupted before completion. Re-queueing -- the next tick will pick this up."
     forgejo_unassign_all "$P_FORGEJO_REPO" "$n"
 
     # Best-effort cleanup of leftover worktree / branch.
@@ -194,7 +194,7 @@ WORKTREE="$TICK_STATE_DIR/worktrees/${PROJECT}-${ISSUE_NUMBER}"
 
 # Recovery should have cleared any stale path; this is a belt-and-braces check.
 if [ -e "$WORKTREE" ]; then
-  log "stale worktree at $WORKTREE — aborting"
+  log "stale worktree at $WORKTREE -- aborting"
   forgejo_unassign_all "$FORGEJO_REPO" "$ISSUE_NUMBER"
   forgejo_comment "$FORGEJO_REPO" "$ISSUE_NUMBER" \
     "Tick aborted: stale worktree from a previous run was present at \`$WORKTREE\`. Investigate and clear before retrying."

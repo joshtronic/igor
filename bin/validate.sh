@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# validate.sh — Validate Tick's setup: global env, then every project
+# validate.sh -- Validate Tick's setup: global env, then every project
 # in projects/. Exits non-zero on any failure.
 
 set -uo pipefail
@@ -15,7 +15,7 @@ if [ -f "$TICK_HOME/.env" ]; then
 fi
 
 pass() { printf '  \033[32m✓\033[0m %s\n' "$1"; }
-fail() { printf '  \033[31m✗\033[0m %s%s\n' "$1" "${2:+ — $2}"; FAIL=1; }
+fail() { printf '  \033[31m✗\033[0m %s%s\n' "$1" "${2:+ -- $2}"; FAIL=1; }
 
 # ── Global checks ──────────────────────────────────────────────
 
@@ -61,7 +61,7 @@ for conf in "${confs[@]}"; do
   fi
 
   if [ -z "${FORGEJO_URL:-}" ] || [ -z "${FORGEJO_TOKEN:-}" ]; then
-    fail "Forgejo API checks" "skipped — global creds missing"
+    fail "Forgejo API checks" "skipped -- global creds missing"
     echo
     continue
   fi

@@ -2,8 +2,8 @@
 # Forgejo API helpers. Sourced by bin/tick.sh and bin/agent-*.sh.
 #
 # Requires in environment:
-#   FORGEJO_URL    — e.g., https://git.sherver.org
-#   FORGEJO_TOKEN  — bot's API token (loaded from $TICK_HOME/.env)
+#   FORGEJO_URL    -- e.g., https://git.sherver.org
+#   FORGEJO_TOKEN  -- bot's API token (loaded from $TICK_HOME/.env)
 #
 # Requires on PATH: curl, jq.
 
@@ -85,7 +85,7 @@ forgejo_open_pr() {
 }
 
 # Add a label by name. Forgejo's API takes label IDs, so this resolves
-# name → id with a single API call.
+# name -> id with a single API call.
 forgejo_add_label() {
   local repo="$1" number="$2" name="$3"
   local id
