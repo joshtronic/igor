@@ -58,6 +58,7 @@ systemd/                     # global user units (no @ instance)
 └── tick.timer
 
 AGENTS.md                    # universal unattended rules — appended to Claude's system prompt
+agent-settings.json          # bot's permission profile — passed via --settings
 projects/<name>.conf         # per-project config (paths, base branch)
 ```
 

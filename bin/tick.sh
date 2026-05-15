@@ -225,13 +225,15 @@ EOF
 )
 
 log "invoking claude (timeout ${TICK_TIMEOUT})"
+CLAUDE_LOG="$WORKTREE/.git/claude-output.log"
 set +e
 timeout --kill-after=30s "$TICK_TIMEOUT" \
   claude \
     --append-system-prompt "$(cat "$TICK_HOME/AGENTS.md")" \
+    --settings "$TICK_HOME/agent-settings.json" \
     --max-turns 50 \
-    --print "$USER_MSG"
-CLAUDE_EXIT=$?
+    --print "$USER_MSG" 2>&1 | tee "$CLAUDE_LOG"
+CLAUDE_EXIT=${PIPESTATUS[0]}
 set -e
 log "claude exited $CLAUDE_EXIT"
 
@@ -273,8 +275,19 @@ else
   # OUTCOME: noop
   log "outcome: no work produced"
   forgejo_unassign_all "$FORGEJO_REPO" "$ISSUE_NUMBER"
+
+  TAIL="(no output captured)"
+  [ -s "$CLAUDE_LOG" ] && TAIL=$(tail -c 4000 "$CLAUDE_LOG")
+
   forgejo_comment "$FORGEJO_REPO" "$ISSUE_NUMBER" \
-    "Tick completed with no work produced and no blocker reported. Investigate. (claude exit: ${CLAUDE_EXIT})"
+"Tick completed with no work produced and no blocker reported. Investigate. (claude exit: ${CLAUDE_EXIT})
+
+<details><summary>last bytes of claude output</summary>
+
+\`\`\`
+${TAIL}
+\`\`\`
+</details>"
 fi
 
 # Cleanup runs via trap on exit.

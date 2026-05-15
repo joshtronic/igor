@@ -131,17 +131,24 @@ unattended modes (no change from current usage). Architecture,
 commands, conventions, interactive rules. Interactive-only rules
 remain intact; they are overridden at bot runtime by `tick/AGENTS.md`.
 
+### `tick/agent-settings.json`
+
+The bot's dev-centric permission profile, applied to every project
+via `--settings`. Broad allow list (common dev tooling) plus a
+targeted deny list (`git push`, `sudo`, `rm -rf /`, `curl | bash`,
+etc.). The harness owns push and remote ops; the bot does the work.
+
 ### `<project>/.claude/settings.json`
 
-The bot's narrow Claude Code allow-list. Committed. Claude picks it
-up from the project checkout automatically — `tick.sh` does not pass
-`--settings`.
+Optional. Project-specific tweaks layered on top of
+`tick/agent-settings.json` — most projects won't need one. If
+present, it adds project-specific allowed/denied tools (e.g. a
+project that uses an unusual build tool can allow it here).
 
 ### `<project>/.claude/settings.local.json`
 
-Interactive overrides. Gitignored. Broadens perms locally so
-interactive work isn't constrained by the bot's profile. The server
-checkout never has this file, so the bot is unaffected.
+Gitignored, interactive use only. Never seen by the bot (the bot's
+profile is `tick/agent-settings.json`, not the project's local file).
 
 ---
 
@@ -196,10 +203,12 @@ Per invocation:
 6. Invoke Claude with:
    - `cwd` = worktree path
    - `--append-system-prompt "$(cat $TICK_HOME/AGENTS.md)"`
+   - `--settings "$TICK_HOME/agent-settings.json"` (bot's dev-centric
+     permission profile; project's `.claude/settings.json` layers on
+     top automatically)
    - `--max-turns 50` (safety net against runaway tool-use loops; the
      wall-clock `TICK_TIMEOUT` is the coarser backstop)
    - `--print "$ISSUE_BODY"`
-   - Settings auto-loaded from `<worktree>/.claude/settings.json`
 7. On Claude exit, inspect worktree state:
    - Commits on a branch ahead of `PR_BASE` → push branch, open PR
      with `Closes #<issue>` in description. PR body is taken from
