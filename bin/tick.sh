@@ -1,20 +1,19 @@
 #!/usr/bin/env bash
-# tick.sh -- claim one Agent-labeled Forgejo issue from any known
-# project and work it.
+# tick.sh -- discover and work one Agent-labeled Forgejo issue across
+# every repo the bot user has push access to.
 #
-# Usage:
-#   tick.sh             scan all projects, pick globally oldest claimable
-#   tick.sh <project>   scope to one project (for debugging)
+# Usage: tick.sh
 #
 # Behavior:
-#   1. Acquire global flock -- only one tick runs at a time.
-#   2. Recovery -- any open issue assigned to $BOT_USER (orphaned from
-#      a previous interrupted tick) gets a comment and is unassigned
-#      so the next tick re-claims it.
-#   3. Discovery -- query each project's Forgejo repo for the oldest
-#      claimable issue (Agent-labeled, no assignee, not Status/Blocked).
-#      Pick the globally oldest.
-#   4. Claim, worktree, invoke Claude, classify outcome.
+#   1. Acquire global flock -- only one tick at a time.
+#   2. Resolve bot identity from Forgejo (whoami).
+#   3. Recovery -- any open issue still assigned to the bot from a
+#      previous interrupted tick gets a comment and is unassigned so
+#      the next tick re-claims it.
+#   4. Discovery -- list every repo the bot has push access to, find
+#      the globally oldest claimable issue across them.
+#   5. Claim, clone-if-needed, preflight (CLAUDE.md present), worktree,
+#      invoke Claude, classify outcome.
 #
 # Exits 0 on success or no-work-found. Non-zero on config/infra errors.
 
@@ -25,7 +24,7 @@ set -euo pipefail
 TICK_HOME="${TICK_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
 TICK_CONFIG_DIR="${TICK_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tick}"
 TICK_STATE_DIR="${TICK_STATE_DIR:-$HOME/.local/state/tick}"
-SCOPE_PROJECT="${1:-}"
+TICK_CODE_ROOT="${TICK_CODE_ROOT:-$HOME/Code}"
 
 # ── Secrets ────────────────────────────────────────────────────
 
@@ -38,14 +37,23 @@ fi
 : "${CLAUDE_CODE_OAUTH_TOKEN:?CLAUDE_CODE_OAUTH_TOKEN must be set (via $TICK_CONFIG_DIR/.env)}"
 : "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set (via $TICK_CONFIG_DIR/.env)}"
 : "${FORGEJO_URL:?FORGEJO_URL must be set (via $TICK_CONFIG_DIR/.env)}"
-: "${BOT_USER:=agent}"
+TICK_TIMEOUT="${TICK_TIMEOUT:-60m}"
+FORGEJO_SSH_HOST="${FORGEJO_SSH_HOST:-$(echo "$FORGEJO_URL" | sed -E 's|^[a-z]+://([^/:]+).*|\1|')}"
 
 # ── Library ────────────────────────────────────────────────────
 
 # shellcheck source=lib/forgejo.sh
 . "$TICK_HOME/lib/forgejo.sh"
 
-# ── Global lock (one tick at a time, across all projects) ─────
+# ── Resolve bot identity ──────────────────────────────────────
+
+BOT_USER=$(forgejo_whoami)
+[ -n "$BOT_USER" ] || {
+  echo "tick: failed to resolve bot user from $FORGEJO_URL/api/v1/user" >&2
+  exit 3
+}
+
+# ── Global lock (one tick at a time) ──────────────────────────
 
 mkdir -p "$TICK_STATE_DIR"
 LOCK="$TICK_STATE_DIR/lock"
@@ -84,108 +92,73 @@ cleanup_agent_branches() {
   (cd "$repo" && echo "$refs" | xargs git branch -D) >/dev/null 2>&1 || true
 }
 
-# ── Discover known projects ───────────────────────────────────
+# Local clone path for owner/name -> $TICK_CODE_ROOT/name.
+repo_path_for() { echo "$TICK_CODE_ROOT/$(basename "$1")"; }
 
-shopt -s nullglob
-declare -a PROJECTS
-if [ -n "$SCOPE_PROJECT" ]; then
-  [ -f "$TICK_CONFIG_DIR/projects/${SCOPE_PROJECT}.conf" ] \
-    || { echo "tick: no conf at $TICK_CONFIG_DIR/projects/${SCOPE_PROJECT}.conf" >&2; exit 2; }
-  PROJECTS=("$SCOPE_PROJECT")
-else
-  for conf in "$TICK_CONFIG_DIR"/projects/*.conf; do
-    PROJECTS+=("$(basename "$conf" .conf)")
-  done
-fi
+# Worktree key: slash-free, unique per repo+issue.
+worktree_key() { printf '%s-%s' "${1//\//_}" "$2"; }
 
-if [ ${#PROJECTS[@]} -eq 0 ]; then
-  log "no projects configured at $TICK_CONFIG_DIR/projects/"
-  exit 0
-fi
+# ── Recovery: clear orphaned bot assignments ──────────────────
 
-# ── Load a project's conf into P_* vars ───────────────────────
-# Sets P_REPO_PATH, P_FORGEJO_REPO, P_PR_BASE, P_TICK_TIMEOUT.
-# Returns 0 on success, 1 on missing required fields.
+log "recovery sweep ($BOT_USER)"
+ORPHANS=$(forgejo_my_assigned || echo '[]')
+ORPHAN_COUNT=$(jq 'length' <<<"$ORPHANS")
 
-load_project_conf() {
-  local project="$1"
-  local conf="$TICK_CONFIG_DIR/projects/${project}.conf"
-  [ -f "$conf" ] || return 1
-
-  # Reset before sourcing
-  REPO_PATH=""
-  FORGEJO_REPO=""
-  PR_BASE=""
-  TICK_TIMEOUT=""
-
-  # shellcheck source=/dev/null
-  . "$conf"
-
-  [ -n "$REPO_PATH" ]    || { echo "tick: $project missing REPO_PATH" >&2; return 1; }
-  [ -n "$FORGEJO_REPO" ] || { echo "tick: $project missing FORGEJO_REPO" >&2; return 1; }
-
-  P_REPO_PATH="$REPO_PATH"
-  P_FORGEJO_REPO="$FORGEJO_REPO"
-  P_PR_BASE="${PR_BASE:-master}"
-  P_TICK_TIMEOUT="${TICK_TIMEOUT:-60m}"
-  return 0
-}
-
-# ── Recovery: clear orphaned $BOT_USER assignments ────────────
-
-log "recovery sweep ($BOT_USER across ${#PROJECTS[@]} project(s))"
-for project in "${PROJECTS[@]}"; do
-  load_project_conf "$project" || continue
-  ORPHANS=$(forgejo_find_assigned "$P_FORGEJO_REPO" "$BOT_USER" || echo "[]")
-  ORPHAN_COUNT=$(jq 'length' <<<"$ORPHANS")
-  [ "$ORPHAN_COUNT" -gt 0 ] || continue
-
-  while read -r n; do
-    [ -z "$n" ] && continue
-    log "recovery: ${project}#${n} orphaned, re-queueing"
-    forgejo_comment "$P_FORGEJO_REPO" "$n" \
+if [ "$ORPHAN_COUNT" -gt 0 ]; then
+  while read -r line; do
+    [ -z "$line" ] && continue
+    O_REPO=$(jq -r '.repo' <<<"$line")
+    O_NUM=$(jq -r '.num' <<<"$line")
+    log "recovery: ${O_REPO}#${O_NUM} orphaned, re-queueing"
+    forgejo_comment "$O_REPO" "$O_NUM" \
       "Previous tick was interrupted before completion. Re-queueing -- the next tick will pick this up."
-    forgejo_unassign_all "$P_FORGEJO_REPO" "$n"
+    forgejo_unassign_all "$O_REPO" "$O_NUM"
 
-    # Best-effort cleanup of leftover worktree / branch.
-    wt="$TICK_STATE_DIR/worktrees/${project}-${n}"
-    if [ -d "$wt" ]; then
-      (cd "$P_REPO_PATH" && git worktree remove "$wt" --force) 2>/dev/null || rm -rf "$wt"
+    O_LOCAL=$(repo_path_for "$O_REPO")
+    O_WT="$TICK_STATE_DIR/worktrees/$(worktree_key "$O_REPO" "$O_NUM")"
+    if [ -d "$O_LOCAL/.git" ]; then
+      if [ -d "$O_WT" ]; then
+        (cd "$O_LOCAL" && git worktree remove "$O_WT" --force) 2>/dev/null || rm -rf "$O_WT"
+      fi
+      cleanup_agent_branches "$O_NUM" "$O_LOCAL"
     fi
-    cleanup_agent_branches "$n" "$P_REPO_PATH"
-  done < <(jq -r '.[].number' <<<"$ORPHANS")
-done
+  done < <(jq -c '.[] | {repo: .repository.full_name, num: .number}' <<<"$ORPHANS")
+fi
 
 # ── Discovery: find globally oldest claimable ─────────────────
 
+REPOS=$(forgejo_list_bot_repos)
+REPO_COUNT=$(jq 'length' <<<"$REPOS")
+log "scanning $REPO_COUNT repo(s) for claimable work"
+
 WINNER=""
-WINNER_PROJECT=""
+WINNER_REPO=""
+WINNER_PR_BASE=""
 WINNER_CREATED=""
 
-for project in "${PROJECTS[@]}"; do
-  load_project_conf "$project" || continue
-  ISSUE=$(forgejo_find_claimable "$P_FORGEJO_REPO" || true)
+while read -r repo_line; do
+  [ -z "$repo_line" ] && continue
+  R_NAME=$(jq -r '.full_name' <<<"$repo_line")
+  R_BASE=$(jq -r '.default_branch' <<<"$repo_line")
+  ISSUE=$(forgejo_find_claimable "$R_NAME" || true)
   [ -n "$ISSUE" ] && [ "$ISSUE" != "null" ] && [ "$ISSUE" != "empty" ] || continue
   CREATED=$(jq -r '.created_at' <<<"$ISSUE")
   if [ -z "$WINNER" ] || [[ "$CREATED" < "$WINNER_CREATED" ]]; then
     WINNER="$ISSUE"
-    WINNER_PROJECT="$project"
+    WINNER_REPO="$R_NAME"
+    WINNER_PR_BASE="$R_BASE"
     WINNER_CREATED="$CREATED"
   fi
-done
+done < <(jq -c '.[]' <<<"$REPOS")
 
 if [ -z "$WINNER" ]; then
-  log "no claimable work across any project"
+  log "no claimable work across any repo"
   exit 0
 fi
 
-# Reload the winner's conf to repopulate P_* canonically.
-load_project_conf "$WINNER_PROJECT"
-PROJECT="$WINNER_PROJECT"
-REPO_PATH="$P_REPO_PATH"
-FORGEJO_REPO="$P_FORGEJO_REPO"
-PR_BASE="$P_PR_BASE"
-TICK_TIMEOUT="$P_TICK_TIMEOUT"
+FORGEJO_REPO="$WINNER_REPO"
+PR_BASE="$WINNER_PR_BASE"
+REPO_PATH=$(repo_path_for "$FORGEJO_REPO")
 
 ISSUE_NUMBER=$(jq -r .number <<<"$WINNER")
 ISSUE_TITLE=$(jq -r .title <<<"$WINNER")
@@ -199,8 +172,13 @@ else
   BRANCH="agent/${ISSUE_NUMBER}"
 fi
 
-log "claiming ${PROJECT}#${ISSUE_NUMBER}: ${ISSUE_TITLE}"
+log "claiming ${FORGEJO_REPO}#${ISSUE_NUMBER}: ${ISSUE_TITLE}"
 log "branch: ${BRANCH}"
+
+# Export early so agent-block.sh / agent-report.sh work for both
+# preflight (called by tick.sh) and Claude (invoked below).
+export ISSUE_NUMBER ISSUE_TITLE FORGEJO_REPO PR_BASE TICK_HOME
+export PATH="$TICK_HOME/bin:$PATH"
 
 # ── Cleanup on exit (set before worktree creation) ────────────
 
@@ -212,7 +190,7 @@ cleanup() {
     log "removing worktree $WORKTREE"
     (cd "$REPO_PATH" && git worktree remove "$WORKTREE" --force) 2>/dev/null || true
   fi
-  if [ -n "${ISSUE_NUMBER:-}" ]; then
+  if [ -n "${ISSUE_NUMBER:-}" ] && [ -d "$REPO_PATH/.git" ]; then
     cleanup_agent_branches "$ISSUE_NUMBER" "$REPO_PATH"
   fi
   exit "$rc"
@@ -223,10 +201,33 @@ trap cleanup EXIT
 
 forgejo_assign "$FORGEJO_REPO" "$ISSUE_NUMBER" "$BOT_USER"
 
+# ── Clone if needed ───────────────────────────────────────────
+
+if [ ! -d "$REPO_PATH/.git" ]; then
+  CLONE_URL="git@${FORGEJO_SSH_HOST}:${FORGEJO_REPO}.git"
+  log "cloning $CLONE_URL -> $REPO_PATH"
+  mkdir -p "$(dirname "$REPO_PATH")"
+  if ! git clone "$CLONE_URL" "$REPO_PATH"; then
+    log "clone failed, blocking"
+    agent-block.sh "Tick could not clone \`$CLONE_URL\`. Verify the bot user has SSH access to this repo and try again."
+    exit 0
+  fi
+fi
+
+# ── Preflight ─────────────────────────────────────────────────
+
+if [ ! -f "$REPO_PATH/CLAUDE.md" ]; then
+  log "preflight: missing CLAUDE.md, blocking"
+  agent-block.sh "Tick cannot work this repo: \`CLAUDE.md\` is missing at the repo root.
+
+Tick relies on \`CLAUDE.md\` for project conventions (test commands, code style, gotchas). Add one, remove \`Status/Blocked\`, and the next tick will re-claim this issue."
+  exit 0
+fi
+
 # ── Worktree ──────────────────────────────────────────────────
 
 mkdir -p "$TICK_STATE_DIR/worktrees"
-WORKTREE="$TICK_STATE_DIR/worktrees/${PROJECT}-${ISSUE_NUMBER}"
+WORKTREE="$TICK_STATE_DIR/worktrees/$(worktree_key "$FORGEJO_REPO" "$ISSUE_NUMBER")"
 
 # Recovery should have cleared any stale path; this is a belt-and-braces check.
 if [ -e "$WORKTREE" ]; then
@@ -234,6 +235,7 @@ if [ -e "$WORKTREE" ]; then
   forgejo_unassign_all "$FORGEJO_REPO" "$ISSUE_NUMBER"
   forgejo_comment "$FORGEJO_REPO" "$ISSUE_NUMBER" \
     "Tick aborted: stale worktree from a previous run was present at \`$WORKTREE\`. Investigate and clear before retrying."
+  WORKTREE=""
   exit 4
 fi
 
@@ -244,10 +246,6 @@ git worktree add -b "$BRANCH" "$WORKTREE" "origin/${PR_BASE}"
 # ── Invoke Claude ─────────────────────────────────────────────
 
 cd "$WORKTREE"
-
-# Helpers (agent-block.sh etc.) on PATH and aware of context.
-export PATH="$TICK_HOME/bin:$PATH"
-export ISSUE_NUMBER ISSUE_TITLE FORGEJO_REPO PR_BASE TICK_HOME
 
 USER_MSG=$(cat <<EOF
 You are working Forgejo issue #${ISSUE_NUMBER} in ${FORGEJO_REPO}.

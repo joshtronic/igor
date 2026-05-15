@@ -96,3 +96,31 @@ forgejo_add_label() {
   _fj POST "/repos/${repo}/issues/${number}/labels" \
     "$(jq -n --argjson id "$id" '{labels: [$id]}')" >/dev/null
 }
+
+# Returns the authenticated user's login (the bot's username). Empty
+# on failure.
+forgejo_whoami() {
+  _fj GET "/user" | jq -r '.login // empty'
+}
+
+# Lists every repo the bot has push access to. Returns a JSON array of
+# {full_name, default_branch}. Paginated (50/page).
+forgejo_list_bot_repos() {
+  local page=1 batch count all='[]'
+  while batch=$(_fj GET "/user/repos?limit=50&page=${page}"); do
+    count=$(jq 'length' <<<"$batch")
+    [ "$count" -eq 0 ] && break
+    all=$(printf '%s\n%s' "$all" "$batch" | jq -s 'add')
+    [ "$count" -lt 50 ] && break
+    page=$((page + 1))
+  done
+  jq '[.[] | select(.permissions.push == true)
+        | {full_name, default_branch}]' <<<"$all"
+}
+
+# All open issues currently assigned to the authenticated user across
+# every accessible repo. Returns a JSON array. Used by the recovery
+# sweep -- one call replaces N per-repo calls.
+forgejo_my_assigned() {
+  _fj GET "/repos/issues/search?state=open&type=issues&assigned=true&limit=50"
+}

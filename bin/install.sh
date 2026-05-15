@@ -5,8 +5,9 @@
 # copies the systemd units into the user's systemd dir, and enables
 # the timer. Idempotent -- safe to re-run after editing templates.
 #
-# Adding a project does NOT require running this. Drop a new file at
-# ~/.config/tick/projects/<name>.conf and the next tick picks it up.
+# Adding a repo does NOT require running this. Add the bot user as a
+# collaborator (write perm) on the repo in Forgejo and the next tick
+# discovers it automatically.
 
 set -euo pipefail
 
@@ -16,7 +17,7 @@ UNIT_DIR="$HOME/.config/systemd/user"
 
 # ── Config scaffolding ─────────────────────────────────────────
 
-mkdir -p "$TICK_CONFIG_DIR/projects"
+mkdir -p "$TICK_CONFIG_DIR"
 chmod 700 "$TICK_CONFIG_DIR"
 
 if [ ! -f "$TICK_CONFIG_DIR/.env" ]; then

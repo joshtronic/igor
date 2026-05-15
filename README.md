@@ -3,14 +3,15 @@
 > "SPOOOON!"
 
 Unattended Claude Code in a big blue moth costume. One global Tick fires on a
-timer, sweeps every project's Forgejo issue queue for `Agent`-labeled work,
-claims the oldest one, spins up a worktree, lets Claude do the heroics, and
-ships a PR. Or posts a report. Or flags `Status/Blocked` and waits for the city
-to look at it.
+timer, sweeps every repo the bot can push to for `Agent`-labeled work, claims
+the oldest one, spins up a worktree, lets Claude do the heroics, and ships a
+PR. Or posts a report. Or flags `Status/Blocked` and waits for the city to look
+at it.
 
-The work runs under a dedicated Forgejo user (`$BOT_USER`, default `agent`) with
-its own SSH key, API token, and server account. Tick fires; the bot does the
-swinging.
+The work runs under a dedicated Forgejo user with its own SSH key and API
+token. The token *is* the identity -- the bot's username is resolved from
+`/api/v1/user` on each tick, so there's nothing to configure or get out of
+sync. Tick fires; the bot does the swinging.
 
 ## How Tick works
 
@@ -18,15 +19,21 @@ A timer fires `bin/tick.sh`. Per tick:
 
 1. **Lock.** Global flock -- only one Tick at a time. Justice cannot be in two
    places at once.
-2. **Recovery sweep.** Any open issue still assigned to the bot from a previous
+2. **Identity.** Resolve the bot's Forgejo login from the token via
+   `/api/v1/user`. No `BOT_USER` config; the token is the identity.
+3. **Recovery sweep.** Any open issue still assigned to the bot from a previous
    interrupted run gets a "previous tick was interrupted -- re-queueing" comment
    and is unassigned. No villain escapes by tripping the harness mid-fight.
-3. **Discovery.** Query every configured project's Forgejo repo for the oldest
-   claimable issue (`Agent`-labeled, no assignee, not `Status/Blocked`). Pick
-   the globally oldest.
-4. **Justice.** Assign to the bot, make a worktree, invoke Claude with the
-   project's `CLAUDE.md` plus the universal `AGENTS.md`, react to whatever
-   Claude leaves behind.
+4. **Discovery.** List every repo the bot has push access to (one API call),
+   then query each for the oldest claimable issue (`Agent`-labeled, no
+   assignee, not `Status/Blocked`). Pick the globally oldest.
+5. **Claim and clone.** Assign the issue to the bot. If the repo isn't cloned
+   locally yet, clone it to `~/Code/<repo>` via SSH.
+6. **Preflight.** Verify `CLAUDE.md` exists at the repo root. If not, block the
+   issue with a clear comment and bail. (Same code path as Claude calling
+   `agent-block.sh` from inside the worktree.)
+7. **Justice.** Make a worktree, invoke Claude with the project's `CLAUDE.md`
+   plus the universal `AGENTS.md`, react to whatever Claude leaves behind.
 
 | What Claude did                 | What Tick does                                                |
 |---------------------------------|---------------------------------------------------------------|
@@ -44,13 +51,13 @@ picks it up.
 Two labels carry the state machine. `Status/Blocked` is Forgejo's default; only
 `Agent` is custom.
 
-| State               | Labels                     | Assignee    | Open?  |
-|---------------------|----------------------------|-------------|--------|
-| Filed, not approved | -- (or `Kind/*`)            | --           | open   |
-| Approved, claimable | `Agent`                    | --           | open   |
-| In progress         | `Agent`                    | `$BOT_USER` | open   |
-| Blocked             | `Agent` + `Status/Blocked` | --           | open   |
-| Done                | (any)                      | (any)       | closed |
+| State               | Labels                     | Assignee  | Open?  |
+|---------------------|----------------------------|-----------|--------|
+| Filed, not approved | -- (or `Kind/*`)            | --         | open   |
+| Approved, claimable | `Agent`                    | --         | open   |
+| In progress         | `Agent`                    | `<bot>`   | open   |
+| Blocked             | `Agent` + `Status/Blocked` | --         | open   |
+| Done                | (any)                      | (any)     | closed |
 
 `Agent` is a **permission flag** ("agent's domain"), not a state. State is
 carried by `Status/Blocked`, the assignee, and open/closed.
@@ -71,7 +78,7 @@ bin/
 ├── agent-block.sh           # Claude calls this when stuck
 ├── agent-report.sh          # Claude calls this for no-diff outcomes
 ├── check-sync.sh            # CI lint: AGENTS.md <-> tick.sh contract
-├── validate.sh              # validate global env + every project
+├── validate.sh              # validate env + Forgejo connectivity + bot perms
 ├── install.sh               # one-time: scaffold config, install units
 └── uninstall.sh             # stop, disable, remove units
 
@@ -89,9 +96,9 @@ On the host (deployment-specific, not in the repo):
 
 ```
 ~/.local/share/tick/                 # the runtime git checkout (this repo)
-~/.config/tick/.env                  # secrets, chmod 600
-~/.config/tick/projects/<name>.conf  # per-project config (paths, base branch)
+~/.config/tick/.env                  # secrets, chmod 600 -- the only config
 ~/.local/state/tick/                 # worktrees, flock
+~/Code/<repo>/                       # per-repo clones (created on demand)
 ~/.config/systemd/user/tick.{service,timer}
 ```
 
@@ -105,19 +112,24 @@ whole point. The bot's Forgejo token lives in the same file. Both at
 
 ### Bot user
 
-A dedicated Forgejo user (`$BOT_USER`) plus a matching server account. The
-Forgejo user needs:
+A dedicated Forgejo user plus a matching server account (one Unix user runs
+the systemd units and owns the SSH key). The Forgejo user needs:
 
-- An API token with issue/PR/comment/label/assign permissions on every repo Tick
-  will work.
-- An SSH key for git operations.
-- Branch protection bypass on each repo's base branch (so the harness can push
-  `agent/N` branches and `Closes #N`-linked merges work uniformly).
+- An API token with scopes for `read:user`, `repository` (issue/PR/comment/
+  label/assign), and push access on every target repo. The bot's username is
+  read from this token via `/api/v1/user`, so there's no separate `BOT_USER`
+  setting.
+- An SSH key for git operations (clone and push). Tick clones via
+  `git@<host>:<owner>/<repo>.git`, where `<host>` is derived from
+  `FORGEJO_URL` (override with `FORGEJO_SSH_HOST` if SSH is on a different
+  endpoint).
+- Branch protection bypass on each repo's default branch, so the harness can
+  push `agent/N-<slug>` branches and `Closes #N`-linked merges work uniformly.
 
-The server account runs the systemd user units and owns the runtime checkout
-at `~/.local/share/tick/`, its config at `~/.config/tick/`, and its state at
-`~/.local/state/tick/`. Git authorship on all bot commits and PRs attributes
-to this user.
+The server account owns the runtime checkout at `~/.local/share/tick/`, its
+config at `~/.config/tick/`, its state at `~/.local/state/tick/`, and the
+per-repo clones at `~/Code/<repo>/`. Git authorship on all bot commits and PRs
+attributes to this user.
 
 ### Install
 
@@ -145,21 +157,25 @@ Schedule override goes in a drop-in at
 - Logs: `journalctl --user -u tick.service -f`
 - Force a tick now: `systemctl --user start tick.service`
 
-### Adding a project
+### Granting Tick a repo
 
-Drop a file at `~/.config/tick/projects/<name>.conf`. The next tick will see
-it. Removing a project: delete the conf. No systemd reload needed.
+There is no per-project config. To put a repo under Tick's care, do three
+things in Forgejo (once per repo):
 
-```sh
-# Required
-REPO_PATH=/home/agent/Code/joshing.you
-FORGEJO_REPO=joshtronic/joshing.you
+1. Add the bot user as a collaborator with **write** permission.
+2. Ensure the `Agent` and `Status/Blocked` labels exist on the repo (Tick reads
+   them by name).
+3. Put a `CLAUDE.md` at the repo root with project conventions (test commands,
+   code style, gotchas, anything Claude needs to be useful here). Tick refuses
+   to invoke Claude without one and posts a blocker comment explaining why.
 
-# Optional
-PR_BASE=master       # default: master
-TICK_TIMEOUT=60m     # default: 60m -- per-project override if needed
-BOT_USER=agent       # default: agent
-```
+That's it. The next tick discovers the repo via the bot's token, clones it
+to `~/Code/<repo>` if it's missing locally, and starts working any
+`Agent`-labeled issues.
+
+To stop Tick from working a repo: revoke the bot's collaborator role, or stop
+applying the `Agent` label. The local clone at `~/Code/<repo>` is yours to
+keep or `rm -rf` as you see fit.
 
 ## Scope and trade-offs
 
