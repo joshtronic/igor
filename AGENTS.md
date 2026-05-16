@@ -68,6 +68,21 @@ harness will push the branch and open a PR with `Closes
   and that section is authoritative. You can describe deps in your
   narrative if it's relevant context, but the audit list is the
   harness's job.
+- **Use a TDD loop when the repo supports tests.** If the project's
+  `CLAUDE.md` declares a real test command (npm test, pytest, cargo
+  test, go test, etc.), follow the cycle:
+    1. Write the failing test(s) for the change.
+    2. Run them. Confirm they fail for the right reason.
+    3. Commit the tests with a clear message (`test: ...`).
+    4. Implement the change.
+    5. Run the tests. Confirm green.
+    6. Commit the implementation (`feat: ...` / `fix: ...`).
+  Two commits minimum on TDD-applicable work, more if the change is
+  big enough to warrant smaller steps. Don't mix test and impl in a
+  single commit -- that defeats the audit trail.
+- **Skip the TDD loop when there's no test command.** Static sites
+  and repos with only lint can't TDD meaningfully. One commit is fine
+  there; lint still has to pass.
 - Run the project's tests before you exit. The project's `CLAUDE.md`
   declares the command. Tests passing on your branch is the
   definition of done.
