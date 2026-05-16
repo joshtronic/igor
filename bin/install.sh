@@ -18,30 +18,31 @@ set -euo pipefail
 IGOR_HOME="$(cd "$(dirname "$0")/.." && pwd)"
 UNIT_DIR="$HOME/.config/systemd/user"
 
-# Pre-flight: systemd --user must be talkable. The common failure is
-# sudo -iu / su - sessions that skip pam_systemd, leaving the runtime
-# dir + DBus envs unset even when linger is enabled. Detect early
-# with a clear fix message rather than the cryptic DBus error.
+# Pre-flight: systemd --user needs XDG_RUNTIME_DIR + DBUS env to
+# reach its bus. sudo -iu / su - sessions skip pam_systemd and don't
+# set these, even when linger is enabled and the runtime dir
+# physically exists. Try to fix it ourselves before failing.
 if [ -z "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "${XDG_RUNTIME_DIR}" ]; then
-  cat >&2 <<EOF
-no systemd user session in this shell (XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-unset}).
+  CANDIDATE="/run/user/$(id -u)"
+  if [ -d "$CANDIDATE" ] && [ -S "$CANDIDATE/bus" ]; then
+    echo "-> XDG_RUNTIME_DIR was unset; linger appears active, using $CANDIDATE"
+    export XDG_RUNTIME_DIR="$CANDIDATE"
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=$CANDIDATE/bus"
+  else
+    cat >&2 <<EOF
+no systemd user session reachable, and $CANDIDATE doesn't exist (or
+has no bus socket). this account needs linger enabled so its user-
+systemd instance persists without an active login.
 
-systemctl --user can't reach its bus from here. usually because sudo -iu
-or su - skipped pam_systemd, or linger isn't enabled for this account.
+fix (run by a user with sudo, doesn't have to be $(whoami)):
 
-fix, in order:
+  sudo loginctl enable-linger $(whoami)
 
-  1. Enable linger so the user-systemd persists without active login:
-       (as root) loginctl enable-linger $(whoami)
-
-  2. Get a proper login session via one of:
-       sudo machinectl shell $(whoami)@.host
-       ssh $(whoami)@localhost
-     (sudo -iu / su - often skip pam_systemd setup; avoid them.)
-
-  3. Re-run bin/install.sh from the new session.
+then re-run bin/install.sh from this same shell. linger creates the
+runtime dir immediately -- no need to log out and back in.
 EOF
-  exit 1
+    exit 1
+  fi
 fi
 
 if [ ! -f "$IGOR_HOME/.env" ]; then
