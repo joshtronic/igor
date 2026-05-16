@@ -155,11 +155,19 @@ maintenance_mark_done() {
 # rolls per check (not per-repo-persistent) so cadence drifts off
 # clockwork patterns naturally.
 #
-# Also: skip repos with an open onboarding ticket. Tier 1 refused to
-# clone them for cause; tier 2 shouldn't sneak around that gate by
-# cloning + auditing a repo Igor already declared not-ready.
+# Skips:
+# - Bot-owned repos (brain, website, anything else under <bot>/). These
+#   are Igor's internal infrastructure, not target code. Auditing your
+#   own notes repo for npm audit findings is busywork.
+# - Repos with an open onboarding ticket. Tier 1 refused to clone them
+#   for cause; tier 2 shouldn't sneak around that gate.
 maintenance_eligible() {
-  local repo="$1" last cooldown_days last_epoch now age_days existing
+  local repo="$1" last cooldown_days last_epoch now age_days existing owner
+
+  owner="${repo%%/*}"
+  if [ "$owner" = "$BOT_USER" ]; then
+    return 1
+  fi
 
   existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$ONBOARDING_MARKER" 2>/dev/null)
   if [ -n "$existing" ] && [ "$existing" != "null" ] && [ "$existing" != "empty" ]; then
