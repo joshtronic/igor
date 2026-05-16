@@ -39,6 +39,14 @@ A timer fires `bin/tick.sh`. Per tick:
    `.git/IGOR_MAINTENANCE_FINDINGS.md`. Harness files an Agent-labeled
    issue with those findings if non-empty, then updates the cooldown
    state at `~/.local/state/igor/discretionary-state.json`.
+9. **Discretionary self-directed work (tier 3).** If no maintenance
+   repos are eligible either, Igor does one freeform pass on his
+   own website. Same throttles apply (rate, open-PR cap), plus the
+   one-PR-per-repo rule (skip if there's an open Igor PR on the
+   website). Claude reads the website's `CLAUDE.md`, picks one
+   focused improvement (post, design, copy, layout), and opens a
+   PR with no `Closes #N` since there's no source issue. Branch
+   name pattern: `agent/discretionary-YYYY-MM-DD-HHMMSS`.
 
 | What Claude did                 | What Igor does                                                |
 |---------------------------------|---------------------------------------------------------------|

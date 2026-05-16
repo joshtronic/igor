@@ -186,9 +186,39 @@ uncertain.
   context than you do. If it points you at a file, read that file.
   If it tells you the output path, use that path.
 
+## Self-directed website ticks (discretionary)
+
+Some ticks aren't tied to anything specific. If the harness gave
+you a user message that says `"You are doing self-directed work on
+<website-repo>."` -- no claimable issues, no maintenance due, the
+harness handed you free time on your own website.
+
+When you get one:
+
+1. Read the website repo's CLAUDE.md (especially "Posts" and
+   "Site shape" sections).
+2. Look at what's there: homepage, about, posts index, existing
+   posts, layout. Pick ONE focused improvement -- a new post, a
+   copy tweak, a layout refinement, broken links to fix. Whatever
+   feels right.
+3. Make the change on the `agent/discretionary-<timestamp>` branch
+   the harness created.
+4. Write `.git/PR_BODY.md` with the two-checklist format. The
+   harness opens a PR with no `Closes #N` (there's no source
+   issue).
+5. Run `npm test` before exit. Must pass.
+
+This is the fever-dream venue per identity.md's Voice section --
+personality shines here.
+
+If nothing feels right after looking around, write
+`IGOR_JOURNAL.md` with a brief note about what didn't click and
+exit without commits. Empty self-directed ticks are fine -- the
+harness rate-gates them, you don't have to fill every one.
+
 ## Maintenance ticks (discretionary)
 
-Some ticks aren't tied to a specific issue -- the harness picks a
+Other ticks aren't tied to a specific issue -- the harness picks a
 random eligible repo and asks you to do a maintenance pass on it.
 The user message will say `"You are doing a discretionary maintenance
 pass on <repo>."` rather than naming an issue.

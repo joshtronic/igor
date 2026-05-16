@@ -325,7 +325,168 @@ if [ -z "$WINNER" ]; then
   done < <(jq -c '.[]' <<<"$REPOS")
 
   if [ "${#ELIGIBLE[@]}" -eq 0 ]; then
-    log "discretionary: no repos eligible for maintenance"
+    # -- Tier 3: self-directed website work (fallback) ---------
+    #
+    # No claimable tickets, no maintenance due. If the bot owns a
+    # website and has no open PR on it, do one freeform pass:
+    # Claude reads the website's CLAUDE.md, picks one focused
+    # improvement (post, design, copy, layout), and opens a PR.
+    # No source issue means no Closes #N footer.
+
+    W_REPO="${BOT_USER}/website"
+    W_PATH=$(repo_path_for "$W_REPO")
+
+    if [ ! -d "$W_PATH/.git" ]; then
+      log "discretionary: no website cloned -- nothing to do"
+      exit 0
+    fi
+
+    if forgejo_has_open_bot_pr "$W_REPO" "$BOT_USER"; then
+      log "discretionary: website has open Igor PR -- holding off"
+      exit 0
+    fi
+
+    log "discretionary: self-directed work on $W_REPO"
+
+    W_BASE=$(cd "$W_PATH" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+    W_BASE="${W_BASE:-master}"
+    W_TS=$(date -u +%Y%m%d-%H%M%S)
+    W_BRANCH="agent/discretionary-${W_TS}"
+    W_WORKTREE="$IGOR_STATE_DIR/worktrees/website-discretionary-${W_TS}"
+    mkdir -p "$IGOR_STATE_DIR/worktrees"
+    (cd "$W_PATH" && git fetch --prune origin)
+    (cd "$W_PATH" && git worktree add -b "$W_BRANCH" "$W_WORKTREE" "origin/${W_BASE}")
+
+    W_CLEANUP() {
+      [ -d "$W_WORKTREE" ] && (cd "$W_PATH" && git worktree remove --force "$W_WORKTREE") 2>/dev/null || true
+      cleanup_agent_branches "discretionary-${W_TS}" "$W_PATH"
+    }
+    trap W_CLEANUP EXIT
+
+    cd "$W_WORKTREE"
+
+    W_USER_MSG=$(cat <<EOF
+You are doing self-directed work on $W_REPO. No issue is assigned;
+no human is waiting on a specific thing.
+
+Read CLAUDE.md, especially the "Posts" and "Site shape" sections.
+Look at what's there: src/index.md (homepage), src/about.md (about),
+src/posts.njk (posts index template), src/posts/ (existing posts
+if any), src/_includes/base.njk (layout).
+
+Pick ONE focused improvement. Examples:
+
+  - Write a new blog post (your choice of topic)
+  - Improve the About page
+  - Improve the homepage copy
+  - Refine the layout, nav, or any CSS
+  - Fix typos, broken links, stale content
+  - Add a tag page if posts are tagged enough to warrant it
+
+ONE thing. Under scope cap (400 lines / 10 commits).
+
+This is the fever-dream venue -- personality welcome. See
+identity.md's Voice section for the register layering.
+
+Make the change on the agent branch. Write .git/PR_BODY.md with
+the two-checklist format from AGENTS.md (What this PR does + Test
+plan). Run npm test before exit -- must pass.
+
+If nothing feels right after looking around, write IGOR_JOURNAL.md
+with a brief note about what didn't click and exit without
+commits. Empty ticks are fine.
+EOF
+)
+
+    BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
+    if [ -f "$BRAIN_PATH/identity.md" ] && [ -f "$BRAIN_PATH/index.md" ]; then
+      W_SYSTEM_PROMPT=$(cat "$BRAIN_PATH/identity.md" "$BRAIN_PATH/index.md" "$IGOR_HOME/AGENTS.md")
+    else
+      W_SYSTEM_PROMPT=$(cat "$IGOR_HOME/AGENTS.md")
+    fi
+
+    log "invoking claude for website work (timeout ${IGOR_TIMEOUT})"
+    W_LOG="$W_WORKTREE/.git/claude-output.log"
+    W_START=$(date +%s)
+    set +e
+    timeout --kill-after=30s "$IGOR_TIMEOUT" \
+      claude \
+        --model "$IGOR_MODEL" \
+        --append-system-prompt "$W_SYSTEM_PROMPT" \
+        --settings "$IGOR_HOME/agent-settings.json" \
+        --max-turns 50 \
+        --print "$W_USER_MSG" 2>&1 | tee "$W_LOG"
+    W_EXIT=${PIPESTATUS[0]}
+    set -e
+    log "claude exited $W_EXIT after $(( $(date +%s) - W_START ))s"
+
+    # Journal write
+    W_JOURNAL_SRC="$W_WORKTREE/.git/IGOR_JOURNAL.md"
+    if [ -s "$W_JOURNAL_SRC" ]; then
+      W_JDATE=$(date -u +%Y-%m-%d)
+      W_JFILE="$BRAIN_PATH/journal/${W_JDATE}.md"
+      W_JTS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      log "journal: appending discretionary website tick"
+      mkdir -p "$BRAIN_PATH/journal"
+      (cd "$BRAIN_PATH" && git pull --rebase --quiet origin master 2>/dev/null) \
+        || log "warning: brain pull failed"
+      {
+        printf '\n## %s -- discretionary on %s\n\n' "$W_JTS" "$W_REPO"
+        cat "$W_JOURNAL_SRC"
+      } >> "$W_JFILE"
+      (cd "$BRAIN_PATH" \
+        && git add "journal/${W_JDATE}.md" \
+        && git commit --quiet -m "journal: discretionary on $W_REPO" \
+        && git push --quiet origin master) \
+        || log "warning: brain commit/push failed"
+    fi
+
+    # Outcome classification
+    cd "$W_WORKTREE"
+    W_COMMITS=$(git rev-list --count "origin/${W_BASE}..HEAD" 2>/dev/null || echo 0)
+
+    if [ "$W_COMMITS" -eq 0 ]; then
+      log "discretionary: no work produced on $W_REPO"
+      exit 0
+    fi
+
+    W_ACTUAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    if [ "$W_ACTUAL_BRANCH" != "$W_BRANCH" ]; then
+      log "discretionary: HEAD on $W_ACTUAL_BRANCH, expected $W_BRANCH -- abandoning"
+      exit 0
+    fi
+
+    W_CHANGED=$(git diff --shortstat "origin/${W_BASE}..HEAD" 2>/dev/null \
+      | awk '{ for (i=1;i<=NF;i++) if ($i ~ /insertion|deletion/) s+=$(i-1); print s+0 }')
+    W_CHANGED=${W_CHANGED:-0}
+    if [ "$W_COMMITS" -gt 10 ] || [ "$W_CHANGED" -gt 400 ]; then
+      log "discretionary: scope exceeded ($W_COMMITS commits, $W_CHANGED lines) -- abandoning"
+      exit 0
+    fi
+
+    if grep -qiE 'tests:[[:space:]]+0[[:space:]]+(passed|failed|of|total)|no tests (ran|found|collected)|collected 0 items|(^|[^0-9])0 passing([^0-9]|$)|running 0 tests|ran 0 tests' "$W_LOG"; then
+      log "discretionary: vacuous tests -- abandoning"
+      exit 0
+    fi
+
+    log "discretionary: pushing $W_BRANCH and opening PR on $W_REPO"
+    git push --force-with-lease -u origin "$W_BRANCH"
+
+    W_EXISTING_PR=$(forgejo_find_pr_by_head "$W_REPO" "$W_BRANCH")
+    if [ -n "$W_EXISTING_PR" ]; then
+      log "PR #$W_EXISTING_PR already open"
+    else
+      W_PR_TITLE=$(git log -1 --pretty=%s)
+      if [ -f .git/PR_BODY.md ]; then
+        W_PR_BODY=$(cat .git/PR_BODY.md)
+      else
+        W_PR_BODY=$(git log "origin/${W_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
+      fi
+      W_PR_BODY+=$(build_deps_section "$W_BASE")
+      forgejo_open_pr "$W_REPO" "$W_BRANCH" "$W_BASE" "$W_PR_TITLE" "$W_PR_BODY"
+      log "discretionary: PR opened on $W_REPO"
+    fi
+
     exit 0
   fi
 
