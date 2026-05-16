@@ -605,6 +605,25 @@ EOF
     # Agent to enter the work queue. Same gate as onboarding tickets.
     forgejo_add_label "$TARGET" "$M_NUM" "Status/Needs More Info" 2>/dev/null \
       || log "warning: could not apply 'Status/Needs More Info' on #$M_NUM ($TARGET)"
+
+    # If Claude wrote a severity assessment alongside the findings,
+    # apply the matching Priority/* label so triage attention follows.
+    M_PRIORITY_FILE="$M_WORKTREE/.igor/IGOR_MAINTENANCE_PRIORITY"
+    if [ -s "$M_PRIORITY_FILE" ]; then
+      M_PRIORITY=$(tr -d '[:space:]' < "$M_PRIORITY_FILE" | tr '[:upper:]' '[:lower:]')
+      case "$M_PRIORITY" in
+        critical) M_PRI_LABEL="Priority/Critical" ;;
+        high)     M_PRI_LABEL="Priority/High" ;;
+        medium)   M_PRI_LABEL="Priority/Medium" ;;
+        low)      M_PRI_LABEL="Priority/Low" ;;
+        *)        M_PRI_LABEL="" ;;
+      esac
+      if [ -n "$M_PRI_LABEL" ]; then
+        forgejo_add_label "$TARGET" "$M_NUM" "$M_PRI_LABEL" 2>/dev/null \
+          || log "warning: could not apply '$M_PRI_LABEL' on #$M_NUM ($TARGET)"
+      fi
+    fi
+
     log "maintenance: filed #$M_NUM on $TARGET (awaiting human triage)"
   else
     log "maintenance: no findings on $TARGET"
