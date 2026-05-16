@@ -18,6 +18,36 @@ set -euo pipefail
 IGOR_HOME="$(cd "$(dirname "$0")/.." && pwd)"
 UNIT_DIR="$HOME/.config/systemd/user"
 
+# Pre-flight: harness depends on these being on PATH. Fail loudly here
+# rather than mysteriously deep inside tick.sh later.
+missing=()
+for cmd in jq curl git flock timeout claude; do
+  command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+done
+if [ "${#missing[@]}" -gt 0 ]; then
+  echo "missing required commands: ${missing[*]}" >&2
+  echo >&2
+  echo "on Debian/Ubuntu:" >&2
+  apt_pkgs=()
+  for cmd in "${missing[@]}"; do
+    case "$cmd" in
+      jq)      apt_pkgs+=("jq") ;;
+      curl)    apt_pkgs+=("curl") ;;
+      git)     apt_pkgs+=("git") ;;
+      flock)   apt_pkgs+=("util-linux") ;;
+      timeout) apt_pkgs+=("coreutils") ;;
+      claude)  ;;  # not in apt; install per Anthropic's docs
+    esac
+  done
+  if [ "${#apt_pkgs[@]}" -gt 0 ]; then
+    echo "  sudo apt-get install -y ${apt_pkgs[*]}" >&2
+  fi
+  for cmd in "${missing[@]}"; do
+    [ "$cmd" = "claude" ] && echo "  claude: install via Anthropic's CLI installer (see docs.claude.com)" >&2
+  done
+  exit 1
+fi
+
 # Pre-flight: systemd --user needs XDG_RUNTIME_DIR + DBUS env to
 # reach its bus. sudo -iu / su - sessions skip pam_systemd and don't
 # set these, even when linger is enabled and the runtime dir

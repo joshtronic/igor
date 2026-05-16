@@ -18,6 +18,23 @@ fi
 pass() { printf '  \033[32m+\033[0m %s\n' "$1"; }
 fail() { printf '  \033[31mx\033[0m %s%s\n' "$1" "${2:+ -- $2}"; FAIL=1; }
 
+# -- Required commands on PATH ----------------------------------
+
+echo "== deps =="
+for cmd in jq curl git flock timeout claude; do
+  if command -v "$cmd" >/dev/null 2>&1; then
+    pass "$cmd installed"
+  else
+    case "$cmd" in
+      jq|curl|git)        fail "$cmd installed" "sudo apt-get install -y $cmd" ;;
+      flock)              fail "$cmd installed" "sudo apt-get install -y util-linux" ;;
+      timeout)            fail "$cmd installed" "sudo apt-get install -y coreutils" ;;
+      claude)             fail "$cmd installed" "install per Anthropic's CLI docs" ;;
+    esac
+  fi
+done
+echo
+
 # -- Global env -------------------------------------------------
 
 echo "== env =="
