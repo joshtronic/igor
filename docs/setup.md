@@ -1,5 +1,28 @@
 # Setup
 
+## Server prerequisites
+
+Before cloning Igor, make sure the host has:
+
+**Required on PATH:**
+
+- `jq`, `curl`, `git`, `flock`, `timeout` -- core harness deps. On Debian/Ubuntu: `sudo apt-get install -y jq curl git util-linux coreutils` (most are usually already installed; `jq` is the one you'll typically need to add).
+- `claude` -- Anthropic's Claude CLI. Install via Anthropic's installer (see [docs.claude.com](https://docs.claude.com)). The harness invokes `claude --print` directly; `ANTHROPIC_API_KEY` from `.env` is what it authenticates with.
+
+`bin/install.sh` and `bin/validate.sh` both pre-flight these and bail loudly if anything's missing.
+
+**Ecosystem toolchains for repos Igor will actually work:**
+
+Tier 2 maintenance auto-detects the stack and runs standard audit tools (`npm audit`, `cargo audit`, `pip-audit`, `govulncheck`, `bundle audit`, etc.). Claude will `cargo install cargo-audit` or `pip install pip-audit` within his session as needed, but the base toolchain must be on the host:
+
+- Node projects (including Igor's own website) → `sudo apt-get install -y nodejs npm`
+- Python projects → `sudo apt-get install -y python3 python3-pip python3-venv`
+- Go projects → `sudo apt-get install -y golang-go`
+- Rust projects → install [rustup](https://rustup.rs) (not in apt)
+- Ruby projects → `sudo apt-get install -y ruby ruby-dev`
+
+You only need toolchains for languages Igor will actually touch.
+
 ## Auth and secrets
 
 Igor runs against the Anthropic API (not the Max plan). Create a dedicated
