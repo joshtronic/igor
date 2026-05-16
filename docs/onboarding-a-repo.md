@@ -38,5 +38,7 @@ isn't language-specific, it's about having *some* automation that catches
 regressions.
 
 To stop Igor from working a repo: revoke the bot's collaborator role, or
-stop applying the `Agent` label. The local clone at `~/Code/<repo>` is
-yours to keep or `rm -rf` as you see fit.
+stop applying the `Agent` label. The harness clone under
+`~/.local/state/igor/repos/<owner>/<repo>/` is harness-internal -- you
+don't need to touch it; `rm -rf`ing the state dir at any time is
+safe, the next tick re-clones what it needs.

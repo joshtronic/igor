@@ -24,7 +24,7 @@ A timer fires `bin/tick.sh`. Per tick:
 
    Pick the globally oldest across all eligible repos.
 5. **Claim and clone.** Assign the issue to the bot. If the repo isn't cloned
-   locally yet, clone it to `~/Code/<repo>` via SSH.
+   locally yet, clone it to `~/.local/state/igor/repos/<owner>/<repo>/` via SSH.
 6. **Preflight.** Verify `CLAUDE.md` exists at the repo root. If not, block
    the issue with a clear comment and bail. (Same code path as Claude calling
    `agent-block.sh` from inside the worktree.)
@@ -100,18 +100,21 @@ agent-settings.json          # bot's permission profile -- passed via --settings
 On the host (deployment-specific, not in the repo):
 
 ```
-~/.local/share/igor/                 # the runtime git checkout (this repo)
-~/.local/share/igor/.env             # secrets, chmod 600 -- the only config
-~/.local/state/igor/                 # worktrees, flock
-~/Code/<owner>/<repo>/               # per-repo clones, nested by owner
-~/Code/<bot>/brain/                  # Igor's brain -- always present, bootstrap-required
-~/Code/<bot>/website/                # Igor's website -- present if exists
-~/.config/systemd/user/tick.{service,timer}   # symlinks into the clone
+~/.local/share/igor/                          # the harness install (systemd-managed)
+~/.local/share/igor/.env                      # secrets, chmod 600 -- the only config
+~/.local/state/igor/lock                      # global flock
+~/.local/state/igor/worktrees/<key>/          # per-tick worktrees
+~/.local/state/igor/repos/<owner>/<repo>/     # harness's per-repo clones
+~/.local/state/igor/repos/<bot>/brain/        # Igor's brain -- bootstrap-required
+~/.local/state/igor/repos/<bot>/website/      # Igor's website -- bootstrap-soft
+~/.config/systemd/user/tick.{service,timer}   # symlinks into the harness install
 ```
 
-`<owner>/<repo>` nesting mirrors Forgejo's URL structure and isolates
-the harness's per-repo clones from any interactive clones you keep at
-`~/Code/<repo>/`.
+Harness state lives entirely under `~/.local/state/igor/`, isolated
+from `~/Code/` (your interactive workspace) and from `~/.local/share/igor/`
+(the install itself). Per-repo clones nest by owner to mirror
+Forgejo's URL structure and prevent same-name collisions across
+different owners.
 
 ## Scope and trade-offs
 

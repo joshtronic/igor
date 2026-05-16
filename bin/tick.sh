@@ -23,7 +23,7 @@ set -euo pipefail
 
 IGOR_HOME="${IGOR_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
 IGOR_STATE_DIR="${IGOR_STATE_DIR:-$HOME/.local/state/igor}"
-IGOR_CODE_ROOT="${IGOR_CODE_ROOT:-$HOME/Code}"
+IGOR_REPO_ROOT="$IGOR_STATE_DIR/repos"
 
 # -- Secrets ----------------------------------------------------
 
@@ -94,10 +94,11 @@ cleanup_agent_branches() {
   (cd "$repo" && echo "$refs" | xargs git branch -D) >/dev/null 2>&1 || true
 }
 
-# Local clone path: nests by owner. <owner>/<name> -> $IGOR_CODE_ROOT/<owner>/<name>.
-# Mirrors Forgejo's URL structure on disk and prevents collisions
-# between same-named repos under different owners.
-repo_path_for() { echo "$IGOR_CODE_ROOT/$1"; }
+# Local clone path: nests by owner under the harness state dir.
+# Lives in state (not in ~/Code) because these are harness-managed
+# working copies, distinct from any interactive clones the operator
+# keeps in their own workspace.
+repo_path_for() { echo "$IGOR_REPO_ROOT/$1"; }
 
 # Idempotent clone-if-missing. Creates the owner subdir as needed.
 ensure_repo_local() {
@@ -347,7 +348,7 @@ EOF
 # prompt caching), then AGENTS.md. Brain files are bootstrap-required,
 # but guard with -f in case identity.md or index.md was deleted in
 # place -- degrade to AGENTS.md only rather than crashing the tick.
-BRAIN_PATH="$IGOR_CODE_ROOT/${BOT_USER}/brain"
+BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
 if [ -f "$BRAIN_PATH/identity.md" ] && [ -f "$BRAIN_PATH/index.md" ]; then
   SYSTEM_PROMPT=$(cat "$BRAIN_PATH/identity.md" "$BRAIN_PATH/index.md" "$IGOR_HOME/AGENTS.md")
 else

@@ -37,7 +37,8 @@ the systemd units and owns the SSH key). The Forgejo user needs:
   push `agent/N-<slug>` branches and `Closes #N`-linked merges work uniformly.
 
 The server account owns the runtime checkout at `~/.local/share/igor/`, its
-state at `~/.local/state/igor/`, and the per-repo clones at `~/Code/<repo>/`.
+state at `~/.local/state/igor/` (which includes the per-repo clones
+under `~/.local/state/igor/repos/<owner>/<repo>/`).
 Git authorship on all bot commits and PRs attributes to this user.
 
 ## Install

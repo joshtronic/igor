@@ -29,17 +29,11 @@ echo "== env =="
 [ -f "$IGOR_HOME/agent-settings.json" ] && pass "agent-settings.json present" || fail "agent-settings.json present"
 
 state_dir="${IGOR_STATE_DIR:-$HOME/.local/state/igor}"
-if mkdir -p "$state_dir/worktrees" 2>/dev/null && [ -w "$state_dir/worktrees" ]; then
+if mkdir -p "$state_dir/worktrees" "$state_dir/repos" 2>/dev/null \
+   && [ -w "$state_dir/worktrees" ] && [ -w "$state_dir/repos" ]; then
   pass "state dir writable ($state_dir)"
 else
   fail "state dir writable ($state_dir)"
-fi
-
-code_root="${IGOR_CODE_ROOT:-$HOME/Code}"
-if mkdir -p "$code_root" 2>/dev/null && [ -w "$code_root" ]; then
-  pass "code root writable ($code_root)"
-else
-  fail "code root writable ($code_root)"
 fi
 echo
 
