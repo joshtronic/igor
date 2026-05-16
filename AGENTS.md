@@ -249,6 +249,19 @@ When you get one:
    `Status/Needs More Info` + adds `Agent` to enter the work queue
    for specific ones. Your job is producing the report; the human
    gates whether you do the work.
+5. Also write a single-word severity assessment to
+   `.igor/IGOR_MAINTENANCE_PRIORITY` -- one of `critical`, `high`,
+   `medium`, `low`. The harness applies the matching `Priority/*`
+   label so the human's attention follows the severity. Guidelines:
+   - `critical` -- actively-exploited vulnerabilities, secrets
+     leaked into deps, anything that warrants stopping other work
+   - `high` -- unfixed CVEs of moderate-or-worse severity, deps with
+     known security patches available
+   - `medium` -- outdated-but-functional, low-severity advisories
+   - `low` -- minor version bumps, nice-to-have updates, nothing
+     security-relevant
+   Skip the file if there are no findings; the harness only reads
+   it when findings exist.
 5. If nothing notable, skip the findings file. Exit cleanly.
 
 Same content rules and identity guardrails apply. Maintenance
