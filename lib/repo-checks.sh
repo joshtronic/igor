@@ -13,7 +13,7 @@ if ! declare -F log >/dev/null; then
   log() { printf '[igor] %s\n' "$*"; }
 fi
 
-# ── Individual checks ──────────────────────────────────────────
+# -- Individual checks ------------------------------------------
 #
 # Each returns 0 on pass, non-zero on fail. Pure -- no logging, no
 # side effects beyond the API GET they perform.
@@ -107,7 +107,22 @@ check_ci_workflow() {
   return 1
 }
 
-# ── Main validator ─────────────────────────────────────────────
+# Returns 0 if all four labels Igor uses exist on the repo, 1 if any
+# are missing. Prints a comma-separated list of missing labels to
+# stdout (empty on full pass), so the orchestrator can include the
+# specifics in the onboarding ticket.
+check_labels() {
+  local repo="$1" name missing=""
+  for name in "Agent" "Status/Blocked" "Status/Needs More Info" "Priority/High"; do
+    if ! forgejo_repo_has_label "$repo" "$name"; then
+      missing="${missing:+$missing, }\`$name\`"
+    fi
+  done
+  printf '%s' "$missing"
+  [ -z "$missing" ]
+}
+
+# -- Main validator ---------------------------------------------
 #
 # Runs all checks, prints a markdown checklist to stdout, returns 0
 # if every required check passed, 1 if any failed. The checklist is
@@ -147,10 +162,19 @@ validate_repo_via_api() {
   _emit $? "CI workflow present" \
     "add a Forgejo Actions workflow at \`.forgejo/workflows/<name>.yml\` that runs lint + tests"
 
+  local labels_missing
+  labels_missing=$(check_labels "$repo")
+  if [ -z "$labels_missing" ]; then
+    _emit 0 "Required labels present (Agent, Status/Blocked, Status/Needs More Info, Priority/High)" ""
+  else
+    _emit 1 "Required labels present" \
+      "create missing label(s): ${labels_missing}"
+  fi
+
   [ "$fail" -eq 0 ]
 }
 
-# ── Onboarding ticket lifecycle ────────────────────────────────
+# -- Onboarding ticket lifecycle --------------------------------
 #
 # Filed when a repo fails validation, closed by the human when fixed,
 # reopened on re-validation failure. The marker keeps it auto-

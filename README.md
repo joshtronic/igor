@@ -82,22 +82,22 @@ In the repo (versioned policy + harness code):
 
 ```
 bin/
-├── tick.sh                  # the worker (one issue per invocation)
-├── agent-block.sh           # Claude calls this when stuck
-├── agent-report.sh          # Claude calls this for no-diff outcomes
-├── check-sync.sh            # CI lint: AGENTS.md <-> tick.sh contract
-├── validate.sh              # validate env + Forgejo connectivity + bot perms
-├── validate-repo.sh         # audit a single repo (or --all) for readiness
-├── install.sh               # one-time: scaffold config, install units
-└── uninstall.sh             # stop, disable, remove units
+|-- tick.sh                  # the worker (one issue per invocation)
+|-- agent-block.sh           # Claude calls this when stuck
+|-- agent-report.sh          # Claude calls this for no-diff outcomes
+|-- check-sync.sh            # CI lint: AGENTS.md <-> tick.sh contract
+|-- validate.sh              # validate env + Forgejo connectivity + bot perms
+|-- validate-repo.sh         # audit a single repo (or --all) for readiness
+|-- install.sh               # one-time: scaffold config, install units
+`-- uninstall.sh             # stop, disable, remove units
 
 lib/
-├── forgejo.sh               # Forgejo API helpers
-└── repo-checks.sh           # repo-readiness checks + onboarding ticket lifecycle
+|-- forgejo.sh               # Forgejo API helpers
+`-- repo-checks.sh           # repo-readiness checks + onboarding ticket lifecycle
 
 systemd/                     # user units (no @ instance)
-├── tick.service
-└── tick.timer
+|-- tick.service
+`-- tick.timer
 
 AGENTS.md                    # universal unattended rules -- appended to Claude's system prompt
 agent-settings.json          # bot's permission profile -- passed via --settings
@@ -153,7 +153,13 @@ git clone <forgejo-url>/igor ~/.local/share/igor
 
 `install.sh` scaffolds `~/.config/igor/` (seeds `.env` from `.env.example`),
 copies the systemd units, and enables `tick.timer`. Edit `~/.config/igor/.env`
-with real tokens before the first tick. Re-running is safe.
+with real tokens before the first tick, then verify the setup:
+
+```sh
+bin/validate.sh   # checks env, Forgejo reachability, bot identity, accessible repos
+```
+
+Re-running `install.sh` is safe. To tear down:
 
 ```sh
 bin/uninstall.sh   # stops, disables, removes units (leaves config + state)

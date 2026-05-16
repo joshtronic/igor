@@ -19,14 +19,14 @@
 
 set -euo pipefail
 
-# ── Paths ──────────────────────────────────────────────────────
+# -- Paths ------------------------------------------------------
 
 IGOR_HOME="${IGOR_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
-IGOR_CONFIG_DIR="${IGOR_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/igor}"
+IGOR_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/igor"
 IGOR_STATE_DIR="${IGOR_STATE_DIR:-$HOME/.local/state/igor}"
 IGOR_CODE_ROOT="${IGOR_CODE_ROOT:-$HOME/Code}"
 
-# ── Secrets ────────────────────────────────────────────────────
+# -- Secrets ----------------------------------------------------
 
 if [ -f "$IGOR_CONFIG_DIR/.env" ]; then
   set -a
@@ -40,14 +40,14 @@ fi
 IGOR_TIMEOUT="${IGOR_TIMEOUT:-60m}"
 FORGEJO_SSH_HOST="${FORGEJO_SSH_HOST:-$(echo "$FORGEJO_URL" | sed -E 's|^[a-z]+://([^/:]+).*|\1|')}"
 
-# ── Library ────────────────────────────────────────────────────
+# -- Library ----------------------------------------------------
 
 # shellcheck source=lib/forgejo.sh
 . "$IGOR_HOME/lib/forgejo.sh"
 # shellcheck source=lib/repo-checks.sh
 . "$IGOR_HOME/lib/repo-checks.sh"
 
-# ── Resolve bot identity ──────────────────────────────────────
+# -- Resolve bot identity --------------------------------------
 
 BOT_USER=$(forgejo_whoami)
 [ -n "$BOT_USER" ] || {
@@ -55,7 +55,7 @@ BOT_USER=$(forgejo_whoami)
   exit 3
 }
 
-# ── Global lock (one tick at a time) ──────────────────────────
+# -- Global lock (one tick at a time) --------------------------
 
 mkdir -p "$IGOR_STATE_DIR"
 LOCK="$IGOR_STATE_DIR/lock"
@@ -122,7 +122,7 @@ build_deps_section() {
   done <<<"$files"
 }
 
-# ── Recovery: clear orphaned bot assignments ──────────────────
+# -- Recovery: clear orphaned bot assignments ------------------
 #
 # Invariant: we hold the global flock, so no other Igor is currently
 # running. Any open issue assigned to the bot right now is, by
@@ -153,7 +153,7 @@ if [ "$ORPHAN_COUNT" -gt 0 ]; then
   done < <(jq -c '.[] | {repo: .repository.full_name, num: .number}' <<<"$ORPHANS")
 fi
 
-# ── Discovery: find globally oldest claimable ─────────────────
+# -- Discovery: find globally oldest claimable -----------------
 
 REPOS=$(forgejo_list_bot_repos)
 REPO_COUNT=$(jq 'length' <<<"$REPOS")
@@ -229,7 +229,7 @@ log "branch: ${BRANCH}"
 export ISSUE_NUMBER ISSUE_TITLE FORGEJO_REPO PR_BASE IGOR_HOME
 export PATH="$IGOR_HOME/bin:$PATH"
 
-# ── Cleanup on exit (set before worktree creation) ────────────
+# -- Cleanup on exit (set before worktree creation) ------------
 
 WORKTREE=""
 
@@ -246,11 +246,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ── Claim ─────────────────────────────────────────────────────
+# -- Claim -----------------------------------------------------
 
 forgejo_assign "$FORGEJO_REPO" "$ISSUE_NUMBER" "$BOT_USER"
 
-# ── Clone if needed ───────────────────────────────────────────
+# -- Clone if needed -------------------------------------------
 
 if [ ! -d "$REPO_PATH/.git" ]; then
   CLONE_URL="git@${FORGEJO_SSH_HOST}:${FORGEJO_REPO}.git"
@@ -263,7 +263,7 @@ if [ ! -d "$REPO_PATH/.git" ]; then
   fi
 fi
 
-# ── Preflight ─────────────────────────────────────────────────
+# -- Preflight -------------------------------------------------
 
 if [ ! -f "$REPO_PATH/CLAUDE.md" ]; then
   log "preflight: missing CLAUDE.md, blocking"
@@ -273,7 +273,7 @@ Igor relies on \`CLAUDE.md\` for project conventions (test commands, code style,
   exit 0
 fi
 
-# ── Worktree ──────────────────────────────────────────────────
+# -- Worktree --------------------------------------------------
 
 mkdir -p "$IGOR_STATE_DIR/worktrees"
 WORKTREE="$IGOR_STATE_DIR/worktrees/$(worktree_key "$FORGEJO_REPO" "$ISSUE_NUMBER")"
@@ -292,7 +292,7 @@ cd "$REPO_PATH"
 git fetch origin --prune
 git worktree add -b "$BRANCH" "$WORKTREE" "origin/${PR_BASE}"
 
-# ── Invoke Claude ─────────────────────────────────────────────
+# -- Invoke Claude ---------------------------------------------
 
 cd "$WORKTREE"
 
@@ -322,7 +322,7 @@ set -e
 ELAPSED=$(( $(date +%s) - START_TS ))
 log "claude exited $CLAUDE_EXIT (elapsed ${ELAPSED}s)"
 
-# ── Determine outcome ─────────────────────────────────────────
+# -- Determine outcome -----------------------------------------
 
 cd "$WORKTREE"
 COMMITS=$(git rev-list --count "origin/${PR_BASE}..HEAD" 2>/dev/null || echo 0)
@@ -355,11 +355,11 @@ elif [ "$COMMITS" -gt 0 ]; then
   CHANGED=$(git diff --shortstat "origin/${PR_BASE}..HEAD" 2>/dev/null \
     | awk '{ for (i=1;i<=NF;i++) if ($i ~ /insertion|deletion/) s+=$(i-1); print s+0 }')
   CHANGED=${CHANGED:-0}
-  if [ "$COMMITS" -gt 10 ] || [ "$CHANGED" -gt 800 ]; then
+  if [ "$COMMITS" -gt 10 ] || [ "$CHANGED" -gt 400 ]; then
     # OUTCOME: blocked
     log "outcome: blocked (scope: $COMMITS commits, $CHANGED lines)"
     FILES=$(git diff --name-only "origin/${PR_BASE}..HEAD" | head -30 | sed 's/^/  - /')
-    agent-block.sh "Scope exceeded: this branch reached **${COMMITS} commits / ${CHANGED} changed lines**, over the per-issue cap (10 commits / 800 lines).
+    agent-block.sh "Scope exceeded: this branch reached **${COMMITS} commits / ${CHANGED} changed lines**, over the per-issue cap (10 commits / 400 lines).
 
 Files touched (first 30):
 ${FILES}

@@ -56,8 +56,10 @@ harness will push the branch and open a PR with `Closes
 #$ISSUE_NUMBER` after you exit.
 
 - Keep changes focused on the issue. Do not refactor unrelated code.
-- Aim for diffs under ~400 lines. If the work is genuinely larger,
-  proceed but mention the size in your final commit message.
+- Aim for diffs under ~400 lines and ~10 commits. The harness hard-
+  blocks at these limits and asks the human to split the ticket. If
+  you're going to blow through, block early with `agent-block.sh`
+  rather than doing work that won't ship.
 - If your work spans multiple commits, write `.git/PR_BODY.md` with
   a concise summary of what changed and why. The harness uses this
   as the PR body (falling back to commit log if absent). Do not write

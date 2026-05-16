@@ -114,6 +114,15 @@ forgejo_count_bot_comments_matching() {
         '[.[] | select(.user.login == $u and (.body | startswith($p)))] | length'
 }
 
+# Returns 0 if a label with the given name exists on this repo, 1
+# otherwise. Used by repo-checks to verify Igor's required label set
+# is present before we try to apply any of them.
+forgejo_repo_has_label() {
+  local repo="$1" name="$2"
+  _fj GET "/repos/${repo}/labels" \
+    | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null 2>&1
+}
+
 # Add a label by name. Forgejo's API takes label IDs, so this resolves
 # name -> id with a single API call.
 forgejo_add_label() {
@@ -155,7 +164,7 @@ forgejo_my_assigned() {
   _fj GET "/repos/issues/search?state=open&type=issues&assigned=true&limit=50"
 }
 
-# ── File reads (no clone) ──────────────────────────────────────
+# -- File reads (no clone) --------------------------------------
 #
 # These let onboarding validation inspect a repo without cloning it.
 # All take <repo> = "<owner>/<name>".
@@ -184,7 +193,7 @@ forgejo_repo_dir_has_match() {
   jq -e --arg re "$name_re" 'any(.[]; .name | test($re))' <<<"$contents" >/dev/null 2>&1
 }
 
-# ── Issue lifecycle (open / reopen) ────────────────────────────
+# -- Issue lifecycle (open / reopen) ----------------------------
 
 # Open a new issue. Prints the new issue number to stdout. Labels are
 # applied separately via forgejo_add_label so missing labels degrade

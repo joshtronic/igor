@@ -12,10 +12,10 @@
 set -euo pipefail
 
 IGOR_HOME="$(cd "$(dirname "$0")/.." && pwd)"
-IGOR_CONFIG_DIR="${IGOR_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/igor}"
+IGOR_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/igor"
 UNIT_DIR="$HOME/.config/systemd/user"
 
-# ── Config scaffolding ─────────────────────────────────────────
+# -- Config scaffolding -----------------------------------------
 
 mkdir -p "$IGOR_CONFIG_DIR"
 chmod 700 "$IGOR_CONFIG_DIR"
@@ -28,7 +28,7 @@ else
   echo "-> $IGOR_CONFIG_DIR/.env already exists, leaving alone"
 fi
 
-# ── systemd units ──────────────────────────────────────────────
+# -- systemd units ----------------------------------------------
 
 mkdir -p "$UNIT_DIR"
 
@@ -43,3 +43,15 @@ systemctl --user enable --now tick.timer
 
 echo
 systemctl --user list-timers tick.timer --no-pager || true
+
+cat <<'EOF'
+
+-> next steps
+
+  1. Edit ~/.config/igor/.env with real tokens.
+  2. Run bin/validate.sh to confirm Igor's setup is healthy
+     (env, Forgejo reachability, bot identity, accessible repos).
+  3. For each repo you grant Igor access to, ensure these labels exist:
+       Agent, Status/Blocked, Status/Needs More Info, Priority/High
+     and the repo passes bin/validate-repo.sh <owner>/<name>.
+EOF

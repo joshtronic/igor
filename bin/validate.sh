@@ -6,7 +6,7 @@
 set -uo pipefail
 
 IGOR_HOME="$(cd "$(dirname "$0")/.." && pwd)"
-IGOR_CONFIG_DIR="${IGOR_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/igor}"
+IGOR_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/igor"
 FAIL=0
 
 if [ -f "$IGOR_CONFIG_DIR/.env" ]; then
@@ -16,10 +16,10 @@ if [ -f "$IGOR_CONFIG_DIR/.env" ]; then
   set +a
 fi
 
-pass() { printf '  \033[32m✓\033[0m %s\n' "$1"; }
-fail() { printf '  \033[31m✗\033[0m %s%s\n' "$1" "${2:+ -- $2}"; FAIL=1; }
+pass() { printf '  \033[32m+\033[0m %s\n' "$1"; }
+fail() { printf '  \033[31mx\033[0m %s%s\n' "$1" "${2:+ -- $2}"; FAIL=1; }
 
-# ── Global env ─────────────────────────────────────────────────
+# -- Global env -------------------------------------------------
 
 echo "== env =="
 [ -n "${FORGEJO_URL:-}" ]             && pass "FORGEJO_URL set"             || fail "FORGEJO_URL set"             "missing from .env"
@@ -43,7 +43,7 @@ else
 fi
 echo
 
-# ── Forgejo connectivity + bot identity ────────────────────────
+# -- Forgejo connectivity + bot identity ------------------------
 
 echo "== forgejo =="
 if [ -z "${FORGEJO_URL:-}" ] || [ -z "${FORGEJO_TOKEN:-}" ]; then
