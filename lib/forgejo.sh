@@ -164,6 +164,14 @@ forgejo_my_assigned() {
   _fj GET "/repos/issues/search?state=open&type=issues&assigned=true&limit=50"
 }
 
+# Returns 0 if the repo exists and the bot can access it, 1 otherwise.
+# Used by the bootstrap step to verify Igor's required repos
+# (<bot>/brain, optionally <bot>/website) are present before the
+# discovery loop runs.
+forgejo_repo_exists() {
+  _fj GET "/repos/$1" >/dev/null 2>&1
+}
+
 # -- File reads (no clone) --------------------------------------
 #
 # These let onboarding validation inspect a repo without cloning it.

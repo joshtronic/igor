@@ -103,9 +103,15 @@ On the host (deployment-specific, not in the repo):
 ~/.local/share/igor/                 # the runtime git checkout (this repo)
 ~/.local/share/igor/.env             # secrets, chmod 600 -- the only config
 ~/.local/state/igor/                 # worktrees, flock
-~/Code/<repo>/                       # per-repo clones (created on demand)
+~/Code/<owner>/<repo>/               # per-repo clones, nested by owner
+~/Code/<bot>/brain/                  # Igor's brain -- always present, bootstrap-required
+~/Code/<bot>/website/                # Igor's website -- present if exists
 ~/.config/systemd/user/tick.{service,timer}   # symlinks into the clone
 ```
+
+`<owner>/<repo>` nesting mirrors Forgejo's URL structure and isolates
+the harness's per-repo clones from any interactive clones you keep at
+`~/Code/<repo>/`.
 
 ## Scope and trade-offs
 

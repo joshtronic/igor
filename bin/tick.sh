@@ -94,8 +94,21 @@ cleanup_agent_branches() {
   (cd "$repo" && echo "$refs" | xargs git branch -D) >/dev/null 2>&1 || true
 }
 
-# Local clone path for owner/name -> $IGOR_CODE_ROOT/name.
-repo_path_for() { echo "$IGOR_CODE_ROOT/$(basename "$1")"; }
+# Local clone path: nests by owner. <owner>/<name> -> $IGOR_CODE_ROOT/<owner>/<name>.
+# Mirrors Forgejo's URL structure on disk and prevents collisions
+# between same-named repos under different owners.
+repo_path_for() { echo "$IGOR_CODE_ROOT/$1"; }
+
+# Idempotent clone-if-missing. Creates the owner subdir as needed.
+ensure_repo_local() {
+  local repo="$1" local_path
+  local_path=$(repo_path_for "$repo")
+  if [ ! -d "$local_path/.git" ]; then
+    log "bootstrap: cloning $repo to $local_path"
+    mkdir -p "$(dirname "$local_path")"
+    git clone "git@${FORGEJO_SSH_HOST}:${repo}.git" "$local_path"
+  fi
+}
 
 # Worktree key: slash-free, unique per repo+issue.
 worktree_key() { printf '%s-%s' "${1//\//_}" "$2"; }
@@ -121,6 +134,29 @@ build_deps_section() {
     printf -- '- `%s` (%s)\n' "$f" "$counts"
   done <<<"$files"
 }
+
+# -- Bootstrap: ensure Igor's own repos are cloned -------------
+#
+# Brain is hard-required: identity.md is foundational, every system
+# prompt loads it. If the bot doesn't own a brain repo, halt loudly
+# rather than running ticks with generic-Claude voice.
+#
+# Website is soft: warn if absent but proceed -- Igor can still work
+# other repos. The website is just one of his target repos, not
+# essential infrastructure.
+
+if ! forgejo_repo_exists "${BOT_USER}/brain"; then
+  echo "igor: bootstrap failed -- ${BOT_USER}/brain does not exist or bot lacks access" >&2
+  echo "  create the repo (see docs/setup.md) and try again." >&2
+  exit 4
+fi
+ensure_repo_local "${BOT_USER}/brain"
+
+if forgejo_repo_exists "${BOT_USER}/website"; then
+  ensure_repo_local "${BOT_USER}/website"
+else
+  log "warning: ${BOT_USER}/website does not exist -- website work disabled"
+fi
 
 # -- Recovery: clear orphaned bot assignments ------------------
 #
@@ -307,6 +343,18 @@ ${ISSUE_BODY}
 EOF
 )
 
+# System prompt: identity + index from brain (most stable first, for
+# prompt caching), then AGENTS.md. Brain files are bootstrap-required,
+# but guard with -f in case identity.md or index.md was deleted in
+# place -- degrade to AGENTS.md only rather than crashing the tick.
+BRAIN_PATH="$IGOR_CODE_ROOT/${BOT_USER}/brain"
+if [ -f "$BRAIN_PATH/identity.md" ] && [ -f "$BRAIN_PATH/index.md" ]; then
+  SYSTEM_PROMPT=$(cat "$BRAIN_PATH/identity.md" "$BRAIN_PATH/index.md" "$IGOR_HOME/AGENTS.md")
+else
+  log "warning: brain identity.md or index.md missing at $BRAIN_PATH -- using AGENTS.md only"
+  SYSTEM_PROMPT=$(cat "$IGOR_HOME/AGENTS.md")
+fi
+
 log "invoking claude (timeout ${IGOR_TIMEOUT})"
 CLAUDE_LOG="$WORKTREE/.git/claude-output.log"
 START_TS=$(date +%s)
@@ -314,7 +362,7 @@ set +e
 timeout --kill-after=30s "$IGOR_TIMEOUT" \
   claude \
     --model "$IGOR_MODEL" \
-    --append-system-prompt "$(cat "$IGOR_HOME/AGENTS.md")" \
+    --append-system-prompt "$SYSTEM_PROMPT" \
     --settings "$IGOR_HOME/agent-settings.json" \
     --max-turns 50 \
     --print "$USER_MSG" 2>&1 | tee "$CLAUDE_LOG"
