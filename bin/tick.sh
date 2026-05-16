@@ -309,7 +309,7 @@ if [ -z "$WINNER" ]; then
   #   (3) per-repo cooldown -- 5-7 days random since last pass.
   #
   # Findings flow same as journal: Claude writes
-  # .git/IGOR_MAINTENANCE_FINDINGS.md, harness reads it and files an
+  # .igor/IGOR_MAINTENANCE_FINDINGS.md, harness reads it and files an
   # Agent-labeled issue for follow-up work.
 
   DISCRETIONARY_RATE="${IGOR_DISCRETIONARY_RATE:-0}"
@@ -370,6 +370,7 @@ if [ -z "$WINNER" ]; then
     mkdir -p "$IGOR_STATE_DIR/worktrees"
     (cd "$W_PATH" && git fetch --prune origin)
     (cd "$W_PATH" && git worktree add -b "$W_BRANCH" "$W_WORKTREE" "origin/${W_BASE}")
+    mkdir -p "$W_WORKTREE/.igor"
 
     W_CLEANUP() {
       [ -d "$W_WORKTREE" ] && (cd "$W_PATH" && git worktree remove --force "$W_WORKTREE") 2>/dev/null || true
@@ -402,7 +403,7 @@ ONE thing. Under scope cap (400 lines / 10 commits).
 This is the fever-dream venue -- personality welcome. See
 identity.md's Voice section for the register layering.
 
-Make the change on the agent branch. Write .git/PR_BODY.md with
+Make the change on the agent branch. Write .igor/PR_BODY.md with
 the two-checklist format from AGENTS.md (What this PR does + Test
 plan). Run npm test before exit -- must pass.
 
@@ -420,7 +421,7 @@ EOF
     fi
 
     log "invoking claude for website work (timeout ${IGOR_TIMEOUT})"
-    W_LOG="$W_WORKTREE/.git/claude-output.log"
+    W_LOG="$W_WORKTREE/.igor/claude-output.log"
     W_START=$(date +%s)
     set +e
     timeout --kill-after=30s "$IGOR_TIMEOUT" \
@@ -435,7 +436,7 @@ EOF
     log "claude exited $W_EXIT after $(( $(date +%s) - W_START ))s"
 
     # Journal write
-    W_JOURNAL_SRC="$W_WORKTREE/.git/IGOR_JOURNAL.md"
+    W_JOURNAL_SRC="$W_WORKTREE/.igor/IGOR_JOURNAL.md"
     if [ -s "$W_JOURNAL_SRC" ]; then
       W_JDATE=$(date -u +%Y-%m-%d)
       W_JFILE="$BRAIN_PATH/journal/${W_JDATE}.md"
@@ -491,8 +492,8 @@ EOF
       log "PR #$W_EXISTING_PR already open"
     else
       W_PR_TITLE=$(git log -1 --pretty=%s)
-      if [ -f .git/PR_BODY.md ]; then
-        W_PR_BODY=$(cat .git/PR_BODY.md)
+      if [ -f .igor/PR_BODY.md ]; then
+        W_PR_BODY=$(cat .igor/PR_BODY.md)
       else
         W_PR_BODY=$(git log "origin/${W_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
       fi
@@ -519,6 +520,7 @@ EOF
   mkdir -p "$IGOR_STATE_DIR/worktrees"
   (cd "$TARGET_PATH" && git fetch --prune origin)
   (cd "$TARGET_PATH" && git worktree add --detach "$M_WORKTREE" "origin/${TARGET_BASE}")
+  mkdir -p "$M_WORKTREE/.igor"
 
   M_CLEANUP() {
     [ -d "$M_WORKTREE" ] && (cd "$TARGET_PATH" && git worktree remove --force "$M_WORKTREE") 2>/dev/null || true
@@ -547,7 +549,7 @@ No human is waiting on you. Your job:
      listed above.
   3. If anything notable surfaces -- vulnerabilities, outdated
      deps, broken links, regressions -- write a markdown summary
-     to .git/IGOR_MAINTENANCE_FINDINGS.md. The harness will file
+     to .igor/IGOR_MAINTENANCE_FINDINGS.md. The harness will file
      an Agent-labeled issue with that content for tier-1 work to
      pick up on a future tick.
   4. If nothing notable, skip the findings file and exit cleanly.
@@ -566,7 +568,7 @@ EOF
   fi
 
   log "invoking claude for maintenance (timeout ${IGOR_TIMEOUT})"
-  M_LOG="$M_WORKTREE/.git/claude-output.log"
+  M_LOG="$M_WORKTREE/.igor/claude-output.log"
   M_START=$(date +%s)
   set +e
   timeout --kill-after=30s "$IGOR_TIMEOUT" \
@@ -580,7 +582,7 @@ EOF
   set -e
   log "claude exited $M_EXIT after $(( $(date +%s) - M_START ))s"
 
-  FINDINGS="$M_WORKTREE/.git/IGOR_MAINTENANCE_FINDINGS.md"
+  FINDINGS="$M_WORKTREE/.igor/IGOR_MAINTENANCE_FINDINGS.md"
   if [ -s "$FINDINGS" ]; then
     M_TITLE="Maintenance pass $(date -u +%Y-%m-%d): findings"
     M_BODY=$(cat "$FINDINGS")
@@ -682,6 +684,7 @@ fi
 cd "$REPO_PATH"
 git fetch origin --prune
 git worktree add -b "$BRANCH" "$WORKTREE" "origin/${PR_BASE}"
+mkdir -p "$WORKTREE/.igor"
 
 # -- Invoke Claude ---------------------------------------------
 
@@ -711,7 +714,7 @@ else
 fi
 
 log "invoking claude (timeout ${IGOR_TIMEOUT})"
-CLAUDE_LOG="$WORKTREE/.git/claude-output.log"
+CLAUDE_LOG="$WORKTREE/.igor/claude-output.log"
 START_TS=$(date +%s)
 set +e
 timeout --kill-after=30s "$IGOR_TIMEOUT" \
@@ -728,12 +731,12 @@ log "claude exited $CLAUDE_EXIT (elapsed ${ELAPSED}s)"
 
 # -- Brain journal: append Claude's reflection if present ------
 #
-# Claude optionally writes .git/IGOR_JOURNAL.md before exit. The
+# Claude optionally writes .igor/IGOR_JOURNAL.md before exit. The
 # harness owns the brain commit -- Claude's worktree never reaches
 # across to brain. Best-effort: if pull/push fails, log it but
 # don't fail the tick over a journal entry.
 
-JOURNAL_SRC="$WORKTREE/.git/IGOR_JOURNAL.md"
+JOURNAL_SRC="$WORKTREE/.igor/IGOR_JOURNAL.md"
 if [ -s "$JOURNAL_SRC" ]; then
   BRAIN_LOCAL="$IGOR_REPO_ROOT/${BOT_USER}/brain"
   JOURNAL_DATE=$(date -u +%Y-%m-%d)
@@ -830,8 +833,8 @@ Split this into smaller issues, then remove \`Status/Blocked\` and the next tick
     log "PR #$EXISTING_PR already open for $BRANCH -- skipping open"
   else
     PR_TITLE=$(git log -1 --pretty=%s)
-    if [ -f .git/PR_BODY.md ]; then
-      PR_BODY=$(cat .git/PR_BODY.md)
+    if [ -f .igor/PR_BODY.md ]; then
+      PR_BODY=$(cat .igor/PR_BODY.md)
     else
       PR_BODY=$(git log "origin/${PR_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
     fi

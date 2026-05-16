@@ -7,7 +7,7 @@ There is no per-project config. To put a repo under Igor's care:
    **Advanced** label template; the fourth is custom:
    - From the Advanced template (repo Settings -> Labels -> load
      template -> Advanced): `Status/Blocked`, `Status/Needs More Info`,
-     `Priority/High`. (The Advanced template also brings `Kind/*` and
+     `Priority/Critical`. (The Advanced template also brings `Kind/*` and
      other useful families; harmless to keep them.)
    - Create manually as a new label: `Agent`.
 3. Bring the repo to Igor's readiness bar:

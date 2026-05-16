@@ -64,7 +64,7 @@ label and Igor picks it up.
 Two labels carry the state machine for agent-work tickets. `Status/Blocked`
 comes from Forgejo's Advanced label template; `Agent` is custom (created
 per-repo). Onboarding-failure tickets also use `Status/Needs More Info` and
-`Priority/High`, both from the Advanced template. See
+`Priority/Critical`, both from the Advanced template. See
 [onboarding-a-repo.md](onboarding-a-repo.md) for how to set them up.
 
 | State               | Labels                     | Assignee  | Open?  |
@@ -84,7 +84,7 @@ Useful queries:
 - In flight: `is:open label:Agent assignee:<bot user>`
 - Stuck: `is:open label:Status/Blocked`
 
-Igor also files `Status/Needs More Info` + `Priority/High` tickets for repos
+Igor also files `Status/Needs More Info` + `Priority/Critical` tickets for repos
 that fail onboarding validation. See [onboarding-a-repo.md](onboarding-a-repo.md).
 
 ## Pieces

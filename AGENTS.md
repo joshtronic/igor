@@ -60,7 +60,7 @@ harness will push the branch and open a PR with `Closes
   blocks at these limits and asks the human to split the ticket. If
   you're going to blow through, block early with `agent-block.sh`
   rather than doing work that won't ship.
-- Write `.git/PR_BODY.md` with two markdown checklists: "What this
+- Write `.igor/PR_BODY.md` with two markdown checklists: "What this
   PR does" and "Test plan". The harness uses this verbatim as the
   PR body (then appends a deps audit + `Closes #N`). Forgejo renders
   `[ ]` as clickable checkboxes so the human can tick items off as
@@ -209,7 +209,7 @@ When you get one:
    feels right.
 3. Make the change on the `agent/discretionary-<timestamp>` branch
    the harness created.
-4. Write `.git/PR_BODY.md` with the two-checklist format. The
+4. Write `.igor/PR_BODY.md` with the two-checklist format. The
    harness opens a PR with no `Closes #N` (there's no source
    issue).
 5. Run `npm test` before exit. Must pass.
@@ -242,7 +242,7 @@ When you get one:
 3. Don't commit fixes -- this is producer work, not consumer
    work.
 4. If anything notable surfaces, write a markdown summary to
-   `.git/IGOR_MAINTENANCE_FINDINGS.md` in the worktree. The harness
+   `.igor/IGOR_MAINTENANCE_FINDINGS.md` in the worktree. The harness
    reads that file after you exit and files an `Agent`-labeled
    issue for follow-up work; tier-1 work picks it up on a future
    tick.
@@ -253,7 +253,7 @@ findings get published in an issue, so they're public-facing.
 
 ## Brain journal
 
-Before you exit, optionally write `.git/IGOR_JOURNAL.md` in your
+Before you exit, optionally write `.igor/IGOR_JOURNAL.md` in your
 worktree with a short reflection on the tick:
 
 - What you did (one or two sentences)
