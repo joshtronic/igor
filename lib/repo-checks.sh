@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
-# validate-repo.sh -- onboarding health checks for a Forgejo repo.
+# repo-checks.sh -- repo-readiness checks + onboarding ticket lifecycle.
 # Sourced by bin/tick.sh (gates the clone) and bin/validate-repo.sh
 # (operator audit tool). All checks run via the Forgejo API; no clone
 # is required.
 #
 # Requires lib/forgejo.sh sourced first.
+
+# Fallback logger so this module is sourceable outside tick.sh. When
+# sourced into tick.sh, bash's dynamic function lookup picks up tick's
+# richer definition at call time.
+if ! declare -F log >/dev/null; then
+  log() { printf '[igor] %s\n' "$*"; }
+fi
 
 # ── Individual checks ──────────────────────────────────────────
 #
@@ -141,4 +148,66 @@ validate_repo_via_api() {
     "add a Forgejo Actions workflow at \`.forgejo/workflows/<name>.yml\` that runs lint + tests"
 
   [ "$fail" -eq 0 ]
+}
+
+# ── Onboarding ticket lifecycle ────────────────────────────────
+#
+# Filed when a repo fails validation, closed by the human when fixed,
+# reopened on re-validation failure. The marker keeps it auto-
+# discoverable across ticks without needing a title prefix.
+
+ONBOARDING_MARKER='<!-- igor:onboarding -->'
+
+# handle_onboarding_failure <repo> <bot-user> <markdown-report>
+#
+# Idempotent: existing open ticket -> silent skip; existing closed
+# ticket and still failing -> reopen with updated checklist; nothing
+# -> file fresh.
+handle_onboarding_failure() {
+  local repo="$1" bot="$2" report="$3"
+
+  local body
+  body=$(cat <<EOF
+${ONBOARDING_MARKER}
+
+Igor refuses to clone this repo until it has the scaffolding to support
+unattended work. Required checks:
+
+${report}
+
+Bring the repo to standard, then close this ticket -- the next tick will
+re-validate and either proceed or reopen this with what's still missing.
+
+This ticket is auto-managed by Igor. Do not edit the title or remove the
+HTML comment marker at the top of the body.
+EOF
+)
+
+  local existing num state
+  existing=$(forgejo_find_marked_issue "$repo" "$bot" "$ONBOARDING_MARKER")
+
+  if [ -z "$existing" ] || [ "$existing" = "null" ] || [ "$existing" = "empty" ]; then
+    log "onboarding: filing fresh ticket on $repo"
+    num=$(forgejo_open_issue "$repo" "Repo not ready for Igor: missing scaffolding" "$body")
+    forgejo_add_label "$repo" "$num" "Status/Needs More Info" 2>/dev/null \
+      || log "warning: could not apply 'Status/Needs More Info' on $repo (label missing?)"
+    forgejo_add_label "$repo" "$num" "Priority/High" 2>/dev/null \
+      || log "warning: could not apply 'Priority/High' on $repo (label missing?)"
+    return
+  fi
+
+  num=$(jq -r '.number' <<<"$existing")
+  state=$(jq -r '.state' <<<"$existing")
+
+  if [ "$state" = "open" ]; then
+    log "onboarding: existing open ticket #${num} on $repo, skipping silently"
+    return
+  fi
+
+  log "onboarding: re-validation failed on $repo, reopening #${num}"
+  forgejo_comment "$repo" "$num" \
+"Re-validation still failing. Updated checklist:
+
+${report}"
+  forgejo_reopen_issue "$repo" "$num"
 }

@@ -22,8 +22,8 @@ fi
 
 # shellcheck source=../lib/forgejo.sh
 . "$IGOR_HOME/lib/forgejo.sh"
-# shellcheck source=../lib/validate-repo.sh
-. "$IGOR_HOME/lib/validate-repo.sh"
+# shellcheck source=../lib/repo-checks.sh
+. "$IGOR_HOME/lib/repo-checks.sh"
 
 if [ $# -ne 1 ]; then
   echo "usage: validate-repo.sh <owner>/<name> | --all" >&2

@@ -93,7 +93,7 @@ bin/
 
 lib/
 ├── forgejo.sh               # Forgejo API helpers
-└── validate-repo.sh         # repo-readiness checks (sourced by tick + audit)
+└── repo-checks.sh           # repo-readiness checks + onboarding ticket lifecycle
 
 systemd/                     # user units (no @ instance)
 ├── tick.service
