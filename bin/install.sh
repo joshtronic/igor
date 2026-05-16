@@ -18,6 +18,33 @@ set -euo pipefail
 IGOR_HOME="$(cd "$(dirname "$0")/.." && pwd)"
 UNIT_DIR="$HOME/.config/systemd/user"
 
+# Pre-flight: systemd --user needs XDG_RUNTIME_DIR + DBUS env to
+# reach its bus. sudo -iu / su - sessions skip pam_systemd and don't
+# set these, even when linger is enabled and the runtime dir
+# physically exists. Try to fix it ourselves before failing.
+if [ -z "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "${XDG_RUNTIME_DIR}" ]; then
+  CANDIDATE="/run/user/$(id -u)"
+  if [ -d "$CANDIDATE" ] && [ -S "$CANDIDATE/bus" ]; then
+    echo "-> XDG_RUNTIME_DIR was unset; linger appears active, using $CANDIDATE"
+    export XDG_RUNTIME_DIR="$CANDIDATE"
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=$CANDIDATE/bus"
+  else
+    cat >&2 <<EOF
+no systemd user session reachable, and $CANDIDATE doesn't exist (or
+has no bus socket). this account needs linger enabled so its user-
+systemd instance persists without an active login.
+
+fix (run by a user with sudo, doesn't have to be $(whoami)):
+
+  sudo loginctl enable-linger $(whoami)
+
+then re-run bin/install.sh from this same shell. linger creates the
+runtime dir immediately -- no need to log out and back in.
+EOF
+    exit 1
+  fi
+fi
+
 if [ ! -f "$IGOR_HOME/.env" ]; then
   echo "no $IGOR_HOME/.env -- run \`cp .env.example .env\`, edit it, then re-run install" >&2
   exit 1
