@@ -99,6 +99,10 @@ repo_path_for() { echo "$IGOR_CODE_ROOT/$(basename "$1")"; }
 worktree_key() { printf '%s-%s' "${1//\//_}" "$2"; }
 
 # ── Recovery: clear orphaned bot assignments ──────────────────
+#
+# Invariant: we hold the global flock, so no other Igor is currently
+# running. Any open issue assigned to the bot right now is, by
+# definition, an orphan from a crashed previous tick.
 
 log "recovery sweep ($BOT_USER)"
 ORPHANS=$(forgejo_my_assigned || echo '[]')
@@ -267,6 +271,7 @@ EOF
 
 log "invoking claude (timeout ${IGOR_TIMEOUT})"
 CLAUDE_LOG="$WORKTREE/.git/claude-output.log"
+START_TS=$(date +%s)
 set +e
 timeout --kill-after=30s "$IGOR_TIMEOUT" \
   claude \
@@ -276,7 +281,8 @@ timeout --kill-after=30s "$IGOR_TIMEOUT" \
     --print "$USER_MSG" 2>&1 | tee "$CLAUDE_LOG"
 CLAUDE_EXIT=${PIPESTATUS[0]}
 set -e
-log "claude exited $CLAUDE_EXIT"
+ELAPSED=$(( $(date +%s) - START_TS ))
+log "claude exited $CLAUDE_EXIT (elapsed ${ELAPSED}s)"
 
 # ── Determine outcome ─────────────────────────────────────────
 
@@ -296,6 +302,16 @@ elif [ "$HAS_BLOCKED" = "true" ]; then
   log "outcome: blocked (Status/Blocked applied by agent)"
 
 elif [ "$COMMITS" -gt 0 ]; then
+  # HEAD-equals-branch sanity check. AGENTS.md tells Claude to stay on
+  # the agent branch, but trust-but-verify before we touch the remote.
+  ACTUAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+  if [ "$ACTUAL_BRANCH" != "$BRANCH" ]; then
+    # OUTCOME: blocked
+    log "outcome: blocked (HEAD on $ACTUAL_BRANCH, expected $BRANCH)"
+    agent-block.sh "Igor refused to push: HEAD ended up on \`$ACTUAL_BRANCH\` instead of \`$BRANCH\`. Something went sideways during the work -- investigate before re-queueing."
+    exit 0
+  fi
+
   # Scope cap. Big diffs and long commit chains get blocked instead of
   # shipped; the human splits the work into smaller issues.
   CHANGED=$(git diff --shortstat "origin/${PR_BASE}..HEAD" 2>/dev/null \
@@ -314,31 +330,66 @@ Split this into smaller issues, then remove \`Status/Blocked\` and the next tick
     exit 0
   fi
 
+  # Vacuous-test heuristic. Catches the dumbest false positive: test
+  # commands that exit 0 with zero tests run (jest --passWithNoTests,
+  # pytest with no collected items, etc). Not a complete check -- still
+  # relies on the project's test command being meaningful.
+  if grep -qiE 'tests:[[:space:]]+0[[:space:]]+(passed|failed|of|total)|no tests (ran|found|collected)|collected 0 items|(^|[^0-9])0 passing([^0-9]|$)|running 0 tests|ran 0 tests' "$CLAUDE_LOG"; then
+    # OUTCOME: blocked
+    log "outcome: blocked (vacuous tests: 0 tests reported)"
+    agent-block.sh "Tests ran but reported zero tests executed. Definition of done failed: the test suite must run at least one assertion. Either this repo's \`CLAUDE.md\` declares a meaningless test command, or the change skipped the relevant suite. Fix and remove \`Status/Blocked\` to re-queue."
+    exit 0
+  fi
+
   # OUTCOME: pr
   log "outcome: PR ($COMMITS commit(s), $CHANGED line(s))"
-  git push -u origin "$BRANCH"
 
-  PR_TITLE=$(git log -1 --pretty=%s)
-  if [ -f .git/PR_BODY.md ]; then
-    PR_BODY=$(cat .git/PR_BODY.md)
+  # Idempotent push: --force-with-lease covers the crash-then-retry
+  # case where a prior tick pushed but died before opening a PR. We
+  # only overwrite the remote ref we last fetched; if anyone else has
+  # touched it (human, another host), the push fails loud.
+  git push --force-with-lease -u origin "$BRANCH"
+
+  # Idempotent PR open: skip if one already exists for this branch.
+  EXISTING_PR=$(forgejo_find_pr_by_head "$FORGEJO_REPO" "$BRANCH")
+  if [ -n "$EXISTING_PR" ]; then
+    log "PR #$EXISTING_PR already open for $BRANCH -- skipping open"
   else
-    PR_BODY=$(git log "origin/${PR_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
-  fi
-  PR_BODY+=$'\n\nCloses #'"$ISSUE_NUMBER"
+    PR_TITLE=$(git log -1 --pretty=%s)
+    if [ -f .git/PR_BODY.md ]; then
+      PR_BODY=$(cat .git/PR_BODY.md)
+    else
+      PR_BODY=$(git log "origin/${PR_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
+    fi
+    PR_BODY+=$'\n\nCloses #'"$ISSUE_NUMBER"
 
-  forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$PR_TITLE" "$PR_BODY"
-  log "PR opened"
+    forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$PR_TITLE" "$PR_BODY"
+    log "PR opened"
+  fi
 
 else
+  # Noop-loop guard. If the bot already left a "no work produced"
+  # comment on this issue, this is the second attempt -- block rather
+  # than burn another tick on it.
+  NOOP_PREFIX="Igor completed with no work produced"
+  PRIOR_NOOPS=$(forgejo_count_bot_comments_matching \
+    "$FORGEJO_REPO" "$ISSUE_NUMBER" "$BOT_USER" "$NOOP_PREFIX")
+  if [ "${PRIOR_NOOPS:-0}" -ge 1 ]; then
+    # OUTCOME: blocked
+    log "outcome: blocked (repeated noop, prior count: $PRIOR_NOOPS)"
+    agent-block.sh "Igor produced no work on this issue twice. The issue is probably unclear, requires context Claude can't reach, or has a setup problem. Investigate, then remove \`Status/Blocked\` to re-queue."
+    exit 0
+  fi
+
   # OUTCOME: noop
-  log "outcome: no work produced"
+  log "outcome: no work produced (elapsed ${ELAPSED}s)"
   forgejo_unassign_all "$FORGEJO_REPO" "$ISSUE_NUMBER"
 
   TAIL="(no output captured)"
   [ -s "$CLAUDE_LOG" ] && TAIL=$(tail -c 4000 "$CLAUDE_LOG")
 
   forgejo_comment "$FORGEJO_REPO" "$ISSUE_NUMBER" \
-"Igor completed with no work produced and no blocker reported. Investigate. (claude exit: ${CLAUDE_EXIT})
+"${NOOP_PREFIX} and no blocker reported. Investigate. (claude exit: ${CLAUDE_EXIT}, elapsed ${ELAPSED}s)
 
 <details><summary>last bytes of claude output</summary>
 

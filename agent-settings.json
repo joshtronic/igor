@@ -61,7 +61,23 @@
       "Bash(curl:* | bash:*)",
       "Bash(curl:* | sh:*)",
       "Bash(wget:* | bash:*)",
-      "Bash(wget:* | sh:*)"
+      "Bash(wget:* | sh:*)",
+      "Bash(cat ~/.ssh:*)",
+      "Bash(cat /Users/*/.ssh:*)",
+      "Bash(cat /home/*/.ssh:*)",
+      "Bash(cat ~/.config/igor:*)",
+      "Bash(cat /Users/*/.config/igor:*)",
+      "Bash(cat /home/*/.config/igor:*)",
+      "Bash(cat /etc/shadow:*)",
+      "Bash(cat /etc/sudoers:*)",
+      "Read(~/.ssh/**)",
+      "Read(/Users/*/.ssh/**)",
+      "Read(/home/*/.ssh/**)",
+      "Read(~/.config/igor/**)",
+      "Read(/Users/*/.config/igor/**)",
+      "Read(/home/*/.config/igor/**)",
+      "Read(/etc/shadow)",
+      "Read(/etc/sudoers)"
     ]
   }
 }

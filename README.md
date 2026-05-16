@@ -212,6 +212,15 @@ Known trade-offs:
 - **One PR per repo.** While an Igor PR is open in a repo, the rest of that
   repo's claimable issues wait. Intentional throttle; merge or close to
   resume.
+- **Rate-limit contention with interactive use.** On Claude Max, Igor and
+  your own Claude Code sessions share the same rate budget. A pathological
+  tick can eat into the 5-hour window. Wall-clock and turn caps bound it,
+  but it's a real failure mode -- monitor the first week.
+- **Tests-vacuous-true.** Definition of done is "tests pass." A test command
+  that exits 0 with zero tests run (e.g. `jest --passWithNoTests`) is a
+  vacuous pass. The harness greps Claude's output for obvious zero-test
+  patterns and blocks, but the real defense is a meaningful test command
+  in `CLAUDE.md`. Repos with weak test discipline get a weaker bar.
 
 ## Status
 

@@ -93,6 +93,27 @@ forgejo_has_open_bot_pr() {
     | jq -e --arg u "$user" 'any(.[]; .user.login == $u)' >/dev/null
 }
 
+# Number on the open PR with the given head branch, or empty if none.
+# Used to make PR-open idempotent across harness crashes: if a previous
+# tick pushed but died before opening, we find the orphan branch already
+# has no PR -- but if it does have one (e.g. re-running by hand) we
+# don't duplicate.
+forgejo_find_pr_by_head() {
+  local repo="$1" head="$2"
+  _fj GET "/repos/${repo}/pulls?state=open&limit=50" \
+    | jq -r --arg h "$head" 'map(select(.head.ref == $h)) | first | .number // empty'
+}
+
+# Count of comments on this issue authored by the given user whose body
+# starts with the given prefix. Used by the noop-loop guard: a prior
+# "no work produced" comment from the bot means we've already retried.
+forgejo_count_bot_comments_matching() {
+  local repo="$1" number="$2" user="$3" prefix="$4"
+  _fj GET "/repos/${repo}/issues/${number}/comments" \
+    | jq --arg u "$user" --arg p "$prefix" \
+        '[.[] | select(.user.login == $u and (.body | startswith($p)))] | length'
+}
+
 # Add a label by name. Forgejo's API takes label IDs, so this resolves
 # name -> id with a single API call.
 forgejo_add_label() {
