@@ -3,7 +3,7 @@
 #
 # Requires in environment:
 #   FORGEJO_URL    -- e.g., https://git.sherver.org
-#   FORGEJO_TOKEN  -- bot's API token (loaded from $TICK_HOME/.env)
+#   FORGEJO_TOKEN  -- bot's API token (loaded from $IGOR_HOME/.env)
 #
 # Requires on PATH: curl, jq.
 
@@ -84,6 +84,54 @@ forgejo_open_pr() {
         '{title: $t, body: $b, head: $h, base: $ba}')" >/dev/null
 }
 
+# Returns 0 if the given user has any open PR in this repo, 1 otherwise.
+# Used to gate discovery: one Igor PR open in a repo pauses new claims
+# there until the human merges or closes.
+forgejo_has_open_bot_pr() {
+  local repo="$1" user="$2"
+  _fj GET "/repos/${repo}/pulls?state=open&limit=50" \
+    | jq -e --arg u "$user" 'any(.[]; .user.login == $u)' >/dev/null
+}
+
+# Count of open PRs authored by the authenticated user across every
+# accessible repo. Used by the tier-2 throttle: if Igor already has
+# too many PRs sitting in review, hold off on filing more maintenance
+# work.
+forgejo_count_bot_open_prs() {
+  _fj GET "/repos/issues/search?type=pulls&state=open&created=true&limit=50" \
+    | jq 'length // 0'
+}
+
+# Number on the open PR with the given head branch, or empty if none.
+# Used to make PR-open idempotent across harness crashes: if a previous
+# tick pushed but died before opening, we find the orphan branch already
+# has no PR -- but if it does have one (e.g. re-running by hand) we
+# don't duplicate.
+forgejo_find_pr_by_head() {
+  local repo="$1" head="$2"
+  _fj GET "/repos/${repo}/pulls?state=open&limit=50" \
+    | jq -r --arg h "$head" 'map(select(.head.ref == $h)) | first | .number // empty'
+}
+
+# Count of comments on this issue authored by the given user whose body
+# starts with the given prefix. Used by the noop-loop guard: a prior
+# "no work produced" comment from the bot means we've already retried.
+forgejo_count_bot_comments_matching() {
+  local repo="$1" number="$2" user="$3" prefix="$4"
+  _fj GET "/repos/${repo}/issues/${number}/comments" \
+    | jq --arg u "$user" --arg p "$prefix" \
+        '[.[] | select(.user.login == $u and (.body | startswith($p)))] | length'
+}
+
+# Returns 0 if a label with the given name exists on this repo, 1
+# otherwise. Used by repo-checks to verify Igor's required label set
+# is present before we try to apply any of them.
+forgejo_repo_has_label() {
+  local repo="$1" name="$2"
+  _fj GET "/repos/${repo}/labels" \
+    | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null 2>&1
+}
+
 # Add a label by name. Forgejo's API takes label IDs, so this resolves
 # name -> id with a single API call.
 forgejo_add_label() {
@@ -95,4 +143,100 @@ forgejo_add_label() {
   [ -n "$id" ] || { echo "label not found: $name" >&2; return 1; }
   _fj POST "/repos/${repo}/issues/${number}/labels" \
     "$(jq -n --argjson id "$id" '{labels: [$id]}')" >/dev/null
+}
+
+# Returns the authenticated user's login (the bot's username). Empty
+# on failure.
+forgejo_whoami() {
+  _fj GET "/user" | jq -r '.login // empty'
+}
+
+# Lists every repo the bot has push access to. Returns a JSON array of
+# {full_name, default_branch}. Paginated (50/page).
+forgejo_list_bot_repos() {
+  local page=1 batch count all='[]'
+  while batch=$(_fj GET "/user/repos?limit=50&page=${page}"); do
+    count=$(jq 'length' <<<"$batch")
+    [ "$count" -eq 0 ] && break
+    all=$(printf '%s\n%s' "$all" "$batch" | jq -s 'add')
+    [ "$count" -lt 50 ] && break
+    page=$((page + 1))
+  done
+  jq '[.[] | select(.permissions.push == true)
+        | {full_name, default_branch}]' <<<"$all"
+}
+
+# All open issues currently assigned to the authenticated user across
+# every accessible repo. Returns a JSON array. Used by the recovery
+# sweep -- one call replaces N per-repo calls.
+forgejo_my_assigned() {
+  _fj GET "/repos/issues/search?state=open&type=issues&assigned=true&limit=50"
+}
+
+# Returns 0 if the repo exists and the bot can access it, 1 otherwise.
+# Used by the bootstrap step to verify Igor's required repos
+# (<bot>/brain, optionally <bot>/website) are present before the
+# discovery loop runs.
+forgejo_repo_exists() {
+  _fj GET "/repos/$1" >/dev/null 2>&1
+}
+
+# -- File reads (no clone) --------------------------------------
+#
+# These let onboarding validation inspect a repo without cloning it.
+# All take <repo> = "<owner>/<name>".
+
+# Returns 0 if path exists in repo (file or dir), 1 otherwise.
+forgejo_repo_file_exists() {
+  local repo="$1" path="$2"
+  _fj GET "/repos/${repo}/contents/${path}" >/dev/null 2>&1
+}
+
+# Prints raw file contents on stdout (base64-decoded). Empty on miss.
+forgejo_repo_get_file() {
+  local repo="$1" path="$2"
+  local resp
+  resp=$(_fj GET "/repos/${repo}/contents/${path}" 2>/dev/null) || return 0
+  jq -r '.content // empty' <<<"$resp" | base64 -d 2>/dev/null || true
+}
+
+# Returns 0 if the given dir in the repo contains at least one file
+# matching the given regex. Useful for "does .forgejo/workflows have a
+# .yml file?" without enumerating each candidate path.
+forgejo_repo_dir_has_match() {
+  local repo="$1" dir="$2" name_re="$3"
+  local contents
+  contents=$(_fj GET "/repos/${repo}/contents/${dir}" 2>/dev/null) || return 1
+  jq -e --arg re "$name_re" 'any(.[]; .name | test($re))' <<<"$contents" >/dev/null 2>&1
+}
+
+# -- Issue lifecycle (open / reopen) ----------------------------
+
+# Open a new issue. Prints the new issue number to stdout. Labels are
+# applied separately via forgejo_add_label so missing labels degrade
+# gracefully instead of failing the whole call.
+forgejo_open_issue() {
+  local repo="$1" title="$2" body="$3"
+  _fj POST "/repos/${repo}/issues" \
+    "$(jq -n --arg t "$title" --arg b "$body" '{title: $t, body: $b}')" \
+    | jq -r '.number'
+}
+
+forgejo_reopen_issue() {
+  local repo="$1" number="$2"
+  _fj PATCH "/repos/${repo}/issues/${number}" \
+    '{"state": "open"}' >/dev/null
+}
+
+# Find the most recent bot-authored issue in this repo whose body
+# contains the given HTML-comment marker. Returns the issue JSON
+# (open or closed) or empty if none found. Used to dedupe auto-filed
+# onboarding tickets across ticks.
+forgejo_find_marked_issue() {
+  local repo="$1" bot="$2" marker="$3"
+  _fj GET "/repos/${repo}/issues?state=all&type=issues&limit=50" \
+    | jq -c --arg b "$bot" --arg m "$marker" '
+        [.[] | select(.user.login == $b and ((.body // "") | contains($m)))]
+        | sort_by(.created_at) | reverse | first // empty
+      '
 }

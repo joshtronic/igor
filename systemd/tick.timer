@@ -1,5 +1,5 @@
 [Unit]
-Description=Tick timer -- fires the next tick
+Description=Igor tick timer -- fires the next tick
 
 [Timer]
 # First tick a couple of minutes after boot.

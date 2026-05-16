@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# uninstall.sh -- Stop and disable Tick's systemd timer on this host.
+# uninstall.sh -- Stop and disable Igor's systemd timer on this host.
 #
-# Leaves projects/, agent-settings.json, .env, etc. alone -- this is
-# the inverse of install.sh only. Pair with `rm -rf` on the repo if
-# you want a full teardown.
+# Leaves the clone (with .env) and ~/.local/state/igor/ alone -- this
+# is the inverse of install.sh only. Pair with `rm -rf` on those for
+# a full teardown.
 
 set -uo pipefail
 

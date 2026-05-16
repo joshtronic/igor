@@ -10,7 +10,7 @@
 # Usage: agent-block.sh "<reason>"
 #
 # Requires in environment (exported by tick.sh):
-#   ISSUE_NUMBER, FORGEJO_REPO, FORGEJO_URL, FORGEJO_TOKEN, TICK_HOME
+#   ISSUE_NUMBER, FORGEJO_REPO, FORGEJO_URL, FORGEJO_TOKEN, IGOR_HOME
 
 set -euo pipefail
 
@@ -18,10 +18,10 @@ REASON="${1:?usage: agent-block.sh \"<reason>\"}"
 
 : "${ISSUE_NUMBER:?ISSUE_NUMBER not set -- are you being run from a tick?}"
 : "${FORGEJO_REPO:?FORGEJO_REPO not set}"
-: "${TICK_HOME:?TICK_HOME not set}"
+: "${IGOR_HOME:?IGOR_HOME not set}"
 
 # shellcheck source=../lib/forgejo.sh
-. "$TICK_HOME/lib/forgejo.sh"
+. "$IGOR_HOME/lib/forgejo.sh"
 
 forgejo_comment    "$FORGEJO_REPO" "$ISSUE_NUMBER" "$REASON"
 forgejo_add_label  "$FORGEJO_REPO" "$ISSUE_NUMBER" "Status/Blocked"

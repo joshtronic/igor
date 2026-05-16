@@ -1,10 +1,10 @@
 [Unit]
-Description=Tick -- claim and work one Forgejo issue across known projects
+Description=Igor -- one tick: claim and work one Forgejo issue across known projects
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/Code/tick
-ExecStart=%h/Code/tick/bin/tick.sh
+WorkingDirectory=%h/.local/share/igor
+ExecStart=%h/.local/share/igor/bin/tick.sh
 Nice=10

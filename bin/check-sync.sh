@@ -13,12 +13,12 @@
 
 set -euo pipefail
 
-TICK_HOME="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$TICK_HOME"
+IGOR_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$IGOR_HOME"
 
 FAIL=0
 
-# ── Outcome sentinels ──────────────────────────────────────────
+# -- Outcome sentinels ------------------------------------------
 
 tick_outcomes=$(grep -oE '# OUTCOME: [a-z-]+'   bin/tick.sh 2>/dev/null \
                 | awk '{print $3}' | sort -u)
@@ -26,38 +26,38 @@ agents_outcomes=$(grep -oE 'OUTCOME: [a-z-]+ ' AGENTS.md   2>/dev/null \
                 | awk '{print $2}' | sort -u)
 
 if [ -z "$tick_outcomes" ]; then
-  echo "✗ no OUTCOME sentinels found in bin/tick.sh"
+  echo "x no OUTCOME sentinels found in bin/tick.sh"
   FAIL=1
 fi
 if [ -z "$agents_outcomes" ]; then
-  echo "✗ no OUTCOME sentinels found in AGENTS.md"
+  echo "x no OUTCOME sentinels found in AGENTS.md"
   FAIL=1
 fi
 
 if [ -n "$tick_outcomes" ] && [ -n "$agents_outcomes" ]; then
   if [ "$tick_outcomes" != "$agents_outcomes" ]; then
-    echo "✗ outcome sets diverge"
+    echo "x outcome sets diverge"
     echo "  bin/tick.sh: $(echo "$tick_outcomes" | tr '\n' ' ')"
     echo "  AGENTS.md:   $(echo "$agents_outcomes" | tr '\n' ' ')"
     diff <(echo "$tick_outcomes") <(echo "$agents_outcomes") | sed 's/^/    /'
     FAIL=1
   else
-    echo "✓ outcomes match: $(echo "$tick_outcomes" | tr '\n' ' ')"
+    echo "+ outcomes match: $(echo "$tick_outcomes" | tr '\n' ' ')"
   fi
 fi
 
-# ── Referenced helpers ─────────────────────────────────────────
+# -- Referenced helpers -----------------------------------------
 
 helpers=$(grep -oE 'agent-[a-z-]+\.sh' AGENTS.md 2>/dev/null | sort -u || true)
 for h in $helpers; do
   if [ ! -f "bin/$h" ]; then
-    echo "✗ AGENTS.md references bin/$h but it does not exist"
+    echo "x AGENTS.md references bin/$h but it does not exist"
     FAIL=1
   elif [ ! -x "bin/$h" ]; then
-    echo "✗ bin/$h exists but is not executable"
+    echo "x bin/$h exists but is not executable"
     FAIL=1
   else
-    echo "✓ bin/$h exists and is executable"
+    echo "+ bin/$h exists and is executable"
   fi
 done
 

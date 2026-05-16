@@ -1,28 +1,42 @@
 #!/usr/bin/env bash
-# install.sh -- One-time setup for Tick on this host.
+# install.sh -- One-time systemd setup for Igor on this host.
 #
-# Copies the global tick.service / tick.timer units into the user's
-# systemd directory and enables the timer. Idempotent -- safe to run
-# again after editing the templates.
+# Symlinks the unit files into the user systemd dir (so `git pull`
+# updates them with a subsequent `systemctl --user daemon-reload`)
+# and enables the timer. Idempotent; safe to re-run.
 #
-# Adding a project does NOT require running this. Just drop a new
-# file at projects/<name>.conf and the next tick will pick it up.
+# Local dev does NOT need this -- `cp .env.example .env`, edit, run
+# `bin/tick.sh` directly. install.sh is only for the systemd-managed
+# install.
+#
+# Adding a repo to Igor's care does NOT require running this -- add
+# the bot user as a collaborator on the repo and the next tick
+# discovers it (and onboards if needed).
 
 set -euo pipefail
 
-TICK_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+IGOR_HOME="$(cd "$(dirname "$0")/.." && pwd)"
 UNIT_DIR="$HOME/.config/systemd/user"
 
-mkdir -p "$UNIT_DIR"
+if [ ! -f "$IGOR_HOME/.env" ]; then
+  echo "no $IGOR_HOME/.env -- run \`cp .env.example .env\`, edit it, then re-run install" >&2
+  exit 1
+fi
 
-echo "-> copying unit templates to $UNIT_DIR"
-cp "$TICK_HOME/systemd/tick.service" "$UNIT_DIR/"
-cp "$TICK_HOME/systemd/tick.timer"   "$UNIT_DIR/"
+mkdir -p "$UNIT_DIR"
+ln -sf "$IGOR_HOME/systemd/tick.service" "$UNIT_DIR/tick.service"
+ln -sf "$IGOR_HOME/systemd/tick.timer"   "$UNIT_DIR/tick.timer"
 
 systemctl --user daemon-reload
-
-echo "-> enabling tick.timer"
 systemctl --user enable --now tick.timer
-
-echo
 systemctl --user list-timers tick.timer --no-pager || true
+
+cat <<EOF
+
+-> next steps
+
+  1. bin/validate.sh -- confirm setup (env, Forgejo, bot identity).
+  2. For each repo: ensure labels exist (Agent, Status/Blocked,
+     Status/Needs More Info, Priority/High) and run
+     bin/validate-repo.sh <owner>/<name>.
+EOF
