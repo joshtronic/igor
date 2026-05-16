@@ -38,7 +38,7 @@ A timer fires `bin/tick.sh`. Per tick:
 
 | What Claude did                 | What Igor does                                                |
 |---------------------------------|---------------------------------------------------------------|
-| Made commits                    | Push branch, open PR with `Closes #N`                         |
+| Made commits                    | Push branch, open PR with `Closes #N` + deps audit            |
 | Closed the issue with a comment | Treat as a report -- log and clean up                         |
 | Applied `Status/Blocked`        | Log, clean up, wait for the human                             |
 | Nothing                         | Unassign, leave a "no work" comment with Claude's tail output |
@@ -221,6 +221,14 @@ Known trade-offs:
   vacuous pass. The harness greps Claude's output for obvious zero-test
   patterns and blocks, but the real defense is a meaningful test command
   in `CLAUDE.md`. Repos with weak test discipline get a weaker bar.
+- **Supply-chain alerting, not prevention.** Every PR Igor opens gets a
+  harness-generated `## Dependencies changed` section listing manifest /
+  lockfile diffs with line counts -- so a `npm install evil-package` is
+  impossible to miss in review. The harness writes that section, not
+  Claude, so the thing under review can't omit it. Igor does **not**
+  sandbox installs or scan package contents -- a malicious package could
+  still run install scripts during the work. The defense is human PR
+  review armed with the audit.
 
 ## Status
 

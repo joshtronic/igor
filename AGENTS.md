@@ -60,7 +60,12 @@ harness will push the branch and open a PR with `Closes
   proceed but mention the size in your final commit message.
 - If your work spans multiple commits, write `.git/PR_BODY.md` with
   a concise summary of what changed and why. The harness uses this
-  as the PR body (falling back to commit log if absent).
+  as the PR body (falling back to commit log if absent). Do not write
+  a "Dependencies changed" section yourself -- the harness appends one
+  automatically from the diff when manifest or lockfile files changed,
+  and that section is authoritative. You can describe deps in your
+  narrative if it's relevant context, but the audit list is the
+  harness's job.
 - Run the project's tests before you exit. The project's `CLAUDE.md`
   declares the command. Tests passing on your branch is the
   definition of done.

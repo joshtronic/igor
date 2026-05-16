@@ -98,6 +98,28 @@ repo_path_for() { echo "$IGOR_CODE_ROOT/$(basename "$1")"; }
 # Worktree key: slash-free, unique per repo+issue.
 worktree_key() { printf '%s-%s' "${1//\//_}" "$2"; }
 
+# Build a "Dependencies changed" section from the diff. Empty output
+# when no manifest/lockfile files changed. Trust boundary: the harness
+# writes this, not Claude -- a thing under review must not be able to
+# omit its own audit trail.
+build_deps_section() {
+  local base="$1" pattern files f counts
+  pattern='^(.*/)?(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|requirements[^/]*\.txt|Pipfile(\.lock)?|pyproject\.toml|poetry\.lock|uv\.lock|Cargo\.(toml|lock)|go\.(mod|sum)|Gemfile(\.lock)?|composer\.(json|lock))$'
+  files=$(git diff --name-only "origin/${base}..HEAD" | grep -E "$pattern" || true)
+  [ -z "$files" ] && return 0
+
+  printf '\n\n## Dependencies changed\n\n'
+  printf 'Manifest or lockfile changes detected. Review carefully -- transitive\n'
+  printf 'dependencies in lockfiles are the largest supply-chain attack surface.\n\n'
+  printf 'Files changed:\n'
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    counts=$(git diff --numstat "origin/${base}..HEAD" -- "$f" \
+      | awk '{printf "+%s -%s", $1, $2}')
+    printf -- '- `%s` (%s)\n' "$f" "$counts"
+  done <<<"$files"
+}
+
 # ── Recovery: clear orphaned bot assignments ──────────────────
 #
 # Invariant: we hold the global flock, so no other Igor is currently
@@ -361,6 +383,7 @@ Split this into smaller issues, then remove \`Status/Blocked\` and the next tick
     else
       PR_BODY=$(git log "origin/${PR_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
     fi
+    PR_BODY+=$(build_deps_section "$PR_BASE")
     PR_BODY+=$'\n\nCloses #'"$ISSUE_NUMBER"
 
     forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$PR_TITLE" "$PR_BODY"
