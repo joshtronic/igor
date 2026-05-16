@@ -111,6 +111,49 @@ ensure_repo_local() {
   fi
 }
 
+# -- Discretionary-work state (tier 2 cooldown) ----------------
+#
+# Tracks per-repo "last maintained" timestamps so we don't run
+# maintenance on the same repo every empty tick. Lives at
+# $IGOR_STATE_DIR/discretionary-state.json. Regenerable -- losing
+# it just makes every repo eligible again.
+
+discretionary_state_file() { echo "$IGOR_STATE_DIR/discretionary-state.json"; }
+
+maintenance_last_run() {
+  local repo="$1" state_file
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || { echo ""; return; }
+  jq -r --arg r "$repo" '.maintenance[$r] // ""' "$state_file" 2>/dev/null || echo ""
+}
+
+maintenance_mark_done() {
+  local repo="$1" state_file tmp ts
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg r "$repo" --arg t "$ts" \
+    '.maintenance //= {} | .maintenance[$r] = $t' "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
+# Eligible if never run or last run >= random(5,7) days ago. Random
+# rolls per check (not per-repo-persistent) so cadence drifts off
+# clockwork patterns naturally.
+maintenance_eligible() {
+  local repo="$1" last cooldown_days last_epoch now age_days
+  last=$(maintenance_last_run "$repo")
+  [ -z "$last" ] && return 0
+  cooldown_days=$(( 5 + RANDOM % 3 ))
+  last_epoch=$(date -u -d "$last" +%s 2>/dev/null \
+    || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last" +%s 2>/dev/null \
+    || echo 0)
+  now=$(date -u +%s)
+  age_days=$(( (now - last_epoch) / 86400 ))
+  [ "$age_days" -ge "$cooldown_days" ]
+}
+
 # Worktree key: slash-free, unique per repo+issue.
 worktree_key() { printf '%s-%s' "${1//\//_}" "$2"; }
 
@@ -239,6 +282,133 @@ done < <(jq -c '.[]' <<<"$REPOS")
 
 if [ -z "$WINNER" ]; then
   log "no claimable work across any repo"
+
+  # -- Tier 2: discretionary maintenance pass ------------------
+  #
+  # When nothing's claimable, optionally fire one maintenance pass
+  # on a random eligible repo. Three throttles:
+  #
+  #   (1) IGOR_DISCRETIONARY_RATE -- probability we even consider
+  #       maintenance this tick. Default 0 (off). Range 0.0-1.0.
+  #   (2) IGOR_MAX_OPEN_PRS -- if the bot already has this many open
+  #       PRs across all repos, don't add more findings to the queue.
+  #   (3) per-repo cooldown -- 5-7 days random since last pass.
+  #
+  # Findings flow same as journal: Claude writes
+  # .git/IGOR_MAINTENANCE_FINDINGS.md, harness reads it and files an
+  # Agent-labeled issue for follow-up work.
+
+  DISCRETIONARY_RATE="${IGOR_DISCRETIONARY_RATE:-0}"
+  MAX_OPEN_PRS="${IGOR_MAX_OPEN_PRS:-3}"
+
+  RATE_X1000=$(awk "BEGIN { printf \"%d\", $DISCRETIONARY_RATE * 1000 }")
+  ROLL=$(( RANDOM % 1000 ))
+
+  if [ "$ROLL" -ge "$RATE_X1000" ]; then
+    log "discretionary: dice $ROLL/1000 vs rate $RATE_X1000 -- skip"
+    exit 0
+  fi
+
+  OPEN_PRS=$(forgejo_count_bot_open_prs 2>/dev/null || echo 0)
+  if [ "$OPEN_PRS" -ge "$MAX_OPEN_PRS" ]; then
+    log "discretionary: $OPEN_PRS open PRs (cap $MAX_OPEN_PRS) -- holding off"
+    exit 0
+  fi
+
+  ELIGIBLE=()
+  while read -r repo_line; do
+    [ -z "$repo_line" ] && continue
+    R_NAME=$(jq -r '.full_name' <<<"$repo_line")
+    if maintenance_eligible "$R_NAME"; then
+      ELIGIBLE+=("$R_NAME")
+    fi
+  done < <(jq -c '.[]' <<<"$REPOS")
+
+  if [ "${#ELIGIBLE[@]}" -eq 0 ]; then
+    log "discretionary: no repos eligible for maintenance"
+    exit 0
+  fi
+
+  TARGET="${ELIGIBLE[RANDOM % ${#ELIGIBLE[@]}]}"
+  log "discretionary: maintenance pass on $TARGET"
+
+  ensure_repo_local "$TARGET"
+  TARGET_PATH=$(repo_path_for "$TARGET")
+
+  # Detached-HEAD worktree on the repo's current default branch.
+  # No feature branch -- maintenance doesn't commit; it writes
+  # findings to a known path that the harness reads after exit.
+  TARGET_BASE=$(cd "$TARGET_PATH" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+  TARGET_BASE="${TARGET_BASE:-master}"
+  M_WORKTREE="$IGOR_STATE_DIR/worktrees/maintenance-${TARGET//\//_}-$$"
+  mkdir -p "$IGOR_STATE_DIR/worktrees"
+  (cd "$TARGET_PATH" && git fetch --prune origin)
+  (cd "$TARGET_PATH" && git worktree add --detach "$M_WORKTREE" "origin/${TARGET_BASE}")
+
+  M_CLEANUP() {
+    [ -d "$M_WORKTREE" ] && (cd "$TARGET_PATH" && git worktree remove --force "$M_WORKTREE") 2>/dev/null || true
+  }
+  trap M_CLEANUP EXIT
+
+  cd "$M_WORKTREE"
+
+  M_USER_MSG=$(cat <<EOF
+You are doing a discretionary maintenance pass on $TARGET.
+
+No human is waiting on you. Your job:
+
+  1. Read this repo's CLAUDE.md. Look for a "Maintenance" section
+     declaring routine checks (security audit, dependency freshness,
+     link checks, SEO scan, anything the repo defines).
+  2. Run those checks.
+  3. If anything notable surfaces -- vulnerabilities, outdated deps,
+     broken links, regressions -- write a markdown summary to
+     .git/IGOR_MAINTENANCE_FINDINGS.md in this worktree. The harness
+     will file an Agent-labeled issue with that content as the body
+     so tier-1 work picks it up on a future tick.
+  4. If nothing notable, skip the findings file and exit cleanly.
+
+Don't commit fixes during a maintenance pass -- file an issue and
+let normal work flow address them on a future tick. Same content
+rules as always: identity guardrails apply.
+EOF
+)
+
+  BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
+  if [ -f "$BRAIN_PATH/identity.md" ] && [ -f "$BRAIN_PATH/index.md" ]; then
+    M_SYSTEM_PROMPT=$(cat "$BRAIN_PATH/identity.md" "$BRAIN_PATH/index.md" "$IGOR_HOME/AGENTS.md")
+  else
+    M_SYSTEM_PROMPT=$(cat "$IGOR_HOME/AGENTS.md")
+  fi
+
+  log "invoking claude for maintenance (timeout ${IGOR_TIMEOUT})"
+  M_LOG="$M_WORKTREE/.git/claude-output.log"
+  M_START=$(date +%s)
+  set +e
+  timeout --kill-after=30s "$IGOR_TIMEOUT" \
+    claude \
+      --model "$IGOR_MODEL" \
+      --append-system-prompt "$M_SYSTEM_PROMPT" \
+      --settings "$IGOR_HOME/agent-settings.json" \
+      --max-turns 50 \
+      --print "$M_USER_MSG" 2>&1 | tee "$M_LOG"
+  M_EXIT=${PIPESTATUS[0]}
+  set -e
+  log "claude exited $M_EXIT after $(( $(date +%s) - M_START ))s"
+
+  FINDINGS="$M_WORKTREE/.git/IGOR_MAINTENANCE_FINDINGS.md"
+  if [ -s "$FINDINGS" ]; then
+    M_TITLE="Maintenance pass $(date -u +%Y-%m-%d): findings"
+    M_BODY=$(cat "$FINDINGS")
+    M_NUM=$(forgejo_open_issue "$TARGET" "$M_TITLE" "$M_BODY")
+    forgejo_add_label "$TARGET" "$M_NUM" "Agent" 2>/dev/null \
+      || log "warning: could not apply Agent label to #$M_NUM on $TARGET"
+    log "maintenance: filed #$M_NUM on $TARGET"
+  else
+    log "maintenance: no findings on $TARGET"
+  fi
+
+  maintenance_mark_done "$TARGET"
   exit 0
 fi
 

@@ -30,6 +30,15 @@ A timer fires `bin/tick.sh`. Per tick:
    `agent-block.sh` from inside the worktree.)
 7. **Work.** Make a worktree, invoke Claude with the project's `CLAUDE.md`
    plus the universal `AGENTS.md`, react to whatever Claude leaves behind.
+8. **Discretionary maintenance (tier 2).** If steps 4-7 found no
+   claimable work, optionally fire one maintenance pass on a random
+   eligible repo. Gated by `IGOR_DISCRETIONARY_RATE` (default off),
+   `IGOR_MAX_OPEN_PRS` (default 3), and per-repo 5-7 day random
+   cooldown. Claude reads the repo's `CLAUDE.md` Maintenance section,
+   runs the declared checks, writes findings to
+   `.git/IGOR_MAINTENANCE_FINDINGS.md`. Harness files an Agent-labeled
+   issue with those findings if non-empty, then updates the cooldown
+   state at `~/.local/state/igor/discretionary-state.json`.
 
 | What Claude did                 | What Igor does                                                |
 |---------------------------------|---------------------------------------------------------------|

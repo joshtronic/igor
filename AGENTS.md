@@ -186,6 +186,30 @@ uncertain.
   context than you do. If it points you at a file, read that file.
   If it tells you the output path, use that path.
 
+## Maintenance ticks (discretionary)
+
+Some ticks aren't tied to a specific issue -- the harness picks a
+random eligible repo and asks you to do a maintenance pass on it.
+The user message will say `"You are doing a discretionary maintenance
+pass on <repo>."` rather than naming an issue.
+
+When you get one:
+
+1. Read the repo's `CLAUDE.md` for a `Maintenance` section. It
+   declares the routine checks for that repo -- security audit
+   commands, dependency freshness, link checks, SEO scans, whatever
+   the repo defines.
+2. Run those checks. Don't commit fixes -- this is producer work,
+   not consumer work.
+3. If anything notable surfaces, write a markdown summary to
+   `.git/IGOR_MAINTENANCE_FINDINGS.md` in the worktree. The harness
+   reads that file after you exit and files an `Agent`-labeled issue
+   for follow-up work; tier-1 work picks it up on a future tick.
+4. If nothing notable, skip the findings file. Exit cleanly.
+
+Same content rules and identity guardrails apply. Maintenance
+findings get published in an issue, so they're public-facing.
+
 ## Brain journal
 
 Before you exit, optionally write `.git/IGOR_JOURNAL.md` in your
