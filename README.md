@@ -24,10 +24,17 @@ A timer fires `bin/tick.sh`. Per tick:
    re-queueing" comment and is unassigned. Nothing slips through a midnight
    crash.
 4. **Discovery.** List every repo the bot has push access to (one API call).
-   Skip any repo with an open Igor-authored PR -- one PR at a time per repo,
-   so the human can review without a backlog forming behind them. For the
-   rest, query each for the oldest claimable issue (`Agent`-labeled, no
-   assignee, not `Status/Blocked`). Pick the globally oldest.
+   For each:
+   - If we haven't cloned it yet, run onboarding validation via the Forgejo
+     API. Repos that fail get an auto-filed `Status/Needs More Info` ticket
+     listing what's missing (or a reopen on the existing one), and are
+     excluded from discovery until the human closes the ticket.
+   - If there's an open Igor-authored PR, skip -- one PR at a time per repo
+     so the human can review without a backlog forming behind them.
+   - Otherwise, query for the oldest claimable issue (`Agent`-labeled, no
+     assignee, not `Status/Blocked`).
+
+   Pick the globally oldest across all eligible repos.
 5. **Claim and clone.** Assign the issue to the bot. If the repo isn't cloned
    locally yet, clone it to `~/Code/<repo>` via SSH.
 6. **Preflight.** Verify `CLAUDE.md` exists at the repo root. If not, block
@@ -80,10 +87,13 @@ bin/
 ├── agent-report.sh          # Claude calls this for no-diff outcomes
 ├── check-sync.sh            # CI lint: AGENTS.md <-> tick.sh contract
 ├── validate.sh              # validate env + Forgejo connectivity + bot perms
+├── validate-repo.sh         # audit a single repo (or --all) for readiness
 ├── install.sh               # one-time: scaffold config, install units
 └── uninstall.sh             # stop, disable, remove units
 
-lib/forgejo.sh               # Forgejo API helpers
+lib/
+├── forgejo.sh               # Forgejo API helpers
+└── validate-repo.sh         # repo-readiness checks (sourced by tick + audit)
 
 systemd/                     # user units (no @ instance)
 ├── tick.service
@@ -157,27 +167,46 @@ Schedule override goes in a drop-in at
 - Schedule: `systemctl --user list-timers tick.timer`
 - Logs: `journalctl --user -u tick.service -f`
 - Force a tick now: `systemctl --user start tick.service`
+- Audit a repo's readiness: `bin/validate-repo.sh <owner>/<name>` (or
+  `bin/validate-repo.sh --all` to sweep every accessible repo)
 
 ### Granting Igor a repo
 
-There is no per-project config. To put a repo under Igor's care, do three
-things in Forgejo (once per repo):
+There is no per-project config. To put a repo under Igor's care:
 
 1. Add the bot user as a collaborator with **write** permission.
-2. Ensure the `Agent` and `Status/Blocked` labels exist on the repo (Igor
-   reads them by name).
-3. Put a `CLAUDE.md` at the repo root with project conventions (test
-   commands, code style, gotchas, anything Claude needs to be useful here).
-   Igor refuses to invoke Claude without one and posts a blocker comment
-   explaining why.
+2. Ensure the labels Igor reads exist on the repo: `Agent`, `Status/Blocked`,
+   `Status/Needs More Info`, `Priority/High`.
+3. Bring the repo to Igor's readiness bar:
+   - `CLAUDE.md` at root with project conventions (test commands, code
+     style, gotchas, anything Claude needs to be useful here)
+   - A README at root (`README.md`/`.rst`/`.txt`/no-ext all accepted)
+   - **Tests**: a discoverable way to run them -- `"test"` script in
+     `package.json`, `pytest.ini` / `[tool.pytest]` in `pyproject.toml`,
+     `test:` target in a `Makefile`, or a Cargo/Go project (implicit)
+   - **Lint**: a config -- `.eslintrc*`, `.markdownlint*`, `.stylelintrc*`,
+     `.flake8` / `[tool.ruff]`/`[tool.black]` in `pyproject.toml`,
+     `.golangci.yml`, Cargo `[lints]`, `.shellcheckrc`
+   - **CI**: a workflow file at `.forgejo/workflows/<name>.yml` (or under
+     `.gitea/workflows/`) that runs the lint + test commands
+4. Optionally, run `bin/validate-repo.sh <owner>/<name>` from your Igor
+   install to confirm the readiness bar before the first tick.
 
-That's it. The next tick discovers the repo via the bot's token, clones it
-to `~/Code/<repo>` if it's missing locally, and starts working any
-`Agent`-labeled issues.
+That's it. The next tick validates the repo via the Forgejo API. If any
+checks fail, Igor files a `Status/Needs More Info` ticket listing what's
+missing and skips the repo. Fix the gaps, close the ticket, and the next
+tick re-validates and clones if ready (or reopens the ticket with what's
+still wrong).
 
-To stop Igor from working a repo: revoke the bot's collaborator role, or stop
-applying the `Agent` label. The local clone at `~/Code/<repo>` is yours to
-keep or `rm -rf` as you see fit.
+The readiness bar is the same for every repo -- a one-page blog and a
+production service both need lint + tests + CI. Static sites can satisfy
+"tests" with `eleventy --dryrun` plus markdownlint or htmltest; the bar
+isn't language-specific, it's about having *some* automation that catches
+regressions.
+
+To stop Igor from working a repo: revoke the bot's collaborator role, or
+stop applying the `Agent` label. The local clone at `~/Code/<repo>` is
+yours to keep or `rm -rf` as you see fit.
 
 ## Scope and trade-offs
 

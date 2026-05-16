@@ -44,6 +44,8 @@ FORGEJO_SSH_HOST="${FORGEJO_SSH_HOST:-$(echo "$FORGEJO_URL" | sed -E 's|^[a-z]+:
 
 # shellcheck source=lib/forgejo.sh
 . "$IGOR_HOME/lib/forgejo.sh"
+# shellcheck source=lib/validate-repo.sh
+. "$IGOR_HOME/lib/validate-repo.sh"
 
 # ── Resolve bot identity ──────────────────────────────────────
 
@@ -97,6 +99,65 @@ repo_path_for() { echo "$IGOR_CODE_ROOT/$(basename "$1")"; }
 
 # Worktree key: slash-free, unique per repo+issue.
 worktree_key() { printf '%s-%s' "${1//\//_}" "$2"; }
+
+# Onboarding ticket lifecycle: filed when a repo fails validation,
+# closed by the human when they've fixed it, reopened on re-validation
+# failure. The marker keeps it auto-discoverable across ticks without
+# needing a title prefix.
+ONBOARDING_MARKER='<!-- igor:onboarding -->'
+
+# Open / reopen / no-op the onboarding ticket on a failing repo.
+# Idempotent: existing open ticket -> silent skip; existing closed
+# ticket and still failing -> reopen with updated checklist; nothing
+# -> file fresh.
+handle_onboarding_failure() {
+  local repo="$1" report="$2"
+
+  local body
+  body=$(cat <<EOF
+${ONBOARDING_MARKER}
+
+Igor refuses to clone this repo until it has the scaffolding to support
+unattended work. Required checks:
+
+${report}
+
+Bring the repo to standard, then close this ticket -- the next tick will
+re-validate and either proceed or reopen this with what's still missing.
+
+This ticket is auto-managed by Igor. Do not edit the title or remove the
+HTML comment marker at the top of the body.
+EOF
+)
+
+  local existing num state
+  existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$ONBOARDING_MARKER")
+
+  if [ -z "$existing" ] || [ "$existing" = "null" ] || [ "$existing" = "empty" ]; then
+    log "onboarding: filing fresh ticket on $repo"
+    num=$(forgejo_open_issue "$repo" "Repo not ready for Igor: missing scaffolding" "$body")
+    forgejo_add_label "$repo" "$num" "Status/Needs More Info" 2>/dev/null \
+      || log "warning: could not apply 'Status/Needs More Info' on $repo (label missing?)"
+    forgejo_add_label "$repo" "$num" "Priority/High" 2>/dev/null \
+      || log "warning: could not apply 'Priority/High' on $repo (label missing?)"
+    return
+  fi
+
+  num=$(jq -r '.number' <<<"$existing")
+  state=$(jq -r '.state' <<<"$existing")
+
+  if [ "$state" = "open" ]; then
+    log "onboarding: existing open ticket #${num} on $repo, skipping silently"
+    return
+  fi
+
+  log "onboarding: re-validation failed on $repo, reopening #${num}"
+  forgejo_comment "$repo" "$num" \
+"Re-validation still failing. Updated checklist:
+
+${report}"
+  forgejo_reopen_issue "$repo" "$num"
+}
 
 # Build a "Dependencies changed" section from the diff. Empty output
 # when no manifest/lockfile files changed. Trust boundary: the harness
@@ -166,6 +227,20 @@ while read -r repo_line; do
   [ -z "$repo_line" ] && continue
   R_NAME=$(jq -r '.full_name' <<<"$repo_line")
   R_BASE=$(jq -r '.default_branch' <<<"$repo_line")
+  R_PATH=$(repo_path_for "$R_NAME")
+
+  # Onboarding gate: for repos we haven't cloned yet, validate via API
+  # before we look at any issues there. Failing repos get an auto-filed
+  # ticket (or a reopen on the existing one) and are excluded from
+  # discovery until the human closes the ticket.
+  if [ ! -d "$R_PATH/.git" ]; then
+    if ! R_REPORT=$(validate_repo_via_api "$R_NAME"); then
+      log "onboarding check failed on $R_NAME"
+      handle_onboarding_failure "$R_NAME" "$R_REPORT"
+      continue
+    fi
+    log "onboarding check passed on $R_NAME"
+  fi
 
   # One open Igor PR per repo. Skip until the human deals with it.
   if forgejo_has_open_bot_pr "$R_NAME" "$BOT_USER"; then

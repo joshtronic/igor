@@ -154,3 +154,63 @@ forgejo_list_bot_repos() {
 forgejo_my_assigned() {
   _fj GET "/repos/issues/search?state=open&type=issues&assigned=true&limit=50"
 }
+
+# ── File reads (no clone) ──────────────────────────────────────
+#
+# These let onboarding validation inspect a repo without cloning it.
+# All take <repo> = "<owner>/<name>".
+
+# Returns 0 if path exists in repo (file or dir), 1 otherwise.
+forgejo_repo_file_exists() {
+  local repo="$1" path="$2"
+  _fj GET "/repos/${repo}/contents/${path}" >/dev/null 2>&1
+}
+
+# Prints raw file contents on stdout (base64-decoded). Empty on miss.
+forgejo_repo_get_file() {
+  local repo="$1" path="$2"
+  local resp
+  resp=$(_fj GET "/repos/${repo}/contents/${path}" 2>/dev/null) || return 0
+  jq -r '.content // empty' <<<"$resp" | base64 -d 2>/dev/null || true
+}
+
+# Returns 0 if the given dir in the repo contains at least one file
+# matching the given regex. Useful for "does .forgejo/workflows have a
+# .yml file?" without enumerating each candidate path.
+forgejo_repo_dir_has_match() {
+  local repo="$1" dir="$2" name_re="$3"
+  local contents
+  contents=$(_fj GET "/repos/${repo}/contents/${dir}" 2>/dev/null) || return 1
+  jq -e --arg re "$name_re" 'any(.[]; .name | test($re))' <<<"$contents" >/dev/null 2>&1
+}
+
+# ── Issue lifecycle (open / reopen) ────────────────────────────
+
+# Open a new issue. Prints the new issue number to stdout. Labels are
+# applied separately via forgejo_add_label so missing labels degrade
+# gracefully instead of failing the whole call.
+forgejo_open_issue() {
+  local repo="$1" title="$2" body="$3"
+  _fj POST "/repos/${repo}/issues" \
+    "$(jq -n --arg t "$title" --arg b "$body" '{title: $t, body: $b}')" \
+    | jq -r '.number'
+}
+
+forgejo_reopen_issue() {
+  local repo="$1" number="$2"
+  _fj PATCH "/repos/${repo}/issues/${number}" \
+    '{"state": "open"}' >/dev/null
+}
+
+# Find the most recent bot-authored issue in this repo whose body
+# contains the given HTML-comment marker. Returns the issue JSON
+# (open or closed) or empty if none found. Used to dedupe auto-filed
+# onboarding tickets across ticks.
+forgejo_find_marked_issue() {
+  local repo="$1" bot="$2" marker="$3"
+  _fj GET "/repos/${repo}/issues?state=all&type=issues&limit=50" \
+    | jq -c --arg b "$bot" --arg m "$marker" '
+        [.[] | select(.user.login == $b and ((.body // "") | contains($m)))]
+        | sort_by(.created_at) | reverse | first // empty
+      '
+}
