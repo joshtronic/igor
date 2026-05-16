@@ -186,6 +186,33 @@ uncertain.
   context than you do. If it points you at a file, read that file.
   If it tells you the output path, use that path.
 
+## Brain journal
+
+Before you exit, optionally write `.git/IGOR_JOURNAL.md` in your
+worktree with a short reflection on the tick:
+
+- What you did (one or two sentences)
+- What you learned or noticed worth remembering
+- Any topic that surfaced that might be worth writing about later --
+  the discretionary-work loop may pick from these to pitch website
+  posts down the road.
+
+Keep it short. Two paragraphs at most. This isn't a status report;
+it's a journal entry. Write in first person, in your own voice.
+
+The harness reads this file after you exit and appends it to your
+brain's `journal/YYYY-MM-DD.md` with a timestamp. You don't commit
+or push the journal yourself -- the harness handles that.
+
+If nothing about this tick is worth remembering (a one-line fix
+you've seen a hundred times), skip the journal file. Empty journals
+are fine. Don't fabricate insight.
+
+Same content rules as identity.md's "What I won't put in writing"
+section apply -- the journal is real publication, just to your own
+brain. No secrets, no personal hostility toward specific people, no
+private repo specifics.
+
 ## Exit
 
 When done, simply exit. The harness inspects the worktree and

@@ -372,6 +372,38 @@ set -e
 ELAPSED=$(( $(date +%s) - START_TS ))
 log "claude exited $CLAUDE_EXIT (elapsed ${ELAPSED}s)"
 
+# -- Brain journal: append Claude's reflection if present ------
+#
+# Claude optionally writes .git/IGOR_JOURNAL.md before exit. The
+# harness owns the brain commit -- Claude's worktree never reaches
+# across to brain. Best-effort: if pull/push fails, log it but
+# don't fail the tick over a journal entry.
+
+JOURNAL_SRC="$WORKTREE/.git/IGOR_JOURNAL.md"
+if [ -s "$JOURNAL_SRC" ]; then
+  BRAIN_LOCAL="$IGOR_REPO_ROOT/${BOT_USER}/brain"
+  JOURNAL_DATE=$(date -u +%Y-%m-%d)
+  JOURNAL_FILE="$BRAIN_LOCAL/journal/${JOURNAL_DATE}.md"
+  JOURNAL_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  log "journal: appending tick reflection to brain/journal/${JOURNAL_DATE}.md"
+  mkdir -p "$BRAIN_LOCAL/journal"
+
+  (cd "$BRAIN_LOCAL" && git pull --rebase --quiet origin master 2>/dev/null) \
+    || log "warning: brain pull failed; appending to local copy anyway"
+
+  {
+    printf '\n## %s -- %s#%s\n\n' "$JOURNAL_TS" "$FORGEJO_REPO" "$ISSUE_NUMBER"
+    cat "$JOURNAL_SRC"
+  } >> "$JOURNAL_FILE"
+
+  (cd "$BRAIN_LOCAL" \
+    && git add "journal/${JOURNAL_DATE}.md" \
+    && git commit --quiet -m "journal: ${FORGEJO_REPO}#${ISSUE_NUMBER}" \
+    && git push --quiet origin master) \
+    || log "warning: brain commit/push failed; entry may be local-only"
+fi
+
 # -- Determine outcome -----------------------------------------
 
 cd "$WORKTREE"
