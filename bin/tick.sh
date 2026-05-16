@@ -193,6 +193,35 @@ maintenance_eligible() {
   [ "$age_days" -ge "$cooldown_days" ]
 }
 
+# Tier-3 (self-directed website) cooldown. Tracks the last time a
+# tier-3 PR was opened on the website so Igor doesn't ship multiple
+# posts/page-edits per day. Default 24 hours, overridable via
+# IGOR_TIER3_COOLDOWN_HOURS.
+tier3_eligible() {
+  local last cooldown_hours last_epoch now age_hours state_file
+  cooldown_hours="${IGOR_TIER3_COOLDOWN_HOURS:-24}"
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || return 0
+  last=$(jq -r '.tier3.website // ""' "$state_file" 2>/dev/null || echo "")
+  [ -z "$last" ] && return 0
+  last_epoch=$(date -u -d "$last" +%s 2>/dev/null \
+    || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last" +%s 2>/dev/null \
+    || echo 0)
+  now=$(date -u +%s)
+  age_hours=$(( (now - last_epoch) / 3600 ))
+  [ "$age_hours" -ge "$cooldown_hours" ]
+}
+
+tier3_mark_done() {
+  local state_file tmp ts
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg t "$ts" '.tier3 //= {} | .tier3.website = $t' "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
 # Worktree key: slash-free, unique per repo+issue.
 worktree_key() { printf '%s-%s' "${1//\//_}" "$2"; }
 
@@ -386,6 +415,11 @@ if [ -z "$WINNER" ]; then
       exit 0
     fi
 
+    if ! tier3_eligible; then
+      log "discretionary: tier 3 already ran on website within cooldown -- holding off"
+      exit 0
+    fi
+
     log "discretionary: self-directed work on $W_REPO"
 
     W_BASE=$(cd "$W_PATH" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
@@ -527,6 +561,9 @@ EOF
       forgejo_open_pr "$W_REPO" "$W_BRANCH" "$W_BASE" "$W_PR_TITLE" "$W_PR_BODY"
       log "discretionary: PR opened on $W_REPO"
     fi
+
+    # Record the ship time so the cooldown gate fires for the next tick.
+    tier3_mark_done
 
     exit 0
   fi
