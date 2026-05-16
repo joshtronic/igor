@@ -61,11 +61,12 @@ harness will push the branch and open a PR with `Closes
 - If your work spans multiple commits, write `.git/PR_BODY.md` with
   a concise summary of what changed and why. The harness uses this
   as the PR body (falling back to commit log if absent).
-- Run the project's tests or build if they are quick and would catch
-  regressions in what you changed. The project's `CLAUDE.md` should
-  say what to run.
-- If a test or build fails after your changes, fix it. If you cannot
-  fix it, block (see below). Do not push broken work.
+- Run the project's tests before you exit. The project's `CLAUDE.md`
+  declares the command. Tests passing on your branch is the
+  definition of done.
+- If tests fail after your changes and you cannot fix them, block.
+  Do not exit with commits and failing tests -- the harness pushes
+  whatever you leave behind.
 
 ### 2. Report (analysis tasks with no code change)
 

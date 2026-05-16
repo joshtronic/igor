@@ -23,8 +23,10 @@ A timer fires `bin/tick.sh`. Per tick:
    previous interrupted run gets a "previous tick was interrupted --
    re-queueing" comment and is unassigned. Nothing slips through a midnight
    crash.
-4. **Discovery.** List every repo the bot has push access to (one API call),
-   then query each for the oldest claimable issue (`Agent`-labeled, no
+4. **Discovery.** List every repo the bot has push access to (one API call).
+   Skip any repo with an open Igor-authored PR -- one PR at a time per repo,
+   so the human can review without a backlog forming behind them. For the
+   rest, query each for the oldest claimable issue (`Agent`-labeled, no
    assignee, not `Status/Blocked`). Pick the globally oldest.
 5. **Claim and clone.** Assign the issue to the bot. If the repo isn't cloned
    locally yet, clone it to `~/Code/<repo>` via SSH.
@@ -204,6 +206,12 @@ Known trade-offs:
   issue first.
 - **Recovery, not resume.** An interrupted tick re-queues its issue; the next
   tick starts fresh.
+- **Scope cap.** A branch over 10 commits or 800 changed lines gets blocked
+  instead of shipped, with a comment listing the touched files. Split the
+  ticket and re-queue.
+- **One PR per repo.** While an Igor PR is open in a repo, the rest of that
+  repo's claimable issues wait. Intentional throttle; merge or close to
+  resume.
 
 ## Status
 

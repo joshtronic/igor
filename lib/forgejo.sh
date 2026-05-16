@@ -84,6 +84,15 @@ forgejo_open_pr() {
         '{title: $t, body: $b, head: $h, base: $ba}')" >/dev/null
 }
 
+# Returns 0 if the given user has any open PR in this repo, 1 otherwise.
+# Used to gate discovery: one Igor PR open in a repo pauses new claims
+# there until the human merges or closes.
+forgejo_has_open_bot_pr() {
+  local repo="$1" user="$2"
+  _fj GET "/repos/${repo}/pulls?state=open&limit=50" \
+    | jq -e --arg u "$user" 'any(.[]; .user.login == $u)' >/dev/null
+}
+
 # Add a label by name. Forgejo's API takes label IDs, so this resolves
 # name -> id with a single API call.
 forgejo_add_label() {

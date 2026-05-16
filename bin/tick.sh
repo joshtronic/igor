@@ -140,6 +140,13 @@ while read -r repo_line; do
   [ -z "$repo_line" ] && continue
   R_NAME=$(jq -r '.full_name' <<<"$repo_line")
   R_BASE=$(jq -r '.default_branch' <<<"$repo_line")
+
+  # One open Igor PR per repo. Skip until the human deals with it.
+  if forgejo_has_open_bot_pr "$R_NAME" "$BOT_USER"; then
+    log "skipping $R_NAME -- open Igor PR present"
+    continue
+  fi
+
   ISSUE=$(forgejo_find_claimable "$R_NAME" || true)
   [ -n "$ISSUE" ] && [ "$ISSUE" != "null" ] && [ "$ISSUE" != "empty" ] || continue
   CREATED=$(jq -r '.created_at' <<<"$ISSUE")
@@ -289,8 +296,26 @@ elif [ "$HAS_BLOCKED" = "true" ]; then
   log "outcome: blocked (Status/Blocked applied by agent)"
 
 elif [ "$COMMITS" -gt 0 ]; then
+  # Scope cap. Big diffs and long commit chains get blocked instead of
+  # shipped; the human splits the work into smaller issues.
+  CHANGED=$(git diff --shortstat "origin/${PR_BASE}..HEAD" 2>/dev/null \
+    | awk '{ for (i=1;i<=NF;i++) if ($i ~ /insertion|deletion/) s+=$(i-1); print s+0 }')
+  CHANGED=${CHANGED:-0}
+  if [ "$COMMITS" -gt 10 ] || [ "$CHANGED" -gt 800 ]; then
+    # OUTCOME: blocked
+    log "outcome: blocked (scope: $COMMITS commits, $CHANGED lines)"
+    FILES=$(git diff --name-only "origin/${PR_BASE}..HEAD" | head -30 | sed 's/^/  - /')
+    agent-block.sh "Scope exceeded: this branch reached **${COMMITS} commits / ${CHANGED} changed lines**, over the per-issue cap (10 commits / 800 lines).
+
+Files touched (first 30):
+${FILES}
+
+Split this into smaller issues, then remove \`Status/Blocked\` and the next tick will re-claim what's left."
+    exit 0
+  fi
+
   # OUTCOME: pr
-  log "outcome: PR ($COMMITS commit(s))"
+  log "outcome: PR ($COMMITS commit(s), $CHANGED line(s))"
   git push -u origin "$BRANCH"
 
   PR_TITLE=$(git log -1 --pretty=%s)
