@@ -17,9 +17,11 @@ bin/install.sh                 # systemd setup
 bin/validate.sh                # confirm setup
 ```
 
-For each repo Igor should work, add the bot user as a collaborator and
-ensure it passes `bin/validate-repo.sh <owner>/<name>`. See
-[docs/onboarding-a-repo.md](docs/onboarding-a-repo.md) for the readiness bar.
+For each repo Igor should work: add the bot user as a collaborator, set
+up labels (Forgejo's Advanced label template + a custom `Agent` label),
+and confirm via `bin/validate-repo.sh <owner>/<name>`. See
+[docs/onboarding-a-repo.md](docs/onboarding-a-repo.md) for the full
+readiness bar.
 
 ## Docs
 

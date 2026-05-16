@@ -3,8 +3,13 @@
 There is no per-project config. To put a repo under Igor's care:
 
 1. Add the bot user as a collaborator with **write** permission.
-2. Ensure the labels Igor reads exist on the repo: `Agent`, `Status/Blocked`,
-   `Status/Needs More Info`, `Priority/High`.
+2. Set up the labels Igor reads. Three of them come from Forgejo's
+   **Advanced** label template; the fourth is custom:
+   - From the Advanced template (repo Settings -> Labels -> load
+     template -> Advanced): `Status/Blocked`, `Status/Needs More Info`,
+     `Priority/High`. (The Advanced template also brings `Kind/*` and
+     other useful families; harmless to keep them.)
+   - Create manually as a new label: `Agent`.
 3. Bring the repo to Igor's readiness bar:
    - `CLAUDE.md` at root with project conventions (test commands, code
      style, gotchas, anything Claude needs to be useful here)

@@ -44,8 +44,11 @@ label and Igor picks it up.
 
 ## Labels
 
-Two labels carry the state machine. `Status/Blocked` is Forgejo's default;
-only `Agent` is custom.
+Two labels carry the state machine for agent-work tickets. `Status/Blocked`
+comes from Forgejo's Advanced label template; `Agent` is custom (created
+per-repo). Onboarding-failure tickets also use `Status/Needs More Info` and
+`Priority/High`, both from the Advanced template. See
+[onboarding-a-repo.md](onboarding-a-repo.md) for how to set them up.
 
 | State               | Labels                     | Assignee  | Open?  |
 |---------------------|----------------------------|-----------|--------|

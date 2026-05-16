@@ -168,7 +168,7 @@ validate_repo_via_api() {
     _emit 0 "Required labels present (Agent, Status/Blocked, Status/Needs More Info, Priority/High)" ""
   else
     _emit 1 "Required labels present" \
-      "create missing label(s): ${labels_missing}"
+      "create missing label(s): ${labels_missing} -- the Status/* and Priority/* labels come from Forgejo's Advanced label template (Settings -> Labels -> load template); the \`Agent\` label is custom"
   fi
 
   [ "$fail" -eq 0 ]
