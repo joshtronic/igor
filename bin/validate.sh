@@ -82,5 +82,39 @@ else
   fail "bot has push access to at least one repo" \
        "add $bot as a collaborator with write permission on a repo"
 fi
+echo
+
+# -- SSH connectivity to git endpoint ---------------------------
+#
+# HTTPS-to-the-API working (above) doesn't mean SSH-for-git-clone
+# works. Different port, different auth (key vs token), different
+# failure modes. Test SSH explicitly.
+
+echo "== SSH =="
+
+SSH_TARGET="${FORGEJO_SSH_HOST:-$(echo "$FORGEJO_URL" | sed -E 's|^[a-z]+://([^/:]+).*|\1|')}"
+SSH_HOST_ONLY="$SSH_TARGET"
+SSH_PORT_FLAG=()
+if [[ "$SSH_TARGET" == *:* ]]; then
+  SSH_HOST_ONLY="${SSH_TARGET%:*}"
+  SSH_PORT_FLAG=("-p" "${SSH_TARGET##*:}")
+fi
+
+ssh_out=$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 \
+  -o StrictHostKeyChecking=accept-new \
+  "${SSH_PORT_FLAG[@]}" "git@${SSH_HOST_ONLY}" 2>&1 || true)
+
+if grep -qE 'Connection timed out|No route to host|Could not resolve hostname|Connection refused' <<<"$ssh_out"; then
+  fail "Forgejo SSH endpoint reachable ($SSH_TARGET)" \
+       "endpoint unreachable. If Forgejo SSH is on a non-default port, set FORGEJO_SSH_HOST=host:port in .env, or add a Host entry to ~/.ssh/config"
+elif grep -qE 'Permission denied \(publickey\)' <<<"$ssh_out"; then
+  fail "Forgejo SSH authenticates as bot ($SSH_TARGET)" \
+       "SSH key not recognized by Forgejo. ssh-keygen -t ed25519 if needed, then add the .pub to the bot user's Forgejo SSH keys"
+elif grep -qiE 'authenticated|Hi |welcome' <<<"$ssh_out"; then
+  pass "Forgejo SSH reachable + authenticates as bot ($SSH_TARGET)"
+else
+  fail "Forgejo SSH check ($SSH_TARGET)" \
+       "unexpected response: $(echo "$ssh_out" | head -1)"
+fi
 
 exit $FAIL
