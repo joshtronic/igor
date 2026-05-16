@@ -94,6 +94,6 @@ cat <<EOF
 
   1. bin/validate.sh -- confirm setup (env, Forgejo, bot identity).
   2. For each repo: ensure labels exist (Agent, Status/Blocked,
-     Status/Needs More Info, Priority/High) and run
+     Status/Needs More Info, Priority/Critical) and run
      bin/validate-repo.sh <owner>/<name>.
 EOF
