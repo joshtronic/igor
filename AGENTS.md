@@ -243,9 +243,12 @@ When you get one:
    work.
 4. If anything notable surfaces, write a markdown summary to
    `.igor/IGOR_MAINTENANCE_FINDINGS.md` in the worktree. The harness
-   reads that file after you exit and files an `Agent`-labeled
-   issue for follow-up work; tier-1 work picks it up on a future
-   tick.
+   reads that file after you exit and files a `Status/Needs More
+   Info`-labeled issue with the findings as the body. The human
+   reads it, decides which findings are worth fixing, and removes
+   `Status/Needs More Info` + adds `Agent` to enter the work queue
+   for specific ones. Your job is producing the report; the human
+   gates whether you do the work.
 5. If nothing notable, skip the findings file. Exit cleanly.
 
 Same content rules and identity guardrails apply. Maintenance

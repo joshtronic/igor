@@ -599,9 +599,13 @@ EOF
     M_TITLE="Maintenance pass $(date -u +%Y-%m-%d): findings"
     M_BODY=$(cat "$FINDINGS")
     M_NUM=$(forgejo_open_issue "$TARGET" "$M_TITLE" "$M_BODY")
-    forgejo_add_label "$TARGET" "$M_NUM" "Agent" 2>/dev/null \
-      || log "warning: could not apply Agent label to #$M_NUM on $TARGET"
-    log "maintenance: filed #$M_NUM on $TARGET"
+    # Status/Needs More Info, not Agent. Maintenance findings are
+    # reports for the human to triage. Once they decide which ones
+    # are worth fixing, they remove Status/Needs More Info and add
+    # Agent to enter the work queue. Same gate as onboarding tickets.
+    forgejo_add_label "$TARGET" "$M_NUM" "Status/Needs More Info" 2>/dev/null \
+      || log "warning: could not apply 'Status/Needs More Info' on #$M_NUM ($TARGET)"
+    log "maintenance: filed #$M_NUM on $TARGET (awaiting human triage)"
   else
     log "maintenance: no findings on $TARGET"
   fi
