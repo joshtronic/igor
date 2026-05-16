@@ -113,7 +113,10 @@ ssh_clone_url() {
   fi
 }
 
-# Idempotent clone-if-missing. Creates the owner subdir as needed.
+# Idempotent clone-if-missing, pull-if-present. Creates the owner
+# subdir as needed. Pulls existing clones so brain identity changes
+# and website content updates propagate to Igor on every tick (not
+# only when something else triggers a fetch).
 ensure_repo_local() {
   local repo="$1" local_path
   local_path=$(repo_path_for "$repo")
@@ -121,6 +124,9 @@ ensure_repo_local() {
     log "bootstrap: cloning $repo to $local_path"
     mkdir -p "$(dirname "$local_path")"
     git clone "$(ssh_clone_url "$repo")" "$local_path"
+  else
+    (cd "$local_path" && git pull --rebase --quiet origin 2>/dev/null) \
+      || log "warning: pull of $repo failed; using stale local copy"
   fi
 }
 
