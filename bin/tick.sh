@@ -100,6 +100,19 @@ cleanup_agent_branches() {
 # keeps in their own workspace.
 repo_path_for() { echo "$IGOR_REPO_ROOT/$1"; }
 
+# Build the SSH clone URL for a given <owner>/<name>. Handles
+# FORGEJO_SSH_HOST in "host" form (default port 22) or "host:port"
+# form (non-default port via ssh:// URL syntax). The shorthand
+# git@host:path syntax can't express ports; ssh:// can.
+ssh_clone_url() {
+  local repo="$1"
+  if [[ "$FORGEJO_SSH_HOST" == *:* ]]; then
+    echo "ssh://git@${FORGEJO_SSH_HOST}/${repo}.git"
+  else
+    echo "git@${FORGEJO_SSH_HOST}:${repo}.git"
+  fi
+}
+
 # Idempotent clone-if-missing. Creates the owner subdir as needed.
 ensure_repo_local() {
   local repo="$1" local_path
@@ -107,7 +120,7 @@ ensure_repo_local() {
   if [ ! -d "$local_path/.git" ]; then
     log "bootstrap: cloning $repo to $local_path"
     mkdir -p "$(dirname "$local_path")"
-    git clone "git@${FORGEJO_SSH_HOST}:${repo}.git" "$local_path"
+    git clone "$(ssh_clone_url "$repo")" "$local_path"
   fi
 }
 
@@ -630,7 +643,7 @@ forgejo_assign "$FORGEJO_REPO" "$ISSUE_NUMBER" "$BOT_USER"
 # -- Clone if needed -------------------------------------------
 
 if [ ! -d "$REPO_PATH/.git" ]; then
-  CLONE_URL="git@${FORGEJO_SSH_HOST}:${FORGEJO_REPO}.git"
+  CLONE_URL="$(ssh_clone_url "$FORGEJO_REPO")"
   log "cloning $CLONE_URL -> $REPO_PATH"
   mkdir -p "$(dirname "$REPO_PATH")"
   if ! git clone "$CLONE_URL" "$REPO_PATH"; then
