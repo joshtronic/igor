@@ -270,7 +270,8 @@ while read -r repo_line; do
   if [ ! -d "$R_PATH/.git" ]; then
     if ! R_REPORT=$(validate_repo_via_api "$R_NAME"); then
       log "onboarding check failed on $R_NAME"
-      handle_onboarding_failure "$R_NAME" "$BOT_USER" "$R_REPORT"
+      handle_onboarding_failure "$R_NAME" "$BOT_USER" "$R_REPORT" \
+        || log "warning: onboarding handler failed on $R_NAME (likely token scope or repo perms); continuing"
       continue
     fi
     log "onboarding check passed on $R_NAME"
