@@ -22,21 +22,20 @@ set -euo pipefail
 # -- Paths ------------------------------------------------------
 
 IGOR_HOME="${IGOR_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
-IGOR_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/igor"
 IGOR_STATE_DIR="${IGOR_STATE_DIR:-$HOME/.local/state/igor}"
 IGOR_CODE_ROOT="${IGOR_CODE_ROOT:-$HOME/Code}"
 
 # -- Secrets ----------------------------------------------------
 
-if [ -f "$IGOR_CONFIG_DIR/.env" ]; then
+if [ -f "$IGOR_HOME/.env" ]; then
   set -a
   # shellcheck source=/dev/null
-  . "$IGOR_CONFIG_DIR/.env"
+  . "$IGOR_HOME/.env"
   set +a
 fi
-: "${CLAUDE_CODE_OAUTH_TOKEN:?CLAUDE_CODE_OAUTH_TOKEN must be set (via $IGOR_CONFIG_DIR/.env)}"
-: "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set (via $IGOR_CONFIG_DIR/.env)}"
-: "${FORGEJO_URL:?FORGEJO_URL must be set (via $IGOR_CONFIG_DIR/.env)}"
+: "${CLAUDE_CODE_OAUTH_TOKEN:?CLAUDE_CODE_OAUTH_TOKEN must be set (via $IGOR_HOME/.env)}"
+: "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set (via $IGOR_HOME/.env)}"
+: "${FORGEJO_URL:?FORGEJO_URL must be set (via $IGOR_HOME/.env)}"
 IGOR_TIMEOUT="${IGOR_TIMEOUT:-60m}"
 FORGEJO_SSH_HOST="${FORGEJO_SSH_HOST:-$(echo "$FORGEJO_URL" | sed -E 's|^[a-z]+://([^/:]+).*|\1|')}"
 

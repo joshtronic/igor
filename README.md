@@ -107,10 +107,10 @@ On the host (deployment-specific, not in the repo):
 
 ```
 ~/.local/share/igor/                 # the runtime git checkout (this repo)
-~/.config/igor/.env                  # secrets, chmod 600 -- the only config
+~/.local/share/igor/.env             # secrets, chmod 600 -- the only config
 ~/.local/state/igor/                 # worktrees, flock
 ~/Code/<repo>/                       # per-repo clones (created on demand)
-~/.config/systemd/user/tick.{service,timer}
+~/.config/systemd/user/tick.{service,timer}   # symlinks into the clone
 ```
 
 ## Setup
@@ -119,7 +119,7 @@ On the host (deployment-specific, not in the repo):
 
 Claude Max via `CLAUDE_CODE_OAUTH_TOKEN`. No per-call API billing -- that's
 the whole point. The bot's Forgejo token lives in the same file. Both at
-`~/.config/igor/.env`, chmod 600 (seeded from `.env.example` by `install.sh`).
+`.env` in the Igor clone (next to `.env.example`), chmod 600.
 
 ### Bot user
 
@@ -138,22 +138,24 @@ the systemd units and owns the SSH key). The Forgejo user needs:
   push `agent/N-<slug>` branches and `Closes #N`-linked merges work uniformly.
 
 The server account owns the runtime checkout at `~/.local/share/igor/`, its
-config at `~/.config/igor/`, its state at `~/.local/state/igor/`, and the
-per-repo clones at `~/Code/<repo>/`. Git authorship on all bot commits and PRs
-attributes to this user.
+state at `~/.local/state/igor/`, and the per-repo clones at `~/Code/<repo>/`.
+Git authorship on all bot commits and PRs attributes to this user.
 
 ### Install
 
-Clone the repo into the runtime location, then run install.sh:
+Clone the repo, drop the `.env` in place, then run install.sh:
 
 ```sh
 git clone <forgejo-url>/igor ~/.local/share/igor
-~/.local/share/igor/bin/install.sh
+cd ~/.local/share/igor
+cp .env.example .env && chmod 600 .env
+$EDITOR .env                           # fill in tokens
+bin/install.sh
 ```
 
-`install.sh` scaffolds `~/.config/igor/` (seeds `.env` from `.env.example`),
-copies the systemd units, and enables `tick.timer`. Edit `~/.config/igor/.env`
-with real tokens before the first tick, then verify the setup:
+`install.sh` symlinks the systemd unit files into `~/.config/systemd/user/`
+(so future `git pull`s update them with a `daemon-reload`) and enables
+`tick.timer`. Verify the setup:
 
 ```sh
 bin/validate.sh   # checks env, Forgejo reachability, bot identity, accessible repos
@@ -167,6 +169,21 @@ bin/uninstall.sh   # stops, disables, removes units (leaves config + state)
 
 Schedule override goes in a drop-in at
 `~/.config/systemd/user/tick.timer.d/override.conf`.
+
+### Local dev / manual runs
+
+`install.sh` is only for the systemd-managed install. To run a tick
+manually (against a dev clone or to test changes):
+
+```sh
+git clone <forgejo-url>/igor ~/Code/igor
+cd ~/Code/igor
+cp .env.example .env && chmod 600 .env && $EDITOR .env
+bin/tick.sh
+```
+
+Same `.env` shape, same scripts. flock prevents collision with any
+running systemd-managed tick.
 
 ### Operating
 

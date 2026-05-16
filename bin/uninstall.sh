@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # uninstall.sh -- Stop and disable Igor's systemd timer on this host.
 #
-# Leaves ~/.config/igor/ (config, .env) and ~/.local/state/igor/ alone --
-# this is the inverse of install.sh only. Pair with `rm -rf` on those
-# dirs and the code checkout for a full teardown.
+# Leaves the clone (with .env) and ~/.local/state/igor/ alone -- this
+# is the inverse of install.sh only. Pair with `rm -rf` on those for
+# a full teardown.
 
 set -uo pipefail
 

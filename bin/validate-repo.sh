@@ -11,12 +11,11 @@
 set -uo pipefail
 
 IGOR_HOME="$(cd "$(dirname "$0")/.." && pwd)"
-IGOR_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/igor"
 
-if [ -f "$IGOR_CONFIG_DIR/.env" ]; then
+if [ -f "$IGOR_HOME/.env" ]; then
   set -a
   # shellcheck source=/dev/null
-  . "$IGOR_CONFIG_DIR/.env"
+  . "$IGOR_HOME/.env"
   set +a
 fi
 
