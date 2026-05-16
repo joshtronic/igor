@@ -60,14 +60,42 @@ harness will push the branch and open a PR with `Closes
   blocks at these limits and asks the human to split the ticket. If
   you're going to blow through, block early with `agent-block.sh`
   rather than doing work that won't ship.
-- If your work spans multiple commits, write `.git/PR_BODY.md` with
-  a concise summary of what changed and why. The harness uses this
-  as the PR body (falling back to commit log if absent). Do not write
-  a "Dependencies changed" section yourself -- the harness appends one
-  automatically from the diff when manifest or lockfile files changed,
-  and that section is authoritative. You can describe deps in your
-  narrative if it's relevant context, but the audit list is the
-  harness's job.
+- Write `.git/PR_BODY.md` with two markdown checklists: "What this
+  PR does" and "Test plan". The harness uses this verbatim as the
+  PR body (then appends a deps audit + `Closes #N`). Forgejo renders
+  `[ ]` as clickable checkboxes so the human can tick items off as
+  they review.
+
+  Pre-check (`[x]`) anything you verified during the run -- tests
+  passing, lint passing, scripted assertions. Leave unchecked (`[ ]`)
+  steps that need a human to run -- manual UI testing, comparing
+  against an external system, eyeballing output. Be specific:
+  "trigger `Y` via the CLI, observe expected output" beats "test
+  Y". If no manual steps are needed (pure refactor, doc fix), the
+  Test plan section can be `- [x] No manual verification needed; CI
+  is the gate`.
+
+  Example:
+
+  ```markdown
+  ## What this PR does
+
+  - [x] Add `X` to handle the `Y` case
+  - [x] Wire `Z` to call the new helper
+  - [x] Tests covering happy path and timeout
+
+  ## Test plan
+
+  - [x] `npm test` passes locally
+  - [ ] Manual: trigger `Y` via the CLI, observe expected output
+  - [ ] Manual: confirm `Z` still works when `X` is absent
+  ```
+
+  Do not write a "Dependencies changed" section yourself -- the
+  harness appends one automatically from the diff when manifest or
+  lockfile files changed, and that section is authoritative. You
+  can describe deps in your narrative if it's relevant context, but
+  the audit list is the harness's job.
 - **Use a TDD loop when the repo supports tests.** If the project's
   `CLAUDE.md` declares a real test command (npm test, pytest, cargo
   test, go test, etc.), follow the cycle:
