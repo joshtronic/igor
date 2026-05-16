@@ -154,8 +154,20 @@ maintenance_mark_done() {
 # Eligible if never run or last run >= random(5,7) days ago. Random
 # rolls per check (not per-repo-persistent) so cadence drifts off
 # clockwork patterns naturally.
+#
+# Also: skip repos with an open onboarding ticket. Tier 1 refused to
+# clone them for cause; tier 2 shouldn't sneak around that gate by
+# cloning + auditing a repo Igor already declared not-ready.
 maintenance_eligible() {
-  local repo="$1" last cooldown_days last_epoch now age_days
+  local repo="$1" last cooldown_days last_epoch now age_days existing
+
+  existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$ONBOARDING_MARKER" 2>/dev/null)
+  if [ -n "$existing" ] && [ "$existing" != "null" ] && [ "$existing" != "empty" ]; then
+    if [ "$(jq -r '.state' <<<"$existing" 2>/dev/null)" = "open" ]; then
+      return 1
+    fi
+  fi
+
   last=$(maintenance_last_run "$repo")
   [ -z "$last" ] && return 0
   cooldown_days=$(( 5 + RANDOM % 3 ))
