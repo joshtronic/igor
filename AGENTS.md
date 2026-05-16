@@ -82,13 +82,16 @@ harness will push the branch and open a PR with `Closes
   single commit -- that defeats the audit trail.
 - **Skip the TDD loop when there's no test command.** Static sites
   and repos with only lint can't TDD meaningfully. One commit is fine
-  there; lint still has to pass.
-- Run the project's tests before you exit. The project's `CLAUDE.md`
-  declares the command. Tests passing on your branch is the
-  definition of done.
-- If tests fail after your changes and you cannot fix them, block.
-  Do not exit with commits and failing tests -- the harness pushes
-  whatever you leave behind.
+  there; lint is still the definition of done.
+- **Run the project's tests AND lint before you exit.** The project's
+  `CLAUDE.md` declares both commands. Tests + lint both passing on
+  your branch is the definition of done.
+- If tests or lint fail after your changes and you cannot fix them,
+  block. Do not exit with commits and failing tests or lint -- the
+  harness pushes whatever you leave behind.
+- Lint-catch fixes go in their own commit (`style:` or `chore:`),
+  same audit-trail rule as test vs implementation -- don't bury style
+  fixes inside a feature commit.
 
 ### 2. Report (analysis tasks with no code change)
 

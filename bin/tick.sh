@@ -33,9 +33,10 @@ if [ -f "$IGOR_HOME/.env" ]; then
   . "$IGOR_HOME/.env"
   set +a
 fi
-: "${CLAUDE_CODE_OAUTH_TOKEN:?CLAUDE_CODE_OAUTH_TOKEN must be set (via $IGOR_HOME/.env)}"
+: "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set (via $IGOR_HOME/.env)}"
 : "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set (via $IGOR_HOME/.env)}"
 : "${FORGEJO_URL:?FORGEJO_URL must be set (via $IGOR_HOME/.env)}"
+: "${IGOR_MODEL:?IGOR_MODEL must be set (via $IGOR_HOME/.env)}"
 IGOR_TIMEOUT="${IGOR_TIMEOUT:-60m}"
 FORGEJO_SSH_HOST="${FORGEJO_SSH_HOST:-$(echo "$FORGEJO_URL" | sed -E 's|^[a-z]+://([^/:]+).*|\1|')}"
 
@@ -312,6 +313,7 @@ START_TS=$(date +%s)
 set +e
 timeout --kill-after=30s "$IGOR_TIMEOUT" \
   claude \
+    --model "$IGOR_MODEL" \
     --append-system-prompt "$(cat "$IGOR_HOME/AGENTS.md")" \
     --settings "$IGOR_HOME/agent-settings.json" \
     --max-turns 50 \

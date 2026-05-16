@@ -140,10 +140,12 @@ Known trade-offs:
 - **One PR per repo.** While an Igor PR is open in a repo, the rest of that
   repo's claimable issues wait. Intentional throttle; merge or close to
   resume.
-- **Rate-limit contention with interactive use.** On Claude Max, Igor and
-  your own Claude Code sessions share the same rate budget. A pathological
-  tick can eat into the 5-hour window. Wall-clock and turn caps bound it,
-  but it's a real failure mode -- monitor the first week.
+- **Metered cost per tick.** Igor runs against the Anthropic API (not the
+  Max plan -- that's for interactive Claude Code), so every tick costs
+  money in proportion to context size and tool use. Wall-clock and turn
+  caps bound the worst case, but watch the Console for the first week to
+  calibrate. Prompt caching on the stable `AGENTS.md` + per-repo
+  `CLAUDE.md` portion drops repeat input cost ~90%.
 - **Tests-vacuous-true.** Definition of done is "tests pass." A test command
   that exits 0 with zero tests run (e.g. `jest --passWithNoTests`) is a
   vacuous pass. The harness greps Claude's output for obvious zero-test

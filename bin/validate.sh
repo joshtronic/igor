@@ -21,9 +21,10 @@ fail() { printf '  \033[31mx\033[0m %s%s\n' "$1" "${2:+ -- $2}"; FAIL=1; }
 # -- Global env -------------------------------------------------
 
 echo "== env =="
-[ -n "${FORGEJO_URL:-}" ]             && pass "FORGEJO_URL set"             || fail "FORGEJO_URL set"             "missing from .env"
-[ -n "${FORGEJO_TOKEN:-}" ]           && pass "FORGEJO_TOKEN set"           || fail "FORGEJO_TOKEN set"           "missing from .env"
-[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && pass "CLAUDE_CODE_OAUTH_TOKEN set" || fail "CLAUDE_CODE_OAUTH_TOKEN set" "missing from .env"
+[ -n "${FORGEJO_URL:-}" ]       && pass "FORGEJO_URL set"       || fail "FORGEJO_URL set"       "missing from .env"
+[ -n "${FORGEJO_TOKEN:-}" ]     && pass "FORGEJO_TOKEN set"     || fail "FORGEJO_TOKEN set"     "missing from .env"
+[ -n "${ANTHROPIC_API_KEY:-}" ] && pass "ANTHROPIC_API_KEY set" || fail "ANTHROPIC_API_KEY set" "missing from .env"
+[ -n "${IGOR_MODEL:-}" ]        && pass "IGOR_MODEL set ($IGOR_MODEL)" || fail "IGOR_MODEL set" "missing from .env"
 
 [ -f "$IGOR_HOME/agent-settings.json" ] && pass "agent-settings.json present" || fail "agent-settings.json present"
 

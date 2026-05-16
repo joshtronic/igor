@@ -2,9 +2,23 @@
 
 ## Auth and secrets
 
-Claude Max via `CLAUDE_CODE_OAUTH_TOKEN`. No per-call API billing -- that's
-the whole point. The bot's Forgejo token lives in the same file. Both at
-`.env` in the Igor clone (next to `.env.example`), chmod 600.
+Igor runs against the Anthropic API (not the Max plan). Create a dedicated
+API key in the [Anthropic Console](https://console.anthropic.com) and set
+a hard spending limit on it -- a pathological tick should not be able to
+drain the account. Set the key as `ANTHROPIC_API_KEY` in `.env`.
+
+The Max plan is for interactive Claude Code sessions (you, typing). The
+robot is a separate workload with different cost shape -- metered billing
+gives real per-task visibility, model selection, and prompt caching you
+control.
+
+Pick the model in `IGOR_MODEL` (also in `.env`). Sensible defaults:
+`claude-sonnet-4-6` for normal coding work, `claude-opus-4-7` if you find
+Igor consistently noops on tickets that need deeper reasoning,
+`claude-haiku-4-5-20251001` only for cheap/light tasks.
+
+The bot's Forgejo token (`FORGEJO_TOKEN`) lives in the same `.env`, chmod
+600. See `.env.example` for the full template.
 
 ## Bot user
 
