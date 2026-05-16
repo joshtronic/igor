@@ -48,10 +48,18 @@ The bot's Forgejo token (`FORGEJO_TOKEN`) lives in the same `.env`, chmod
 A dedicated Forgejo user plus a matching server account (one Unix user runs
 the systemd units and owns the SSH key). The Forgejo user needs:
 
-- An API token with scopes for `read:user`, `repository` (issue/PR/comment/
-  label/assign), and push access on every target repo. The bot's username is
-  read from this token via `/api/v1/user`, so there's no separate `BOT_USER`
-  setting.
+- An API token with these three scopes:
+  - `read:user` -- so the harness can resolve the bot's identity via
+    `/api/v1/user` (no separate `BOT_USER` config needed)
+  - `write:repository` -- reading repo contents, listing PRs, opening PRs
+  - `write:issue` -- creating/commenting/labeling/assigning/closing issues
+
+  Forgejo's scope model is fine-grained: `write:repository` does NOT
+  include issue ops, hence the separate `write:issue`. All three are
+  required; missing any will cause specific harness operations to fail
+  later with a `403 token does not have at least one of required scope(s)`
+  message. Push access for git (clone/push) is via the SSH key, separate
+  from API scopes.
 - An SSH key for git operations (clone and push). Igor clones via
   `git@<host>:<owner>/<repo>.git`, where `<host>` is derived from
   `FORGEJO_URL` (override with `FORGEJO_SSH_HOST` if SSH is on a different
