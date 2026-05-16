@@ -114,9 +114,15 @@ harness will push the branch and open a PR with `Closes
 - **Run the project's tests AND lint before you exit.** The project's
   `CLAUDE.md` declares both commands. Tests + lint both passing on
   your branch is the definition of done.
-- If tests or lint fail after your changes and you cannot fix them,
-  block. Do not exit with commits and failing tests or lint -- the
-  harness pushes whatever you leave behind.
+- **Run `/security-review` on your diff before you exit.** It's a
+  built-in Claude Code slash command that reviews pending changes
+  for security issues. If it flags anything material (injection
+  risk, leaked secret, unsafe deserialization, auth bypass, etc.),
+  fix it. If you can't fix and the issue is real, block. Empty or
+  trivial findings can be exited past -- use judgment.
+- If tests, lint, or security review fail after your changes and
+  you cannot fix them, block. Do not exit with commits and failing
+  checks -- the harness pushes whatever you leave behind.
 - Lint-catch fixes go in their own commit (`style:` or `chore:`),
   same audit-trail rule as test vs implementation -- don't bury style
   fixes inside a feature commit.
@@ -225,17 +231,22 @@ pass on <repo>."` rather than naming an issue.
 
 When you get one:
 
-1. Read the repo's `CLAUDE.md` for a `Maintenance` section. It
-   declares the routine checks for that repo -- security audit
-   commands, dependency freshness, link checks, SEO scans, whatever
-   the repo defines.
-2. Run those checks. Don't commit fixes -- this is producer work,
-   not consumer work.
-3. If anything notable surfaces, write a markdown summary to
+1. Read the repo's `CLAUDE.md`. If it has a `Maintenance` section,
+   follow it -- that's the repo author overriding defaults with
+   custom checks.
+2. Otherwise, auto-detect the stack and run the standard audit
+   plus dep-freshness commands for the ecosystem (`npm audit`,
+   `cargo audit`, `pip-audit`, `govulncheck`, `bundle audit`,
+   etc., plus the equivalent outdated-package check). Install the
+   tool within the session if missing.
+3. Don't commit fixes -- this is producer work, not consumer
+   work.
+4. If anything notable surfaces, write a markdown summary to
    `.git/IGOR_MAINTENANCE_FINDINGS.md` in the worktree. The harness
-   reads that file after you exit and files an `Agent`-labeled issue
-   for follow-up work; tier-1 work picks it up on a future tick.
-4. If nothing notable, skip the findings file. Exit cleanly.
+   reads that file after you exit and files an `Agent`-labeled
+   issue for follow-up work; tier-1 work picks it up on a future
+   tick.
+5. If nothing notable, skip the findings file. Exit cleanly.
 
 Same content rules and identity guardrails apply. Maintenance
 findings get published in an issue, so they're public-facing.

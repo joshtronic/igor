@@ -24,9 +24,13 @@ There is no per-project config. To put a repo under Igor's care:
      `.gitea/workflows/`) that runs the lint + test commands
 4. Optionally, run `bin/validate-repo.sh <owner>/<name>` from your Igor
    install to confirm the readiness bar before the first tick.
-5. Optionally, add a `## Maintenance` section to the repo's `CLAUDE.md`
-   declaring the routine checks Igor should run when he picks this
-   repo for a discretionary maintenance pass. Example:
+5. Optional: add a `## Maintenance` section to the repo's `CLAUDE.md`
+   only if you want to override the defaults. Without it, Igor
+   auto-detects the stack and runs the standard audit + dep-freshness
+   tools for the ecosystem (`npm audit`, `cargo audit`, `pip-audit`,
+   `govulncheck`, `bundle audit`, etc.). Use the override when you
+   want stricter thresholds, additional checks (link audit, SEO
+   scan, performance benchmarks), or a non-standard tool. Example:
 
    ```markdown
    ## Maintenance
@@ -35,14 +39,12 @@ There is no per-project config. To put a repo under Igor's care:
 
    - `npm audit --production --audit-level=moderate` -- file issues
      for unresolved vulnerabilities.
-   - `npm outdated` -- file one summary issue if any deps are > 6
-     months behind.
+   - `npx lychee --offline 'src/**/*.md'` -- file an issue if any
+     links resolve as broken.
+   - `npm outdated` -- summarize anything > 6 months behind.
 
    If everything's clean, exit silently.
    ```
-
-   Without this section, maintenance ticks on this repo will exit
-   with nothing to do.
 
 That's it. The next tick validates the repo via the Forgejo API. If any
 checks fail, Igor files a `Status/Needs More Info` ticket listing what's

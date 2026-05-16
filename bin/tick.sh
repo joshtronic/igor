@@ -518,18 +518,27 @@ You are doing a discretionary maintenance pass on $TARGET.
 
 No human is waiting on you. Your job:
 
-  1. Read this repo's CLAUDE.md. Look for a "Maintenance" section
-     declaring routine checks (security audit, dependency freshness,
-     link checks, SEO scan, anything the repo defines).
-  2. Run those checks.
-  3. If anything notable surfaces -- vulnerabilities, outdated deps,
-     broken links, regressions -- write a markdown summary to
-     .git/IGOR_MAINTENANCE_FINDINGS.md in this worktree. The harness
-     will file an Agent-labeled issue with that content as the body
-     so tier-1 work picks it up on a future tick.
+  1. Read this repo's CLAUDE.md. If it has a "Maintenance" section,
+     follow it -- that's the repo author declaring exactly what
+     maintenance means here.
+  2. Otherwise, auto-detect the stack and run the standard audit
+     plus dep-freshness commands for the ecosystem:
+       - package.json     -> npm audit + npm outdated
+       - Cargo.toml       -> cargo audit + cargo outdated
+       - pyproject.toml/requirements.txt -> pip-audit + pip list --outdated
+       - go.mod           -> govulncheck + go list -m -u all
+       - Gemfile          -> bundle audit + bundle outdated
+     If a tool isn't installed, install it within this session
+     (cargo install cargo-audit, etc.). Use judgment for stacks not
+     listed above.
+  3. If anything notable surfaces -- vulnerabilities, outdated
+     deps, broken links, regressions -- write a markdown summary
+     to .git/IGOR_MAINTENANCE_FINDINGS.md. The harness will file
+     an Agent-labeled issue with that content for tier-1 work to
+     pick up on a future tick.
   4. If nothing notable, skip the findings file and exit cleanly.
 
-Don't commit fixes during a maintenance pass -- file an issue and
+Don't commit fixes during a maintenance pass -- file findings and
 let normal work flow address them on a future tick. Same content
 rules as always: identity guardrails apply.
 EOF
