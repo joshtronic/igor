@@ -116,24 +116,6 @@ forgejo_pr_review_comments() {
   _fj GET "/repos/${repo}/pulls/${number}/comments"
 }
 
-# Returns 0 if the given user has any open PR in this repo, 1 otherwise.
-# Used to gate discovery: one Igor PR open in a repo pauses new claims
-# there until the human merges or closes.
-forgejo_has_open_bot_pr() {
-  local repo="$1" user="$2"
-  _fj GET "/repos/${repo}/pulls?state=open&limit=50" \
-    | jq -e --arg u "$user" 'any(.[]; .user.login == $u)' >/dev/null
-}
-
-# Count of open PRs authored by the authenticated user across every
-# accessible repo. Used by the tier-2 throttle: if Igor already has
-# too many PRs sitting in review, hold off on filing more maintenance
-# work.
-forgejo_count_bot_open_prs() {
-  _fj GET "/repos/issues/search?type=pulls&state=open&created=true&limit=50" \
-    | jq 'length // 0'
-}
-
 # Number on the open PR with the given head branch, or empty if none.
 # Used to make PR-open idempotent across harness crashes: if a previous
 # tick pushed but died before opening, we find the orphan branch already
