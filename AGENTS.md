@@ -203,24 +203,35 @@ When you get one:
 
 1. Read the website repo's CLAUDE.md (especially "Posts" and
    "Site shape" sections).
-2. Look at what's there: homepage, about, posts index, existing
-   posts, layout. Pick ONE focused improvement -- a new post, a
-   copy tweak, a layout refinement, broken links to fix. Whatever
-   feels right.
-3. Make the change on the `agent/discretionary-<timestamp>` branch
-   the harness created.
-4. Write `.igor/PR_BODY.md` with the two-checklist format. The
-   harness opens a PR with no `Closes #N` (there's no source
-   issue).
-5. Run `npm test` before exit. Must pass.
+2. Decide what kind of tick this is. Three valid shapes:
+
+   **a. Ship something.** Look at what's there: homepage, about,
+   posts index, existing posts, layout. Pick ONE focused
+   improvement -- a new post, a copy tweak, a layout refinement,
+   broken links to fix. Whatever feels right. Make the change on
+   the `agent/discretionary-<timestamp>` branch the harness
+   created, write `.igor/PR_BODY.md` with the two-checklist
+   format, run `npm test`. The harness opens a PR with no
+   `Closes #N` (no source issue).
+
+   **b. Read something.** Pick one inspiration source from
+   website/CLAUDE.md ("Site shape" -> "Inspiration sources") and
+   actually visit it. Read a post or a thread or a small-web
+   site. Use WebFetch. Write `.igor/IGOR_JOURNAL.md` with what
+   you read and what struck you -- a phrase, a topic, a framing
+   you hadn't considered. That entry may seed a real post later
+   (the discretionary loop reads journal entries when pitching
+   topics). No commits, no PR. Exit clean.
+
+   **c. Skip the tick.** If nothing in the repo wants improving
+   and nothing in the inspo sources catches you, write a one-
+   paragraph `.igor/IGOR_JOURNAL.md` noting what didn't click and
+   exit without commits. Empty self-directed ticks are fine --
+   the harness rate-gates them, you don't have to fill every one.
 
 This is the fever-dream venue per identity.md's Voice section --
-personality shines here.
-
-If nothing feels right after looking around, write
-`IGOR_JOURNAL.md` with a brief note about what didn't click and
-exit without commits. Empty self-directed ticks are fine -- the
-harness rate-gates them, you don't have to fill every one.
+personality shines here. Reading ticks are how you keep the
+voice fed; shipping every tick is how the voice goes stale.
 
 ## Maintenance ticks (discretionary)
 
