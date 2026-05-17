@@ -363,20 +363,62 @@ EOF
 
 # Post cooldown. One post per local calendar day on Igor's own blog.
 # Calendar-day semantics (not rolling 24h) so "once a day" matches
-# what a human means -- the day ticks over at local midnight, not at
-# the wall-clock time of yesterday's post. Local time follows the
-# server's TZ.
+# what a human means -- the day ticks over at local midnight.
 #
-# Only gates posts -- other site work (about page, layout, copy fixes)
+# Authoritative sources, checked in order (any "yes" blocks):
+#   1. git log on origin/master -- any post file added today?
+#      (Authoritative: state file can be lost or out of sync; the
+#      merged history can't lie.)
+#   2. State file `.tier3.website_last_day` -- did we ship today?
+#      (Covers same-tick-day post when nothing's merged yet.)
+#   3. State file `.tier3.website` (legacy UTC timestamp) -- did the
+#      previous code mark today? (Migration safety; harmless to keep.)
+#
+# Only gates posts -- other site work (about page, layout, copy)
 # and read+journal ticks are unthrottled.
 posts_cooldown_clear() {
-  local last_day today state_file
-  state_file=$(discretionary_state_file)
-  [ -f "$state_file" ] || return 0
-  last_day=$(jq -r '.tier3.website_last_day // ""' "$state_file" 2>/dev/null || echo "")
-  [ -z "$last_day" ] && return 0
+  local today website_path state_file last_day last_legacy
   today=$(date +%Y-%m-%d)
-  [ "$last_day" != "$today" ]
+
+  # Layer 1: git log on the website's master. Authoritative for
+  # anything that's already merged. Skips silently if the website
+  # isn't cloned yet (first tick after bootstrap).
+  website_path=$(repo_path_for "${BOT_USER}/website")
+  if [ -d "$website_path/.git" ]; then
+    local merged_today
+    merged_today=$(cd "$website_path" \
+      && git log --since="$today 00:00:00" --until="$today 23:59:59" \
+          origin/master --diff-filter=A --name-only --pretty=format: \
+          -- 'src/posts/*' 2>/dev/null \
+      | grep -cE '^src/posts/.+\.md$' || true)
+    if [ "${merged_today:-0}" -gt 0 ]; then
+      return 1
+    fi
+  fi
+
+  # Layer 2: state file, current schema.
+  state_file=$(discretionary_state_file)
+  if [ -f "$state_file" ]; then
+    last_day=$(jq -r '.tier3.website_last_day // ""' "$state_file" 2>/dev/null || echo "")
+    if [ -n "$last_day" ] && [ "$last_day" = "$today" ]; then
+      return 1
+    fi
+
+    # Layer 3: legacy UTC timestamp from pre-refactor harness runs.
+    # Translate to local date and compare; if today, block.
+    last_legacy=$(jq -r '.tier3.website // ""' "$state_file" 2>/dev/null || echo "")
+    if [ -n "$last_legacy" ]; then
+      local legacy_local_day
+      legacy_local_day=$(date -d "$last_legacy" +%Y-%m-%d 2>/dev/null \
+        || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last_legacy" +%Y-%m-%d 2>/dev/null \
+        || echo "")
+      if [ "$legacy_local_day" = "$today" ]; then
+        return 1
+      fi
+    fi
+  fi
+
+  return 0
 }
 
 posts_mark_shipped() {
@@ -913,6 +955,15 @@ EOF
     exit 0
   fi
 
+  # Burn the cooldown BEFORE push -- intent-based, not success-based.
+  # If the push or PR-open fails after this, the cooldown still
+  # protects against another post-shaped PR tomorrow morning. The
+  # commits exist locally and the human can recover; we just need
+  # to not let the next tick double up.
+  if [ "$W_NEW_POST" -eq 1 ]; then
+    posts_mark_shipped
+  fi
+
   log "discretionary: pushing $W_BRANCH and opening PR on $W_REPO (new_post=$W_NEW_POST)"
   git push --force-with-lease -u origin "$W_BRANCH"
 
@@ -929,12 +980,6 @@ EOF
     W_PR_BODY+=$(build_deps_section "$W_BASE")
     forgejo_open_pr "$W_REPO" "$W_BRANCH" "$W_BASE" "$W_PR_TITLE" "$W_PR_BODY" "${IGOR_REVIEWER:-}"
     log "discretionary: PR opened on $W_REPO"
-  fi
-
-  # Only burn the post cooldown when an actual new post landed.
-  # Site-work PRs (about, layout, copy) don't gate future ticks.
-  if [ "$W_NEW_POST" -eq 1 ]; then
-    posts_mark_shipped
   fi
 
   exit 0
