@@ -523,10 +523,15 @@ if [ -n "${IGOR_REVIEWER:-}" ]; then
 
     log "PR-review: ${PR_REPO}#${PR_NUMBER} assigned back -- reopening"
 
-    PR_DETAILS=$(forgejo_get_pr "$PR_REPO" "$PR_NUMBER")
-    PR_HEAD=$(jq -r .head.ref <<<"$PR_DETAILS")
-    PR_BASE=$(jq -r .base.ref <<<"$PR_DETAILS")
+    PR_DETAILS=$(forgejo_get_pr "$PR_REPO" "$PR_NUMBER" 2>/dev/null || echo '{}')
+    PR_HEAD=$(jq -r '.head.ref // ""' <<<"$PR_DETAILS")
+    PR_BASE=$(jq -r '.base.ref // ""' <<<"$PR_DETAILS")
     PR_BODY=$(jq -r '.body // ""' <<<"$PR_DETAILS")
+
+    if [ -z "$PR_HEAD" ]; then
+      log "PR-review: could not fetch PR details for ${PR_REPO}#${PR_NUMBER} -- skipping"
+      exit 0
+    fi
 
     ensure_repo_local "$PR_REPO"
     PR_REPO_PATH=$(repo_path_for "$PR_REPO")
@@ -540,18 +545,24 @@ if [ -n "${IGOR_REVIEWER:-}" ]; then
     (cd "$PR_REPO_PATH" && git worktree add -B "$PR_HEAD" "$PR_WORKTREE" "origin/${PR_HEAD}")
     mkdir -p "$PR_WORKTREE/.igor"
 
-    PR_ISSUE_COMMENTS=$(forgejo_pr_comments "$PR_REPO" "$PR_NUMBER" \
-      | jq -r --arg me "$BOT_USER" '
-          [.[] | select(.user.login != $me)
-            | "**" + .user.login + "** (" + .created_at + "):\n\n" + .body]
-          | join("\n\n---\n\n")')
-    PR_INLINE_COMMENTS=$(forgejo_pr_review_comments "$PR_REPO" "$PR_NUMBER" \
-      | jq -r --arg me "$BOT_USER" '
-          [.[] | select(.user.login != $me)
-            | "**" + .user.login + "** on `" + .path + "`"
-              + (if .original_line then " line " + (.original_line|tostring) else "" end)
-              + " (" + .created_at + "):\n\n" + .body]
-          | join("\n\n---\n\n")')
+    # Fetch comments defensively -- a 404 on either endpoint shouldn't
+    # kill the tick; just treat as no-comments. PRs without inline
+    # review comments hit the empty case via [] from `|| echo '[]'`.
+    PR_ISSUE_RAW=$(forgejo_pr_comments "$PR_REPO" "$PR_NUMBER" 2>/dev/null || echo '[]')
+    PR_INLINE_RAW=$(forgejo_pr_review_comments "$PR_REPO" "$PR_NUMBER" 2>/dev/null || echo '[]')
+
+    PR_ISSUE_COMMENTS=$(jq -r --arg me "$BOT_USER" '
+        [.[] | select(.user.login != $me)
+          | "**" + (.user.login // "?") + "** (" + (.created_at // "") + "):\n\n" + (.body // "")]
+        | join("\n\n---\n\n")' <<<"$PR_ISSUE_RAW" 2>/dev/null || echo "")
+    PR_INLINE_COMMENTS=$(jq -r --arg me "$BOT_USER" '
+        [.[] | select(.user.login != $me)
+          | "**" + (.user.login // "?") + "** on `" + (.path // "?") + "`"
+            + (if .original_line then " line " + (.original_line|tostring) else "" end)
+            + " (" + (.created_at // "") + "):\n\n" + (.body // "")]
+        | join("\n\n---\n\n")' <<<"$PR_INLINE_RAW" 2>/dev/null || echo "")
+
+    log "PR-review: ${#PR_ISSUE_COMMENTS} chars of issue comments, ${#PR_INLINE_COMMENTS} chars of inline review"
 
     PR_USER_MSG=$(cat <<EOF
 You opened PR ${PR_REPO}#${PR_NUMBER}: ${PR_TITLE}
@@ -617,15 +628,20 @@ EOF
 
     if [ "$PR_NEW" -gt 0 ]; then
       log "PR-review: pushing $PR_NEW new commits and reassigning to $IGOR_REVIEWER"
-      git push origin "$PR_HEAD"
-      forgejo_unassign_all "$PR_REPO" "$PR_NUMBER"
-      forgejo_assign "$PR_REPO" "$PR_NUMBER" "$IGOR_REVIEWER"
+      git push origin "$PR_HEAD" || log "warning: push failed on $PR_HEAD"
+      forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
+        || log "warning: unassign failed on ${PR_REPO}#${PR_NUMBER}"
+      forgejo_assign "$PR_REPO" "$PR_NUMBER" "$IGOR_REVIEWER" 2>/dev/null \
+        || log "warning: assign-to-${IGOR_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
     else
       log "PR-review: no commits made -- reassigning to $IGOR_REVIEWER with a note"
       forgejo_comment "$PR_REPO" "$PR_NUMBER" \
-        "Igor reopened this PR after reassignment but didn't make any new commits. Either the feedback was answerable without code changes, or Igor couldn't act on it. Reassigning back so a human can close the loop."
-      forgejo_unassign_all "$PR_REPO" "$PR_NUMBER"
-      forgejo_assign "$PR_REPO" "$PR_NUMBER" "$IGOR_REVIEWER"
+        "Igor reopened this PR after reassignment but didn't make any new commits. Either the feedback was answerable without code changes, or Igor couldn't act on it. Reassigning back so a human can close the loop." 2>/dev/null \
+        || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
+      forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
+        || log "warning: unassign failed on ${PR_REPO}#${PR_NUMBER}"
+      forgejo_assign "$PR_REPO" "$PR_NUMBER" "$IGOR_REVIEWER" 2>/dev/null \
+        || log "warning: assign-to-${IGOR_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
     fi
 
     (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || true
