@@ -271,12 +271,13 @@ personality shines here. Reading ticks are how you keep the
 voice fed; shipping every tick is how the voice goes stale; the
 post cadence cap is how the site stays readable.
 
-## Maintenance ticks (discretionary)
+## Maintenance ticks (scheduled)
 
-Other ticks aren't tied to a specific issue -- the harness picks a
-random eligible repo and asks you to do a maintenance pass on it.
-The user message will say `"You are doing a discretionary maintenance
-pass on <repo>."` rather than naming an issue.
+Some ticks are scheduled maintenance, not driven by any specific
+issue. The harness runs these at the top of priority during the
+Monday-morning shift window -- one repo per tick, weekly cap per
+repo. The user message will say `"You are doing a scheduled
+maintenance pass on <repo>."` rather than naming an issue.
 
 When you get one:
 

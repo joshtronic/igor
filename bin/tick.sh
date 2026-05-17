@@ -145,7 +145,7 @@ ensure_repo_local() {
   fi
 }
 
-# -- Discretionary-work state (tier 2 cooldown) ----------------
+# -- Discretionary-work state (maintenance + post cooldowns) ----
 #
 # Tracks per-repo "last maintained" timestamps so we don't run
 # maintenance on the same repo every empty tick. Lives at
@@ -180,8 +180,8 @@ maintenance_mark_done() {
 # - Bot-owned repos (brain, website, anything else under <bot>/). These
 #   are Igor's internal infrastructure, not target code. Auditing your
 #   own notes repo for npm audit findings is busywork.
-# - Repos with an open onboarding ticket. Tier 1 refused to clone them
-#   for cause; tier 2 shouldn't sneak around that gate.
+# - Repos with an open onboarding ticket. Issue-work refused to clone
+#   them for cause; maintenance shouldn't sneak around that gate.
 maintenance_eligible() {
   local repo="$1" last last_week this_week existing owner
 
@@ -209,14 +209,156 @@ maintenance_eligible() {
 
 # Are we in the configured Monday-morning maintenance window?
 # True when: today is Monday AND we're inside the configured shift.
-# When shift is unconfigured, this returns false (no bias, current
-# behavior). The bias means tier 2 is *preferred* over tier 3 in
-# this window; the rest of the shift week behaves normally.
+# When shift is unconfigured, this returns false (no scheduled
+# maintenance). Maintenance is a scheduled chore that runs once per
+# week per repo at the top of priority on Monday morning; the rest
+# of the week has no maintenance work.
 in_maintenance_window() {
   local dow
   dow=$(date +%u)  # 1=Mon, 7=Sun
   [ "$dow" = "1" ] || return 1
   in_shift_window
+}
+
+# Scheduled maintenance pass -- priority 1 in the work cascade.
+# Runs during the Monday-morning shift window. One repo per tick,
+# weekly cap per repo. Exits 0 if maintenance fires; returns 1
+# when not in the window or no repos are eligible this week (so
+# the caller falls through to PR review / issues / discretionary).
+#
+# Findings flow: Claude writes .igor/IGOR_MAINTENANCE_FINDINGS.md,
+# harness files a Status/Needs More Info issue for human triage.
+do_maintenance_tick() {
+  in_maintenance_window || return 1
+
+  local repos r_name target target_path target_base
+  local ELIGIBLE=()
+  repos=$(forgejo_list_bot_repos)
+  while read -r repo_line; do
+    [ -z "$repo_line" ] && continue
+    r_name=$(jq -r '.full_name' <<<"$repo_line")
+    if maintenance_eligible "$r_name"; then
+      ELIGIBLE+=("$r_name")
+    fi
+  done < <(jq -c '.[]' <<<"$repos")
+
+  if [ "${#ELIGIBLE[@]}" -eq 0 ]; then
+    log "scheduled: no repos eligible for maintenance this week -- continuing"
+    return 1
+  fi
+
+  target="${ELIGIBLE[RANDOM % ${#ELIGIBLE[@]}]}"
+  log "scheduled: maintenance pass on $target"
+
+  ensure_repo_local "$target"
+  target_path=$(repo_path_for "$target")
+
+  # Detached-HEAD worktree on the repo's current default branch.
+  # No feature branch -- maintenance doesn't commit; it writes
+  # findings to a known path that the harness reads after exit.
+  target_base=$(cd "$target_path" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+  target_base="${target_base:-master}"
+  local m_worktree="$IGOR_STATE_DIR/worktrees/maintenance-${target//\//_}-$$"
+  mkdir -p "$IGOR_STATE_DIR/worktrees"
+  (cd "$target_path" && git fetch --prune origin)
+  (cd "$target_path" && git worktree add --detach "$m_worktree" "origin/${target_base}")
+  mkdir -p "$m_worktree/.igor"
+
+  # Worktree cleanup at script exit. Variables M_WT_PATH/M_TGT_PATH
+  # need global scope so the trap can see them.
+  M_WT_PATH="$m_worktree"
+  M_TGT_PATH="$target_path"
+  trap '[ -d "$M_WT_PATH" ] && (cd "$M_TGT_PATH" && git worktree remove --force "$M_WT_PATH") 2>/dev/null || true' EXIT
+
+  cd "$m_worktree"
+
+  local m_user_msg
+  m_user_msg=$(cat <<EOF
+You are doing a scheduled maintenance pass on $target.
+
+No human is waiting on you. Your job:
+
+  1. Read this repo's CLAUDE.md. If it has a "Maintenance" section,
+     follow it -- that's the repo author declaring exactly what
+     maintenance means here.
+  2. Otherwise, auto-detect the stack and run the standard audit
+     plus dep-freshness commands for the ecosystem:
+       - package.json     -> npm audit + npm outdated
+       - Cargo.toml       -> cargo audit + cargo outdated
+       - pyproject.toml/requirements.txt -> pip-audit + pip list --outdated
+       - go.mod           -> govulncheck + go list -m -u all
+       - Gemfile          -> bundle audit + bundle outdated
+     If a tool isn't installed, install it within this session
+     (cargo install cargo-audit, etc.). Use judgment for stacks not
+     listed above.
+  3. If anything notable surfaces -- vulnerabilities, outdated
+     deps, broken links, regressions -- write a markdown summary
+     to .igor/IGOR_MAINTENANCE_FINDINGS.md. The harness will file
+     an issue with that content for human triage.
+  4. If nothing notable, skip the findings file and exit cleanly.
+
+Don't commit fixes during a maintenance pass -- file findings and
+let normal work flow address them on a future tick. Same content
+rules as always: identity guardrails apply.
+EOF
+)
+
+  local m_brain="$IGOR_REPO_ROOT/${BOT_USER}/brain"
+  local m_system_prompt
+  if [ -f "$m_brain/identity.md" ] && [ -f "$m_brain/index.md" ]; then
+    m_system_prompt=$(cat "$m_brain/identity.md" "$m_brain/index.md" "$IGOR_HOME/AGENTS.md")
+  else
+    m_system_prompt=$(cat "$IGOR_HOME/AGENTS.md")
+  fi
+
+  log "invoking claude for maintenance (timeout ${IGOR_TIMEOUT})"
+  local m_log="$m_worktree/.igor/claude-output.log"
+  local m_start; m_start=$(date +%s)
+  local m_exit
+  set +e
+  timeout --kill-after=30s "$IGOR_TIMEOUT" \
+    claude \
+      --model "$IGOR_MODEL" \
+      --append-system-prompt "$m_system_prompt" \
+      --settings "$IGOR_HOME/agent-settings.json" \
+      --max-turns 50 \
+      --print "$m_user_msg" 2>&1 | tee "$m_log"
+  m_exit=${PIPESTATUS[0]}
+  set -e
+  log "claude exited $m_exit after $(( $(date +%s) - m_start ))s"
+
+  local findings="$m_worktree/.igor/IGOR_MAINTENANCE_FINDINGS.md"
+  if [ -s "$findings" ]; then
+    local m_title m_body m_num
+    m_title="Maintenance pass $(date +%Y-%m-%d): findings"
+    m_body=$(cat "$findings")
+    m_num=$(forgejo_open_issue "$target" "$m_title" "$m_body")
+    forgejo_add_label "$target" "$m_num" "Status/Needs More Info" 2>/dev/null \
+      || log "warning: could not apply 'Status/Needs More Info' on #$m_num ($target)"
+
+    local m_priority_file="$m_worktree/.igor/IGOR_MAINTENANCE_PRIORITY"
+    if [ -s "$m_priority_file" ]; then
+      local m_priority m_pri_label=""
+      m_priority=$(tr -d '[:space:]' < "$m_priority_file" | tr '[:upper:]' '[:lower:]')
+      case "$m_priority" in
+        critical) m_pri_label="Priority/Critical" ;;
+        high)     m_pri_label="Priority/High" ;;
+        medium)   m_pri_label="Priority/Medium" ;;
+        low)      m_pri_label="Priority/Low" ;;
+      esac
+      if [ -n "$m_pri_label" ]; then
+        forgejo_add_label "$target" "$m_num" "$m_pri_label" 2>/dev/null \
+          || log "warning: could not apply '$m_pri_label' on #$m_num ($target)"
+      fi
+    fi
+
+    log "maintenance: filed #$m_num on $target (awaiting human triage)"
+  else
+    log "maintenance: no findings on $target"
+  fi
+
+  maintenance_mark_done "$target"
+  exit 0
 }
 
 # Post cooldown. One post per local calendar day on Igor's own blog.
@@ -257,19 +399,6 @@ in_shift_window() {
   hour=$(date +%H)
   hour=$((10#$hour))
   [ "$hour" -ge "$start" ] && [ "$hour" -lt "$end" ]
-}
-
-# Posts only allowed in the last hour of the shift (so site work and
-# maintenance happen first, then a post if there's something to say).
-# If shift is unconfigured, no time-of-day gating -- the cooldown is
-# the only constraint.
-posts_in_window() {
-  local start="${IGOR_SHIFT_START:-}" end="${IGOR_SHIFT_END:-}" hour
-  [ -z "$start" ] && return 0
-  [ -z "$end" ] && return 0
-  hour=$(date +%H)
-  hour=$((10#$hour))
-  [ "$hour" -eq "$((end - 1))" ]
 }
 
 # Worktree key: slash-free, unique per repo+issue.
@@ -362,6 +491,16 @@ if [ "$ORPHAN_COUNT" -gt 0 ]; then
     fi
   done < <(jq -c '.[] | {repo: .repository.full_name, num: .number}' <<<"$ORPHANS")
 fi
+
+# -- Scheduled maintenance (priority 1) ------------------------
+#
+# Monday-morning maintenance is a chore, not discretionary work.
+# Runs at the top of the cascade so it always beats PR-review,
+# claimable issues, and discretionary website work. One repo per
+# tick, weekly cap per repo. Off-Monday or outside the shift this
+# is a no-op and we proceed.
+
+do_maintenance_tick || true
 
 # -- PR-review pickup ------------------------------------------
 #
@@ -546,99 +685,67 @@ done < <(jq -c '.[]' <<<"$REPOS")
 if [ -z "$WINNER" ]; then
   log "no claimable work across any repo"
 
-  # -- Tier 2: discretionary maintenance pass ------------------
+  # -- Discretionary: self-directed website work --------------
   #
-  # When nothing's claimable, optionally fire one maintenance pass
-  # on a random eligible repo. Two throttles:
+  # Last priority in the cascade. Scheduled maintenance, PR-review
+  # pickup, and claimable issues all came up empty. If the bot owns
+  # a website and has no open PR on it, optionally do one freeform
+  # pass on the site.
   #
-  #   (1) IGOR_DISCRETIONARY_RATE -- probability we even consider
-  #       discretionary work this tick. Default 0 (off). Range 0.0-1.0.
-  #   (2) per-repo weekly cap -- one audit per repo per ISO week.
-  #
-  # On Monday-morning shifts the dice roll is bypassed: maintenance
-  # runs as a scheduled obligation rather than discretionary work.
-  # Per-repo PR throttle still prevents pile-on if findings stack.
-  #
-  # Findings flow same as journal: Claude writes
-  # .igor/IGOR_MAINTENANCE_FINDINGS.md, harness reads it and files an
-  # issue with Status/Needs More Info for human triage.
+  # IGOR_DISCRETIONARY_RATE (default 0) gates whether we attempt
+  # this on an empty tick. Per-repo PR throttle and once-per-local-
+  # day post cooldown are the natural pacing.
 
   DISCRETIONARY_RATE="${IGOR_DISCRETIONARY_RATE:-0}"
-
-  if in_maintenance_window; then
-    log "discretionary: Monday-morning maintenance window -- bypassing dice roll"
-  else
-    RATE_X1000=$(awk "BEGIN { printf \"%d\", $DISCRETIONARY_RATE * 1000 }")
-    ROLL=$(( RANDOM % 1000 ))
-    if [ "$ROLL" -ge "$RATE_X1000" ]; then
-      log "discretionary: dice $ROLL/1000 vs rate $RATE_X1000 -- skip"
-      exit 0
-    fi
+  RATE_X1000=$(awk "BEGIN { printf \"%d\", $DISCRETIONARY_RATE * 1000 }")
+  ROLL=$(( RANDOM % 1000 ))
+  if [ "$ROLL" -ge "$RATE_X1000" ]; then
+    log "discretionary: dice $ROLL/1000 vs rate $RATE_X1000 -- skip"
+    exit 0
   fi
 
-  ELIGIBLE=()
-  while read -r repo_line; do
-    [ -z "$repo_line" ] && continue
-    R_NAME=$(jq -r '.full_name' <<<"$repo_line")
-    if maintenance_eligible "$R_NAME"; then
-      ELIGIBLE+=("$R_NAME")
-    fi
-  done < <(jq -c '.[]' <<<"$REPOS")
+  W_REPO="${BOT_USER}/website"
+  W_PATH=$(repo_path_for "$W_REPO")
 
-  if [ "${#ELIGIBLE[@]}" -eq 0 ]; then
-    # -- Tier 3: self-directed website work (fallback) ---------
-    #
-    # No claimable tickets, no maintenance due. If the bot owns a
-    # website and has no open PR on it, do one freeform pass:
-    # Claude reads the website's CLAUDE.md, picks one focused
-    # improvement (post, design, copy, layout), and opens a PR.
-    # No source issue means no Closes #N footer.
+  if [ ! -d "$W_PATH/.git" ]; then
+    log "discretionary: no website cloned -- nothing to do"
+    exit 0
+  fi
 
-    W_REPO="${BOT_USER}/website"
-    W_PATH=$(repo_path_for "$W_REPO")
+  if forgejo_has_open_bot_pr "$W_REPO" "$BOT_USER"; then
+    log "discretionary: website has open Igor PR -- holding off"
+    exit 0
+  fi
 
-    if [ ! -d "$W_PATH/.git" ]; then
-      log "discretionary: no website cloned -- nothing to do"
-      exit 0
-    fi
+  if posts_cooldown_clear; then
+    W_POSTING_ALLOWED=1
+    W_POST_RULE="You MAY publish a new post this tick if that's the right call."
+  else
+    W_POSTING_ALLOWED=0
+    W_POST_RULE="You already shipped a post today (local calendar day). Do NOT publish another post this tick -- max one post per day is a hard rule. Other site work (about page, layout, copy, links, tag pages, CSS) and read+journal ticks are still fair game."
+  fi
 
-    if forgejo_has_open_bot_pr "$W_REPO" "$BOT_USER"; then
-      log "discretionary: website has open Igor PR -- holding off"
-      exit 0
-    fi
+  log "discretionary: self-directed work on $W_REPO (posting=$W_POSTING_ALLOWED)"
 
-    if posts_cooldown_clear && posts_in_window; then
-      W_POSTING_ALLOWED=1
-      W_POST_RULE="You MAY publish a new post this tick if that's the right call."
-    elif ! posts_cooldown_clear; then
-      W_POSTING_ALLOWED=0
-      W_POST_RULE="You already shipped a post today (local calendar day). Do NOT publish another post this tick -- max one post per day is a hard rule. Other site work (about page, layout, copy, links, tag pages, CSS) and read+journal ticks are still fair game."
-    else
-      W_POSTING_ALLOWED=0
-      W_POST_RULE="Posts are only allowed in the last hour of your configured shift. Do site work, maintenance follow-ups, or a read+journal tick. A post requires having earned the right via a day of other work first."
-    fi
+  W_BASE=$(cd "$W_PATH" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+  W_BASE="${W_BASE:-master}"
+  W_TS=$(date -u +%Y%m%d-%H%M%S)
+  W_BRANCH="agent/discretionary-${W_TS}"
+  W_WORKTREE="$IGOR_STATE_DIR/worktrees/website-discretionary-${W_TS}"
+  mkdir -p "$IGOR_STATE_DIR/worktrees"
+  (cd "$W_PATH" && git fetch --prune origin)
+  (cd "$W_PATH" && git worktree add -b "$W_BRANCH" "$W_WORKTREE" "origin/${W_BASE}")
+  mkdir -p "$W_WORKTREE/.igor"
 
-    log "discretionary: self-directed work on $W_REPO (posting=$W_POSTING_ALLOWED)"
+  W_CLEANUP() {
+    [ -d "$W_WORKTREE" ] && (cd "$W_PATH" && git worktree remove --force "$W_WORKTREE") 2>/dev/null || true
+    cleanup_agent_branches "discretionary-${W_TS}" "$W_PATH"
+  }
+  trap W_CLEANUP EXIT
 
-    W_BASE=$(cd "$W_PATH" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
-    W_BASE="${W_BASE:-master}"
-    W_TS=$(date -u +%Y%m%d-%H%M%S)
-    W_BRANCH="agent/discretionary-${W_TS}"
-    W_WORKTREE="$IGOR_STATE_DIR/worktrees/website-discretionary-${W_TS}"
-    mkdir -p "$IGOR_STATE_DIR/worktrees"
-    (cd "$W_PATH" && git fetch --prune origin)
-    (cd "$W_PATH" && git worktree add -b "$W_BRANCH" "$W_WORKTREE" "origin/${W_BASE}")
-    mkdir -p "$W_WORKTREE/.igor"
+  cd "$W_WORKTREE"
 
-    W_CLEANUP() {
-      [ -d "$W_WORKTREE" ] && (cd "$W_PATH" && git worktree remove --force "$W_WORKTREE") 2>/dev/null || true
-      cleanup_agent_branches "discretionary-${W_TS}" "$W_PATH"
-    }
-    trap W_CLEANUP EXIT
-
-    cd "$W_WORKTREE"
-
-    W_USER_MSG=$(cat <<EOF
+  W_USER_MSG=$(cat <<EOF
 You are doing self-directed work on $W_REPO. No issue is assigned;
 no human is waiting on a specific thing.
 
@@ -649,14 +756,15 @@ if any), src/_includes/base.njk (layout).
 
 POST CADENCE RULE: $W_POST_RULE
 
-Pick ONE focused outcome. Three valid shapes (per AGENTS.md tier 3):
+Pick ONE focused outcome. Three valid shapes (per AGENTS.md
+"Self-directed website ticks"):
 
   a. Ship site work -- about page, homepage copy, layout, CSS,
-     broken links, typos, tag pages, RSS, etc.
+   broken links, typos, tag pages, RSS, etc.
   b. Ship a new post (only if posting is allowed this tick per
-     the rule above).
+   the rule above).
   c. Read one of the inspo sources from CLAUDE.md "Site shape" and
-     write .igor/IGOR_JOURNAL.md about what struck you. No commits.
+   write .igor/IGOR_JOURNAL.md about what struck you. No commits.
 
 ONE thing. Under scope cap (400 lines / 10 commits).
 
@@ -673,233 +781,117 @@ exit without commits. Empty ticks are fine.
 EOF
 )
 
-    BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
-    if [ -f "$BRAIN_PATH/identity.md" ] && [ -f "$BRAIN_PATH/index.md" ]; then
-      W_SYSTEM_PROMPT=$(cat "$BRAIN_PATH/identity.md" "$BRAIN_PATH/index.md" "$IGOR_HOME/AGENTS.md")
-    else
-      W_SYSTEM_PROMPT=$(cat "$IGOR_HOME/AGENTS.md")
-    fi
-
-    log "invoking claude for website work (timeout ${IGOR_TIMEOUT})"
-    W_LOG="$W_WORKTREE/.igor/claude-output.log"
-    W_START=$(date +%s)
-    set +e
-    timeout --kill-after=30s "$IGOR_TIMEOUT" \
-      claude \
-        --model "$IGOR_MODEL" \
-        --append-system-prompt "$W_SYSTEM_PROMPT" \
-        --settings "$IGOR_HOME/agent-settings.json" \
-        --max-turns 50 \
-        --print "$W_USER_MSG" 2>&1 | tee "$W_LOG"
-    W_EXIT=${PIPESTATUS[0]}
-    set -e
-    log "claude exited $W_EXIT after $(( $(date +%s) - W_START ))s"
-
-    # Journal write -- local-day bucketing; skip byte-identical dupes.
-    W_JOURNAL_SRC="$W_WORKTREE/.igor/IGOR_JOURNAL.md"
-    if [ -s "$W_JOURNAL_SRC" ]; then
-      W_JDATE=$(date +%Y-%m-%d)
-      W_JFILE="$BRAIN_PATH/journal/${W_JDATE}.md"
-      W_JTS=$(date +%Y-%m-%dT%H:%M:%S%z)
-      (cd "$BRAIN_PATH" && git pull --rebase --quiet origin master 2>/dev/null) \
-        || log "warning: brain pull failed"
-      if journal_is_duplicate "$W_JOURNAL_SRC" "$W_JFILE"; then
-        log "journal: discretionary entry duplicates an earlier entry today -- skipping"
-      else
-        log "journal: appending discretionary website tick"
-        mkdir -p "$BRAIN_PATH/journal"
-        {
-          printf '\n## %s -- discretionary on %s\n\n' "$W_JTS" "$W_REPO"
-          cat "$W_JOURNAL_SRC"
-        } >> "$W_JFILE"
-        (cd "$BRAIN_PATH" \
-          && git add "journal/${W_JDATE}.md" \
-          && git commit --quiet -m "journal: discretionary on $W_REPO" \
-          && git push --quiet origin master) \
-          || log "warning: brain commit/push failed"
-      fi
-    fi
-
-    # Outcome classification
-    cd "$W_WORKTREE"
-    W_COMMITS=$(git rev-list --count "origin/${W_BASE}..HEAD" 2>/dev/null || echo 0)
-
-    if [ "$W_COMMITS" -eq 0 ]; then
-      log "discretionary: no work produced on $W_REPO"
-      exit 0
-    fi
-
-    W_ACTUAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-    if [ "$W_ACTUAL_BRANCH" != "$W_BRANCH" ]; then
-      log "discretionary: HEAD on $W_ACTUAL_BRANCH, expected $W_BRANCH -- abandoning"
-      exit 0
-    fi
-
-    W_CHANGED=$(git diff --shortstat "origin/${W_BASE}..HEAD" 2>/dev/null \
-      | awk '{ for (i=1;i<=NF;i++) if ($i ~ /insertion|deletion/) s+=$(i-1); print s+0 }')
-    W_CHANGED=${W_CHANGED:-0}
-    if [ "$W_COMMITS" -gt 10 ] || [ "$W_CHANGED" -gt 400 ]; then
-      log "discretionary: scope exceeded ($W_COMMITS commits, $W_CHANGED lines) -- abandoning"
-      exit 0
-    fi
-
-    if grep -qiE 'tests:[[:space:]]+0[[:space:]]+(passed|failed|of|total)|no tests (ran|found|collected)|collected 0 items|(^|[^0-9])0 passing([^0-9]|$)|running 0 tests|ran 0 tests' "$W_LOG"; then
-      log "discretionary: vacuous tests -- abandoning"
-      exit 0
-    fi
-
-    # Did this tick ship a new post? Detect via diff: any new file under src/posts/.
-    W_NEW_POST=0
-    if git diff --name-status --diff-filter=A "origin/${W_BASE}..HEAD" 2>/dev/null \
-         | awk '{ print $2 }' | grep -qE '^src/posts/.+\.md$'; then
-      W_NEW_POST=1
-    fi
-
-    if [ "$W_NEW_POST" -eq 1 ] && [ "$W_POSTING_ALLOWED" -eq 0 ]; then
-      log "discretionary: new post detected but posting is on cooldown -- abandoning (1 post/day rule)"
-      exit 0
-    fi
-
-    log "discretionary: pushing $W_BRANCH and opening PR on $W_REPO (new_post=$W_NEW_POST)"
-    git push --force-with-lease -u origin "$W_BRANCH"
-
-    W_EXISTING_PR=$(forgejo_find_pr_by_head "$W_REPO" "$W_BRANCH")
-    if [ -n "$W_EXISTING_PR" ]; then
-      log "PR #$W_EXISTING_PR already open"
-    else
-      W_PR_TITLE=$(git log -1 --pretty=%s)
-      if [ -f .igor/PR_BODY.md ]; then
-        W_PR_BODY=$(cat .igor/PR_BODY.md)
-      else
-        W_PR_BODY=$(git log "origin/${W_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
-      fi
-      W_PR_BODY+=$(build_deps_section "$W_BASE")
-      forgejo_open_pr "$W_REPO" "$W_BRANCH" "$W_BASE" "$W_PR_TITLE" "$W_PR_BODY" "${IGOR_REVIEWER:-}"
-      log "discretionary: PR opened on $W_REPO"
-    fi
-
-    # Only burn the post cooldown when an actual new post landed.
-    # Site-work PRs (about, layout, copy) don't gate future ticks.
-    if [ "$W_NEW_POST" -eq 1 ]; then
-      posts_mark_shipped
-    fi
-
-    exit 0
-  fi
-
-  TARGET="${ELIGIBLE[RANDOM % ${#ELIGIBLE[@]}]}"
-  log "discretionary: maintenance pass on $TARGET"
-
-  ensure_repo_local "$TARGET"
-  TARGET_PATH=$(repo_path_for "$TARGET")
-
-  # Detached-HEAD worktree on the repo's current default branch.
-  # No feature branch -- maintenance doesn't commit; it writes
-  # findings to a known path that the harness reads after exit.
-  TARGET_BASE=$(cd "$TARGET_PATH" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
-  TARGET_BASE="${TARGET_BASE:-master}"
-  M_WORKTREE="$IGOR_STATE_DIR/worktrees/maintenance-${TARGET//\//_}-$$"
-  mkdir -p "$IGOR_STATE_DIR/worktrees"
-  (cd "$TARGET_PATH" && git fetch --prune origin)
-  (cd "$TARGET_PATH" && git worktree add --detach "$M_WORKTREE" "origin/${TARGET_BASE}")
-  mkdir -p "$M_WORKTREE/.igor"
-
-  M_CLEANUP() {
-    [ -d "$M_WORKTREE" ] && (cd "$TARGET_PATH" && git worktree remove --force "$M_WORKTREE") 2>/dev/null || true
-  }
-  trap M_CLEANUP EXIT
-
-  cd "$M_WORKTREE"
-
-  M_USER_MSG=$(cat <<EOF
-You are doing a discretionary maintenance pass on $TARGET.
-
-No human is waiting on you. Your job:
-
-  1. Read this repo's CLAUDE.md. If it has a "Maintenance" section,
-     follow it -- that's the repo author declaring exactly what
-     maintenance means here.
-  2. Otherwise, auto-detect the stack and run the standard audit
-     plus dep-freshness commands for the ecosystem:
-       - package.json     -> npm audit + npm outdated
-       - Cargo.toml       -> cargo audit + cargo outdated
-       - pyproject.toml/requirements.txt -> pip-audit + pip list --outdated
-       - go.mod           -> govulncheck + go list -m -u all
-       - Gemfile          -> bundle audit + bundle outdated
-     If a tool isn't installed, install it within this session
-     (cargo install cargo-audit, etc.). Use judgment for stacks not
-     listed above.
-  3. If anything notable surfaces -- vulnerabilities, outdated
-     deps, broken links, regressions -- write a markdown summary
-     to .igor/IGOR_MAINTENANCE_FINDINGS.md. The harness will file
-     an Agent-labeled issue with that content for tier-1 work to
-     pick up on a future tick.
-  4. If nothing notable, skip the findings file and exit cleanly.
-
-Don't commit fixes during a maintenance pass -- file findings and
-let normal work flow address them on a future tick. Same content
-rules as always: identity guardrails apply.
-EOF
-)
-
   BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
   if [ -f "$BRAIN_PATH/identity.md" ] && [ -f "$BRAIN_PATH/index.md" ]; then
-    M_SYSTEM_PROMPT=$(cat "$BRAIN_PATH/identity.md" "$BRAIN_PATH/index.md" "$IGOR_HOME/AGENTS.md")
+    W_SYSTEM_PROMPT=$(cat "$BRAIN_PATH/identity.md" "$BRAIN_PATH/index.md" "$IGOR_HOME/AGENTS.md")
   else
-    M_SYSTEM_PROMPT=$(cat "$IGOR_HOME/AGENTS.md")
+    W_SYSTEM_PROMPT=$(cat "$IGOR_HOME/AGENTS.md")
   fi
 
-  log "invoking claude for maintenance (timeout ${IGOR_TIMEOUT})"
-  M_LOG="$M_WORKTREE/.igor/claude-output.log"
-  M_START=$(date +%s)
+  log "invoking claude for website work (timeout ${IGOR_TIMEOUT})"
+  W_LOG="$W_WORKTREE/.igor/claude-output.log"
+  W_START=$(date +%s)
   set +e
   timeout --kill-after=30s "$IGOR_TIMEOUT" \
     claude \
       --model "$IGOR_MODEL" \
-      --append-system-prompt "$M_SYSTEM_PROMPT" \
+      --append-system-prompt "$W_SYSTEM_PROMPT" \
       --settings "$IGOR_HOME/agent-settings.json" \
       --max-turns 50 \
-      --print "$M_USER_MSG" 2>&1 | tee "$M_LOG"
-  M_EXIT=${PIPESTATUS[0]}
+      --print "$W_USER_MSG" 2>&1 | tee "$W_LOG"
+  W_EXIT=${PIPESTATUS[0]}
   set -e
-  log "claude exited $M_EXIT after $(( $(date +%s) - M_START ))s"
+  log "claude exited $W_EXIT after $(( $(date +%s) - W_START ))s"
 
-  FINDINGS="$M_WORKTREE/.igor/IGOR_MAINTENANCE_FINDINGS.md"
-  if [ -s "$FINDINGS" ]; then
-    M_TITLE="Maintenance pass $(date -u +%Y-%m-%d): findings"
-    M_BODY=$(cat "$FINDINGS")
-    M_NUM=$(forgejo_open_issue "$TARGET" "$M_TITLE" "$M_BODY")
-    # Status/Needs More Info, not Agent. Maintenance findings are
-    # reports for the human to triage. Once they decide which ones
-    # are worth fixing, they remove Status/Needs More Info and add
-    # Agent to enter the work queue. Same gate as onboarding tickets.
-    forgejo_add_label "$TARGET" "$M_NUM" "Status/Needs More Info" 2>/dev/null \
-      || log "warning: could not apply 'Status/Needs More Info' on #$M_NUM ($TARGET)"
-
-    # If Claude wrote a severity assessment alongside the findings,
-    # apply the matching Priority/* label so triage attention follows.
-    M_PRIORITY_FILE="$M_WORKTREE/.igor/IGOR_MAINTENANCE_PRIORITY"
-    if [ -s "$M_PRIORITY_FILE" ]; then
-      M_PRIORITY=$(tr -d '[:space:]' < "$M_PRIORITY_FILE" | tr '[:upper:]' '[:lower:]')
-      case "$M_PRIORITY" in
-        critical) M_PRI_LABEL="Priority/Critical" ;;
-        high)     M_PRI_LABEL="Priority/High" ;;
-        medium)   M_PRI_LABEL="Priority/Medium" ;;
-        low)      M_PRI_LABEL="Priority/Low" ;;
-        *)        M_PRI_LABEL="" ;;
-      esac
-      if [ -n "$M_PRI_LABEL" ]; then
-        forgejo_add_label "$TARGET" "$M_NUM" "$M_PRI_LABEL" 2>/dev/null \
-          || log "warning: could not apply '$M_PRI_LABEL' on #$M_NUM ($TARGET)"
-      fi
+  # Journal write -- local-day bucketing; skip byte-identical dupes.
+  W_JOURNAL_SRC="$W_WORKTREE/.igor/IGOR_JOURNAL.md"
+  if [ -s "$W_JOURNAL_SRC" ]; then
+    W_JDATE=$(date +%Y-%m-%d)
+    W_JFILE="$BRAIN_PATH/journal/${W_JDATE}.md"
+    W_JTS=$(date +%Y-%m-%dT%H:%M:%S%z)
+    (cd "$BRAIN_PATH" && git pull --rebase --quiet origin master 2>/dev/null) \
+      || log "warning: brain pull failed"
+    if journal_is_duplicate "$W_JOURNAL_SRC" "$W_JFILE"; then
+      log "journal: discretionary entry duplicates an earlier entry today -- skipping"
+    else
+      log "journal: appending discretionary website tick"
+      mkdir -p "$BRAIN_PATH/journal"
+      {
+        printf '\n## %s -- discretionary on %s\n\n' "$W_JTS" "$W_REPO"
+        cat "$W_JOURNAL_SRC"
+      } >> "$W_JFILE"
+      (cd "$BRAIN_PATH" \
+        && git add "journal/${W_JDATE}.md" \
+        && git commit --quiet -m "journal: discretionary on $W_REPO" \
+        && git push --quiet origin master) \
+        || log "warning: brain commit/push failed"
     fi
-
-    log "maintenance: filed #$M_NUM on $TARGET (awaiting human triage)"
-  else
-    log "maintenance: no findings on $TARGET"
   fi
 
-  maintenance_mark_done "$TARGET"
+  # Outcome classification
+  cd "$W_WORKTREE"
+  W_COMMITS=$(git rev-list --count "origin/${W_BASE}..HEAD" 2>/dev/null || echo 0)
+
+  if [ "$W_COMMITS" -eq 0 ]; then
+    log "discretionary: no work produced on $W_REPO"
+    exit 0
+  fi
+
+  W_ACTUAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+  if [ "$W_ACTUAL_BRANCH" != "$W_BRANCH" ]; then
+    log "discretionary: HEAD on $W_ACTUAL_BRANCH, expected $W_BRANCH -- abandoning"
+    exit 0
+  fi
+
+  W_CHANGED=$(git diff --shortstat "origin/${W_BASE}..HEAD" 2>/dev/null \
+    | awk '{ for (i=1;i<=NF;i++) if ($i ~ /insertion|deletion/) s+=$(i-1); print s+0 }')
+  W_CHANGED=${W_CHANGED:-0}
+  if [ "$W_COMMITS" -gt 10 ] || [ "$W_CHANGED" -gt 400 ]; then
+    log "discretionary: scope exceeded ($W_COMMITS commits, $W_CHANGED lines) -- abandoning"
+    exit 0
+  fi
+
+  if grep -qiE 'tests:[[:space:]]+0[[:space:]]+(passed|failed|of|total)|no tests (ran|found|collected)|collected 0 items|(^|[^0-9])0 passing([^0-9]|$)|running 0 tests|ran 0 tests' "$W_LOG"; then
+    log "discretionary: vacuous tests -- abandoning"
+    exit 0
+  fi
+
+  # Did this tick ship a new post? Detect via diff: any new file under src/posts/.
+  W_NEW_POST=0
+  if git diff --name-status --diff-filter=A "origin/${W_BASE}..HEAD" 2>/dev/null \
+       | awk '{ print $2 }' | grep -qE '^src/posts/.+\.md$'; then
+    W_NEW_POST=1
+  fi
+
+  if [ "$W_NEW_POST" -eq 1 ] && [ "$W_POSTING_ALLOWED" -eq 0 ]; then
+    log "discretionary: new post detected but posting is on cooldown -- abandoning (1 post/day rule)"
+    exit 0
+  fi
+
+  log "discretionary: pushing $W_BRANCH and opening PR on $W_REPO (new_post=$W_NEW_POST)"
+  git push --force-with-lease -u origin "$W_BRANCH"
+
+  W_EXISTING_PR=$(forgejo_find_pr_by_head "$W_REPO" "$W_BRANCH")
+  if [ -n "$W_EXISTING_PR" ]; then
+    log "PR #$W_EXISTING_PR already open"
+  else
+    W_PR_TITLE=$(git log -1 --pretty=%s)
+    if [ -f .igor/PR_BODY.md ]; then
+      W_PR_BODY=$(cat .igor/PR_BODY.md)
+    else
+      W_PR_BODY=$(git log "origin/${W_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
+    fi
+    W_PR_BODY+=$(build_deps_section "$W_BASE")
+    forgejo_open_pr "$W_REPO" "$W_BRANCH" "$W_BASE" "$W_PR_TITLE" "$W_PR_BODY" "${IGOR_REVIEWER:-}"
+    log "discretionary: PR opened on $W_REPO"
+  fi
+
+  # Only burn the post cooldown when an actual new post landed.
+  # Site-work PRs (about, layout, copy) don't gate future ticks.
+  if [ "$W_NEW_POST" -eq 1 ]; then
+    posts_mark_shipped
+  fi
+
   exit 0
 fi
 
