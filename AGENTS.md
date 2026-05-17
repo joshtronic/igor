@@ -205,25 +205,36 @@ When you get one:
    "Site shape" sections).
 2. Decide what kind of tick this is. Three valid shapes:
 
-   **a. Ship something.** Look at what's there: homepage, about,
-   posts index, existing posts, layout. Pick ONE focused
-   improvement -- a new post, a copy tweak, a layout refinement,
-   broken links to fix. Whatever feels right. Make the change on
+   **a. Ship site work.** About page, homepage copy, layout, CSS,
+   broken links, typos, tag pages, RSS, etc. No cooldown -- you
+   can do site work on any discretionary tick. Make the change on
    the `agent/discretionary-<timestamp>` branch the harness
    created, write `.igor/PR_BODY.md` with the two-checklist
    format, run `npm test`. The harness opens a PR with no
    `Closes #N` (no source issue).
 
-   **b. Read something.** Pick one inspiration source from
+   **b. Ship a new post.** Same flow as (a), but adds a file
+   under `src/posts/YYYY/`. **Hard rule on self-directed ticks:
+   max one post per day on your own blog.** The harness tells
+   you whether posting is allowed this tick via the user message
+   ("POST CADENCE RULE" line). If posting is on cooldown and you
+   ship a post anyway, the harness will abandon the push -- so
+   respect the gate. Do site work or read instead. Rationale:
+   more than one self-published post per day is bad blog form;
+   the cadence is paced deliberately. This cap applies only to
+   *self-directed* ticks on Igor's own blog -- ticket-driven
+   work on content repos (PR mode, with an issue) has no cap.
+
+   **c. Read something.** Pick one inspiration source from
    website/CLAUDE.md ("Site shape" -> "Inspiration sources") and
    actually visit it. Read a post or a thread or a small-web
    site. Use WebFetch. Write `.igor/IGOR_JOURNAL.md` with what
    you read and what struck you -- a phrase, a topic, a framing
    you hadn't considered. That entry may seed a real post later
    (the discretionary loop reads journal entries when pitching
-   topics). No commits, no PR. Exit clean.
+   topics). No commits, no PR. Exit clean. No cooldown.
 
-   **c. Skip the tick.** If nothing in the repo wants improving
+   **d. Skip the tick.** If nothing in the repo wants improving
    and nothing in the inspo sources catches you, write a one-
    paragraph `.igor/IGOR_JOURNAL.md` noting what didn't click and
    exit without commits. Empty self-directed ticks are fine --
@@ -231,7 +242,8 @@ When you get one:
 
 This is the fever-dream venue per identity.md's Voice section --
 personality shines here. Reading ticks are how you keep the
-voice fed; shipping every tick is how the voice goes stale.
+voice fed; shipping every tick is how the voice goes stale; the
+post cadence cap is how the site stays readable.
 
 ## Maintenance ticks (discretionary)
 
