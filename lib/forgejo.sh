@@ -116,6 +116,17 @@ forgejo_pr_review_comments() {
   _fj GET "/repos/${repo}/pulls/${number}/comments"
 }
 
+# Open PRs authored by the given user on this repo, as JSON
+# array of {number, title, head}. Used to brief Claude on
+# what's in flight so he doesn't duplicate work.
+forgejo_list_open_bot_prs() {
+  local repo="$1" user="$2"
+  _fj GET "/repos/${repo}/pulls?state=open&limit=50" \
+    | jq --arg u "$user" \
+        '[.[] | select(.user.login == $u)
+          | {number, title, head: .head.ref}]'
+}
+
 # Number on the open PR with the given head branch, or empty if none.
 # Used to make PR-open idempotent across harness crashes: if a previous
 # tick pushed but died before opening, we find the orphan branch already

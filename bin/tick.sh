@@ -732,7 +732,25 @@ if [ -z "$WINNER" ]; then
     W_POST_RULE="You already shipped a post today (local calendar day). Do NOT publish another post this tick -- max one post per day is a hard rule. Other site work (about page, layout, copy, links, tag pages, CSS) and read+journal ticks are still fair game."
   fi
 
-  log "discretionary: self-directed work on $W_REPO (posting=$W_POSTING_ALLOWED)"
+  # Brief Claude on what's already in flight so he doesn't duplicate.
+  # Open PR titles are the cheapest collision-avoidance signal we have
+  # short of full diff overlap analysis.
+  W_OPEN_PRS_JSON=$(forgejo_list_open_bot_prs "$W_REPO" "$BOT_USER" 2>/dev/null || echo '[]')
+  W_OPEN_PRS_COUNT=$(jq 'length' <<<"$W_OPEN_PRS_JSON")
+  if [ "$W_OPEN_PRS_COUNT" -gt 0 ]; then
+    W_OPEN_PRS_LIST=$(jq -r '.[] | "  - #\(.number) (branch `\(.head)`): \(.title)"' <<<"$W_OPEN_PRS_JSON")
+    W_IN_FLIGHT="There are ${W_OPEN_PRS_COUNT} open Igor PR(s) on this repo already, awaiting human review:
+
+${W_OPEN_PRS_LIST}
+
+Do NOT duplicate any of these. Pick something different. If
+nothing else is calling you, this is a fine tick to spend reading
+(shape c) instead of shipping another overlapping PR."
+  else
+    W_IN_FLIGHT="No open Igor PRs on this repo right now -- you're working from a clean slate."
+  fi
+
+  log "discretionary: self-directed work on $W_REPO (posting=$W_POSTING_ALLOWED, in_flight=$W_OPEN_PRS_COUNT)"
 
   W_BASE=$(cd "$W_PATH" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
   W_BASE="${W_BASE:-master}"
@@ -760,6 +778,8 @@ Read CLAUDE.md, especially the "Posts" and "Site shape" sections.
 Look at what's there: src/index.md (homepage), src/about.md (about),
 src/posts.njk (posts index template), src/posts/ (existing posts
 if any), src/_includes/base.njk (layout).
+
+IN-FLIGHT WORK: $W_IN_FLIGHT
 
 POST CADENCE RULE: $W_POST_RULE
 
