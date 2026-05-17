@@ -778,10 +778,16 @@ ONE thing. Under scope cap (400 lines / 10 commits).
 This is the fever-dream venue -- personality welcome. See
 identity.md's Voice section for the register layering.
 
-If shipping (a or b): make the change on the agent branch. Write
-.igor/PR_BODY.md with the two-checklist format from AGENTS.md
-(What this PR does + Test plan). Run npm test before exit -- must
-pass.
+If shipping (a or b):
+  - Make the change on the agent branch (already checked out).
+  - **Commit your work before exiting.** Use \`git add\` + \`git commit\`.
+    The harness only pushes committed changes; files left
+    uncommitted in the worktree are dropped and the tick reports
+    "no work produced." This is the most common Igor failure mode --
+    don't be the one that exits without committing.
+  - Write .igor/PR_BODY.md with the two-checklist format from
+    AGENTS.md (What this PR does + Test plan).
+  - Run npm test before exit -- must pass.
 
 If reading (c) or nothing fits: write .igor/IGOR_JOURNAL.md and
 exit without commits. Empty ticks are fine.
@@ -840,7 +846,15 @@ EOF
   W_COMMITS=$(git rev-list --count "origin/${W_BASE}..HEAD" 2>/dev/null || echo 0)
 
   if [ "$W_COMMITS" -eq 0 ]; then
-    log "discretionary: no work produced on $W_REPO"
+    # Distinguish "Claude did nothing" from "Claude wrote files but
+    # forgot to commit." The latter is wasted spend -- we paid for
+    # the work and it's about to be thrown away.
+    W_DIRTY=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${W_DIRTY:-0}" -gt 0 ]; then
+      log "discretionary: no commits, but $W_DIRTY uncommitted file(s) in worktree -- Claude forgot to commit, work dropped"
+    else
+      log "discretionary: no work produced on $W_REPO"
+    fi
     exit 0
   fi
 
@@ -1168,7 +1182,14 @@ else
   fi
 
   # OUTCOME: noop
-  log "outcome: no work produced (elapsed ${ELAPSED}s)"
+  # Distinguish "Claude did nothing" from "Claude wrote files but
+  # forgot to commit." The latter is wasted spend; flag it loudly.
+  DIRTY=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+  if [ "${DIRTY:-0}" -gt 0 ]; then
+    log "outcome: no work produced -- but $DIRTY uncommitted file(s) in worktree -- Claude forgot to commit, work dropped (elapsed ${ELAPSED}s)"
+  else
+    log "outcome: no work produced (elapsed ${ELAPSED}s)"
+  fi
   forgejo_unassign_all "$FORGEJO_REPO" "$ISSUE_NUMBER"
 
   TAIL="(no output captured)"
