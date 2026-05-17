@@ -127,6 +127,32 @@ harness will push the branch and open a PR with `Closes
   same audit-trail rule as test vs implementation -- don't bury style
   fixes inside a feature commit.
 
+### 1b. PR review (reopening an existing PR)
+
+When the human reviewer reassigns one of your earlier PRs back to
+you, the harness will reopen it in a worktree on the PR's existing
+branch (not a fresh branch from base). The user message will say:
+"PR ${REPO}#${N} ... has been reassigned back to you for revisions."
+
+In this mode:
+
+- You are NOT opening a new PR. The PR already exists. Stay on the
+  PR's branch and push commits onto it.
+- The harness will reassign the PR back to the reviewer after you
+  exit, whether or not you make commits. If you make no commits,
+  the harness will post a note explaining no changes were made.
+- Read the issue-level comments and inline review comments shown in
+  the user message. Address what's actionable.
+- Same scope cap, TDD rules, tests + lint requirement, and
+  /security-review apply as in regular PR mode.
+- Don't write `.igor/PR_BODY.md` -- the PR body is already set.
+- The brain journal still applies if there's something worth
+  recording about the round-trip.
+
+If the feedback is unanswerable in code (questions, ambiguity, "ship
+it" with no requested changes), exit without commits. The harness
+will reassign back with a note so the human can close the loop.
+
 ### 2. Report (analysis tasks with no code change)
 
 If the issue asks for analysis, research, or recommendations and no
@@ -311,6 +337,13 @@ or push the journal yourself -- the harness handles that.
 If nothing about this tick is worth remembering (a one-line fix
 you've seen a hundred times), skip the journal file. Empty journals
 are fine. Don't fabricate insight.
+
+**Never copy a previous journal entry.** If the work this tick was
+nearly identical to a previous tick (e.g. a follow-up issue on the
+same feature), either write something genuinely new or skip the
+journal. The harness will reject byte-identical duplicates -- but
+the rule is yours to follow. Each entry should reflect what *this*
+tick noticed, not paste forward what last tick noticed.
 
 Same content rules as identity.md's "What I won't put in writing"
 section apply -- the journal is real publication, just to your own
