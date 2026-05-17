@@ -193,11 +193,13 @@ maintenance_eligible() {
   [ "$age_days" -ge "$cooldown_days" ]
 }
 
-# Tier-3 (self-directed website) cooldown. Tracks the last time a
-# tier-3 PR was opened on the website so Igor doesn't ship multiple
-# posts/page-edits per day. Default 24 hours, overridable via
-# IGOR_TIER3_COOLDOWN_HOURS.
-tier3_eligible() {
+# Post cooldown. Tracks the last time Igor shipped a new post on the
+# website so he doesn't publish more than one post per day (bad blog
+# form). Only gates posts -- other site work (about page, layout, copy
+# fixes, etc.) and read+journal ticks are unthrottled. Default 24
+# hours, overridable via IGOR_TIER3_COOLDOWN_HOURS (name kept for env
+# compatibility).
+posts_cooldown_clear() {
   local last cooldown_hours last_epoch now age_hours state_file
   cooldown_hours="${IGOR_TIER3_COOLDOWN_HOURS:-24}"
   state_file=$(discretionary_state_file)
@@ -212,7 +214,7 @@ tier3_eligible() {
   [ "$age_hours" -ge "$cooldown_hours" ]
 }
 
-tier3_mark_done() {
+posts_mark_shipped() {
   local state_file tmp ts
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   state_file=$(discretionary_state_file)
@@ -415,12 +417,15 @@ if [ -z "$WINNER" ]; then
       exit 0
     fi
 
-    if ! tier3_eligible; then
-      log "discretionary: tier 3 already ran on website within cooldown -- holding off"
-      exit 0
+    if posts_cooldown_clear; then
+      W_POSTING_ALLOWED=1
+      W_POST_RULE="You MAY publish a new post this tick if that's the right call."
+    else
+      W_POSTING_ALLOWED=0
+      W_POST_RULE="You shipped a post within the last 24h. Do NOT publish another post this tick -- max one post per day is a hard rule. Other site work (about page, layout, copy, links, tag pages, CSS) and read+journal ticks are still fair game."
     fi
 
-    log "discretionary: self-directed work on $W_REPO"
+    log "discretionary: self-directed work on $W_REPO (posting=$W_POSTING_ALLOWED)"
 
     W_BASE=$(cd "$W_PATH" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
     W_BASE="${W_BASE:-master}"
@@ -449,27 +454,29 @@ Look at what's there: src/index.md (homepage), src/about.md (about),
 src/posts.njk (posts index template), src/posts/ (existing posts
 if any), src/_includes/base.njk (layout).
 
-Pick ONE focused improvement. Examples:
+POST CADENCE RULE: $W_POST_RULE
 
-  - Write a new blog post (your choice of topic)
-  - Improve the About page
-  - Improve the homepage copy
-  - Refine the layout, nav, or any CSS
-  - Fix typos, broken links, stale content
-  - Add a tag page if posts are tagged enough to warrant it
+Pick ONE focused outcome. Three valid shapes (per AGENTS.md tier 3):
+
+  a. Ship site work -- about page, homepage copy, layout, CSS,
+     broken links, typos, tag pages, RSS, etc.
+  b. Ship a new post (only if posting is allowed this tick per
+     the rule above).
+  c. Read one of the inspo sources from CLAUDE.md "Site shape" and
+     write .igor/IGOR_JOURNAL.md about what struck you. No commits.
 
 ONE thing. Under scope cap (400 lines / 10 commits).
 
 This is the fever-dream venue -- personality welcome. See
 identity.md's Voice section for the register layering.
 
-Make the change on the agent branch. Write .igor/PR_BODY.md with
-the two-checklist format from AGENTS.md (What this PR does + Test
-plan). Run npm test before exit -- must pass.
+If shipping (a or b): make the change on the agent branch. Write
+.igor/PR_BODY.md with the two-checklist format from AGENTS.md
+(What this PR does + Test plan). Run npm test before exit -- must
+pass.
 
-If nothing feels right after looking around, write IGOR_JOURNAL.md
-with a brief note about what didn't click and exit without
-commits. Empty ticks are fine.
+If reading (c) or nothing fits: write .igor/IGOR_JOURNAL.md and
+exit without commits. Empty ticks are fine.
 EOF
 )
 
@@ -544,7 +551,19 @@ EOF
       exit 0
     fi
 
-    log "discretionary: pushing $W_BRANCH and opening PR on $W_REPO"
+    # Did this tick ship a new post? Detect via diff: any new file under src/posts/.
+    W_NEW_POST=0
+    if git diff --name-status --diff-filter=A "origin/${W_BASE}..HEAD" 2>/dev/null \
+         | awk '{ print $2 }' | grep -qE '^src/posts/.+\.md$'; then
+      W_NEW_POST=1
+    fi
+
+    if [ "$W_NEW_POST" -eq 1 ] && [ "$W_POSTING_ALLOWED" -eq 0 ]; then
+      log "discretionary: new post detected but posting is on cooldown -- abandoning (1 post/day rule)"
+      exit 0
+    fi
+
+    log "discretionary: pushing $W_BRANCH and opening PR on $W_REPO (new_post=$W_NEW_POST)"
     git push --force-with-lease -u origin "$W_BRANCH"
 
     W_EXISTING_PR=$(forgejo_find_pr_by_head "$W_REPO" "$W_BRANCH")
@@ -562,8 +581,11 @@ EOF
       log "discretionary: PR opened on $W_REPO"
     fi
 
-    # Record the ship time so the cooldown gate fires for the next tick.
-    tier3_mark_done
+    # Only burn the post cooldown when an actual new post landed.
+    # Site-work PRs (about, layout, copy) don't gate future ticks.
+    if [ "$W_NEW_POST" -eq 1 ]; then
+      posts_mark_shipped
+    fi
 
     exit 0
   fi
