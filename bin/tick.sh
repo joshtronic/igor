@@ -846,12 +846,16 @@ EOF
   W_COMMITS=$(git rev-list --count "origin/${W_BASE}..HEAD" 2>/dev/null || echo 0)
 
   if [ "$W_COMMITS" -eq 0 ]; then
-    # Distinguish "Claude did nothing" from "Claude wrote files but
-    # forgot to commit." The latter is wasted spend -- we paid for
-    # the work and it's about to be thrown away.
-    W_DIRTY=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    # Exclude .igor/ files from the dirty count -- those are harness
+    # scratch (PR_BODY.md, IGOR_JOURNAL.md, etc.) and stay uncommitted
+    # by design. Real "forgot to commit" cases leave files outside .igor/.
+    W_DIRTY=$(git status --porcelain 2>/dev/null \
+      | awk '$2 !~ /^\.igor\// { c++ } END { print c+0 }')
     if [ "${W_DIRTY:-0}" -gt 0 ]; then
       log "discretionary: no commits, but $W_DIRTY uncommitted file(s) in worktree -- Claude forgot to commit, work dropped"
+    elif [ -s "$W_JOURNAL_SRC" ]; then
+      # Reading tick: journal recorded, no PR expected. Not a noop.
+      log "discretionary: reading tick complete on $W_REPO -- journal recorded, no PR"
     else
       log "discretionary: no work produced on $W_REPO"
     fi
@@ -1182,9 +1186,10 @@ else
   fi
 
   # OUTCOME: noop
-  # Distinguish "Claude did nothing" from "Claude wrote files but
-  # forgot to commit." The latter is wasted spend; flag it loudly.
-  DIRTY=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+  # Exclude .igor/ scratch (PR_BODY.md, IGOR_JOURNAL.md) from the
+  # dirty count -- those are harness state, not committable work.
+  DIRTY=$(git status --porcelain 2>/dev/null \
+    | awk '$2 !~ /^\.igor\// { c++ } END { print c+0 }')
   if [ "${DIRTY:-0}" -gt 0 ]; then
     log "outcome: no work produced -- but $DIRTY uncommitted file(s) in worktree -- Claude forgot to commit, work dropped (elapsed ${ELAPSED}s)"
   else
