@@ -665,12 +665,6 @@ while read -r repo_line; do
     log "onboarding check passed on $R_NAME"
   fi
 
-  # One open Igor PR per repo. Skip until the human deals with it.
-  if forgejo_has_open_bot_pr "$R_NAME" "$BOT_USER"; then
-    log "skipping $R_NAME -- open Igor PR present"
-    continue
-  fi
-
   ISSUE=$(forgejo_find_claimable "$R_NAME" || true)
   [ -n "$ISSUE" ] && [ "$ISSUE" != "null" ] && [ "$ISSUE" != "empty" ] || continue
   CREATED=$(jq -r '.created_at' <<<"$ISSUE")
@@ -693,8 +687,10 @@ if [ -z "$WINNER" ]; then
   # pass on the site.
   #
   # IGOR_DISCRETIONARY_RATE (default 0) gates whether we attempt
-  # this on an empty tick. Per-repo PR throttle and once-per-local-
-  # day post cooldown are the natural pacing.
+  # this on an empty tick. Natural pacing comes from the scope cap
+  # (400 lines / 10 commits) and the once-per-local-day post cap;
+  # multiple concurrent PRs on the same repo are fine -- the human
+  # handles merge order in Forgejo like any multi-PR project.
 
   DISCRETIONARY_RATE="${IGOR_DISCRETIONARY_RATE:-0}"
   RATE_X1000=$(awk "BEGIN { printf \"%d\", $DISCRETIONARY_RATE * 1000 }")
@@ -709,11 +705,6 @@ if [ -z "$WINNER" ]; then
 
   if [ ! -d "$W_PATH/.git" ]; then
     log "discretionary: no website cloned -- nothing to do"
-    exit 0
-  fi
-
-  if forgejo_has_open_bot_pr "$W_REPO" "$BOT_USER"; then
-    log "discretionary: website has open Igor PR -- holding off"
     exit 0
   fi
 
