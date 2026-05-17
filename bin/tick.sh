@@ -113,6 +113,21 @@ ssh_clone_url() {
   fi
 }
 
+# Returns 0 (success / is-duplicate) if the source journal's content
+# is byte-equal to a recent entry in the target journal file. Probe is
+# the first 200 chars -- Claude has been observed to copy entire entries
+# verbatim across consecutive ticks when the work was a near-no-op, and
+# distinct genuine entries don't share 200 chars of opening prose.
+journal_is_duplicate() {
+  local source_file="$1" target_file="$2"
+  [ -f "$target_file" ] || return 1
+  [ -s "$source_file" ] || return 1
+  local probe
+  probe=$(head -c 200 "$source_file")
+  [ -z "$probe" ] && return 1
+  grep -F -q -- "$probe" "$target_file"
+}
+
 # Idempotent clone-if-missing, pull-if-present. Creates the owner
 # subdir as needed. Pulls existing clones so brain identity changes
 # and website content updates propagate to Igor on every tick (not
@@ -157,9 +172,9 @@ maintenance_mark_done() {
   mv "$tmp" "$state_file"
 }
 
-# Eligible if never run or last run >= random(5,7) days ago. Random
-# rolls per check (not per-repo-persistent) so cadence drifts off
-# clockwork patterns naturally.
+# Eligible if not run this local calendar week. Weekly cadence aligns
+# with the Monday-morning maintenance shift -- one audit per repo per
+# week, biased to Mondays. Same-week re-runs are blocked.
 #
 # Skips:
 # - Bot-owned repos (brain, website, anything else under <bot>/). These
@@ -168,7 +183,7 @@ maintenance_mark_done() {
 # - Repos with an open onboarding ticket. Tier 1 refused to clone them
 #   for cause; tier 2 shouldn't sneak around that gate.
 maintenance_eligible() {
-  local repo="$1" last cooldown_days last_epoch now age_days existing owner
+  local repo="$1" last last_week this_week existing owner
 
   owner="${repo%%/*}"
   if [ "$owner" = "$BOT_USER" ]; then
@@ -184,44 +199,77 @@ maintenance_eligible() {
 
   last=$(maintenance_last_run "$repo")
   [ -z "$last" ] && return 0
-  cooldown_days=$(( 5 + RANDOM % 3 ))
-  last_epoch=$(date -u -d "$last" +%s 2>/dev/null \
-    || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last" +%s 2>/dev/null \
-    || echo 0)
-  now=$(date -u +%s)
-  age_days=$(( (now - last_epoch) / 86400 ))
-  [ "$age_days" -ge "$cooldown_days" ]
+  # ISO week (YYYY-Www): local time, same week = blocked
+  last_week=$(date -d "$last" +%G-W%V 2>/dev/null \
+    || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last" +%G-W%V 2>/dev/null \
+    || echo "")
+  this_week=$(date +%G-W%V)
+  [ "$last_week" != "$this_week" ]
 }
 
-# Post cooldown. Tracks the last time Igor shipped a new post on the
-# website so he doesn't publish more than one post per day (bad blog
-# form). Only gates posts -- other site work (about page, layout, copy
-# fixes, etc.) and read+journal ticks are unthrottled. Default 24
-# hours, overridable via IGOR_TIER3_COOLDOWN_HOURS (name kept for env
-# compatibility).
+# Are we in the configured Monday-morning maintenance window?
+# True when: today is Monday AND we're inside the configured shift.
+# When shift is unconfigured, this returns false (no bias, current
+# behavior). The bias means tier 2 is *preferred* over tier 3 in
+# this window; the rest of the shift week behaves normally.
+in_maintenance_window() {
+  local dow
+  dow=$(date +%u)  # 1=Mon, 7=Sun
+  [ "$dow" = "1" ] || return 1
+  in_shift_window
+}
+
+# Post cooldown. One post per local calendar day on Igor's own blog.
+# Calendar-day semantics (not rolling 24h) so "once a day" matches
+# what a human means -- the day ticks over at local midnight, not at
+# the wall-clock time of yesterday's post. Local time follows the
+# server's TZ.
+#
+# Only gates posts -- other site work (about page, layout, copy fixes)
+# and read+journal ticks are unthrottled.
 posts_cooldown_clear() {
-  local last cooldown_hours last_epoch now age_hours state_file
-  cooldown_hours="${IGOR_TIER3_COOLDOWN_HOURS:-24}"
+  local last_day today state_file
   state_file=$(discretionary_state_file)
   [ -f "$state_file" ] || return 0
-  last=$(jq -r '.tier3.website // ""' "$state_file" 2>/dev/null || echo "")
-  [ -z "$last" ] && return 0
-  last_epoch=$(date -u -d "$last" +%s 2>/dev/null \
-    || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last" +%s 2>/dev/null \
-    || echo 0)
-  now=$(date -u +%s)
-  age_hours=$(( (now - last_epoch) / 3600 ))
-  [ "$age_hours" -ge "$cooldown_hours" ]
+  last_day=$(jq -r '.tier3.website_last_day // ""' "$state_file" 2>/dev/null || echo "")
+  [ -z "$last_day" ] && return 0
+  today=$(date +%Y-%m-%d)
+  [ "$last_day" != "$today" ]
 }
 
 posts_mark_shipped() {
-  local state_file tmp ts
-  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local state_file tmp today
+  today=$(date +%Y-%m-%d)
   state_file=$(discretionary_state_file)
   [ -f "$state_file" ] || echo '{}' > "$state_file"
   tmp=$(mktemp)
-  jq --arg t "$ts" '.tier3 //= {} | .tier3.website = $t' "$state_file" > "$tmp"
+  jq --arg d "$today" '.tier3 //= {} | .tier3.website_last_day = $d' "$state_file" > "$tmp"
   mv "$tmp" "$state_file"
+}
+
+# Shift window. Returns 0 if a configured shift is active OR no shift
+# is configured (testing / always-on). When IGOR_SHIFT_START + _END
+# are both set, only fire ticks during [START, END) local hours.
+in_shift_window() {
+  local start="${IGOR_SHIFT_START:-}" end="${IGOR_SHIFT_END:-}" hour
+  [ -z "$start" ] && return 0
+  [ -z "$end" ] && return 0
+  hour=$(date +%H)
+  hour=$((10#$hour))
+  [ "$hour" -ge "$start" ] && [ "$hour" -lt "$end" ]
+}
+
+# Posts only allowed in the last hour of the shift (so site work and
+# maintenance happen first, then a post if there's something to say).
+# If shift is unconfigured, no time-of-day gating -- the cooldown is
+# the only constraint.
+posts_in_window() {
+  local start="${IGOR_SHIFT_START:-}" end="${IGOR_SHIFT_END:-}" hour
+  [ -z "$start" ] && return 0
+  [ -z "$end" ] && return 0
+  hour=$(date +%H)
+  hour=$((10#$hour))
+  [ "$hour" -eq "$((end - 1))" ]
 }
 
 # Worktree key: slash-free, unique per repo+issue.
@@ -248,6 +296,18 @@ build_deps_section() {
     printf -- '- `%s` (%s)\n' "$f" "$counts"
   done <<<"$files"
 }
+
+# -- Shift gate ------------------------------------------------
+#
+# If IGOR_SHIFT_START + _END are configured, exit early when the
+# current local hour is outside the shift window. Lets the systemd
+# timer fire 24/7 while Igor only "works" his configured shift.
+# Default (unconfigured) is always-on.
+
+if ! in_shift_window; then
+  log "outside shift window (${IGOR_SHIFT_START:-unset}-${IGOR_SHIFT_END:-unset}), current hour $(date +%H) -- skipping tick"
+  exit 0
+fi
 
 # -- Bootstrap: ensure Igor's own repos are cloned -------------
 #
@@ -301,6 +361,138 @@ if [ "$ORPHAN_COUNT" -gt 0 ]; then
       cleanup_agent_branches "$O_NUM" "$O_LOCAL"
     fi
   done < <(jq -c '.[] | {repo: .repository.full_name, num: .number}' <<<"$ORPHANS")
+fi
+
+# -- PR-review pickup ------------------------------------------
+#
+# The "assignment dance": Igor opens a PR assigned to IGOR_REVIEWER;
+# the human reviews, leaves comments, and reassigns the PR back to
+# Igor. Next tick finds it here and reopens the work on the PR's
+# existing branch -- new commits, push, reassign to reviewer, exit.
+#
+# Disabled when IGOR_REVIEWER is unset (testing / solo runs without
+# a reviewer configured).
+
+if [ -n "${IGOR_REVIEWER:-}" ]; then
+  REVIEW_PRS=$(forgejo_my_assigned_prs 2>/dev/null || echo '[]')
+  REVIEW_COUNT=$(jq 'length' <<<"$REVIEW_PRS")
+  if [ "$REVIEW_COUNT" -gt 0 ]; then
+    REVIEW_PR=$(jq -c '.[0]' <<<"$REVIEW_PRS")
+    PR_NUMBER=$(jq -r .number <<<"$REVIEW_PR")
+    PR_REPO=$(jq -r '.repository.full_name' <<<"$REVIEW_PR")
+    PR_TITLE=$(jq -r .title <<<"$REVIEW_PR")
+
+    log "PR-review: ${PR_REPO}#${PR_NUMBER} assigned back -- reopening"
+
+    PR_DETAILS=$(forgejo_get_pr "$PR_REPO" "$PR_NUMBER")
+    PR_HEAD=$(jq -r .head.ref <<<"$PR_DETAILS")
+    PR_BASE=$(jq -r .base.ref <<<"$PR_DETAILS")
+    PR_BODY=$(jq -r '.body // ""' <<<"$PR_DETAILS")
+
+    ensure_repo_local "$PR_REPO"
+    PR_REPO_PATH=$(repo_path_for "$PR_REPO")
+
+    (cd "$PR_REPO_PATH" && git fetch origin --prune)
+
+    PR_WORKTREE="$IGOR_STATE_DIR/worktrees/$(worktree_key "$PR_REPO" "pr${PR_NUMBER}")"
+    if [ -e "$PR_WORKTREE" ]; then
+      (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || rm -rf "$PR_WORKTREE"
+    fi
+    (cd "$PR_REPO_PATH" && git worktree add -B "$PR_HEAD" "$PR_WORKTREE" "origin/${PR_HEAD}")
+    mkdir -p "$PR_WORKTREE/.igor"
+
+    PR_ISSUE_COMMENTS=$(forgejo_pr_comments "$PR_REPO" "$PR_NUMBER" \
+      | jq -r --arg me "$BOT_USER" '
+          [.[] | select(.user.login != $me)
+            | "**" + .user.login + "** (" + .created_at + "):\n\n" + .body]
+          | join("\n\n---\n\n")')
+    PR_INLINE_COMMENTS=$(forgejo_pr_review_comments "$PR_REPO" "$PR_NUMBER" \
+      | jq -r --arg me "$BOT_USER" '
+          [.[] | select(.user.login != $me)
+            | "**" + .user.login + "** on `" + .path + "`"
+              + (if .original_line then " line " + (.original_line|tostring) else "" end)
+              + " (" + .created_at + "):\n\n" + .body]
+          | join("\n\n---\n\n")')
+
+    PR_USER_MSG=$(cat <<EOF
+You opened PR ${PR_REPO}#${PR_NUMBER}: ${PR_TITLE}
+
+The human reviewer assigned the PR back to you for revisions. Read
+the comments below, decide what is actionable, address them with new
+commits on this branch (${PR_HEAD}), and exit. The harness will push
+your commits and reassign the PR back to the reviewer.
+
+If you genuinely have nothing to change -- for example the comments
+were questions you can answer in a reply rather than code, or the
+feedback is a "ship it" -- post a comment with your reply using
+\`forgejo_comment\` semantics is not available; instead just exit
+without commits and the harness will reassign back with a note that
+no changes were made. The human will close the loop manually.
+
+Base: ${PR_BASE}
+Branch: ${PR_HEAD}
+
+PR body:
+${PR_BODY}
+
+## Issue-level comments
+
+${PR_ISSUE_COMMENTS}
+
+## Inline review comments
+
+${PR_INLINE_COMMENTS}
+
+Same rules as PR mode (AGENTS.md): TDD where the repo supports it,
+project tests + lint must pass before exit, /security-review on your
+diff. Stay on this branch. Do not open a new PR -- this one already
+exists.
+EOF
+)
+
+    PR_BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
+    if [ -f "$PR_BRAIN_PATH/identity.md" ] && [ -f "$PR_BRAIN_PATH/index.md" ]; then
+      PR_SYSTEM_PROMPT=$(cat "$PR_BRAIN_PATH/identity.md" "$PR_BRAIN_PATH/index.md" "$IGOR_HOME/AGENTS.md")
+    else
+      PR_SYSTEM_PROMPT=$(cat "$IGOR_HOME/AGENTS.md")
+    fi
+
+    cd "$PR_WORKTREE"
+    log "invoking claude for PR review (timeout ${IGOR_TIMEOUT})"
+    PR_LOG="$PR_WORKTREE/.igor/claude-output.log"
+    PR_START=$(date +%s)
+    set +e
+    timeout --kill-after=30s "$IGOR_TIMEOUT" \
+      claude \
+        --model "$IGOR_MODEL" \
+        --append-system-prompt "$PR_SYSTEM_PROMPT" \
+        --settings "$IGOR_HOME/agent-settings.json" \
+        --max-turns 50 \
+        --print "$PR_USER_MSG" 2>&1 | tee "$PR_LOG"
+    PR_EXIT=${PIPESTATUS[0]}
+    set -e
+    log "claude exited $PR_EXIT after $(( $(date +%s) - PR_START ))s"
+
+    cd "$PR_WORKTREE"
+    PR_NEW=$(git rev-list --count "origin/${PR_HEAD}..HEAD" 2>/dev/null || echo 0)
+
+    if [ "$PR_NEW" -gt 0 ]; then
+      log "PR-review: pushing $PR_NEW new commits and reassigning to $IGOR_REVIEWER"
+      git push origin "$PR_HEAD"
+      forgejo_unassign_all "$PR_REPO" "$PR_NUMBER"
+      forgejo_assign "$PR_REPO" "$PR_NUMBER" "$IGOR_REVIEWER"
+    else
+      log "PR-review: no commits made -- reassigning to $IGOR_REVIEWER with a note"
+      forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+        "Igor reopened this PR after reassignment but didn't make any new commits. Either the feedback was answerable without code changes, or Igor couldn't act on it. Reassigning back so a human can close the loop."
+      forgejo_unassign_all "$PR_REPO" "$PR_NUMBER"
+      forgejo_assign "$PR_REPO" "$PR_NUMBER" "$IGOR_REVIEWER"
+    fi
+
+    (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || true
+
+    exit 0
+  fi
 fi
 
 # -- Discovery: find globally oldest claimable -----------------
@@ -357,33 +549,31 @@ if [ -z "$WINNER" ]; then
   # -- Tier 2: discretionary maintenance pass ------------------
   #
   # When nothing's claimable, optionally fire one maintenance pass
-  # on a random eligible repo. Three throttles:
+  # on a random eligible repo. Two throttles:
   #
   #   (1) IGOR_DISCRETIONARY_RATE -- probability we even consider
-  #       maintenance this tick. Default 0 (off). Range 0.0-1.0.
-  #   (2) IGOR_MAX_OPEN_PRS -- if the bot already has this many open
-  #       PRs across all repos, don't add more findings to the queue.
-  #   (3) per-repo cooldown -- 5-7 days random since last pass.
+  #       discretionary work this tick. Default 0 (off). Range 0.0-1.0.
+  #   (2) per-repo weekly cap -- one audit per repo per ISO week.
+  #
+  # On Monday-morning shifts the dice roll is bypassed: maintenance
+  # runs as a scheduled obligation rather than discretionary work.
+  # Per-repo PR throttle still prevents pile-on if findings stack.
   #
   # Findings flow same as journal: Claude writes
   # .igor/IGOR_MAINTENANCE_FINDINGS.md, harness reads it and files an
-  # Agent-labeled issue for follow-up work.
+  # issue with Status/Needs More Info for human triage.
 
   DISCRETIONARY_RATE="${IGOR_DISCRETIONARY_RATE:-0}"
-  MAX_OPEN_PRS="${IGOR_MAX_OPEN_PRS:-3}"
 
-  RATE_X1000=$(awk "BEGIN { printf \"%d\", $DISCRETIONARY_RATE * 1000 }")
-  ROLL=$(( RANDOM % 1000 ))
-
-  if [ "$ROLL" -ge "$RATE_X1000" ]; then
-    log "discretionary: dice $ROLL/1000 vs rate $RATE_X1000 -- skip"
-    exit 0
-  fi
-
-  OPEN_PRS=$(forgejo_count_bot_open_prs 2>/dev/null || echo 0)
-  if [ "$OPEN_PRS" -ge "$MAX_OPEN_PRS" ]; then
-    log "discretionary: $OPEN_PRS open PRs (cap $MAX_OPEN_PRS) -- holding off"
-    exit 0
+  if in_maintenance_window; then
+    log "discretionary: Monday-morning maintenance window -- bypassing dice roll"
+  else
+    RATE_X1000=$(awk "BEGIN { printf \"%d\", $DISCRETIONARY_RATE * 1000 }")
+    ROLL=$(( RANDOM % 1000 ))
+    if [ "$ROLL" -ge "$RATE_X1000" ]; then
+      log "discretionary: dice $ROLL/1000 vs rate $RATE_X1000 -- skip"
+      exit 0
+    fi
   fi
 
   ELIGIBLE=()
@@ -417,12 +607,15 @@ if [ -z "$WINNER" ]; then
       exit 0
     fi
 
-    if posts_cooldown_clear; then
+    if posts_cooldown_clear && posts_in_window; then
       W_POSTING_ALLOWED=1
       W_POST_RULE="You MAY publish a new post this tick if that's the right call."
+    elif ! posts_cooldown_clear; then
+      W_POSTING_ALLOWED=0
+      W_POST_RULE="You already shipped a post today (local calendar day). Do NOT publish another post this tick -- max one post per day is a hard rule. Other site work (about page, layout, copy, links, tag pages, CSS) and read+journal ticks are still fair game."
     else
       W_POSTING_ALLOWED=0
-      W_POST_RULE="You shipped a post within the last 24h. Do NOT publish another post this tick -- max one post per day is a hard rule. Other site work (about page, layout, copy, links, tag pages, CSS) and read+journal ticks are still fair game."
+      W_POST_RULE="Posts are only allowed in the last hour of your configured shift. Do site work, maintenance follow-ups, or a read+journal tick. A post requires having earned the right via a day of other work first."
     fi
 
     log "discretionary: self-directed work on $W_REPO (posting=$W_POSTING_ALLOWED)"
@@ -502,25 +695,29 @@ EOF
     set -e
     log "claude exited $W_EXIT after $(( $(date +%s) - W_START ))s"
 
-    # Journal write
+    # Journal write -- local-day bucketing; skip byte-identical dupes.
     W_JOURNAL_SRC="$W_WORKTREE/.igor/IGOR_JOURNAL.md"
     if [ -s "$W_JOURNAL_SRC" ]; then
-      W_JDATE=$(date -u +%Y-%m-%d)
+      W_JDATE=$(date +%Y-%m-%d)
       W_JFILE="$BRAIN_PATH/journal/${W_JDATE}.md"
-      W_JTS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-      log "journal: appending discretionary website tick"
-      mkdir -p "$BRAIN_PATH/journal"
+      W_JTS=$(date +%Y-%m-%dT%H:%M:%S%z)
       (cd "$BRAIN_PATH" && git pull --rebase --quiet origin master 2>/dev/null) \
         || log "warning: brain pull failed"
-      {
-        printf '\n## %s -- discretionary on %s\n\n' "$W_JTS" "$W_REPO"
-        cat "$W_JOURNAL_SRC"
-      } >> "$W_JFILE"
-      (cd "$BRAIN_PATH" \
-        && git add "journal/${W_JDATE}.md" \
-        && git commit --quiet -m "journal: discretionary on $W_REPO" \
-        && git push --quiet origin master) \
-        || log "warning: brain commit/push failed"
+      if journal_is_duplicate "$W_JOURNAL_SRC" "$W_JFILE"; then
+        log "journal: discretionary entry duplicates an earlier entry today -- skipping"
+      else
+        log "journal: appending discretionary website tick"
+        mkdir -p "$BRAIN_PATH/journal"
+        {
+          printf '\n## %s -- discretionary on %s\n\n' "$W_JTS" "$W_REPO"
+          cat "$W_JOURNAL_SRC"
+        } >> "$W_JFILE"
+        (cd "$BRAIN_PATH" \
+          && git add "journal/${W_JDATE}.md" \
+          && git commit --quiet -m "journal: discretionary on $W_REPO" \
+          && git push --quiet origin master) \
+          || log "warning: brain commit/push failed"
+      fi
     fi
 
     # Outcome classification
@@ -577,7 +774,7 @@ EOF
         W_PR_BODY=$(git log "origin/${W_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
       fi
       W_PR_BODY+=$(build_deps_section "$W_BASE")
-      forgejo_open_pr "$W_REPO" "$W_BRANCH" "$W_BASE" "$W_PR_TITLE" "$W_PR_BODY"
+      forgejo_open_pr "$W_REPO" "$W_BRANCH" "$W_BASE" "$W_PR_TITLE" "$W_PR_BODY" "${IGOR_REVIEWER:-}"
       log "discretionary: PR opened on $W_REPO"
     fi
 
@@ -847,26 +1044,30 @@ log "claude exited $CLAUDE_EXIT (elapsed ${ELAPSED}s)"
 JOURNAL_SRC="$WORKTREE/.igor/IGOR_JOURNAL.md"
 if [ -s "$JOURNAL_SRC" ]; then
   BRAIN_LOCAL="$IGOR_REPO_ROOT/${BOT_USER}/brain"
-  JOURNAL_DATE=$(date -u +%Y-%m-%d)
+  JOURNAL_DATE=$(date +%Y-%m-%d)
   JOURNAL_FILE="$BRAIN_LOCAL/journal/${JOURNAL_DATE}.md"
-  JOURNAL_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-  log "journal: appending tick reflection to brain/journal/${JOURNAL_DATE}.md"
-  mkdir -p "$BRAIN_LOCAL/journal"
+  JOURNAL_TS=$(date +%Y-%m-%dT%H:%M:%S%z)
 
   (cd "$BRAIN_LOCAL" && git pull --rebase --quiet origin master 2>/dev/null) \
     || log "warning: brain pull failed; appending to local copy anyway"
 
-  {
-    printf '\n## %s -- %s#%s\n\n' "$JOURNAL_TS" "$FORGEJO_REPO" "$ISSUE_NUMBER"
-    cat "$JOURNAL_SRC"
-  } >> "$JOURNAL_FILE"
+  if journal_is_duplicate "$JOURNAL_SRC" "$JOURNAL_FILE"; then
+    log "journal: entry duplicates an earlier entry today -- skipping"
+  else
+    log "journal: appending tick reflection to brain/journal/${JOURNAL_DATE}.md"
+    mkdir -p "$BRAIN_LOCAL/journal"
 
-  (cd "$BRAIN_LOCAL" \
-    && git add "journal/${JOURNAL_DATE}.md" \
-    && git commit --quiet -m "journal: ${FORGEJO_REPO}#${ISSUE_NUMBER}" \
-    && git push --quiet origin master) \
-    || log "warning: brain commit/push failed; entry may be local-only"
+    {
+      printf '\n## %s -- %s#%s\n\n' "$JOURNAL_TS" "$FORGEJO_REPO" "$ISSUE_NUMBER"
+      cat "$JOURNAL_SRC"
+    } >> "$JOURNAL_FILE"
+
+    (cd "$BRAIN_LOCAL" \
+      && git add "journal/${JOURNAL_DATE}.md" \
+      && git commit --quiet -m "journal: ${FORGEJO_REPO}#${ISSUE_NUMBER}" \
+      && git push --quiet origin master) \
+      || log "warning: brain commit/push failed; entry may be local-only"
+  fi
 fi
 
 # -- Determine outcome -----------------------------------------
@@ -949,7 +1150,7 @@ Split this into smaller issues, then remove \`Status/Blocked\` and the next tick
     PR_BODY+=$(build_deps_section "$PR_BASE")
     PR_BODY+=$'\n\nCloses #'"$ISSUE_NUMBER"
 
-    forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$PR_TITLE" "$PR_BODY"
+    forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$PR_TITLE" "$PR_BODY" "${IGOR_REVIEWER:-}"
     log "PR opened"
   fi
 

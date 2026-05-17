@@ -76,12 +76,44 @@ forgejo_comment() {
 }
 
 forgejo_open_pr() {
-  local repo="$1" head="$2" base="$3" title="$4" body="$5"
-  _fj POST "/repos/${repo}/pulls" \
-    "$(jq -n \
-        --arg t "$title" --arg b "$body" \
-        --arg h "$head"  --arg ba "$base" \
-        '{title: $t, body: $b, head: $h, base: $ba}')" >/dev/null
+  local repo="$1" head="$2" base="$3" title="$4" body="$5" assignee="${6:-}"
+  local payload
+  payload=$(jq -n \
+    --arg t "$title" --arg b "$body" \
+    --arg h "$head"  --arg ba "$base" \
+    '{title: $t, body: $b, head: $h, base: $ba}')
+  if [ -n "$assignee" ]; then
+    payload=$(jq --arg a "$assignee" '. + {assignees: [$a]}' <<<"$payload")
+  fi
+  _fj POST "/repos/${repo}/pulls" "$payload" >/dev/null
+}
+
+# All open PRs assigned to the authenticated bot user across every
+# accessible repo. The assignment-dance entry point: human reassigns a
+# PR back to the bot, next tick finds it here and reopens the work.
+forgejo_my_assigned_prs() {
+  _fj GET "/repos/issues/search?type=pulls&state=open&assigned=true&limit=50"
+}
+
+# Full PR object including head/base branch info. The search endpoint
+# returns issue-shaped records that don't include branch refs; this
+# fetch fills in what we need to check out the PR's branch.
+forgejo_get_pr() {
+  local repo="$1" number="$2"
+  _fj GET "/repos/${repo}/pulls/${number}"
+}
+
+# Issue-level comments on a PR (the "Conversation" tab). Distinct from
+# inline review comments tied to a specific file/line.
+forgejo_pr_comments() {
+  local repo="$1" number="$2"
+  _fj GET "/repos/${repo}/issues/${number}/comments"
+}
+
+# Inline review comments (tied to a file path and line).
+forgejo_pr_review_comments() {
+  local repo="$1" number="$2"
+  _fj GET "/repos/${repo}/pulls/${number}/comments"
 }
 
 # Returns 0 if the given user has any open PR in this repo, 1 otherwise.

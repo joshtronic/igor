@@ -17,6 +17,17 @@ bin/install.sh                 # systemd setup
 bin/validate.sh                # confirm setup
 ```
 
+## Updating
+
+```sh
+cd ~/.local/share/igor
+git pull
+bin/install.sh                 # re-reads units, daemon-reloads
+```
+
+`install.sh` is idempotent. `.env` changes need no reload -- each tick
+re-sources it.
+
 For each repo Igor should work: add the bot user as a collaborator, set
 up labels (Forgejo's Advanced label template + a custom `Agent` label),
 and confirm via `bin/validate-repo.sh <owner>/<name>`. See
