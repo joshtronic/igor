@@ -811,13 +811,46 @@ if [ -z "$WINNER" ]; then
 
   if [ "$W_OPEN_PRS_COUNT" -gt 0 ]; then
     W_OPEN_PRS_LIST=$(jq -r '.[] | "  - #\(.number) (branch `\(.head)`): \(.title)"' <<<"$W_OPEN_PRS_JSON")
+
+    # Aggregate every file touched across all open PRs. Different
+    # topics often touch the same infrastructure files (base.njk,
+    # style.css). Topic-only briefing wasn't enough -- two PRs about
+    # different things both touching the same file still conflict at
+    # merge time. Telling Claude the file list directly is much more
+    # actionable than the title list alone.
+    W_INFLIGHT_FILES=""
+    while read -r pr_number; do
+      [ -z "$pr_number" ] && continue
+      forgejo_pr_files "$W_REPO" "$pr_number" 2>/dev/null \
+        | jq -r '.[] | .filename' 2>/dev/null
+    done < <(jq -r '.[].number' <<<"$W_OPEN_PRS_JSON" 2>/dev/null) \
+      | grep -v '^\.igor/' \
+      | sort -u \
+      | sed 's/^/  - /' > /tmp/igor_inflight_files.$$
+    W_INFLIGHT_FILES=$(cat /tmp/igor_inflight_files.$$)
+    rm -f /tmp/igor_inflight_files.$$
+
+    if [ -n "$W_INFLIGHT_FILES" ]; then
+      W_FILES_NOTE="
+
+Files currently modified across those open PRs (avoid editing these
+unless you're certain your change won't conflict at merge time):
+
+${W_INFLIGHT_FILES}
+
+If your idea would touch any file on that list, pick a different
+idea or do a read+journal tick instead."
+    else
+      W_FILES_NOTE=""
+    fi
+
     W_IN_FLIGHT="There are ${W_OPEN_PRS_COUNT} open Igor PR(s) on this repo already, awaiting human review:
 
 ${W_OPEN_PRS_LIST}
 
 Do NOT duplicate any of these. Pick something different. If
 nothing else is calling you, this is a fine tick to spend reading
-(shape c) instead of shipping another overlapping PR."
+(shape c) instead of shipping another overlapping PR.${W_FILES_NOTE}"
   else
     W_IN_FLIGHT="No open Igor PRs on this repo right now -- you're working from a clean slate."
   fi
