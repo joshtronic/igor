@@ -113,6 +113,17 @@ ssh_clone_url() {
   fi
 }
 
+# Create the .igor/ scratch dir inside a worktree and drop a local
+# gitignore so its contents (PR_BODY.md, IGOR_JOURNAL.md, claude-
+# output.log, IGOR_MAINTENANCE_*) never get picked up by `git add .`
+# or `git add -A`. Self-contained per worktree so we don't need to
+# touch each target repo's tracked .gitignore.
+init_igor_scratch() {
+  local worktree="$1"
+  mkdir -p "$worktree/.igor"
+  printf '*\n' > "$worktree/.igor/.gitignore"
+}
+
 # Returns 0 (success / is-duplicate) if the source journal's content
 # is byte-equal to a recent entry in the target journal file. Probe is
 # the first 200 chars -- Claude has been observed to copy entire entries
@@ -262,7 +273,7 @@ do_maintenance_tick() {
   mkdir -p "$IGOR_STATE_DIR/worktrees"
   (cd "$target_path" && git fetch --prune origin)
   (cd "$target_path" && git worktree add --detach "$m_worktree" "origin/${target_base}")
-  mkdir -p "$m_worktree/.igor"
+  init_igor_scratch "$m_worktree"
 
   # Worktree cleanup at script exit. Variables M_WT_PATH/M_TGT_PATH
   # need global scope so the trap can see them.
@@ -585,7 +596,7 @@ if [ -n "${IGOR_REVIEWER:-}" ]; then
       (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || rm -rf "$PR_WORKTREE"
     fi
     (cd "$PR_REPO_PATH" && git worktree add -B "$PR_HEAD" "$PR_WORKTREE" "origin/${PR_HEAD}")
-    mkdir -p "$PR_WORKTREE/.igor"
+    init_igor_scratch "$PR_WORKTREE"
 
     # Fetch comments defensively -- a 404 on either endpoint shouldn't
     # kill the tick; just treat as no-comments. PRs without inline
@@ -821,7 +832,7 @@ nothing else is calling you, this is a fine tick to spend reading
   mkdir -p "$IGOR_STATE_DIR/worktrees"
   (cd "$W_PATH" && git fetch --prune origin)
   (cd "$W_PATH" && git worktree add -b "$W_BRANCH" "$W_WORKTREE" "origin/${W_BASE}")
-  mkdir -p "$W_WORKTREE/.igor"
+  init_igor_scratch "$W_WORKTREE"
 
   W_CLEANUP() {
     [ -d "$W_WORKTREE" ] && (cd "$W_PATH" && git worktree remove --force "$W_WORKTREE") 2>/dev/null || true
@@ -1090,7 +1101,7 @@ fi
 cd "$REPO_PATH"
 git fetch origin --prune
 git worktree add -b "$BRANCH" "$WORKTREE" "origin/${PR_BASE}"
-mkdir -p "$WORKTREE/.igor"
+init_igor_scratch "$WORKTREE"
 
 # -- Invoke Claude ---------------------------------------------
 
