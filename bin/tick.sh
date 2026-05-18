@@ -163,7 +163,7 @@ maintenance_last_run() {
 
 maintenance_mark_done() {
   local repo="$1" state_file tmp ts
-  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  ts=$(date +%Y-%m-%dT%H:%M:%S%z)
   state_file=$(discretionary_state_file)
   [ -f "$state_file" ] || echo '{}' > "$state_file"
   tmp=$(mktemp)
@@ -363,20 +363,62 @@ EOF
 
 # Post cooldown. One post per local calendar day on Igor's own blog.
 # Calendar-day semantics (not rolling 24h) so "once a day" matches
-# what a human means -- the day ticks over at local midnight, not at
-# the wall-clock time of yesterday's post. Local time follows the
-# server's TZ.
+# what a human means -- the day ticks over at local midnight.
 #
-# Only gates posts -- other site work (about page, layout, copy fixes)
+# Authoritative sources, checked in order (any "yes" blocks):
+#   1. git log on origin/master -- any post file added today?
+#      (Authoritative: state file can be lost or out of sync; the
+#      merged history can't lie.)
+#   2. State file `.tier3.website_last_day` -- did we ship today?
+#      (Covers same-tick-day post when nothing's merged yet.)
+#   3. State file `.tier3.website` (legacy UTC timestamp) -- did the
+#      previous code mark today? (Migration safety; harmless to keep.)
+#
+# Only gates posts -- other site work (about page, layout, copy)
 # and read+journal ticks are unthrottled.
 posts_cooldown_clear() {
-  local last_day today state_file
-  state_file=$(discretionary_state_file)
-  [ -f "$state_file" ] || return 0
-  last_day=$(jq -r '.tier3.website_last_day // ""' "$state_file" 2>/dev/null || echo "")
-  [ -z "$last_day" ] && return 0
+  local today website_path state_file last_day last_legacy
   today=$(date +%Y-%m-%d)
-  [ "$last_day" != "$today" ]
+
+  # Layer 1: git log on the website's master. Authoritative for
+  # anything that's already merged. Skips silently if the website
+  # isn't cloned yet (first tick after bootstrap).
+  website_path=$(repo_path_for "${BOT_USER}/website")
+  if [ -d "$website_path/.git" ]; then
+    local merged_today
+    merged_today=$(cd "$website_path" \
+      && git log --since="$today 00:00:00" --until="$today 23:59:59" \
+          origin/master --diff-filter=A --name-only --pretty=format: \
+          -- 'src/posts/*' 2>/dev/null \
+      | grep -cE '^src/posts/.+\.md$' || true)
+    if [ "${merged_today:-0}" -gt 0 ]; then
+      return 1
+    fi
+  fi
+
+  # Layer 2: state file, current schema.
+  state_file=$(discretionary_state_file)
+  if [ -f "$state_file" ]; then
+    last_day=$(jq -r '.tier3.website_last_day // ""' "$state_file" 2>/dev/null || echo "")
+    if [ -n "$last_day" ] && [ "$last_day" = "$today" ]; then
+      return 1
+    fi
+
+    # Layer 3: legacy UTC timestamp from pre-refactor harness runs.
+    # Translate to local date and compare; if today, block.
+    last_legacy=$(jq -r '.tier3.website // ""' "$state_file" 2>/dev/null || echo "")
+    if [ -n "$last_legacy" ]; then
+      local legacy_local_day
+      legacy_local_day=$(date -d "$last_legacy" +%Y-%m-%d 2>/dev/null \
+        || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last_legacy" +%Y-%m-%d 2>/dev/null \
+        || echo "")
+      if [ "$legacy_local_day" = "$today" ]; then
+        return 1
+      fi
+    fi
+  fi
+
+  return 0
 }
 
 posts_mark_shipped() {
@@ -724,7 +766,31 @@ if [ -z "$WINNER" ]; then
     exit 0
   fi
 
-  if posts_cooldown_clear; then
+  # Brief Claude on what's already in flight so he doesn't duplicate.
+  # Open PR titles are the cheapest collision-avoidance signal we have
+  # short of full diff overlap analysis.
+  W_OPEN_PRS_JSON=$(forgejo_list_open_bot_prs "$W_REPO" "$BOT_USER" 2>/dev/null || echo '[]')
+  W_OPEN_PRS_COUNT=$(jq 'length' <<<"$W_OPEN_PRS_JSON")
+
+  # Scan each open PR for a new post file. If any open PR is already
+  # adding src/posts/*.md, today's post is in flight (just unmerged);
+  # the cooldown should fire even though git log on master is clean.
+  W_INFLIGHT_POST=0
+  if [ "$W_OPEN_PRS_COUNT" -gt 0 ]; then
+    while read -r pr_number; do
+      [ -z "$pr_number" ] && continue
+      if forgejo_pr_files "$W_REPO" "$pr_number" 2>/dev/null \
+          | jq -e '[.[] | select(.status == "added") | .filename] | any(. ; test("^src/posts/.+\\.md$"))' >/dev/null 2>&1; then
+        W_INFLIGHT_POST=1
+        break
+      fi
+    done < <(jq -r '.[].number' <<<"$W_OPEN_PRS_JSON" 2>/dev/null || echo "")
+  fi
+
+  if [ "$W_INFLIGHT_POST" -eq 1 ]; then
+    W_POSTING_ALLOWED=0
+    W_POST_RULE="An open Igor PR on this repo already contains a new post for today (not yet merged). Do NOT publish another post -- one post per day is the rule and today's slot is already taken. Site work, follow-ups, or a read+journal tick are still fair game."
+  elif posts_cooldown_clear; then
     W_POSTING_ALLOWED=1
     W_POST_RULE="You MAY publish a new post this tick if that's the right call."
   else
@@ -732,11 +798,6 @@ if [ -z "$WINNER" ]; then
     W_POST_RULE="You already shipped a post today (local calendar day). Do NOT publish another post this tick -- max one post per day is a hard rule. Other site work (about page, layout, copy, links, tag pages, CSS) and read+journal ticks are still fair game."
   fi
 
-  # Brief Claude on what's already in flight so he doesn't duplicate.
-  # Open PR titles are the cheapest collision-avoidance signal we have
-  # short of full diff overlap analysis.
-  W_OPEN_PRS_JSON=$(forgejo_list_open_bot_prs "$W_REPO" "$BOT_USER" 2>/dev/null || echo '[]')
-  W_OPEN_PRS_COUNT=$(jq 'length' <<<"$W_OPEN_PRS_JSON")
   if [ "$W_OPEN_PRS_COUNT" -gt 0 ]; then
     W_OPEN_PRS_LIST=$(jq -r '.[] | "  - #\(.number) (branch `\(.head)`): \(.title)"' <<<"$W_OPEN_PRS_JSON")
     W_IN_FLIGHT="There are ${W_OPEN_PRS_COUNT} open Igor PR(s) on this repo already, awaiting human review:
@@ -750,11 +811,11 @@ nothing else is calling you, this is a fine tick to spend reading
     W_IN_FLIGHT="No open Igor PRs on this repo right now -- you're working from a clean slate."
   fi
 
-  log "discretionary: self-directed work on $W_REPO (posting=$W_POSTING_ALLOWED, in_flight=$W_OPEN_PRS_COUNT)"
+  log "discretionary: self-directed work on $W_REPO (posting=$W_POSTING_ALLOWED, in_flight=$W_OPEN_PRS_COUNT, inflight_post=$W_INFLIGHT_POST)"
 
   W_BASE=$(cd "$W_PATH" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
   W_BASE="${W_BASE:-master}"
-  W_TS=$(date -u +%Y%m%d-%H%M%S)
+  W_TS=$(date +%Y%m%d-%H%M%S)
   W_BRANCH="agent/discretionary-${W_TS}"
   W_WORKTREE="$IGOR_STATE_DIR/worktrees/website-discretionary-${W_TS}"
   mkdir -p "$IGOR_STATE_DIR/worktrees"
@@ -913,6 +974,15 @@ EOF
     exit 0
   fi
 
+  # Burn the cooldown BEFORE push -- intent-based, not success-based.
+  # If the push or PR-open fails after this, the cooldown still
+  # protects against another post-shaped PR tomorrow morning. The
+  # commits exist locally and the human can recover; we just need
+  # to not let the next tick double up.
+  if [ "$W_NEW_POST" -eq 1 ]; then
+    posts_mark_shipped
+  fi
+
   log "discretionary: pushing $W_BRANCH and opening PR on $W_REPO (new_post=$W_NEW_POST)"
   git push --force-with-lease -u origin "$W_BRANCH"
 
@@ -929,12 +999,6 @@ EOF
     W_PR_BODY+=$(build_deps_section "$W_BASE")
     forgejo_open_pr "$W_REPO" "$W_BRANCH" "$W_BASE" "$W_PR_TITLE" "$W_PR_BODY" "${IGOR_REVIEWER:-}"
     log "discretionary: PR opened on $W_REPO"
-  fi
-
-  # Only burn the post cooldown when an actual new post landed.
-  # Site-work PRs (about, layout, copy) don't gate future ticks.
-  if [ "$W_NEW_POST" -eq 1 ]; then
-    posts_mark_shipped
   fi
 
   exit 0
