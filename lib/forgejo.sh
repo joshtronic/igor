@@ -127,6 +127,14 @@ forgejo_list_open_bot_prs() {
           | {number, title, head: .head.ref}]'
 }
 
+# Files changed in a PR with status (added/modified/removed/renamed).
+# Returns JSON array of {filename, status}. Used by the post cooldown
+# to detect in-flight post PRs before they merge to master.
+forgejo_pr_files() {
+  local repo="$1" number="$2"
+  _fj GET "/repos/${repo}/pulls/${number}/files"
+}
+
 # Number on the open PR with the given head branch, or empty if none.
 # Used to make PR-open idempotent across harness crashes: if a previous
 # tick pushed but died before opening, we find the orphan branch already
