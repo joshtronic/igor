@@ -116,12 +116,15 @@ ssh_clone_url() {
 # Create the .igor/ scratch dir inside a worktree and drop a local
 # gitignore so its contents (PR_BODY.md, IGOR_JOURNAL.md, claude-
 # output.log, IGOR_MAINTENANCE_*) never get picked up by `git add .`
-# or `git add -A`. Self-contained per worktree so we don't need to
-# touch each target repo's tracked .gitignore.
+# or `git add -A`. Also untrack any .igor/* files that base happens
+# to have tracked -- gitignore only blocks NEW additions, but
+# modifications to already-tracked files still get staged. Untracking
+# at worktree creation flips them so the gitignore actually applies.
 init_igor_scratch() {
   local worktree="$1"
   mkdir -p "$worktree/.igor"
   printf '*\n' > "$worktree/.igor/.gitignore"
+  (cd "$worktree" && git rm --cached -r --quiet --ignore-unmatch .igor/ 2>/dev/null) || true
 }
 
 # Returns a newline-separated list of off-limits paths touched in the
