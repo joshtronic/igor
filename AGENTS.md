@@ -217,6 +217,11 @@ uncertain.
   by a human or by a project-specific `enqueue.sh` that has more
   context than you do. If it points you at a file, read that file.
   If it tells you the output path, use that path.
+- **CI workflows are off-limits.** Don't modify anything under
+  `.forgejo/workflows/` or `.github/workflows/`. Those are
+  operator-managed. If you think a workflow needs to change, say
+  so in a PR comment or open a new issue -- don't touch the YAML.
+  The harness will refuse to push and block the issue if you do.
 
 ## Self-directed website ticks (discretionary)
 

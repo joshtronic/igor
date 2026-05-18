@@ -127,6 +127,17 @@ init_igor_scratch() {
   (cd "$worktree" && git rm --cached -r --quiet --ignore-unmatch .igor/ 2>/dev/null) || true
 }
 
+# Returns a newline-separated list of off-limits paths touched in the
+# diff against the given base ref, or empty if none. Off-limits paths
+# are CI workflow files (.forgejo/workflows/, .github/workflows/) --
+# Claude shouldn't be modifying CI from inside a tick. Callers should
+# abandon (don't push) when this returns non-empty.
+list_offlimits_violations() {
+  local base="$1"
+  git diff --name-only "origin/${base}..HEAD" 2>/dev/null \
+    | grep -E '^\.(forgejo|github)/workflows/' || true
+}
+
 # Returns 0 (success / is-duplicate) if the source journal's content
 # is byte-equal to a recent entry in the target journal file. Probe is
 # the first 200 chars -- Claude has been observed to copy entire entries
@@ -683,6 +694,25 @@ EOF
     PR_NEW=$(git rev-list --count "origin/${PR_HEAD}..HEAD" 2>/dev/null || echo 0)
 
     if [ "$PR_NEW" -gt 0 ]; then
+      # Off-limits guard before push -- CI workflows shouldn't be
+      # touched even in a review round-trip.
+      PR_OFFLIMITS=$(list_offlimits_violations "$PR_HEAD")
+      if [ -n "$PR_OFFLIMITS" ]; then
+        log "PR-review: off-limits files modified, refusing push and bouncing back to $IGOR_REVIEWER"
+        log "off-limits paths touched: $(echo "$PR_OFFLIMITS" | tr '\n' ' ')"
+        forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+          "Igor refused to push revisions: the new commits modify CI workflow files, which are off-limits. Paths touched:
+
+$(echo "$PR_OFFLIMITS" | sed 's/^/  - /')
+
+Reassigning back so a human can review/discard." 2>/dev/null \
+          || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
+        forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
+        forgejo_assign "$PR_REPO" "$PR_NUMBER" "$IGOR_REVIEWER" 2>/dev/null || true
+        (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || true
+        exit 0
+      fi
+
       log "PR-review: pushing $PR_NEW new commits and reassigning to $IGOR_REVIEWER"
       git push origin "$PR_HEAD" || log "warning: push failed on $PR_HEAD"
       forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
@@ -1004,6 +1034,13 @@ EOF
     exit 0
   fi
 
+  W_OFFLIMITS=$(list_offlimits_violations "$W_BASE")
+  if [ -n "$W_OFFLIMITS" ]; then
+    log "discretionary: off-limits files modified -- abandoning. CI workflows are operator-managed."
+    log "off-limits paths touched: $(echo "$W_OFFLIMITS" | tr '\n' ' ')"
+    exit 0
+  fi
+
   if grep -qiE 'tests:[[:space:]]+0[[:space:]]+(passed|failed|of|total)|no tests (ran|found|collected)|collected 0 items|(^|[^0-9])0 passing([^0-9]|$)|running 0 tests|ran 0 tests' "$W_LOG"; then
     log "discretionary: vacuous tests -- abandoning"
     exit 0
@@ -1261,6 +1298,19 @@ Files touched (first 30):
 ${FILES}
 
 Split this into smaller issues, then remove \`Status/Blocked\` and the next tick will re-claim what's left."
+    exit 0
+  fi
+
+  # Off-limits guard: CI workflow files are operator-managed.
+  OFFLIMITS=$(list_offlimits_violations "$PR_BASE")
+  if [ -n "$OFFLIMITS" ]; then
+    # OUTCOME: blocked
+    log "outcome: blocked (off-limits files touched)"
+    agent-block.sh "Igor refused to push: this PR modifies CI workflow files, which are operator-managed and off-limits to ticks. Paths touched:
+
+$(echo "$OFFLIMITS" | sed 's/^/  - /')
+
+Revert those changes (or do them yourself outside Igor) and remove \`Status/Blocked\` to re-queue. If a workflow change is genuinely needed, file a separate issue for the human to handle."
     exit 0
   fi
 
