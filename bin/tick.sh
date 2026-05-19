@@ -700,9 +700,24 @@ fi
 
 # -- Recovery: clear orphaned bot assignments ------------------
 #
-# Invariant: we hold the global flock, so no other Igor is currently
-# running. Any open issue assigned to the bot right now is, by
-# definition, an orphan from a crashed previous tick.
+# Invariant: we hold the global flock, so no other Igor is
+# currently running. Any open issue assigned to the bot right
+# now is in one of two states:
+#
+#   (a) Orphan from a crashed previous tick. Needs the
+#       re-queueing comment, unassign, and local worktree
+#       cleanup.
+#
+#   (b) Leftover from a successful tick where post-PR cleanup
+#       didn't unassign the bot -- e.g., issues whose PRs
+#       opened before fix/issue-lifecycle-design landed. The
+#       work is IN FLIGHT via the open bot PR. Unassign
+#       quietly; no comment ("re-queueing" would be a lie
+#       since discovery's PR-history check skips it), no
+#       worktree cleanup (the work is on the remote branch).
+#
+# Distinguish via forgejo_bot_prs_for_issue: any open bot PR
+# closing the issue -> case (b).
 
 log "recovery sweep ($BOT_USER)"
 ORPHANS=$(forgejo_my_assigned || echo '[]')
@@ -713,6 +728,17 @@ if [ "$ORPHAN_COUNT" -gt 0 ]; then
     [ -z "$line" ] && continue
     O_REPO=$(jq -r '.repo' <<<"$line")
     O_NUM=$(jq -r '.num' <<<"$line")
+
+    # Case (b): open bot PR -> work in flight, quiet unassign only.
+    O_PR_HISTORY=$(forgejo_bot_prs_for_issue "$O_REPO" "$O_NUM" "$BOT_USER" 2>/dev/null || echo '[]')
+    O_OPEN_PR=$(jq '[.[] | select(.state == "open")] | length' <<<"$O_PR_HISTORY")
+    if [ "$O_OPEN_PR" -gt 0 ]; then
+      log "recovery: ${O_REPO}#${O_NUM} in flight (open bot PR), unassigning quietly"
+      forgejo_unassign_all "$O_REPO" "$O_NUM"
+      continue
+    fi
+
+    # Case (a): true orphan -> re-queue.
     log "recovery: ${O_REPO}#${O_NUM} orphaned, re-queueing"
     forgejo_comment "$O_REPO" "$O_NUM" \
       "Previous tick was interrupted before completion. Re-queueing -- the next tick will pick this up."
