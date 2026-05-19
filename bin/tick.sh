@@ -25,6 +25,31 @@ IGOR_HOME="${IGOR_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
 IGOR_STATE_DIR="${IGOR_STATE_DIR:-$HOME/.local/state/igor}"
 IGOR_REPO_ROOT="$IGOR_STATE_DIR/repos"
 
+# -- Self-update -----------------------------------------------
+#
+# Pull the harness's own latest code before doing anything else.
+# If it changed, exec the new tick.sh so we don't run a mixed-
+# version tick (old tick.sh body + new lib/* sourced below).
+# IGOR_RESPAWNED guards against infinite re-exec loops if the
+# pull fails to advance HEAD for some reason.
+#
+# Skip via IGOR_SKIP_SELF_PULL=1 for local dev / interactive
+# debugging where the operator wants to run a specific worktree
+# state without surprise updates.
+
+if [ -z "${IGOR_RESPAWNED:-}" ] && [ -z "${IGOR_SKIP_SELF_PULL:-}" ] \
+    && [ -d "$IGOR_HOME/.git" ]; then
+  PREV_HEAD=$(git -C "$IGOR_HOME" rev-parse HEAD 2>/dev/null || echo "")
+  git -C "$IGOR_HOME" pull --rebase --quiet --autostash origin master 2>/dev/null \
+    || echo "[igor] warning: harness self-pull failed; using on-disk code" >&2
+  NEW_HEAD=$(git -C "$IGOR_HOME" rev-parse HEAD 2>/dev/null || echo "")
+  if [ -n "$PREV_HEAD" ] && [ -n "$NEW_HEAD" ] && [ "$PREV_HEAD" != "$NEW_HEAD" ]; then
+    echo "[igor] self-update: ${PREV_HEAD:0:7} -> ${NEW_HEAD:0:7}, re-execing" >&2
+    export IGOR_RESPAWNED=1
+    exec "$0" "$@"
+  fi
+fi
+
 # -- Secrets ----------------------------------------------------
 
 if [ -f "$IGOR_HOME/.env" ]; then
