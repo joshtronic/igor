@@ -197,18 +197,45 @@ claude_complete() {
   jq -r '.content[0].text // ""' <<<"$response" 2>/dev/null
 }
 
+# Return 0 if the subject looks like a conventional commit
+# ("type: description" with a known type). Used to reject API
+# responses that are conversational rather than subject-shaped.
+looks_like_conventional_commit() {
+  local s="$1"
+  [[ "$s" =~ ^(feat|fix|chore|docs|style|refactor|test|perf|build|ci|revert):[[:space:]]+.+ ]]
+}
+
+# Ensure a conventional-commit prefix. If the subject already has
+# one (feat:/fix:/chore:/etc.), return unchanged. Otherwise prepend
+# `chore: ` as a safe default so the PR title isn't bare imperative
+# prose like "Update X" with no type marker.
+normalize_subject() {
+  local s="$1"
+  if looks_like_conventional_commit "$s"; then
+    printf '%s' "$s"
+  else
+    printf 'chore: %s' "$s"
+  fi
+}
+
 # Derive a commit subject for the harness commit. Three tiers,
 # tried in order:
-#   1. First "What this PR does" checklist item from PR_BODY.md
-#      (Claude writes this with full context -- best signal)
-#   2. API-generated subject from the diff (Haiku call, ~$0.005,
-#      ~1-2s latency, used when PR_BODY is missing/empty)
-#   3. Passed-in fallback string (last resort, e.g., when the
-#      API call also fails)
+#   1. First "What this PR does" checklist item from PR_BODY.md,
+#      normalized to ensure a conventional-commit prefix. Claude
+#      writes the item with full context -- best signal.
+#   2. API-generated subject from the staged diff (Haiku call,
+#      ~$0.005, ~1-2s latency). Used when PR_BODY is missing or
+#      empty. Response must match conventional-commit shape or
+#      it's rejected (catches "I'm ready to generate..." chat
+#      replies the API sometimes returns on empty input).
+#   3. Passed-in fallback string (last resort).
+#
+# IMPORTANT: caller should run `git add -A` BEFORE calling, so
+# the staged diff (git diff --cached) sees new files. `git diff
+# HEAD` alone would miss untracked files.
 #
 # The chosen subject becomes both the commit message AND the PR
-# title (the existing flow derives PR title from `git log -1
-# --pretty=%s`, which is this commit's subject).
+# title via `git log -1 --pretty=%s` later.
 derive_commit_subject() {
   local pr_body="$1" worktree="$2" fallback="${3:-chore: tick work}"
 
@@ -225,39 +252,45 @@ derive_commit_subject() {
       }
     ' "$pr_body")
     if [ -n "$subject" ]; then
-      printf '%s' "$subject"
+      normalize_subject "$subject"
       return 0
     fi
   fi
 
-  # Tier 2: API-generated from the diff
+  # Tier 2: API-generated from the staged diff
   if [ -n "$worktree" ] && [ -d "$worktree" ]; then
     local diff_summary
     diff_summary=$( (
       cd "$worktree" && {
-        git diff --stat HEAD 2>/dev/null
+        git diff --cached --stat 2>/dev/null
         echo "---"
-        git diff HEAD 2>/dev/null | head -200
+        git diff --cached 2>/dev/null | head -200
       }
     ) 2>/dev/null)
-    if [ -n "$diff_summary" ]; then
+    # Only call the API if we actually have changes to describe.
+    # `--stat` is empty when nothing's staged; the divider alone
+    # without it isn't worth burning an API call on.
+    if printf '%s' "$diff_summary" | grep -q "files\? changed"; then
       local api_subject
       api_subject=$(claude_complete \
-        "You generate single-line conventional-commit subjects. Output ONLY the subject line, nothing else. No quotes, no preamble, no explanation. Format: 'type: description' where type is one of feat/fix/chore/docs/style/refactor/test. Under 72 chars. Imperative mood ('Add X' not 'Added X'). Be specific about what changed; avoid generic words like 'update' or 'improve' when the diff shows something concrete." \
+        "You generate ONE single-line conventional-commit subject. Output ONLY the subject line -- no quotes, no preamble, no explanation, no questions. Format: 'type: description' where type is one of feat/fix/chore/docs/style/refactor/test. Under 72 chars. Imperative mood ('Add X' not 'Added X'). Be specific about what changed. If the input is empty or you cannot tell what changed, output exactly: chore: tick work" \
         "$diff_summary" \
         80)
       # Strip surrounding whitespace and any stray quotes
       api_subject=$(printf '%s' "$api_subject" \
         | head -1 \
         | sed -E 's/^[[:space:]"'\'']+|[[:space:]"'\'']+$//g')
-      if [ -n "$api_subject" ]; then
+      # Only accept if it actually looks like a conventional commit
+      # subject. Catches conversational responses like "I'm ready
+      # to generate conventional commit subjects. Please provide..."
+      if [ -n "$api_subject" ] && looks_like_conventional_commit "$api_subject"; then
         printf '%s' "$api_subject"
         return 0
       fi
     fi
   fi
 
-  # Tier 3: fallback
+  # Tier 3: fallback (already conventional-commit shaped by convention)
   printf '%s' "$fallback"
 }
 
@@ -1211,9 +1244,14 @@ EOF
     | awk '$2 !~ /^\.igor\// { print $2 }')
   if [ -n "$W_DIRTY_PATHS" ]; then
     W_DIRTY_COUNT=$(echo "$W_DIRTY_PATHS" | wc -l | tr -d ' ')
+    # Stage first so derive_commit_subject can use `git diff
+    # --cached` and see new (previously-untracked) files. Without
+    # this, posts and other added files are invisible to the
+    # API-tier diff, and the API responds conversationally to an
+    # empty input ("I'm ready to generate...").
+    git add -A
     W_SUBJECT=$(derive_commit_subject "$W_WORKTREE/.igor/PR_BODY.md" "$W_WORKTREE" "chore: discretionary website tick")
     log "harness-commit: $W_DIRTY_COUNT file(s), subject: $W_SUBJECT"
-    git add -A
     git commit --quiet -m "$W_SUBJECT" || log "warning: harness commit failed"
   fi
 
@@ -1441,9 +1479,12 @@ DIRTY_PATHS=$(git status --porcelain 2>/dev/null \
   | awk '$2 !~ /^\.igor\// { print $2 }')
 if [ -n "$DIRTY_PATHS" ]; then
   DIRTY_COUNT=$(echo "$DIRTY_PATHS" | wc -l | tr -d ' ')
+  # Stage first so derive_commit_subject can see new files via
+  # `git diff --cached`. See tier-3 comment for the failure mode
+  # without this.
+  git add -A
   COMMIT_SUBJECT=$(derive_commit_subject "$WORKTREE/.igor/PR_BODY.md" "$WORKTREE" "chore: issue #${ISSUE_NUMBER} -- ${ISSUE_TITLE}")
   log "harness-commit: $DIRTY_COUNT file(s), subject: $COMMIT_SUBJECT"
-  git add -A
   git commit --quiet -m "$COMMIT_SUBJECT" || log "warning: harness commit failed"
 fi
 

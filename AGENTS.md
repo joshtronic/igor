@@ -66,8 +66,14 @@ the actual work.
 - Write `.igor/PR_BODY.md` with two markdown checklists: "What this
   PR does" and "Test plan". The harness uses this verbatim as the
   PR body AND derives the commit subject from the first
-  "What this PR does" item, so make that first item a clean
-  imperative sentence I'd be happy seeing as a commit message.
+  "What this PR does" item. **Make that first item a proper
+  conventional-commit subject**: start with one of `feat:` / `fix:`
+  / `chore:` / `docs:` / `style:` / `refactor:` / `test:`, then a
+  short imperative description, ideally under 72 chars total. For
+  example: `- [x] feat: add Atom feed validation badge to footer`,
+  not `- [x] Add Atom feed validation badge to footer`. If the
+  prefix is missing the harness prepends `chore:` automatically,
+  but better to write it right the first time.
 
   Pre-check (`[x]`) anything I verified during the run -- tests
   passing, lint passing, scripted assertions. Leave unchecked (`[ ]`)
@@ -83,7 +89,7 @@ the actual work.
   ```markdown
   ## What this PR does
 
-  - [x] Add `X` to handle the `Y` case
+  - [x] feat: add `X` to handle the `Y` case
   - [x] Wire `Z` to call the new helper
   - [x] Tests covering happy path and timeout
 
