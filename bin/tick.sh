@@ -127,6 +127,21 @@ init_igor_scratch() {
   (cd "$worktree" && git rm --cached -r --quiet --ignore-unmatch .igor/ 2>/dev/null) || true
 }
 
+# Build the brain-loaded portion of the system prompt. Stable order
+# for prompt caching: identity (who I am) -> index (what's current)
+# -> MEMORY.md (the memory index, always loaded) -> blog-ideas.md
+# (post idea queue). Each is optional -- missing files are skipped.
+# Caller appends AGENTS.md.
+brain_system_prompt() {
+  local brain="$1"
+  local files=()
+  [ -f "$brain/identity.md" ]         && files+=("$brain/identity.md")
+  [ -f "$brain/index.md" ]            && files+=("$brain/index.md")
+  [ -f "$brain/memories/MEMORY.md" ]  && files+=("$brain/memories/MEMORY.md")
+  [ -f "$brain/blog-ideas.md" ]       && files+=("$brain/blog-ideas.md")
+  [ "${#files[@]}" -gt 0 ] && cat "${files[@]}"
+}
+
 # Returns a newline-separated list of off-limits paths touched in the
 # diff against the given base ref, or empty if none. Off-limits paths
 # are CI workflow files (.forgejo/workflows/, .github/workflows/) --
@@ -331,7 +346,7 @@ EOF
   local m_brain="$IGOR_REPO_ROOT/${BOT_USER}/brain"
   local m_system_prompt
   if [ -f "$m_brain/identity.md" ] && [ -f "$m_brain/index.md" ]; then
-    m_system_prompt=$(cat "$m_brain/identity.md" "$m_brain/index.md" "$IGOR_HOME/AGENTS.md")
+    m_system_prompt=$({ brain_system_prompt "$m_brain"; cat "$IGOR_HOME/AGENTS.md"; })
   else
     m_system_prompt=$(cat "$IGOR_HOME/AGENTS.md")
   fi
@@ -669,7 +684,7 @@ EOF
 
     PR_BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
     if [ -f "$PR_BRAIN_PATH/identity.md" ] && [ -f "$PR_BRAIN_PATH/index.md" ]; then
-      PR_SYSTEM_PROMPT=$(cat "$PR_BRAIN_PATH/identity.md" "$PR_BRAIN_PATH/index.md" "$IGOR_HOME/AGENTS.md")
+      PR_SYSTEM_PROMPT=$({ brain_system_prompt "$PR_BRAIN_PATH"; cat "$IGOR_HOME/AGENTS.md"; })
     else
       PR_SYSTEM_PROMPT=$(cat "$IGOR_HOME/AGENTS.md")
     fi
@@ -954,7 +969,7 @@ EOF
 
   BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
   if [ -f "$BRAIN_PATH/identity.md" ] && [ -f "$BRAIN_PATH/index.md" ]; then
-    W_SYSTEM_PROMPT=$(cat "$BRAIN_PATH/identity.md" "$BRAIN_PATH/index.md" "$IGOR_HOME/AGENTS.md")
+    W_SYSTEM_PROMPT=$({ brain_system_prompt "$BRAIN_PATH"; cat "$IGOR_HOME/AGENTS.md"; })
   else
     W_SYSTEM_PROMPT=$(cat "$IGOR_HOME/AGENTS.md")
   fi
@@ -991,8 +1006,15 @@ EOF
         printf '\n## %s -- discretionary on %s\n\n' "$W_JTS" "$W_REPO"
         cat "$W_JOURNAL_SRC"
       } >> "$W_JFILE"
+      # Stage journal + any new/edited memories + blog-ideas updates.
+      # Claude may have written to memories/* or blog-ideas.md during
+      # the tick; pick them up in the same commit so the brain reflects
+      # the tick's full state. `git add memories/ blog-ideas.md` is a
+      # no-op when those paths are absent.
       (cd "$BRAIN_PATH" \
         && git add "journal/${W_JDATE}.md" \
+        && git add -A memories/ blog-ideas.md 2>/dev/null || true) \
+        && (cd "$BRAIN_PATH" \
         && git commit --quiet -m "journal: discretionary on $W_REPO" \
         && git push --quiet origin master) \
         || log "warning: brain commit/push failed"
@@ -1197,7 +1219,7 @@ EOF
 # place -- degrade to AGENTS.md only rather than crashing the tick.
 BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
 if [ -f "$BRAIN_PATH/identity.md" ] && [ -f "$BRAIN_PATH/index.md" ]; then
-  SYSTEM_PROMPT=$(cat "$BRAIN_PATH/identity.md" "$BRAIN_PATH/index.md" "$IGOR_HOME/AGENTS.md")
+  SYSTEM_PROMPT=$({ brain_system_prompt "$BRAIN_PATH"; cat "$IGOR_HOME/AGENTS.md"; })
 else
   log "warning: brain identity.md or index.md missing at $BRAIN_PATH -- using AGENTS.md only"
   SYSTEM_PROMPT=$(cat "$IGOR_HOME/AGENTS.md")
@@ -1247,8 +1269,11 @@ if [ -s "$JOURNAL_SRC" ]; then
       cat "$JOURNAL_SRC"
     } >> "$JOURNAL_FILE"
 
+    # Journal + any new/edited memories + blog-ideas in one commit.
     (cd "$BRAIN_LOCAL" \
       && git add "journal/${JOURNAL_DATE}.md" \
+      && git add -A memories/ blog-ideas.md 2>/dev/null || true) \
+      && (cd "$BRAIN_LOCAL" \
       && git commit --quiet -m "journal: ${FORGEJO_REPO}#${ISSUE_NUMBER}" \
       && git push --quiet origin master) \
       || log "warning: brain commit/push failed; entry may be local-only"
