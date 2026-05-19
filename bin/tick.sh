@@ -167,16 +167,52 @@ brain_system_prompt() {
   [ "${#files[@]}" -gt 0 ] && cat "${files[@]}"
 }
 
-# Derive a commit subject from .igor/PR_BODY.md if present. Picks
-# the first checklist item from the "What this PR does" section.
-# Falls back to a passed-in default if PR_BODY is absent or empty.
+# Single-shot completion via the Anthropic Messages API. No tool
+# use, no agentic loop -- just send a prompt, get text back. Used
+# for in-harness "thinking" tasks where Claude Code's tool runtime
+# is overkill (commit-subject generation, classification, etc.).
+# Hits the API directly with curl so we don't pay the Claude Code
+# overhead.
 #
-# Claude writes PR_BODY.md as part of his work. The harness uses its
-# first checklist item as both the commit subject AND the PR title
-# (the existing flow derives PR title from `git log -1 --pretty=%s`,
-# which after harness-owns-commits is THIS commit's subject).
+# Model defaults to Haiku (cheap, fast, good enough for short
+# completions). Override via IGOR_MODEL_THINKING. Returns the text
+# of the response on stdout; empty on failure.
+claude_complete() {
+  local system_prompt="$1" user_msg="$2"
+  local model="${IGOR_MODEL_THINKING:-claude-haiku-4-5-20251001}"
+  local max_tokens="${3:-256}"
+  local response
+  response=$(curl -sf -X POST https://api.anthropic.com/v1/messages \
+    -H "x-api-key: $ANTHROPIC_API_KEY" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "Content-Type: application/json" \
+    --max-time 30 \
+    -d "$(jq -n \
+      --arg m "$model" \
+      --argjson mt "$max_tokens" \
+      --arg s "$system_prompt" \
+      --arg u "$user_msg" \
+      '{model: $m, max_tokens: $mt, system: $s, messages: [{role: "user", content: $u}]}')" \
+    2>/dev/null) || return 1
+  jq -r '.content[0].text // ""' <<<"$response" 2>/dev/null
+}
+
+# Derive a commit subject for the harness commit. Three tiers,
+# tried in order:
+#   1. First "What this PR does" checklist item from PR_BODY.md
+#      (Claude writes this with full context -- best signal)
+#   2. API-generated subject from the diff (Haiku call, ~$0.005,
+#      ~1-2s latency, used when PR_BODY is missing/empty)
+#   3. Passed-in fallback string (last resort, e.g., when the
+#      API call also fails)
+#
+# The chosen subject becomes both the commit message AND the PR
+# title (the existing flow derives PR title from `git log -1
+# --pretty=%s`, which is this commit's subject).
 derive_commit_subject() {
-  local pr_body="$1" fallback="${2:-chore: tick work}"
+  local pr_body="$1" worktree="$2" fallback="${3:-chore: tick work}"
+
+  # Tier 1: PR_BODY.md first item
   if [ -f "$pr_body" ]; then
     local subject
     subject=$(awk '
@@ -193,6 +229,35 @@ derive_commit_subject() {
       return 0
     fi
   fi
+
+  # Tier 2: API-generated from the diff
+  if [ -n "$worktree" ] && [ -d "$worktree" ]; then
+    local diff_summary
+    diff_summary=$( (
+      cd "$worktree" && {
+        git diff --stat HEAD 2>/dev/null
+        echo "---"
+        git diff HEAD 2>/dev/null | head -200
+      }
+    ) 2>/dev/null)
+    if [ -n "$diff_summary" ]; then
+      local api_subject
+      api_subject=$(claude_complete \
+        "You generate single-line conventional-commit subjects. Output ONLY the subject line, nothing else. No quotes, no preamble, no explanation. Format: 'type: description' where type is one of feat/fix/chore/docs/style/refactor/test. Under 72 chars. Imperative mood ('Add X' not 'Added X'). Be specific about what changed; avoid generic words like 'update' or 'improve' when the diff shows something concrete." \
+        "$diff_summary" \
+        80)
+      # Strip surrounding whitespace and any stray quotes
+      api_subject=$(printf '%s' "$api_subject" \
+        | head -1 \
+        | sed -E 's/^[[:space:]"'\'']+|[[:space:]"'\'']+$//g')
+      if [ -n "$api_subject" ]; then
+        printf '%s' "$api_subject"
+        return 0
+      fi
+    fi
+  fi
+
+  # Tier 3: fallback
   printf '%s' "$fallback"
 }
 
@@ -1113,7 +1178,7 @@ EOF
     | awk '$2 !~ /^\.igor\// { print $2 }')
   if [ -n "$W_DIRTY_PATHS" ]; then
     W_DIRTY_COUNT=$(echo "$W_DIRTY_PATHS" | wc -l | tr -d ' ')
-    W_SUBJECT=$(derive_commit_subject "$W_WORKTREE/.igor/PR_BODY.md" "chore: discretionary website tick")
+    W_SUBJECT=$(derive_commit_subject "$W_WORKTREE/.igor/PR_BODY.md" "$W_WORKTREE" "chore: discretionary website tick")
     log "harness-commit: $W_DIRTY_COUNT file(s), subject: $W_SUBJECT"
     git add -A
     git commit --quiet -m "$W_SUBJECT" || log "warning: harness commit failed"
@@ -1343,7 +1408,7 @@ DIRTY_PATHS=$(git status --porcelain 2>/dev/null \
   | awk '$2 !~ /^\.igor\// { print $2 }')
 if [ -n "$DIRTY_PATHS" ]; then
   DIRTY_COUNT=$(echo "$DIRTY_PATHS" | wc -l | tr -d ' ')
-  COMMIT_SUBJECT=$(derive_commit_subject "$WORKTREE/.igor/PR_BODY.md" "chore: issue #${ISSUE_NUMBER} -- ${ISSUE_TITLE}")
+  COMMIT_SUBJECT=$(derive_commit_subject "$WORKTREE/.igor/PR_BODY.md" "$WORKTREE" "chore: issue #${ISSUE_NUMBER} -- ${ISSUE_TITLE}")
   log "harness-commit: $DIRTY_COUNT file(s), subject: $COMMIT_SUBJECT"
   git add -A
   git commit --quiet -m "$COMMIT_SUBJECT" || log "warning: harness commit failed"
