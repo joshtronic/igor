@@ -27,4 +27,14 @@ forgejo_comment    "$FORGEJO_REPO" "$ISSUE_NUMBER" "$REASON"
 forgejo_add_label  "$FORGEJO_REPO" "$ISSUE_NUMBER" "Status/Blocked"
 forgejo_unassign_all "$FORGEJO_REPO" "$ISSUE_NUMBER"
 
+# Notify the reviewer (typically the operator) by assigning the
+# issue to them. Without this, the block lands silently and the
+# operator has to spot the Status/Blocked label by checking.
+# Assignment fires a Forgejo notification. Skipped if
+# IGOR_REVIEWER isn't configured.
+if [ -n "${IGOR_REVIEWER:-}" ]; then
+  forgejo_assign "$FORGEJO_REPO" "$ISSUE_NUMBER" "$IGOR_REVIEWER" \
+    || echo "agent-block: warning: could not assign to $IGOR_REVIEWER" >&2
+fi
+
 echo "agent-block: issue #${ISSUE_NUMBER} marked Status/Blocked" >&2
