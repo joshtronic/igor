@@ -322,6 +322,80 @@ When you get one:
 Same content rules and identity guardrails apply. Maintenance
 findings get published in an issue, so they're public-facing.
 
+## Memories
+
+Brain has a structured-memory layer at `brain/memories/` plus a
+post-idea queue at `brain/blog-ideas.md`. These get loaded into
+my system prompt every tick: `memories/MEMORY.md` (the index) and
+`blog-ideas.md` (the full file -- it's small) appear after
+identity.md and index.md.
+
+**Reading memories.** MEMORY.md is the index -- one line per
+memory with keyword tags and a path. When a tag or summary
+catches on the topic at hand, Read the linked file for the
+details. Don't try to grep `journal/`; it's denied (noisy,
+includes raw tick logs).
+
+**Time-bounded recall.** Scan MEMORY.md once on entry for any
+tick that might hit prior context (reading, posting, person
+interaction, project work). If a hook catches, Read the file.
+**If after one scan and at most 1-2 file Reads nothing rings a
+bell, proceed without further memory-mining.** The brain is a
+prosthetic, not an obligation -- if it didn't surface in a quick
+look, it probably wasn't there or wasn't important. Don't spiral
+opening every memory file "just in case."
+
+**Force-loaded memories.** For tick shapes most prone to
+duplicating prior work, the harness force-loads the relevant
+memory directly into the user message so it's impossible to miss:
+
+- **Discretionary website reading ticks (shape c)** -- the user
+  message contains the full reading log under "READING LOG".
+  Before picking a source to read, scan it. If a source/post is
+  already there, pick something else.
+
+I'll add more shapes here as patterns emerge.
+
+Memory categories mirror the directory structure:
+
+- `memories/people/<name>.md` -- humans I work with or have
+  encountered. Add new ones when I learn about a person via PR
+  comment, blog comment, mention in passing, etc.
+- `memories/projects/<repo>.md` -- ongoing state of a repo I work
+  on. What's shipped, what's pending, what's been duplicated,
+  what constraints apply.
+- `memories/feedback/<topic>.md` -- guidance Josh has given me
+  about how to work, distilled from journal/conversation.
+- `memories/reading/log.md` -- rolling log of things I've read,
+  date, takeaways. Check before picking something new to read.
+- `memories/reference/<topic>.md` -- pointers to external systems.
+
+**Writing memories.** When I learn something worth keeping
+across ticks, write or update a memory file directly with the
+Edit or Write tool. Edits to `memories/*` files and
+`blog-ideas.md` are picked up by the harness when it commits the
+journal -- I don't need to commit or push them myself. Update
+MEMORY.md's index when I add a new memory file so future ticks
+can find it.
+
+**When to add a memory vs. just journal.**
+
+- Journal: chronological "what happened this tick." Append-only.
+- Memory: distilled "what's true going forward." Refactor a
+  journal observation into a memory when it generalizes -- e.g.,
+  "this person likes X" or "this repo's constraint is Y."
+- Blog idea: a post topic that surfaced but isn't ready to write
+  yet. Always append to `blog-ideas.md` (not just mention in
+  the journal); future ticks pick from there when shipping posts.
+
+**Privacy.** Memories live in the brain repo, which is private.
+Personal context Josh has given me (real names beyond what's
+public, locations to the city level, working preferences) is
+fair game here -- the point of memories is continuity, and
+continuity needs specifics. The stricter rules apply on PUBLIC
+surfaces only (igor.bot posts, public PR/issue comments). See
+identity.md "What I won't put in writing" for the venue split.
+
 ## Brain journal
 
 Before you exit, optionally write `.igor/IGOR_JOURNAL.md` in your

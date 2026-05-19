@@ -152,6 +152,21 @@ init_igor_scratch() {
   (cd "$worktree" && git rm --cached -r --quiet --ignore-unmatch .igor/ 2>/dev/null) || true
 }
 
+# Build the brain-loaded portion of the system prompt. Stable order
+# for prompt caching: identity (who I am) -> index (what's current)
+# -> MEMORY.md (the memory index, always loaded) -> blog-ideas.md
+# (post idea queue). Each is optional -- missing files are skipped.
+# Caller appends AGENTS.md.
+brain_system_prompt() {
+  local brain="$1"
+  local files=()
+  [ -f "$brain/identity.md" ]         && files+=("$brain/identity.md")
+  [ -f "$brain/index.md" ]            && files+=("$brain/index.md")
+  [ -f "$brain/memories/MEMORY.md" ]  && files+=("$brain/memories/MEMORY.md")
+  [ -f "$brain/blog-ideas.md" ]       && files+=("$brain/blog-ideas.md")
+  [ "${#files[@]}" -gt 0 ] && cat "${files[@]}"
+}
+
 # Returns a newline-separated list of off-limits paths touched in the
 # diff against the given base ref, or empty if none. Off-limits paths
 # are CI workflow files (.forgejo/workflows/, .github/workflows/) --
@@ -163,19 +178,22 @@ list_offlimits_violations() {
     | grep -E '^\.(forgejo|github)/workflows/' || true
 }
 
-# Returns 0 (success / is-duplicate) if the source journal's content
-# is byte-equal to a recent entry in the target journal file. Probe is
-# the first 200 chars -- Claude has been observed to copy entire entries
-# verbatim across consecutive ticks when the work was a near-no-op, and
-# distinct genuine entries don't share 200 chars of opening prose.
+# Returns 0 (is duplicate) if the source journal's entire content
+# appears verbatim as a substring of the target journal file. Strict
+# match -- only true byte-for-byte copies are skipped. Previous
+# implementation used a 200-char prefix probe which false-positived
+# on entries that shared an opening structure ("Read X today.
+# Took Y..."), eating legitimately new entries. The strict match
+# trades some occasional duplicate-let-through for never losing real
+# content.
 journal_is_duplicate() {
   local source_file="$1" target_file="$2"
   [ -f "$target_file" ] || return 1
   [ -s "$source_file" ] || return 1
-  local probe
-  probe=$(head -c 200 "$source_file")
-  [ -z "$probe" ] && return 1
-  grep -F -q -- "$probe" "$target_file"
+  local new_content target_content
+  new_content=$(cat "$source_file")
+  target_content=$(cat "$target_file")
+  [[ "$target_content" == *"$new_content"* ]]
 }
 
 # Idempotent clone-if-missing, pull-if-present. Creates the owner
@@ -356,7 +374,7 @@ EOF
   local m_brain="$IGOR_REPO_ROOT/${BOT_USER}/brain"
   local m_system_prompt
   if [ -f "$m_brain/identity.md" ] && [ -f "$m_brain/index.md" ]; then
-    m_system_prompt=$(cat "$m_brain/identity.md" "$m_brain/index.md" "$IGOR_HOME/AGENTS.md")
+    m_system_prompt=$({ brain_system_prompt "$m_brain"; cat "$IGOR_HOME/AGENTS.md"; })
   else
     m_system_prompt=$(cat "$IGOR_HOME/AGENTS.md")
   fi
@@ -694,7 +712,7 @@ EOF
 
     PR_BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
     if [ -f "$PR_BRAIN_PATH/identity.md" ] && [ -f "$PR_BRAIN_PATH/index.md" ]; then
-      PR_SYSTEM_PROMPT=$(cat "$PR_BRAIN_PATH/identity.md" "$PR_BRAIN_PATH/index.md" "$IGOR_HOME/AGENTS.md")
+      PR_SYSTEM_PROMPT=$({ brain_system_prompt "$PR_BRAIN_PATH"; cat "$IGOR_HOME/AGENTS.md"; })
     else
       PR_SYSTEM_PROMPT=$(cat "$IGOR_HOME/AGENTS.md")
     fi
@@ -933,6 +951,18 @@ nothing else is calling you, this is a fine tick to spend reading
 
   cd "$W_WORKTREE"
 
+  # Force-load the reading log into the user message. Reading ticks
+  # historically picked the same blog post 3 nights in a row because
+  # Claude didn't remember to check the MEMORY.md hook. This makes the
+  # check deterministic -- the log is literally in his prompt, can't
+  # be missed. Empty if the file doesn't exist (e.g., before brain
+  # memory PR lands).
+  W_READING_LOG=""
+  W_READING_LOG_FILE="$BRAIN_PATH/memories/reading/log.md"
+  if [ -f "$W_READING_LOG_FILE" ]; then
+    W_READING_LOG=$(cat "$W_READING_LOG_FILE")
+  fi
+
   W_USER_MSG=$(cat <<EOF
 You are doing self-directed work on $W_REPO. No issue is assigned;
 no human is waiting on a specific thing.
@@ -945,6 +975,10 @@ if any), src/_includes/base.njk (layout).
 IN-FLIGHT WORK: $W_IN_FLIGHT
 
 POST CADENCE RULE: $W_POST_RULE
+
+READING LOG (if shape c, do NOT re-read anything here -- pick fresh):
+
+${W_READING_LOG:-(reading log not yet seeded -- pick anything)}
 
 Pick ONE focused outcome. Three valid shapes (per AGENTS.md
 "Self-directed website ticks"):
@@ -979,7 +1013,7 @@ EOF
 
   BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
   if [ -f "$BRAIN_PATH/identity.md" ] && [ -f "$BRAIN_PATH/index.md" ]; then
-    W_SYSTEM_PROMPT=$(cat "$BRAIN_PATH/identity.md" "$BRAIN_PATH/index.md" "$IGOR_HOME/AGENTS.md")
+    W_SYSTEM_PROMPT=$({ brain_system_prompt "$BRAIN_PATH"; cat "$IGOR_HOME/AGENTS.md"; })
   else
     W_SYSTEM_PROMPT=$(cat "$IGOR_HOME/AGENTS.md")
   fi
@@ -1000,7 +1034,11 @@ EOF
   log "claude exited $W_EXIT after $(( $(date +%s) - W_START ))s"
 
   # Journal write -- local-day bucketing; skip byte-identical dupes.
+  # W_JOURNAL_APPENDED tracks whether the journal actually made it
+  # into brain (vs being skipped as a duplicate) so the outcome log
+  # message downstream doesn't lie.
   W_JOURNAL_SRC="$W_WORKTREE/.igor/IGOR_JOURNAL.md"
+  W_JOURNAL_APPENDED=0
   if [ -s "$W_JOURNAL_SRC" ]; then
     W_JDATE=$(date +%Y-%m-%d)
     W_JFILE="$BRAIN_PATH/journal/${W_JDATE}.md"
@@ -1016,11 +1054,19 @@ EOF
         printf '\n## %s -- discretionary on %s\n\n' "$W_JTS" "$W_REPO"
         cat "$W_JOURNAL_SRC"
       } >> "$W_JFILE"
+      # Stage journal + any new/edited memories + blog-ideas updates.
+      # Claude may have written to memories/* or blog-ideas.md during
+      # the tick; pick them up in the same commit so the brain reflects
+      # the tick's full state. `git add memories/ blog-ideas.md` is a
+      # no-op when those paths are absent.
       (cd "$BRAIN_PATH" \
         && git add "journal/${W_JDATE}.md" \
+        && git add -A memories/ blog-ideas.md 2>/dev/null || true) \
+        && (cd "$BRAIN_PATH" \
         && git commit --quiet -m "journal: discretionary on $W_REPO" \
         && git push --quiet origin master) \
         || log "warning: brain commit/push failed"
+      W_JOURNAL_APPENDED=1
     fi
   fi
 
@@ -1036,9 +1082,13 @@ EOF
       | awk '$2 !~ /^\.igor\// { c++ } END { print c+0 }')
     if [ "${W_DIRTY:-0}" -gt 0 ]; then
       log "discretionary: no commits, but $W_DIRTY uncommitted file(s) in worktree -- Claude forgot to commit, work dropped"
-    elif [ -s "$W_JOURNAL_SRC" ]; then
+    elif [ -s "$W_JOURNAL_SRC" ] && [ "$W_JOURNAL_APPENDED" -eq 1 ]; then
       # Reading tick: journal recorded, no PR expected. Not a noop.
       log "discretionary: reading tick complete on $W_REPO -- journal recorded, no PR"
+    elif [ -s "$W_JOURNAL_SRC" ]; then
+      # Reading tick BUT journal got dedup-skipped -- we paid for the
+      # work and dropped it. Flag loudly so this shows up in journalctl.
+      log "discretionary: reading tick complete on $W_REPO -- journal SKIPPED as duplicate, content lost (dedup may need loosening)"
     else
       log "discretionary: no work produced on $W_REPO"
     fi
@@ -1222,7 +1272,7 @@ EOF
 # place -- degrade to AGENTS.md only rather than crashing the tick.
 BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
 if [ -f "$BRAIN_PATH/identity.md" ] && [ -f "$BRAIN_PATH/index.md" ]; then
-  SYSTEM_PROMPT=$(cat "$BRAIN_PATH/identity.md" "$BRAIN_PATH/index.md" "$IGOR_HOME/AGENTS.md")
+  SYSTEM_PROMPT=$({ brain_system_prompt "$BRAIN_PATH"; cat "$IGOR_HOME/AGENTS.md"; })
 else
   log "warning: brain identity.md or index.md missing at $BRAIN_PATH -- using AGENTS.md only"
   SYSTEM_PROMPT=$(cat "$IGOR_HOME/AGENTS.md")
@@ -1272,8 +1322,11 @@ if [ -s "$JOURNAL_SRC" ]; then
       cat "$JOURNAL_SRC"
     } >> "$JOURNAL_FILE"
 
+    # Journal + any new/edited memories + blog-ideas in one commit.
     (cd "$BRAIN_LOCAL" \
       && git add "journal/${JOURNAL_DATE}.md" \
+      && git add -A memories/ blog-ideas.md 2>/dev/null || true) \
+      && (cd "$BRAIN_LOCAL" \
       && git commit --quiet -m "journal: ${FORGEJO_REPO}#${ISSUE_NUMBER}" \
       && git push --quiet origin master) \
       || log "warning: brain commit/push failed; entry may be local-only"
