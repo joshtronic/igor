@@ -847,6 +847,7 @@ if [ -z "$WINNER" ]; then
 
   W_REPO="${BOT_USER}/website"
   W_PATH=$(repo_path_for "$W_REPO")
+  BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
 
   if [ ! -d "$W_PATH/.git" ]; then
     log "discretionary: no website cloned -- nothing to do"
@@ -1011,7 +1012,8 @@ exit without commits. Empty ticks are fine.
 EOF
 )
 
-  BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
+  # BRAIN_PATH is set at the top of the discretionary block now
+  # (so the READING_LOG load earlier can use it).
   if [ -f "$BRAIN_PATH/identity.md" ] && [ -f "$BRAIN_PATH/index.md" ]; then
     W_SYSTEM_PROMPT=$({ brain_system_prompt "$BRAIN_PATH"; cat "$IGOR_HOME/AGENTS.md"; })
   else
