@@ -153,19 +153,22 @@ list_offlimits_violations() {
     | grep -E '^\.(forgejo|github)/workflows/' || true
 }
 
-# Returns 0 (success / is-duplicate) if the source journal's content
-# is byte-equal to a recent entry in the target journal file. Probe is
-# the first 200 chars -- Claude has been observed to copy entire entries
-# verbatim across consecutive ticks when the work was a near-no-op, and
-# distinct genuine entries don't share 200 chars of opening prose.
+# Returns 0 (is duplicate) if the source journal's entire content
+# appears verbatim as a substring of the target journal file. Strict
+# match -- only true byte-for-byte copies are skipped. Previous
+# implementation used a 200-char prefix probe which false-positived
+# on entries that shared an opening structure ("Read X today.
+# Took Y..."), eating legitimately new entries. The strict match
+# trades some occasional duplicate-let-through for never losing real
+# content.
 journal_is_duplicate() {
   local source_file="$1" target_file="$2"
   [ -f "$target_file" ] || return 1
   [ -s "$source_file" ] || return 1
-  local probe
-  probe=$(head -c 200 "$source_file")
-  [ -z "$probe" ] && return 1
-  grep -F -q -- "$probe" "$target_file"
+  local new_content target_content
+  new_content=$(cat "$source_file")
+  target_content=$(cat "$target_file")
+  [[ "$target_content" == *"$new_content"* ]]
 }
 
 # Idempotent clone-if-missing, pull-if-present. Creates the owner
@@ -923,6 +926,18 @@ nothing else is calling you, this is a fine tick to spend reading
 
   cd "$W_WORKTREE"
 
+  # Force-load the reading log into the user message. Reading ticks
+  # historically picked the same blog post 3 nights in a row because
+  # Claude didn't remember to check the MEMORY.md hook. This makes the
+  # check deterministic -- the log is literally in his prompt, can't
+  # be missed. Empty if the file doesn't exist (e.g., before brain
+  # memory PR lands).
+  W_READING_LOG=""
+  W_READING_LOG_FILE="$BRAIN_PATH/memories/reading/log.md"
+  if [ -f "$W_READING_LOG_FILE" ]; then
+    W_READING_LOG=$(cat "$W_READING_LOG_FILE")
+  fi
+
   W_USER_MSG=$(cat <<EOF
 You are doing self-directed work on $W_REPO. No issue is assigned;
 no human is waiting on a specific thing.
@@ -935,6 +950,10 @@ if any), src/_includes/base.njk (layout).
 IN-FLIGHT WORK: $W_IN_FLIGHT
 
 POST CADENCE RULE: $W_POST_RULE
+
+READING LOG (if shape c, do NOT re-read anything here -- pick fresh):
+
+${W_READING_LOG:-(reading log not yet seeded -- pick anything)}
 
 Pick ONE focused outcome. Three valid shapes (per AGENTS.md
 "Self-directed website ticks"):
@@ -990,7 +1009,11 @@ EOF
   log "claude exited $W_EXIT after $(( $(date +%s) - W_START ))s"
 
   # Journal write -- local-day bucketing; skip byte-identical dupes.
+  # W_JOURNAL_APPENDED tracks whether the journal actually made it
+  # into brain (vs being skipped as a duplicate) so the outcome log
+  # message downstream doesn't lie.
   W_JOURNAL_SRC="$W_WORKTREE/.igor/IGOR_JOURNAL.md"
+  W_JOURNAL_APPENDED=0
   if [ -s "$W_JOURNAL_SRC" ]; then
     W_JDATE=$(date +%Y-%m-%d)
     W_JFILE="$BRAIN_PATH/journal/${W_JDATE}.md"
@@ -1018,6 +1041,7 @@ EOF
         && git commit --quiet -m "journal: discretionary on $W_REPO" \
         && git push --quiet origin master) \
         || log "warning: brain commit/push failed"
+      W_JOURNAL_APPENDED=1
     fi
   fi
 
@@ -1033,9 +1057,13 @@ EOF
       | awk '$2 !~ /^\.igor\// { c++ } END { print c+0 }')
     if [ "${W_DIRTY:-0}" -gt 0 ]; then
       log "discretionary: no commits, but $W_DIRTY uncommitted file(s) in worktree -- Claude forgot to commit, work dropped"
-    elif [ -s "$W_JOURNAL_SRC" ]; then
+    elif [ -s "$W_JOURNAL_SRC" ] && [ "$W_JOURNAL_APPENDED" -eq 1 ]; then
       # Reading tick: journal recorded, no PR expected. Not a noop.
       log "discretionary: reading tick complete on $W_REPO -- journal recorded, no PR"
+    elif [ -s "$W_JOURNAL_SRC" ]; then
+      # Reading tick BUT journal got dedup-skipped -- we paid for the
+      # work and dropped it. Flag loudly so this shows up in journalctl.
+      log "discretionary: reading tick complete on $W_REPO -- journal SKIPPED as duplicate, content lost (dedup may need loosening)"
     else
       log "discretionary: no work produced on $W_REPO"
     fi
