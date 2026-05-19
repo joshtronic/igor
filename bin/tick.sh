@@ -904,11 +904,44 @@ while read -r repo_line; do
     log "onboarding check passed on $R_NAME"
   fi
 
-  ISSUE=$(forgejo_find_claimable "$R_NAME" || true)
-  [ -n "$ISSUE" ] && [ "$ISSUE" != "null" ] && [ "$ISSUE" != "empty" ] || continue
-  CREATED=$(jq -r '.created_at' <<<"$ISSUE")
+  # Iterate candidate issues for this repo (oldest first). The first
+  # one that's actually claimable (not in flight, not over the
+  # rejected-PR strike count) becomes this repo's contender against
+  # other repos' contenders.
+  CANDIDATES=$(forgejo_find_claimable "$R_NAME" || echo '[]')
+  REPO_CONTENDER=""
+  while read -r candidate; do
+    [ -z "$candidate" ] && continue
+    C_NUM=$(jq -r .number <<<"$candidate")
+    C_HISTORY=$(forgejo_bot_prs_for_issue "$R_NAME" "$C_NUM" "$BOT_USER" 2>/dev/null || echo '[]')
+    C_OPEN=$(jq '[.[] | select(.state == "open")] | length' <<<"$C_HISTORY")
+    if [ "$C_OPEN" -gt 0 ]; then
+      log "skipping ${R_NAME}#${C_NUM} -- open bot PR (in flight)"
+      continue
+    fi
+    C_REJECTED=$(jq '[.[] | select(.state == "closed" and .merged == false)] | length' <<<"$C_HISTORY")
+    if [ "$C_REJECTED" -ge 2 ]; then
+      log "skipping ${R_NAME}#${C_NUM} -- ${C_REJECTED} rejected bot PRs, applying Status/Blocked"
+      forgejo_add_label "$R_NAME" "$C_NUM" "Status/Blocked" 2>/dev/null \
+        || log "warning: could not apply Status/Blocked on ${R_NAME}#${C_NUM}"
+      if [ -n "${IGOR_REVIEWER:-}" ]; then
+        forgejo_assign "$R_NAME" "$C_NUM" "$IGOR_REVIEWER" 2>/dev/null \
+          || log "warning: could not assign ${R_NAME}#${C_NUM} to $IGOR_REVIEWER"
+      fi
+      forgejo_comment "$R_NAME" "$C_NUM" \
+        "Igor opened ${C_REJECTED} PRs for this issue, all closed without merging. Probably needs a different approach or more context. Status/Blocked applied; investigate and remove the label to re-queue." 2>/dev/null \
+        || log "warning: could not comment on ${R_NAME}#${C_NUM}"
+      continue
+    fi
+    # First passing candidate wins for this repo.
+    REPO_CONTENDER="$candidate"
+    break
+  done < <(jq -c '.[]' <<<"$CANDIDATES")
+
+  [ -n "$REPO_CONTENDER" ] || continue
+  CREATED=$(jq -r '.created_at' <<<"$REPO_CONTENDER")
   if [ -z "$WINNER" ] || [[ "$CREATED" < "$WINNER_CREATED" ]]; then
-    WINNER="$ISSUE"
+    WINNER="$REPO_CONTENDER"
     WINNER_REPO="$R_NAME"
     WINNER_PR_BASE="$R_BASE"
     WINNER_CREATED="$CREATED"
@@ -1549,6 +1582,14 @@ Revert those changes (or do them yourself outside Igor) and remove \`Status/Bloc
     forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$PR_TITLE" "$PR_BODY" "${IGOR_REVIEWER:-}"
     log "PR opened"
   fi
+
+  # Unassign the bot from the issue so the next tick's recovery
+  # sweep stays quiet. Keep the Agent label intact -- the label is
+  # the human's signal ("this needs an agent"); the open PR linked
+  # via "Closes #N" is the harness's signal ("work in flight").
+  # Discovery's PR-history check excludes issues with open bot PRs.
+  forgejo_unassign_all "$FORGEJO_REPO" "$ISSUE_NUMBER" 2>/dev/null \
+    || log "warning: could not unassign ${FORGEJO_REPO}#${ISSUE_NUMBER}"
 
 else
   # Noop-loop guard. If the bot already left a "no work produced"

@@ -25,18 +25,20 @@ _fj() {
   fi
 }
 
-# Oldest open issue with label:Agent, no assignee, no Status/Blocked.
-# Returns the issue JSON on stdout, or empty if none.
+# All open issues with label:Agent, no assignee, no Status/Blocked,
+# sorted oldest-first. Caller iterates and applies additional
+# filtering (in-flight PR check, rejected-PR strike count) to pick
+# the first issue that's actually workable.
+#
+# Returns a JSON array. Empty array if no candidates.
 forgejo_find_claimable() {
   local repo="$1"
   _fj GET "/repos/${repo}/issues?state=open&labels=Agent&type=issues&sort=oldest&limit=50" \
     | jq -c '
-        map(select(
+        [.[] | select(
           ((.assignees // []) | length) == 0
           and (([.labels[].name] | index("Status/Blocked")) == null)
-        ))
-        | sort_by(.created_at)
-        | first // empty
+        )] | sort_by(.created_at)
       '
 }
 
@@ -176,6 +178,37 @@ forgejo_add_label() {
   [ -n "$id" ] || { echo "label not found: $name" >&2; return 1; }
   _fj POST "/repos/${repo}/issues/${number}/labels" \
     "$(jq -n --argjson id "$id" '{labels: [$id]}')" >/dev/null
+}
+
+# Remove a label by name. Parallel to forgejo_add_label; resolves
+# name -> id then DELETEs from /labels/{id}. Used (rarely) when the
+# harness needs to clear a label it applied earlier.
+forgejo_remove_label() {
+  local repo="$1" number="$2" name="$3"
+  local id
+  id=$(_fj GET "/repos/${repo}/labels" \
+       | jq -r --arg n "$name" '.[] | select(.name == $n) | .id' \
+       | head -1)
+  [ -n "$id" ] || { echo "label not found: $name" >&2; return 1; }
+  _fj DELETE "/repos/${repo}/issues/${number}/labels/${id}" >/dev/null
+}
+
+# Bot-authored PRs on this repo that reference this issue via
+# "Closes #N" (case-insensitive). Each entry: {number, state,
+# merged}. Empty array if none.
+#
+# Used by discovery to gate claimable issues:
+#   - any state="open" entry  -> issue is in flight, skip
+#   - 2+ state="closed", merged=false  -> 2 rejected attempts,
+#     block with Status/Blocked instead of re-trying
+forgejo_bot_prs_for_issue() {
+  local repo="$1" issue_num="$2" user="$3"
+  _fj GET "/repos/${repo}/pulls?state=all&limit=100" \
+    | jq -c --arg u "$user" --arg n "$issue_num" '
+        [.[]
+         | select(.user.login == $u)
+         | select(.body != null and (.body | test("(?i)closes\\s+#" + $n + "\\b")))
+         | {number, state, merged: (.merged // false)}]'
 }
 
 # Returns the authenticated user's login (the bot's username). Empty
