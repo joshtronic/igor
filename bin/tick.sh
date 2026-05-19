@@ -167,6 +167,35 @@ brain_system_prompt() {
   [ "${#files[@]}" -gt 0 ] && cat "${files[@]}"
 }
 
+# Derive a commit subject from .igor/PR_BODY.md if present. Picks
+# the first checklist item from the "What this PR does" section.
+# Falls back to a passed-in default if PR_BODY is absent or empty.
+#
+# Claude writes PR_BODY.md as part of his work. The harness uses its
+# first checklist item as both the commit subject AND the PR title
+# (the existing flow derives PR title from `git log -1 --pretty=%s`,
+# which after harness-owns-commits is THIS commit's subject).
+derive_commit_subject() {
+  local pr_body="$1" fallback="${2:-chore: tick work}"
+  if [ -f "$pr_body" ]; then
+    local subject
+    subject=$(awk '
+      /^## What this PR does/ { in_section = 1; next }
+      /^## / && in_section { exit }
+      in_section && /^- \[[x ]\] / {
+        sub(/^- \[[x ]\] /, "")
+        print
+        exit
+      }
+    ' "$pr_body")
+    if [ -n "$subject" ]; then
+      printf '%s' "$subject"
+      return 0
+    fi
+  fi
+  printf '%s' "$fallback"
+}
+
 # Returns a newline-separated list of off-limits paths touched in the
 # diff against the given base ref, or empty if none. Off-limits paths
 # are CI workflow files (.forgejo/workflows/, .github/workflows/) --
@@ -998,17 +1027,18 @@ identity.md's Voice section for the register layering.
 
 If shipping (a or b):
   - Make the change on the agent branch (already checked out).
-  - **Commit your work before exiting.** Use \`git add\` + \`git commit\`.
-    The harness only pushes committed changes; files left
-    uncommitted in the worktree are dropped and the tick reports
-    "no work produced." This is the most common Igor failure mode --
-    don't be the one that exits without committing.
   - Write .igor/PR_BODY.md with the two-checklist format from
-    AGENTS.md (What this PR does + Test plan).
+    AGENTS.md (What this PR does + Test plan). The first
+    "What this PR does" item becomes the commit subject AND the
+    PR title -- make it a clean imperative sentence.
   - Run npm test before exit -- must pass.
+  - **Do NOT run git add / git commit / git push.** The harness
+    owns commits. Just edit files and exit; the harness commits
+    everything dirty (outside .igor/) with the subject derived
+    from PR_BODY.md.
 
 If reading (c) or nothing fits: write .igor/IGOR_JOURNAL.md and
-exit without commits. Empty ticks are fine.
+exit. No commits expected.
 EOF
 )
 
@@ -1100,19 +1130,28 @@ ${W_DIRTY_LIST}" || log "warning: auto-commit failed"
     fi
   fi
 
-  # Outcome classification
+  # Harness-owned commits: Claude doesn't run git commit; the harness
+  # commits anything dirty (outside .igor/) at end of tick. Subject is
+  # derived from .igor/PR_BODY.md's first checklist item; falls back
+  # to a generic message. Claude's `git add` and commit instructions
+  # were removed from his prompt -- saves tool calls and eliminates
+  # the "forgot to commit" failure mode structurally.
   cd "$W_WORKTREE"
+  W_DIRTY_PATHS=$(git status --porcelain 2>/dev/null \
+    | awk '$2 !~ /^\.igor\// { print $2 }')
+  if [ -n "$W_DIRTY_PATHS" ]; then
+    W_DIRTY_COUNT=$(echo "$W_DIRTY_PATHS" | wc -l | tr -d ' ')
+    W_SUBJECT=$(derive_commit_subject "$W_WORKTREE/.igor/PR_BODY.md" "chore: discretionary website tick")
+    log "harness-commit: $W_DIRTY_COUNT file(s), subject: $W_SUBJECT"
+    git add -A
+    git commit --quiet -m "$W_SUBJECT" || log "warning: harness commit failed"
+  fi
+
+  # Outcome classification
   W_COMMITS=$(git rev-list --count "origin/${W_BASE}..HEAD" 2>/dev/null || echo 0)
 
   if [ "$W_COMMITS" -eq 0 ]; then
-    # Exclude .igor/ files from the dirty count -- those are harness
-    # scratch (PR_BODY.md, IGOR_JOURNAL.md, etc.) and stay uncommitted
-    # by design. Real "forgot to commit" cases leave files outside .igor/.
-    W_DIRTY=$(git status --porcelain 2>/dev/null \
-      | awk '$2 !~ /^\.igor\// { c++ } END { print c+0 }')
-    if [ "${W_DIRTY:-0}" -gt 0 ]; then
-      log "discretionary: no commits, but $W_DIRTY uncommitted file(s) in worktree -- Claude forgot to commit, work dropped"
-    elif [ -s "$W_JOURNAL_SRC" ] && [ "$W_JOURNAL_APPENDED" -eq 1 ]; then
+    if [ -s "$W_JOURNAL_SRC" ] && [ "$W_JOURNAL_APPENDED" -eq 1 ]; then
       # Reading tick: journal recorded, no PR expected. Not a noop.
       log "discretionary: reading tick complete on $W_REPO -- journal recorded, no PR"
     elif [ -s "$W_JOURNAL_SRC" ]; then
@@ -1324,28 +1363,18 @@ set -e
 ELAPSED=$(( $(date +%s) - START_TS ))
 log "claude exited $CLAUDE_EXIT (elapsed ${ELAPSED}s)"
 
-# Safety net: auto-commit any uncommitted work (outside .igor/) that
-# Claude left behind. Same habit as in the discretionary path -- he
-# runs /security-review, treats "no findings" as workflow done, exits
-# without committing. Auto-save preserves the work; the human reviews.
+# Harness-owned commits: see derive_commit_subject + tier-3 comment.
+# Auto-commit anything dirty outside .igor/ so Claude doesn't have
+# to run git himself.
 cd "$WORKTREE"
 DIRTY_PATHS=$(git status --porcelain 2>/dev/null \
   | awk '$2 !~ /^\.igor\// { print $2 }')
 if [ -n "$DIRTY_PATHS" ]; then
-  log "auto-committing $(echo "$DIRTY_PATHS" | wc -l | tr -d ' ') uncommitted file(s) Claude forgot to commit"
-  DIRTY_LIST=$(echo "$DIRTY_PATHS" | sed 's/^/  - /')
+  DIRTY_COUNT=$(echo "$DIRTY_PATHS" | wc -l | tr -d ' ')
+  COMMIT_SUBJECT=$(derive_commit_subject "$WORKTREE/.igor/PR_BODY.md" "chore: issue #${ISSUE_NUMBER} -- ${ISSUE_TITLE}")
+  log "harness-commit: $DIRTY_COUNT file(s), subject: $COMMIT_SUBJECT"
   git add -A
-  git commit --quiet -m "chore: auto-commit (claude exited with uncommitted changes)
-
-The harness detected uncommitted files when Claude exited the tick.
-Claude's habit: he runs /security-review, treats 'no findings' as
-the end of the workflow, and exits without git commit. The work
-itself was real; this commit preserves it.
-
-Review carefully and amend/squash as appropriate before merge.
-
-Files saved:
-${DIRTY_LIST}" || log "warning: auto-commit failed"
+  git commit --quiet -m "$COMMIT_SUBJECT" || log "warning: harness commit failed"
 fi
 
 # -- Brain journal: append Claude's reflection if present ------
@@ -1499,15 +1528,11 @@ else
   fi
 
   # OUTCOME: noop
-  # Exclude .igor/ scratch (PR_BODY.md, IGOR_JOURNAL.md) from the
-  # dirty count -- those are harness state, not committable work.
-  DIRTY=$(git status --porcelain 2>/dev/null \
-    | awk '$2 !~ /^\.igor\// { c++ } END { print c+0 }')
-  if [ "${DIRTY:-0}" -gt 0 ]; then
-    log "outcome: no work produced -- but $DIRTY uncommitted file(s) in worktree -- Claude forgot to commit, work dropped (elapsed ${ELAPSED}s)"
-  else
-    log "outcome: no work produced (elapsed ${ELAPSED}s)"
-  fi
+  # Harness-commits flow: any dirty non-.igor files would already
+  # be auto-committed by the block right after Claude exits, so a
+  # 0-commits outcome here means Claude truly did nothing
+  # commit-worthy. No "forgot to commit" path remains.
+  log "outcome: no work produced (elapsed ${ELAPSED}s)"
   forgejo_unassign_all "$FORGEJO_REPO" "$ISSUE_NUMBER"
 
   TAIL="(no output captured)"
