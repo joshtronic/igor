@@ -1065,34 +1065,6 @@ EOF
   set -e
   log "claude exited $W_EXIT after $(( $(date +%s) - W_START ))s"
 
-  # Safety net: Claude has a habit of running security-review,
-  # treating the "no findings" output as the end of the workflow,
-  # and exiting without running git commit. Files modified but
-  # uncommitted get dropped by the rest of the flow ("no commits,
-  # work dropped"). He's stateless, so telling him won't fix it.
-  # Auto-commit any dirty files outside .igor/ so the work isn't
-  # lost. The commit message makes it obvious this was a save; the
-  # human can amend/squash on review.
-  cd "$W_WORKTREE"
-  W_DIRTY_PATHS=$(git status --porcelain 2>/dev/null \
-    | awk '$2 !~ /^\.igor\// { print $2 }')
-  if [ -n "$W_DIRTY_PATHS" ]; then
-    log "discretionary: auto-committing $(echo "$W_DIRTY_PATHS" | wc -l | tr -d ' ') uncommitted file(s) Claude forgot to commit"
-    W_DIRTY_LIST=$(echo "$W_DIRTY_PATHS" | sed 's/^/  - /')
-    git add -A
-    git commit --quiet -m "chore: auto-commit (claude exited with uncommitted changes)
-
-The harness detected uncommitted files when Claude exited the tick.
-Claude's habit: he runs /security-review, treats 'no findings' as
-the end of the workflow, and exits without git commit. The work
-itself was real; this commit preserves it.
-
-Review carefully and amend/squash as appropriate before merge.
-
-Files saved:
-${W_DIRTY_LIST}" || log "warning: auto-commit failed"
-  fi
-
   # Journal write -- local-day bucketing; skip byte-identical dupes.
   # W_JOURNAL_APPENDED tracks whether the journal actually made it
   # into brain (vs being skipped as a duplicate) so the outcome log
