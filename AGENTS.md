@@ -51,22 +51,25 @@ for.
 
 ### 1. PR (most common)
 
-Do the work in the worktree. Make commits with clear messages. The
-harness will push the branch and open a PR with `Closes
-#$ISSUE_NUMBER` after you exit.
+Do the work in the worktree -- edit files and exit. **The harness
+handles git commits, push, and PR open.** I don't run `git add`,
+`git commit`, or `git push` myself; those tool calls cost tokens
+and the harness is better at it (it derives the commit subject
+from PR_BODY.md, opens the PR with `Closes #N`, etc.). My job is
+the actual work.
 
 - Keep changes focused on the issue. Do not refactor unrelated code.
-- Aim for diffs under ~400 lines and ~10 commits. The harness hard-
-  blocks at these limits and asks the human to split the ticket. If
-  you're going to blow through, block early with `agent-block.sh`
-  rather than doing work that won't ship.
+- Aim for diffs under ~400 lines. The harness hard-blocks larger
+  and asks the human to split the ticket. If I'm going to blow
+  through, block early with `agent-block.sh` rather than doing
+  work that won't ship.
 - Write `.igor/PR_BODY.md` with two markdown checklists: "What this
   PR does" and "Test plan". The harness uses this verbatim as the
-  PR body (then appends a deps audit + `Closes #N`). Forgejo renders
-  `[ ]` as clickable checkboxes so the human can tick items off as
-  they review.
+  PR body AND derives the commit subject from the first
+  "What this PR does" item, so make that first item a clean
+  imperative sentence I'd be happy seeing as a commit message.
 
-  Pre-check (`[x]`) anything you verified during the run -- tests
+  Pre-check (`[x]`) anything I verified during the run -- tests
   passing, lint passing, scripted assertions. Leave unchecked (`[ ]`)
   steps that need a human to run -- manual UI testing, comparing
   against an external system, eyeballing output. Be specific:
@@ -91,41 +94,28 @@ harness will push the branch and open a PR with `Closes
   - [ ] Manual: confirm `Z` still works when `X` is absent
   ```
 
-  Do not write a "Dependencies changed" section yourself -- the
+  Do not write a "Dependencies changed" section myself -- the
   harness appends one automatically from the diff when manifest or
-  lockfile files changed, and that section is authoritative. You
-  can describe deps in your narrative if it's relevant context, but
-  the audit list is the harness's job.
-- **Use a TDD loop when the repo supports tests.** If the project's
-  `CLAUDE.md` declares a real test command (npm test, pytest, cargo
-  test, go test, etc.), follow the cycle:
-    1. Write the failing test(s) for the change.
-    2. Run them. Confirm they fail for the right reason.
-    3. Commit the tests with a clear message (`test: ...`).
-    4. Implement the change.
-    5. Run the tests. Confirm green.
-    6. Commit the implementation (`feat: ...` / `fix: ...`).
-  Two commits minimum on TDD-applicable work, more if the change is
-  big enough to warrant smaller steps. Don't mix test and impl in a
-  single commit -- that defeats the audit trail.
-- **Skip the TDD loop when there's no test command.** Static sites
-  and repos with only lint can't TDD meaningfully. One commit is fine
-  there; lint is still the definition of done.
-- **Run the project's tests AND lint before you exit.** The project's
+  lockfile files changed, and that section is authoritative.
+- **TDD discipline (write tests first) is still real on repos that
+  have a real test command.** Write the failing test, run it, see
+  it fail, then implement, then run again. The mental flow matters
+  for correctness. The harness rolls everything into one commit
+  per PR, so I don't need to manually commit in between steps --
+  just write tests-then-implementation in that order.
+- **Run the project's tests AND lint before exit.** The project's
   `CLAUDE.md` declares both commands. Tests + lint both passing on
-  your branch is the definition of done.
-- **Run `/security-review` on your diff before you exit.** It's a
-  built-in Claude Code slash command that reviews pending changes
-  for security issues. If it flags anything material (injection
-  risk, leaked secret, unsafe deserialization, auth bypass, etc.),
-  fix it. If you can't fix and the issue is real, block. Empty or
-  trivial findings can be exited past -- use judgment.
-- If tests, lint, or security review fail after your changes and
-  you cannot fix them, block. Do not exit with commits and failing
-  checks -- the harness pushes whatever you leave behind.
-- Lint-catch fixes go in their own commit (`style:` or `chore:`),
-  same audit-trail rule as test vs implementation -- don't bury style
-  fixes inside a feature commit.
+  the branch is the definition of done.
+- **Run `/security-review` on the diff before exit.** Built-in
+  Claude Code slash command. If it flags something material
+  (injection risk, leaked secret, unsafe deserialization, auth
+  bypass, etc.), fix it. If I can't fix and the issue is real,
+  block. Empty or trivial findings can be exited past -- use
+  judgment. Note: security review is NOT the final step. After
+  it passes, just exit -- don't try to do anything more.
+- If tests, lint, or security review fail after my changes and I
+  cannot fix them, block. Don't exit with unfixable failures --
+  the harness will commit and push whatever I leave behind.
 
 ### 1b. PR review (reopening an existing PR)
 
