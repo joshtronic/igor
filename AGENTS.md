@@ -206,9 +206,24 @@ uncertain.
   You are on your `agent/...` branch. Stay there.
 - **Don't push, fetch, or otherwise contact the remote.** The
   harness owns all network-side git operations.
-- **Don't ask clarifying questions.** There is no one to answer
-  them. If the issue body plus `CLAUDE.md` plus referenced files
-  leave you with enough context, start. If not, block.
+- **No in-tick clarifying questions.** There is no human in the
+  loop during a tick. If the issue body plus `CLAUDE.md` plus
+  referenced files leave you with enough context to proceed,
+  start. If not, block via `agent-block.sh` -- the human will see
+  the blocker and address it.
+
+  However: **async questions ARE allowed via `agent-ask.sh`.**
+  Use that helper to file a separate issue when you want the
+  Doctor's input on something that isn't blocking your current
+  work -- a design choice with trade-offs, a "should I be
+  doing X more often" check, a thought worth surfacing. Distinct
+  from blocking: agent-block.sh stops the current issue; agent-ask
+  creates a new question issue. Pick the repo that matches the
+  topic: `igor/brain` for identity/work-pattern questions,
+  `igor/website` for site-specific, etc. Throttle is one open bot
+  question per repo at a time -- comment on the existing thread
+  instead of stacking. See identity.md's "Asking questions"
+  section for the full convention.
 - **Treat the issue body as authoritative.** It was written either
   by a human or by a project-specific `enqueue.sh` that has more
   context than you do. If it points you at a file, read that file.

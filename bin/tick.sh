@@ -80,6 +80,13 @@ BOT_USER=$(forgejo_whoami)
   exit 3
 }
 
+# Export bot-identity vars early so helper scripts (agent-ask.sh,
+# agent-block.sh, agent-report.sh) called by Claude from any tick
+# shape can find them.
+export BOT_USER
+export IGOR_REVIEWER="${IGOR_REVIEWER:-}"
+export IGOR_HOME
+
 # -- Global lock (one tick at a time) --------------------------
 
 mkdir -p "$IGOR_STATE_DIR"
@@ -1385,9 +1392,12 @@ fi
 log "claiming ${FORGEJO_REPO}#${ISSUE_NUMBER}: ${ISSUE_TITLE}"
 log "branch: ${BRANCH}"
 
-# Export early so agent-block.sh / agent-report.sh work for both
-# preflight (called by tick.sh) and Claude (invoked below).
-export ISSUE_NUMBER ISSUE_TITLE FORGEJO_REPO PR_BASE IGOR_HOME
+# Export the tier-1 issue context so agent-block.sh / agent-report.sh
+# can find the current issue. BOT_USER and IGOR_REVIEWER are
+# exported earlier (right after bot-identity resolution) so they're
+# available to agent-ask.sh from any tick shape (tier-1, tier-3,
+# PR-review, maintenance).
+export ISSUE_NUMBER ISSUE_TITLE FORGEJO_REPO PR_BASE
 export PATH="$IGOR_HOME/bin:$PATH"
 
 # -- Cleanup on exit (set before worktree creation) ------------

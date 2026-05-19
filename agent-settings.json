@@ -48,7 +48,8 @@
       "Bash(printf:*)",
       "Bash(timeout:*)",
       "Bash(agent-block.sh:*)",
-      "Bash(agent-report.sh:*)"
+      "Bash(agent-report.sh:*)",
+      "Bash(agent-ask.sh:*)"
     ],
     "deny": [
       "Bash(git push:*)",
