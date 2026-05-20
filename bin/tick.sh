@@ -1256,7 +1256,8 @@ EOF
       --print "$W_USER_MSG" 2>&1 | tee "$W_LOG"
   W_EXIT=${PIPESTATUS[0]}
   set -e
-  log "claude exited $W_EXIT after $(( $(date +%s) - W_START ))s"
+  W_ELAPSED=$(( $(date +%s) - W_START ))
+  log "claude exited $W_EXIT after ${W_ELAPSED}s"
 
   # Journal write -- local-day bucketing; skip byte-identical dupes.
   # W_JOURNAL_APPENDED tracks whether the journal actually made it
@@ -1387,6 +1388,7 @@ EOF
   W_EXISTING_PR=$(forgejo_find_pr_by_head "$W_REPO" "$W_BRANCH")
   if [ -n "$W_EXISTING_PR" ]; then
     log "PR #$W_EXISTING_PR already open"
+    W_NEW_PR_NUMBER="$W_EXISTING_PR"
   else
     W_PR_TITLE=$(git log -1 --pretty=%s)
     if [ -f .igor/PR_BODY.md ]; then
@@ -1395,8 +1397,16 @@ EOF
       W_PR_BODY=$(git log "origin/${W_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
     fi
     W_PR_BODY+=$(build_deps_section "$W_BASE")
-    forgejo_open_pr "$W_REPO" "$W_BRANCH" "$W_BASE" "$W_PR_TITLE" "$W_PR_BODY" "${IGOR_REVIEWER:-}"
-    log "discretionary: PR opened on $W_REPO"
+    W_NEW_PR_NUMBER=$(forgejo_open_pr "$W_REPO" "$W_BRANCH" "$W_BASE" "$W_PR_TITLE" "$W_PR_BODY" "${IGOR_REVIEWER:-}")
+    log "discretionary: PR opened on $W_REPO${W_NEW_PR_NUMBER:+ (#$W_NEW_PR_NUMBER)}"
+  fi
+
+  if [ -n "${W_NEW_PR_NUMBER:-}" ]; then
+    forgejo_log_time "$W_REPO" "$W_NEW_PR_NUMBER" "$W_ELAPSED" \
+      && log "time logged: ${W_ELAPSED}s on ${W_REPO}#${W_NEW_PR_NUMBER}" \
+      || log "warning: could not log time on ${W_REPO}#${W_NEW_PR_NUMBER}"
+  else
+    log "warning: no PR number captured, skipping time log"
   fi
 
   exit 0
