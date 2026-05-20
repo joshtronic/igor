@@ -100,7 +100,9 @@ forgejo_open_pr() {
   if [ -n "$assignee" ]; then
     payload=$(jq --arg a "$assignee" '. + {assignees: [$a]}' <<<"$payload")
   fi
-  _fj POST "/repos/${repo}/pulls" "$payload" >/dev/null
+  # Print the new PR's number on stdout so callers can capture it
+  # (for follow-up actions like time tracking).
+  _fj POST "/repos/${repo}/pulls" "$payload" | jq -r '.number // empty'
 }
 
 # All open PRs assigned to the authenticated bot user across every

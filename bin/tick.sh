@@ -1676,6 +1676,7 @@ Revert those changes (or do them yourself outside Igor) and remove \`Status/Bloc
   EXISTING_PR=$(forgejo_find_pr_by_head "$FORGEJO_REPO" "$BRANCH")
   if [ -n "$EXISTING_PR" ]; then
     log "PR #$EXISTING_PR already open for $BRANCH -- skipping open"
+    NEW_PR_NUMBER="$EXISTING_PR"
   else
     PR_TITLE=$(git log -1 --pretty=%s)
     if [ -f .igor/PR_BODY.md ]; then
@@ -1686,15 +1687,21 @@ Revert those changes (or do them yourself outside Igor) and remove \`Status/Bloc
     PR_BODY+=$(build_deps_section "$PR_BASE")
     PR_BODY+=$'\n\nCloses #'"$ISSUE_NUMBER"
 
-    forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$PR_TITLE" "$PR_BODY" "${IGOR_REVIEWER:-}"
-    log "PR opened"
+    NEW_PR_NUMBER=$(forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$PR_TITLE" "$PR_BODY" "${IGOR_REVIEWER:-}")
+    log "PR opened${NEW_PR_NUMBER:+ (#$NEW_PR_NUMBER)}"
   fi
 
-  # Record Claude's wall-clock on the issue (Forgejo time tracking).
-  # Best-effort; never fail the tick over this.
-  forgejo_log_time "$FORGEJO_REPO" "$ISSUE_NUMBER" "$ELAPSED" \
-    && log "time logged: ${ELAPSED}s on ${FORGEJO_REPO}#${ISSUE_NUMBER}" \
-    || log "warning: could not log time on ${FORGEJO_REPO}#${ISSUE_NUMBER}"
+  # Record Claude's wall-clock on the PR (Forgejo time tracking).
+  # PRs and issues share the number space; logging on the PR keeps
+  # multi-PR issues legible per attempt. Best-effort; never fail the
+  # tick over this.
+  if [ -n "${NEW_PR_NUMBER:-}" ]; then
+    forgejo_log_time "$FORGEJO_REPO" "$NEW_PR_NUMBER" "$ELAPSED" \
+      && log "time logged: ${ELAPSED}s on ${FORGEJO_REPO}#${NEW_PR_NUMBER}" \
+      || log "warning: could not log time on ${FORGEJO_REPO}#${NEW_PR_NUMBER}"
+  else
+    log "warning: no PR number captured, skipping time log"
+  fi
 
   # Unassign the bot from the issue so the next tick's recovery
   # sweep stays quiet. Keep the Agent label intact -- the label is
