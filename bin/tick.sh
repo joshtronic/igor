@@ -919,7 +919,8 @@ EOF
         --print "$PR_USER_MSG" 2>&1 | tee "$PR_LOG"
     PR_EXIT=${PIPESTATUS[0]}
     set -e
-    log "claude exited $PR_EXIT after $(( $(date +%s) - PR_START ))s"
+    PR_ELAPSED=$(( $(date +%s) - PR_START ))
+    log "claude exited $PR_EXIT after ${PR_ELAPSED}s"
 
     cd "$PR_WORKTREE"
     PR_NEW=$(git rev-list --count "origin/${PR_HEAD}..HEAD" 2>/dev/null || echo 0)
@@ -960,6 +961,10 @@ Reassigning back so a human can review/discard." 2>/dev/null \
       forgejo_assign "$PR_REPO" "$PR_NUMBER" "$IGOR_REVIEWER" 2>/dev/null \
         || log "warning: assign-to-${IGOR_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
     fi
+
+    forgejo_log_time "$PR_REPO" "$PR_NUMBER" "$PR_ELAPSED" \
+      && log "time logged: ${PR_ELAPSED}s on ${PR_REPO}#${PR_NUMBER}" \
+      || log "warning: could not log time on ${PR_REPO}#${PR_NUMBER}"
 
     (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || true
 
@@ -1597,6 +1602,9 @@ HAS_BLOCKED=$(jq -r '[.labels[].name] | index("Status/Blocked") != null' <<<"$CU
 if [ "$ISSUE_STATE" = "closed" ]; then
   # OUTCOME: report
   log "outcome: report (issue closed by agent)"
+  forgejo_log_time "$FORGEJO_REPO" "$ISSUE_NUMBER" "$ELAPSED" \
+    && log "time logged: ${ELAPSED}s on ${FORGEJO_REPO}#${ISSUE_NUMBER}" \
+    || log "warning: could not log time on ${FORGEJO_REPO}#${ISSUE_NUMBER}"
 
 elif [ "$HAS_BLOCKED" = "true" ]; then
   # OUTCOME: blocked
@@ -1668,6 +1676,7 @@ Revert those changes (or do them yourself outside Igor) and remove \`Status/Bloc
   EXISTING_PR=$(forgejo_find_pr_by_head "$FORGEJO_REPO" "$BRANCH")
   if [ -n "$EXISTING_PR" ]; then
     log "PR #$EXISTING_PR already open for $BRANCH -- skipping open"
+    NEW_PR_NUMBER="$EXISTING_PR"
   else
     PR_TITLE=$(git log -1 --pretty=%s)
     if [ -f .igor/PR_BODY.md ]; then
@@ -1678,8 +1687,20 @@ Revert those changes (or do them yourself outside Igor) and remove \`Status/Bloc
     PR_BODY+=$(build_deps_section "$PR_BASE")
     PR_BODY+=$'\n\nCloses #'"$ISSUE_NUMBER"
 
-    forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$PR_TITLE" "$PR_BODY" "${IGOR_REVIEWER:-}"
-    log "PR opened"
+    NEW_PR_NUMBER=$(forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$PR_TITLE" "$PR_BODY" "${IGOR_REVIEWER:-}")
+    log "PR opened${NEW_PR_NUMBER:+ (#$NEW_PR_NUMBER)}"
+  fi
+
+  # Record Claude's wall-clock on the PR (Forgejo time tracking).
+  # PRs and issues share the number space; logging on the PR keeps
+  # multi-PR issues legible per attempt. Best-effort; never fail the
+  # tick over this.
+  if [ -n "${NEW_PR_NUMBER:-}" ]; then
+    forgejo_log_time "$FORGEJO_REPO" "$NEW_PR_NUMBER" "$ELAPSED" \
+      && log "time logged: ${ELAPSED}s on ${FORGEJO_REPO}#${NEW_PR_NUMBER}" \
+      || log "warning: could not log time on ${FORGEJO_REPO}#${NEW_PR_NUMBER}"
+  else
+    log "warning: no PR number captured, skipping time log"
   fi
 
   # Unassign the bot from the issue so the next tick's recovery
