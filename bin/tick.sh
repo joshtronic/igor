@@ -159,19 +159,35 @@ init_igor_scratch() {
   (cd "$worktree" && git rm --cached -r --quiet --ignore-unmatch .igor/ 2>/dev/null) || true
 }
 
-# Build the brain-loaded portion of the system prompt. Stable order
-# for prompt caching: identity (who I am) -> index (what's current)
-# -> MEMORY.md (the memory index, always loaded) -> blog-ideas.md
-# (post idea queue). Each is optional -- missing files are skipped.
-# Caller appends AGENTS.md.
+# Build the full system prompt for a Claude invocation. Ordered
+# for prompt-cache stability: most-stable first, volatile last so
+# changes to a downstream file don't invalidate the upstream
+# cached prefix.
+#
+# Order (and why):
+#   AGENTS.md           -- protocol/rules, changes by PR only
+#   identity.md         -- who I am, changes by PR only
+#   index.md            -- overview, changes by PR only
+#   memories/MEMORY.md  -- memory index, edited by Claude OCCASIONALLY
+#                          (when he adds a new memory file). Latest
+#                          stable content possible.
+#
+# Files Claude edits FREQUENTLY mid-tick (notably blog-ideas.md)
+# are intentionally NOT loaded here. Loading them in-prompt
+# guarantees cache invalidation every time he writes -- the cost
+# of always-loaded blog-ideas exceeds the benefit. AGENTS.md
+# documents that Claude reads brain/blog-ideas.md on demand
+# (via the Read tool) when shipping/considering a post.
+#
+# Each file is optional -- missing files are skipped. Caller
+# supplies the per-tick user message separately.
 brain_system_prompt() {
   local brain="$1"
-  local files=()
+  local files=("$IGOR_HOME/AGENTS.md")
   [ -f "$brain/identity.md" ]         && files+=("$brain/identity.md")
   [ -f "$brain/index.md" ]            && files+=("$brain/index.md")
   [ -f "$brain/memories/MEMORY.md" ]  && files+=("$brain/memories/MEMORY.md")
-  [ -f "$brain/blog-ideas.md" ]       && files+=("$brain/blog-ideas.md")
-  [ "${#files[@]}" -gt 0 ] && cat "${files[@]}"
+  cat "${files[@]}"
 }
 
 # Single-shot completion via the Anthropic Messages API. No tool
@@ -507,11 +523,7 @@ EOF
 
   local m_brain="$IGOR_REPO_ROOT/${BOT_USER}/brain"
   local m_system_prompt
-  if [ -f "$m_brain/identity.md" ] && [ -f "$m_brain/index.md" ]; then
-    m_system_prompt=$({ brain_system_prompt "$m_brain"; cat "$IGOR_HOME/AGENTS.md"; })
-  else
-    m_system_prompt=$(cat "$IGOR_HOME/AGENTS.md")
-  fi
+  m_system_prompt=$(brain_system_prompt "$m_brain")
 
   log "invoking claude for maintenance (timeout ${IGOR_TIMEOUT})"
   local m_log="$m_worktree/.igor/claude-output.log"
@@ -871,11 +883,7 @@ EOF
 )
 
     PR_BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
-    if [ -f "$PR_BRAIN_PATH/identity.md" ] && [ -f "$PR_BRAIN_PATH/index.md" ]; then
-      PR_SYSTEM_PROMPT=$({ brain_system_prompt "$PR_BRAIN_PATH"; cat "$IGOR_HOME/AGENTS.md"; })
-    else
-      PR_SYSTEM_PROMPT=$(cat "$IGOR_HOME/AGENTS.md")
-    fi
+    PR_SYSTEM_PROMPT=$(brain_system_prompt "$PR_BRAIN_PATH")
 
     cd "$PR_WORKTREE"
     log "invoking claude for PR review (timeout ${IGOR_TIMEOUT})"
@@ -1208,11 +1216,7 @@ EOF
 
   # BRAIN_PATH is set at the top of the discretionary block now
   # (so the READING_LOG load earlier can use it).
-  if [ -f "$BRAIN_PATH/identity.md" ] && [ -f "$BRAIN_PATH/index.md" ]; then
-    W_SYSTEM_PROMPT=$({ brain_system_prompt "$BRAIN_PATH"; cat "$IGOR_HOME/AGENTS.md"; })
-  else
-    W_SYSTEM_PROMPT=$(cat "$IGOR_HOME/AGENTS.md")
-  fi
+  W_SYSTEM_PROMPT=$(brain_system_prompt "$BRAIN_PATH")
 
   log "invoking claude for website work (timeout ${IGOR_TIMEOUT})"
   W_LOG="$W_WORKTREE/.igor/claude-output.log"
@@ -1479,17 +1483,15 @@ ${ISSUE_BODY}
 EOF
 )
 
-# System prompt: identity + index from brain (most stable first, for
-# prompt caching), then AGENTS.md. Brain files are bootstrap-required,
-# but guard with -f in case identity.md or index.md was deleted in
-# place -- degrade to AGENTS.md only rather than crashing the tick.
+# System prompt: brain_system_prompt assembles AGENTS.md + brain
+# files in cache-friendly order. Brain files are bootstrap-required;
+# log a warning if identity.md or index.md is missing rather than
+# crashing the tick (brain_system_prompt handles the missing case
+# by skipping them).
 BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
-if [ -f "$BRAIN_PATH/identity.md" ] && [ -f "$BRAIN_PATH/index.md" ]; then
-  SYSTEM_PROMPT=$({ brain_system_prompt "$BRAIN_PATH"; cat "$IGOR_HOME/AGENTS.md"; })
-else
-  log "warning: brain identity.md or index.md missing at $BRAIN_PATH -- using AGENTS.md only"
-  SYSTEM_PROMPT=$(cat "$IGOR_HOME/AGENTS.md")
-fi
+[ -f "$BRAIN_PATH/identity.md" ] && [ -f "$BRAIN_PATH/index.md" ] \
+  || log "warning: brain identity.md or index.md missing at $BRAIN_PATH"
+SYSTEM_PROMPT=$(brain_system_prompt "$BRAIN_PATH")
 
 log "invoking claude (timeout ${IGOR_TIMEOUT})"
 CLAUDE_LOG="$WORKTREE/.igor/claude-output.log"
