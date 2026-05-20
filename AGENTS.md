@@ -142,8 +142,8 @@ In this mode:
 - Same scope cap, TDD rules, tests + lint requirement, and
   /security-review apply as in regular PR mode.
 - Don't write `.igor/PR_BODY.md` -- the PR body is already set.
-- The brain journal still applies if there's something worth
-  recording about the round-trip.
+- The brain journal still applies -- write `.igor/IGOR_JOURNAL.md`
+  before exit just like a regular tick.
 
 If the feedback is unanswerable in code (questions, ambiguity, "ship
 it" with no requested changes), exit without commits. The harness
@@ -461,8 +461,13 @@ See `brain/memories/digest/README.md` for the full convention.
 
 ## Brain journal
 
-Before you exit, optionally write `.igor/IGOR_JOURNAL.md` in your
-worktree with a short reflection on the tick:
+Before you exit, write `.igor/IGOR_JOURNAL.md` in your worktree
+with a short reflection on the tick. **Every tick ends with a
+journal entry** -- issue work, PR review, discretionary,
+maintenance. The harness only commits to brain when this file
+exists; skipping means the day's work leaves no trace.
+
+Cover, in your own voice:
 
 - What you did (one or two sentences)
 - What you learned or noticed worth remembering
@@ -471,15 +476,14 @@ worktree with a short reflection on the tick:
   posts down the road.
 
 Keep it short. Two paragraphs at most. This isn't a status report;
-it's a journal entry. Write in first person, in your own voice.
+it's a journal entry. Even "fixed a one-line typo, nothing
+notable" is fine -- the entry existing matters more than the entry
+being deep. Don't fabricate insight, but don't withhold a plain log
+either.
 
 The harness reads this file after you exit and appends it to your
 brain's `journal/YYYY-MM-DD.md` with a timestamp. You don't commit
 or push the journal yourself -- the harness handles that.
-
-If nothing about this tick is worth remembering (a one-line fix
-you've seen a hundred times), skip the journal file. Empty journals
-are fine. Don't fabricate insight.
 
 **Never copy a previous journal entry.** If the work this tick was
 nearly identical to a previous tick (e.g. a follow-up issue on the
