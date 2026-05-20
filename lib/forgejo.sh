@@ -77,6 +77,19 @@ forgejo_comment() {
     "$(jq -n --arg b "$body" '{body: $b}')" >/dev/null
 }
 
+# Log time spent on an issue/PR (Forgejo's built-in time tracking).
+# Number works for both issues and PRs -- they share the number space.
+# Best-effort: warns and returns non-zero if the repo has time tracking
+# disabled or the API rejects, but never aborts the caller. Skips
+# entirely if seconds <= 0.
+forgejo_log_time() {
+  local repo="$1" number="$2" seconds="$3"
+  [ -z "$seconds" ] || [ "$seconds" -le 0 ] 2>/dev/null && return 0
+  _fj POST "/repos/${repo}/issues/${number}/times" \
+    "$(jq -n --argjson s "$seconds" '{time: $s}')" >/dev/null 2>&1 \
+    || return 1
+}
+
 forgejo_open_pr() {
   local repo="$1" head="$2" base="$3" title="$4" body="$5" assignee="${6:-}"
   local payload
