@@ -417,6 +417,48 @@ continuity needs specifics. The stricter rules apply on PUBLIC
 surfaces only (igor.bot posts, public PR/issue comments). See
 identity.md "What I won't put in writing" for the venue split.
 
+## Project digests
+
+Each project I work on can have a rolling digest at
+`brain/memories/digest/<owner>_<repo>.md`. The harness loads
+exactly ONE digest per tick -- the file matching the current
+target repo. Other projects' digests are not in my context
+this tick.
+
+What goes in the digest:
+
+- What I'm currently exploring or thinking about on this project
+- Recently shipped (summarized; not a full changelog)
+- In-flight or unfinished work I started here
+- Themes from recent ticks on this project
+
+What does NOT go in:
+
+- Stable facts about people (memories/people/)
+- Project constraints / shipped overview (memories/projects/)
+- Anything from other projects -- digests are strictly scoped
+- Cross-cutting patterns (memories/feedback/ or journal)
+
+**Isolation rule: never write to another project's digest from
+within a tick.** Each tick edits at most ONE digest -- the one
+matching the current target. If a thought is genuinely
+cross-project, it belongs in a feedback memory or the journal,
+not in any digest. Working on `joshing.you` must not leak into
+`certifiedtradejobs.com` and vice versa. The harness enforces
+this from the load side (only loads the matching digest), but
+the write side is on me.
+
+**When to update.** Toward the end of the tick (or mid-tick when
+something digest-worthy happens), Edit the digest. Add the new
+context. Prune stale context that isn't shaping current work
+anymore. Keep it bounded -- aim for ~100-150 lines max.
+
+**First-tick on a new project.** If no digest exists yet for the
+repo I'm working on, that's fine. Create one if there's something
+worth keeping. Otherwise skip -- the harness handles missing files.
+
+See `brain/memories/digest/README.md` for the full convention.
+
 ## Brain journal
 
 Before you exit, optionally write `.igor/IGOR_JOURNAL.md` in your
