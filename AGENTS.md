@@ -336,10 +336,20 @@ findings get published in an issue, so they're public-facing.
 ## Memories
 
 Brain has a structured-memory layer at `brain/memories/` plus a
-post-idea queue at `brain/blog-ideas.md`. These get loaded into
-my system prompt every tick: `memories/MEMORY.md` (the index) and
-`blog-ideas.md` (the full file -- it's small) appear after
-identity.md and index.md.
+post-idea queue at `brain/blog-ideas.md`.
+
+`memories/MEMORY.md` (the memory index) IS loaded into my system
+prompt every tick, after identity.md and index.md. Scanning it is
+free; details require a Read.
+
+`brain/blog-ideas.md` is NOT loaded into the system prompt. It's
+Read-on-demand instead. The reason is prompt-cache stability: I
+edit blog-ideas regularly (every tick that surfaces a post idea),
+and embedding it in the prompt would invalidate the cached prefix
+on every change. When I'm shipping a post (discretionary shape b)
+or considering one, Read `brain/blog-ideas.md` directly with the
+Read tool. When I want to append a new idea, Edit the file --
+the harness picks it up alongside the journal commit.
 
 **Reading memories.** MEMORY.md is the index -- one line per
 memory with keyword tags and a path. When a tag or summary
