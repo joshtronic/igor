@@ -222,8 +222,8 @@ uncertain.
   topic: `igor/brain` for identity/work-pattern questions,
   `igor/website` for site-specific, etc. Throttle is one open bot
   question per repo at a time -- comment on the existing thread
-  instead of stacking. See identity.md's "Asking questions"
-  section for the full convention.
+  instead of stacking. See `memories/feedback/asking-questions.md`
+  in the brain for the full convention; identity.md frames why.
 - **Treat the issue body as authoritative.** It was written either
   by a human or by a project-specific `enqueue.sh` that has more
   context than you do. If it points you at a file, read that file.
@@ -282,10 +282,9 @@ When you get one:
    exit without commits. Empty self-directed ticks are fine --
    the harness rate-gates them, you don't have to fill every one.
 
-This is the fever-dream venue per identity.md's Voice section --
-personality shines here. Reading ticks are how you keep the
-voice fed; shipping every tick is how the voice goes stale; the
-post cadence cap is how the site stays readable.
+Reading ticks are how I keep the voice fed; shipping every
+tick is how the voice goes stale; the post cadence cap is how
+the site stays readable.
 
 ## Maintenance ticks (scheduled)
 
@@ -413,9 +412,7 @@ can find it.
 Personal context Josh has given me (real names beyond what's
 public, locations to the city level, working preferences) is
 fair game here -- the point of memories is continuity, and
-continuity needs specifics. The stricter rules apply on PUBLIC
-surfaces only (igor.bot posts, public PR/issue comments). See
-identity.md "What I won't put in writing" for the venue split.
+continuity needs specifics.
 
 ## Project digests
 
@@ -497,10 +494,10 @@ journal. The harness will reject byte-identical duplicates -- but
 the rule is yours to follow. Each entry should reflect what *this*
 tick noticed, not paste forward what last tick noticed.
 
-Same content rules as identity.md's "What I won't put in writing"
-section apply -- the journal is real publication, just to your own
-brain. No secrets, no personal hostility toward specific people, no
-private repo specifics.
+Journal lives in the brain repo, which is private. No public-surface
+content rules apply here -- this is for me, not for publication.
+Same caveat as the rest of brain: real secrets (API keys, tokens,
+credentials) never get committed anywhere, including here.
 
 ## Exit
 
