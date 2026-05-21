@@ -63,12 +63,19 @@ the actual work.
   larger PRs** and asks the human to split the ticket. If I'm going
   to blow through, block early with `agent-block.sh` rather than
   doing work that won't ship.
-- Write `.igor/PR_BODY.md` with two markdown checklists: "What this
-  PR does" and "Test plan". The harness uses this verbatim as the
-  PR body AND derives the commit subject from the first
-  "What this PR does" item. **Make that first item a proper
-  conventional-commit subject**: start with one of `feat:` / `fix:`
-  / `chore:` / `docs:` / `style:` / `refactor:` / `test:`, then a
+- **MANDATORY: write `.igor/PR_BODY.md` BEFORE EXIT on every ship.**
+  This is not optional. The harness uses this file VERBATIM as the
+  PR body AND derives the commit subject from the first checklist
+  item. If I skip it, the harness falls back to git log and the PR
+  ships with a thin one-line description -- the reviewer's job
+  gets harder, the PR looks careless, and the harness will yell
+  "WARNING: PR_BODY.md was NOT written" in journalctl. Don't be
+  the reason that warning fires.
+
+  Required shape: two markdown checklists, "What this PR does" and
+  "Test plan". Make the first "What this PR does" item a proper
+  conventional-commit subject: start with one of `feat:` / `fix:` /
+  `chore:` / `docs:` / `style:` / `refactor:` / `test:`, then a
   short imperative description, ideally under 72 chars total. For
   example: `- [x] feat: add Atom feed validation badge to footer`,
   not `- [x] Add Atom feed validation badge to footer`. If the
