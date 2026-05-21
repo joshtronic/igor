@@ -47,6 +47,15 @@ forgejo_get_issue() {
   _fj GET "/repos/${repo}/issues/${number}"
 }
 
+# All open issues on a repo, regardless of label/assignee. Used to
+# brief Claude on the current queue so discretionary site-work
+# ticks don't file duplicates of issues already queued.
+# Returns a JSON array (possibly empty).
+forgejo_list_open_issues() {
+  local repo="$1"
+  _fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50"
+}
+
 # All open issues currently assigned to a given user.
 # Returns a JSON array (possibly empty). Filters client-side so this
 # works the same across Forgejo versions.

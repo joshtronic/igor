@@ -1336,6 +1336,18 @@ if [ "$USED_HARNESS_MODE" = "site-work-claude" ] || [ -z "$USED_HARNESS_MODE" ];
     W_READING_LOG=$(cat "$W_READING_LOG_FILE")
   fi
 
+  # Fetch open issues on the repo so Claude can see what's already
+  # queued and avoid filing duplicates. Best-effort; empty on
+  # failure (the prompt mentions it but doesn't depend on it).
+  W_OPEN_ISSUES_LIST=""
+  W_OPEN_ISSUES_JSON=$(forgejo_list_open_issues "$W_REPO" 2>/dev/null || echo '[]')
+  W_OPEN_ISSUES_COUNT=$(jq 'length' <<<"$W_OPEN_ISSUES_JSON" 2>/dev/null || echo 0)
+  if [ "$W_OPEN_ISSUES_COUNT" -gt 0 ]; then
+    W_OPEN_ISSUES_LIST=$(jq -r '
+      .[] | "  - #\(.number) [\([.labels[].name] | join(",") | (if . == "" then "no labels" else . end))]: \(.title)"
+    ' <<<"$W_OPEN_ISSUES_JSON")
+  fi
+
   # RAG: rebuild journal index and pull relevant past entries to inject
   # into the user message. Best-effort -- if any step fails, the tick
   # proceeds with no RAG context rather than blocking on it.
@@ -1367,63 +1379,62 @@ if [ "$USED_HARNESS_MODE" = "site-work-claude" ] || [ -z "$USED_HARNESS_MODE" ];
   fi
 
   W_USER_MSG=$(cat <<EOF
-MODE: SITE-WORK. The harness sampled site-work from the discretionary
-split this tick. Do site work only -- no reading, no posting. The
-harness already handles reading and posting on its own discretionary
-ticks; on this one, your job is to find and fix something on the site
-itself (CSS, layout, copy, broken links, accessibility, tag pages,
-feeds, etc.).
+MODE: FILE A SITE-WORK ISSUE. The harness sampled site-work from
+the discretionary split this tick. Do NOT do site work directly --
+your job is to file ONE Agent-labeled issue describing something
+worth fixing or improving on the site. A future tick will pick up
+the issue via the normal issue-work flow and do the work then.
 
-You are doing self-directed work on $W_REPO. No issue is assigned;
-no human is waiting on a specific thing.
+Why this shape: all coding work goes through the issue queue, so
+nothing happens to the site without a spec and a paper trail.
+Reading and posting have their own harness-driven paths on other
+discretionary ticks -- this tick is for queueing site work.
 
-Read CLAUDE.md, especially the "Posts" and "Site shape" sections.
-Look at what's there: src/index.md (homepage), src/about.md (about),
-src/posts.njk (posts index template), src/posts/ (existing posts
-if any), src/_includes/base.njk (layout).
+You are examining $W_REPO. No issue is assigned to you, and you
+are NOT being asked to ship code. Your only output this tick is:
+ONE filed issue, plus an optional journal entry.
 
-IN-FLIGHT WORK: $W_IN_FLIGHT
+What to do:
 
-POST CADENCE RULE: $W_POST_RULE
+1. Read CLAUDE.md (especially "Posts" and "Site shape" sections).
+2. Browse src/ to see the current state: src/index.md (homepage),
+   src/about.md (about), src/posts.njk, src/_includes/base.njk
+   (layout), src/posts/ (existing posts), etc.
+3. Identify ONE specific thing worth fixing or improving. Could be:
+   layout, CSS, broken links, accessibility gaps, copy edits,
+   typos, missing meta tags, RSS issues, a tag page that needs
+   work, a new page that would help. Pick something concrete and
+   bounded -- one PR's worth of work.
+4. File the issue via:
 
-READING LOG (if shape c, do NOT re-read anything here -- pick fresh):
+     agent-enqueue.sh $W_REPO "title" "body"
 
-${W_READING_LOG:-(reading log not yet seeded -- pick anything)}
+   - Title: short, imperative, conventional-commit-style
+     ("fix: footer links wrap on narrow viewports").
+   - Body: enough spec that a future tick can do the work without
+     re-discovering the problem. Reference specific files, give
+     acceptance criteria.
+
+5. Exit cleanly. NO commits, NO edits to files in the worktree,
+   NO PR. The issue you filed is the tick's output.
+
+IN-FLIGHT PRs: $W_IN_FLIGHT
+
+OPEN ISSUES on this repo right now -- DO NOT file a duplicate.
+Check the existing queue first; if your idea overlaps an open
+issue, either comment on that issue or pick a different thing to
+file.
+
+${W_OPEN_ISSUES_LIST:-(no open issues on this repo)}
 
 RELEVANT PAST CONTEXT (top-K journal entries surfaced by similarity
-to current in-flight state; use as memory hooks, not directives):
+to current state; use as memory hooks, not directives):
 
 ${W_RAG_CONTEXT:-(no past context retrieved this tick)}
 
-Pick ONE focused outcome. Three valid shapes (per AGENTS.md
-"Self-directed website ticks"):
-
-  a. Ship site work -- about page, homepage copy, layout, CSS,
-   broken links, typos, tag pages, RSS, etc.
-  b. Ship a new post (only if posting is allowed this tick per
-   the rule above).
-  c. Read one of the inspo sources from CLAUDE.md "Site shape" and
-   write .igor/IGOR_JOURNAL.md about what struck you. No commits.
-
-ONE thing. Under scope cap (400 lines / 10 commits).
-
-If shipping (a or b):
-  - Make the change on the agent branch (already checked out).
-  - **MANDATORY: write .igor/PR_BODY.md before exit.** Two-checklist
-    format from AGENTS.md (What this PR does + Test plan). NOT
-    OPTIONAL. If I skip this, the harness falls back to git log,
-    the PR ships with a thin description, and the harness yells
-    "WARNING: PR_BODY.md was NOT written" in journalctl. The first
-    "What this PR does" item becomes the commit subject AND the PR
-    title -- make it a clean conventional-commit subject.
-  - Run npm test before exit -- must pass.
-  - **Do NOT run git add / git commit / git push.** The harness
-    owns commits. Just edit files and exit; the harness commits
-    everything dirty (outside .igor/) with the subject derived
-    from PR_BODY.md.
-
-If reading (c) or nothing fits: write .igor/IGOR_JOURNAL.md and
-exit. No commits expected.
+A journal entry is fine to write if something about the examination
+was worth remembering (a pattern you noticed across the site, a
+constraint you should keep in mind). Otherwise skip it.
 EOF
 )
 
