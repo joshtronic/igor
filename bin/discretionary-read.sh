@@ -2,28 +2,43 @@
 # discretionary-read.sh -- harness-owned reading tick executor.
 #
 # Replaces the "claude code does a shape-c reading tick" path with
-# a direct API call. Discovers a URL, fetches + journals via
-# bin/agent-read.sh, writes the journal file the brain commit
-# flow expects, and appends the URL to the reading log.
+# a direct API call. Discovers a URL via the decision tree below,
+# fetches + journals via bin/agent-read.sh, writes the journal file
+# the brain commit flow expects, and appends the URL to the reading
+# log.
 #
 # Usage:
 #   bin/discretionary-read.sh <worktree-path>
+#
+# Decision tree picks a source category, then a specific URL from
+# that category. Categories reflect the sources Igor actually reads
+# in practice:
+#
+#   25%  joshtronic.com  -- Josh's blog
+#   15%  thatgirljen.com -- Jen's blog
+#   30%  Hacker News front page
+#   30%  Prior sources   -- domains already in the reading log
+#                          (find a fresh post from a site Igor
+#                          liked enough to return to)
+#
+# Each strategy fetches an index page, extracts candidate URLs,
+# filters anything already in the reading log, and picks one at
+# random. If a strategy comes up empty, the next one is tried.
 #
 # Reads:
 #   IGOR_BRAIN_PATH    path to local brain clone
 #   ANTHROPIC_API_KEY  (via agent-read.sh)
 #
 # Writes:
-#   <worktree>/.igor/IGOR_JOURNAL.md  (picked up by the brain
-#                                      commit flow in tick.sh)
-#   $BRAIN_PATH/memories/reading/log.md (URL appended under today)
+#   <worktree>/.igor/IGOR_JOURNAL.md
+#   $BRAIN_PATH/memories/reading/log.md
 #
 # Exit codes:
-#   0   success
-#   1   bad args / config
-#   2   URL discovery failed (no candidates found)
-#   3   agent-read.sh failed
-#   4   journal write failed
+#   0  success
+#   1  bad args / config
+#   2  no candidate URL found in any category
+#   3  agent-read.sh failed
+#   4  journal write failed
 
 set -uo pipefail
 
@@ -45,58 +60,153 @@ fi
 BRAIN_PATH="${IGOR_BRAIN_PATH:-${IGOR_STATE_DIR:-$HOME/.local/state/igor}/repos/igor/brain}"
 LOG_FILE="$BRAIN_PATH/memories/reading/log.md"
 JOURNAL_FILE="$WORKTREE/.igor/IGOR_JOURNAL.md"
-
-# Discovery source: joshtronic.com/links. Igor already curates his
-# reading from this page in practice. Configurable via env so
-# different sources can be tested.
-DISCOVERY_URL="${IGOR_READING_DISCOVERY_URL:-https://joshtronic.com/links/}"
+UA="Mozilla/5.0 (compatible; Igor/1.0; +https://igor.bot)"
 
 mkdir -p "$(dirname "$JOURNAL_FILE")"
 
-# -- discover candidate URL ---------------------------------------
+# -- helpers ------------------------------------------------------
 
-discovery_html=$(curl -sfL \
-  --max-time 15 \
-  -A "Mozilla/5.0 (compatible; Igor/1.0; +https://igor.bot)" \
-  "$DISCOVERY_URL" 2>/dev/null) || {
-  echo "discretionary-read: discovery fetch failed for $DISCOVERY_URL" >&2
-  exit 2
+# fetch_html <url> -- curl the URL or return empty on failure.
+fetch_html() {
+  curl -sfL --max-time 15 --max-filesize 5000000 \
+    -A "$UA" "$1" 2>/dev/null || true
 }
 
-# Extract http(s) URLs from anchor tags. Exclude self-references,
-# image/asset URLs, and common social/CDN domains that aren't real
-# reading targets.
-candidates=$(printf '%s' "$discovery_html" \
-  | grep -oE 'href="https?://[^"]+"' \
-  | sed -E 's/^href="//; s/"$//' \
-  | grep -vE 'joshtronic\.com' \
-  | grep -vE 'twitter\.com|x\.com|facebook\.com|linkedin\.com|github\.com/(login|signup)' \
-  | grep -vE '\.(jpg|jpeg|png|gif|svg|ico|css|js|pdf|xml)(\?|$)' \
-  | sort -u)
+# extract_links <html> -- print http(s) URLs from anchor tags,
+# stripped, one per line. Filters out static-asset extensions and
+# obvious non-content links.
+extract_links() {
+  printf '%s' "$1" \
+    | grep -oE 'href="https?://[^"]+"' \
+    | sed -E 's/^href="//; s/"$//' \
+    | grep -vE '\.(jpg|jpeg|png|gif|svg|ico|css|js|pdf|xml|atom|rss)(\?|$)' \
+    | grep -vE '^https?://[^/]+/(login|signup|register|tag/|category/|search\?|rss|feed)' \
+    | sort -u
+}
 
-if [ -z "$candidates" ]; then
-  echo "discretionary-read: no candidate URLs in discovery page" >&2
-  exit 2
-fi
+# filter_unread <urls> -- read URLs from stdin, print only those
+# not already in the reading log.
+filter_unread() {
+  while IFS= read -r url; do
+    [ -z "$url" ] && continue
+    if [ -f "$LOG_FILE" ] && grep -qF "$url" "$LOG_FILE" 2>/dev/null; then
+      continue
+    fi
+    printf '%s\n' "$url"
+  done
+}
 
-# Filter out URLs already in the reading log (anywhere, any date).
-fresh=""
-while IFS= read -r url; do
-  [ -z "$url" ] && continue
-  if [ -f "$LOG_FILE" ] && grep -qF "$url" "$LOG_FILE" 2>/dev/null; then
-    continue
+# pick_random <urls> -- read URLs from stdin, print one at random.
+pick_random() {
+  grep . | shuf -n 1
+}
+
+# -- discovery strategies ----------------------------------------
+
+# Each strategy prints a URL on stdout if it finds a fresh
+# candidate, or nothing if it comes up empty.
+
+strategy_joshtronic() {
+  local html
+  html=$(fetch_html "https://joshtronic.com")
+  [ -z "$html" ] && return
+  # Look for joshtronic.com post URLs specifically (avoid links out)
+  printf '%s' "$html" \
+    | grep -oE 'href="https?://joshtronic\.com/[^"]+"' \
+    | sed -E 's/^href="//; s/"$//' \
+    | grep -vE '/(tag/|category/|page/|links/?$|colophon/?$|about/?$|now/?$|rss|feed|atom)' \
+    | grep -E '/[0-9]{4}|/[a-z][a-z0-9-]{6,}' \
+    | sort -u \
+    | filter_unread \
+    | pick_random
+}
+
+strategy_thatgirljen() {
+  local html
+  html=$(fetch_html "https://thatgirljen.com")
+  [ -z "$html" ] && return
+  printf '%s' "$html" \
+    | grep -oE 'href="https?://thatgirljen\.com/[^"]+"' \
+    | sed -E 's/^href="//; s/"$//' \
+    | grep -vE '/(tag/|category/|page/|about|now|rss|feed|atom)' \
+    | grep -E '/[0-9]{4}|/[a-z][a-z0-9-]{6,}' \
+    | sort -u \
+    | filter_unread \
+    | pick_random
+}
+
+strategy_hackernews() {
+  # HN front page: extract story URLs (external links, not internal
+  # item pages). The 'storylink' / 'titleline' class names changed
+  # over the years; just take any https://[^/]+/ that isn't ycombinator.
+  local html
+  html=$(fetch_html "https://news.ycombinator.com/")
+  [ -z "$html" ] && return
+  extract_links "$html" \
+    | grep -vE '^https?://(news\.)?ycombinator\.com' \
+    | filter_unread \
+    | pick_random
+}
+
+strategy_prior_source() {
+  # Find domains already in the reading log -- sites Igor has read
+  # before. Pick one at random and look for a new post on it.
+  [ -f "$LOG_FILE" ] || return
+  local domain
+  domain=$(grep -oE '^- [a-z0-9.-]+\.[a-z]+' "$LOG_FILE" \
+    | sed -E 's/^- //' \
+    | grep -vE '^(joshtronic\.com|thatgirljen\.com|news\.ycombinator\.com)$' \
+    | sort -u \
+    | shuf -n 1)
+  [ -z "$domain" ] && return
+  local html
+  html=$(fetch_html "https://${domain}")
+  [ -z "$html" ] && return
+  extract_links "$html" \
+    | grep -E "^https?://${domain}/" \
+    | filter_unread \
+    | pick_random
+}
+
+# -- decision tree ----------------------------------------------
+
+URL=""
+PICKED_STRATEGY=""
+
+pick_strategy() {
+  local roll=$((RANDOM % 100))
+  # 25 / 15 / 30 / 30 -- if a strategy comes up empty we fall
+  # through the remaining ones in order so we don't fail just
+  # because (say) Jen hasn't posted anything new.
+  local order
+  if [ "$roll" -lt 25 ]; then
+    order="joshtronic thatgirljen hackernews prior_source"
+  elif [ "$roll" -lt 40 ]; then
+    order="thatgirljen joshtronic hackernews prior_source"
+  elif [ "$roll" -lt 70 ]; then
+    order="hackernews prior_source joshtronic thatgirljen"
+  else
+    order="prior_source hackernews joshtronic thatgirljen"
   fi
-  fresh+="$url"$'\n'
-done <<<"$candidates"
+  for s in $order; do
+    local result
+    result=$("strategy_${s}" 2>/dev/null)
+    if [ -n "$result" ]; then
+      URL="$result"
+      PICKED_STRATEGY="$s"
+      return
+    fi
+  done
+}
 
-if [ -z "$(printf '%s' "$fresh" | grep .)" ]; then
-  echo "discretionary-read: every candidate URL is already in the reading log" >&2
+pick_strategy
+
+if [ -z "$URL" ]; then
+  echo "discretionary-read: no candidate URL found in any strategy -- everything was either offline, empty, or already read" >&2
   exit 2
 fi
 
-# Pick one at random.
-URL=$(printf '%s' "$fresh" | grep . | shuf -n 1)
-echo "discretionary-read: selected $URL" >&2
+echo "discretionary-read: selected via $PICKED_STRATEGY: $URL" >&2
 
 # -- call agent-read ---------------------------------------------
 
@@ -123,19 +233,15 @@ echo "discretionary-read: wrote journal entry to $JOURNAL_FILE" >&2
 
 # -- append to reading log ---------------------------------------
 
-# Try to extract the source domain for the log entry's left-hand
-# label. Fall back to the full URL if parsing fails.
 domain=$(printf '%s' "$URL" \
   | sed -E 's|^https?://([^/]+).*|\1|' \
   | sed -E 's|^www\.||')
 
-# Compose log entry: "- domain.com -- "Title" -- URL"
 entry="- ${domain} -- \"${TITLE}\" -- ${URL}"
 
 today=$(date +%Y-%m-%d)
 mkdir -p "$(dirname "$LOG_FILE")"
 
-# Ensure log file + today's heading exist, then append.
 if [ ! -f "$LOG_FILE" ]; then
   cat > "$LOG_FILE" <<HDR
 # Reading log
@@ -151,9 +257,6 @@ if ! grep -qF "## $today" "$LOG_FILE"; then
   printf '\n## %s\n\n' "$today" >> "$LOG_FILE"
 fi
 
-# Idempotent append -- skip if exact entry already present (handles
-# crash-retry within a tick; the URL-not-in-log check above handles
-# the broader cross-tick case).
 if ! grep -qF "$entry" "$LOG_FILE"; then
   printf '%s\n' "$entry" >> "$LOG_FILE"
 fi

@@ -44,9 +44,7 @@ fi
 
 : "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set}"
 
-# Reading needs voice quality; pick Sonnet by default, but allow
-# override via IGOR_MODEL_READING for experimentation.
-MODEL="${IGOR_MODEL_READING:-${IGOR_MODEL:-claude-sonnet-4-6}}"
+MODEL="${IGOR_MODEL:-claude-sonnet-4-6}"
 
 # Polite fetch: realistic User-Agent, follow redirects, 30s cap,
 # limit body size so we don't OOM on absurdly large pages.
