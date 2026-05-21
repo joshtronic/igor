@@ -140,8 +140,9 @@ def build_index(brain_path: Path, quiet: bool = False):
     # changes, or schema migrations disappear here. Dedicated Redis
     # instance (only Igor uses it), so FLUSHDB is safe.
     r = redis.from_url(REDIS_URL)
+    pre_count = r.dbsize()
     r.flushdb()
-    log("rag: flushed redis db")
+    log(f"rag: flushed redis db ({pre_count} keys removed)")
 
     schema = IndexSchema.from_dict(SCHEMA)
     index = SearchIndex(schema, redis_url=REDIS_URL)
@@ -169,7 +170,8 @@ def build_index(brain_path: Path, quiet: bool = False):
     ]
     keys = [f"journal:{e[0]}" for e in entries]
     index.load(rows, keys=keys)
-    log(f"rag: indexed {len(rows)} entries")
+    post_count = r.dbsize()
+    log(f"rag: indexed {len(rows)} entries (dbsize now {post_count})")
     return len(rows)
 
 
