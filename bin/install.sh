@@ -21,7 +21,7 @@ UNIT_DIR="$HOME/.config/systemd/user"
 # Pre-flight: harness depends on these being on PATH. Fail loudly here
 # rather than mysteriously deep inside tick.sh later.
 missing=()
-for cmd in jq curl git flock timeout claude; do
+for cmd in jq curl git flock timeout claude python3 redis-cli; do
   command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
@@ -31,20 +31,62 @@ if [ "${#missing[@]}" -gt 0 ]; then
   apt_pkgs=()
   for cmd in "${missing[@]}"; do
     case "$cmd" in
-      jq)      apt_pkgs+=("jq") ;;
-      curl)    apt_pkgs+=("curl") ;;
-      git)     apt_pkgs+=("git") ;;
-      flock)   apt_pkgs+=("util-linux") ;;
-      timeout) apt_pkgs+=("coreutils") ;;
-      claude)  ;;  # not in apt; install per Anthropic's docs
+      jq)        apt_pkgs+=("jq") ;;
+      curl)      apt_pkgs+=("curl") ;;
+      git)       apt_pkgs+=("git") ;;
+      flock)     apt_pkgs+=("util-linux") ;;
+      timeout)   apt_pkgs+=("coreutils") ;;
+      python3)   apt_pkgs+=("python3" "python3-venv") ;;
+      redis-cli) ;;  # provided by redis-stack-server, separate install
+      claude)    ;;  # not in apt; install per Anthropic's docs
     esac
   done
   if [ "${#apt_pkgs[@]}" -gt 0 ]; then
     echo "  sudo apt-get install -y ${apt_pkgs[*]}" >&2
   fi
   for cmd in "${missing[@]}"; do
-    [ "$cmd" = "claude" ] && echo "  claude: install via Anthropic's CLI installer (see docs.claude.com)" >&2
+    case "$cmd" in
+      claude)
+        echo "  claude: install via Anthropic's CLI installer (see docs.claude.com)" >&2
+        ;;
+      redis-cli)
+        echo "  redis-cli: install redis-stack-server from Redis's official apt repo" >&2
+        echo "  (https://redis.io/docs/latest/operate/oss_and_stack/install/install-redis/install-redis-on-linux/)" >&2
+        ;;
+    esac
   done
+  exit 1
+fi
+
+# Pre-flight: python3-venv (the venv module is split out on Debian)
+if ! python3 -c "import venv" 2>/dev/null; then
+  echo "python3 is installed but the venv module is not. Install with:" >&2
+  echo "  sudo apt-get install -y python3-venv" >&2
+  exit 1
+fi
+
+# Pre-flight: RediSearch module must be loaded (vanilla redis-server
+# won't work for the RAG layer). Try a quick MODULE LIST; if Redis
+# isn't running we'll get a different error and fall through.
+if redis-cli ping >/dev/null 2>&1; then
+  if ! redis-cli MODULE LIST 2>/dev/null | grep -qi search; then
+    echo "Redis is reachable but the RediSearch module is not loaded." >&2
+    echo "The RAG layer requires Redis Stack (Redis + RediSearch)." >&2
+    echo "Install redis-stack-server from Redis's official apt repo and" >&2
+    echo "stop/disable any prior redis-server. See docs/setup.md." >&2
+    exit 1
+  fi
+else
+  echo "redis-cli installed but Redis is not running on localhost:6379." >&2
+  echo "Start it: sudo systemctl enable --now redis-stack-server" >&2
+  exit 1
+fi
+
+# Pre-flight: bootstrap the RAG Python venv. Idempotent -- no-op
+# after first successful run (or when requirements.txt changes).
+# Done up front so first tick doesn't pay the install cost.
+if ! "$IGOR_HOME/bin/setup-rag.sh"; then
+  echo "RAG venv setup failed. See output above." >&2
   exit 1
 fi
 

@@ -8,14 +8,30 @@ claims the oldest one, ships a PR (or a report, or a blocker).
 
 ## Install
 
+**Server prerequisites** (one-time on the host before cloning):
+
+- `jq curl git util-linux coreutils python3 python3-venv` via apt
+- `claude` CLI via Anthropic's installer
+- `redis-stack-server` (NOT vanilla `redis-server`) via Redis's apt repo
+
+See [docs/setup.md](docs/setup.md) for the full prereq picture and
+links.
+
+Then:
+
 ```sh
 git clone <forgejo-url>/igor ~/.local/share/igor
 cd ~/.local/share/igor
 cp .env.example .env && chmod 600 .env
 $EDITOR .env                   # fill in tokens
-bin/install.sh                 # systemd setup
+bin/install.sh                 # pre-flights deps, sets up venv + systemd
 bin/validate.sh                # confirm setup
 ```
+
+`install.sh` is the "clone and go" entry point. It pre-flights all
+prereqs, creates the Python venv for RAG and installs deps, and wires
+up the systemd timer. Idempotent; re-run after `git pull` to pick up
+unit file or requirements changes.
 
 ## Updating
 

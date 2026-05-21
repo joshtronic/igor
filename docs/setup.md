@@ -2,19 +2,36 @@
 
 ## Server prerequisites
 
-Before cloning Igor, make sure the host has:
+Before cloning Igor, make sure the host has the following installed.
+`bin/install.sh` pre-flights everything and bails loudly if anything's
+missing.
 
 **Required on PATH:**
 
-- `jq`, `curl`, `git`, `flock`, `timeout` -- core harness deps. On Debian/Ubuntu: `sudo apt-get install -y jq curl git util-linux coreutils` (most are usually already installed; `jq` is the one you'll typically need to add).
-- `claude` -- Anthropic's Claude CLI. Install via Anthropic's installer (see [docs.claude.com](https://docs.claude.com)). The harness invokes `claude --print` directly; `ANTHROPIC_API_KEY` from `.env` is what it authenticates with.
-- `python3` + `python3-venv` -- required by the RAG layer. `sudo apt-get install -y python3 python3-venv`. The harness creates an isolated venv at `$IGOR_STATE_DIR/rag-venv` on first run and installs Python deps from `requirements.txt` automatically.
+- `jq`, `curl`, `git`, `flock`, `timeout` -- core harness deps.
+  `sudo apt-get install -y jq curl git util-linux coreutils` (most are
+  usually already installed; `jq` is typically the one to add).
+- `python3` + `python3-venv` -- required by the RAG layer.
+  `sudo apt-get install -y python3 python3-venv`. The harness creates
+  an isolated venv at `$IGOR_STATE_DIR/rag-venv` and installs Python
+  deps from `requirements.txt` automatically -- no manual `pip` needed.
+- `claude` -- Anthropic's Claude CLI. Install via Anthropic's installer
+  (see [docs.claude.com](https://docs.claude.com)). `ANTHROPIC_API_KEY`
+  from `.env` is what it authenticates with.
 
-**Required as a service:**
+**Required as a running service:**
 
-- **Redis Stack** -- vanilla `redis-server` won't work; the RAG layer uses RediSearch's vector indexing. Install `redis-stack-server` from Redis's official apt repo (see [redis.io/docs/install](https://redis.io/docs/latest/operate/oss_and_stack/install/install-redis/install-redis-on-linux/)). Listens on `localhost:6379` by default; override with `REDIS_URL` in `.env` if needed.
+- **Redis Stack** -- the RAG layer uses RediSearch's vector indexing,
+  which vanilla `redis-server` does NOT provide. Install
+  `redis-stack-server` from Redis's official apt repo and start it via
+  systemd. See [redis.io/docs/install](https://redis.io/docs/latest/operate/oss_and_stack/install/install-redis/install-redis-on-linux/)
+  for the apt repo setup. If you already have vanilla `redis-server`
+  installed, stop and disable it first; the two conflict on port 6379.
+  Default config (localhost:6379) is fine; override with `REDIS_URL`
+  in `.env` if needed.
 
-`bin/install.sh` and `bin/validate.sh` both pre-flight these and bail loudly if anything's missing.
+  Quick check it's right: `redis-cli MODULE LIST | grep -i search`
+  should return a line. If it doesn't, you're on vanilla Redis.
 
 **Ecosystem toolchains for repos Igor will actually work:**
 
