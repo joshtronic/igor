@@ -1175,14 +1175,23 @@ nothing else is calling you, this is a fine tick to spend reading
   # proceeds with no RAG context rather than blocking on it.
   W_RAG_CONTEXT=""
   RAG_VENV="$IGOR_STATE_DIR/rag-venv"
-  if "$IGOR_HOME/bin/setup-rag.sh" >/dev/null 2>&1; then
+  # Setup is idempotent and silent on success; only emit if it has
+  # something to say (first-time install, requirements changed).
+  if "$IGOR_HOME/bin/setup-rag.sh"; then
+    # Build/query both write progress + counts to stderr; let them
+    # through to journalctl so the flush+rebuild cycle is auditable
+    # ("rag: flushed redis db (N keys removed)", "rag: indexed N
+    # entries (dbsize now N+M)", etc.). Stderr is captured by
+    # systemd-journald alongside the harness's own [igor] log lines.
     if IGOR_BRAIN_PATH="$BRAIN_PATH" \
-       "$RAG_VENV/bin/python" "$IGOR_HOME/bin/rag.py" build --quiet 2>/dev/null; then
+       "$RAG_VENV/bin/python" "$IGOR_HOME/bin/rag.py" build; then
       # Query with the in-flight context -- the most concrete signal
-      # of what Igor is currently dealing with this tick.
+      # of what Igor is currently dealing with this tick. stdout is
+      # the markdown blob we capture; stderr (errors only here) flows
+      # to journalctl.
       W_RAG_CONTEXT=$(IGOR_BRAIN_PATH="$BRAIN_PATH" \
         "$RAG_VENV/bin/python" "$IGOR_HOME/bin/rag.py" query \
-          "$W_IN_FLIGHT" -k 5 2>/dev/null || true)
+          "$W_IN_FLIGHT" -k 5 || true)
       [ -n "$W_RAG_CONTEXT" ] && log "rag: surfaced past context for discretionary tick"
     else
       log "warning: rag build failed -- proceeding without past-context retrieval"
