@@ -2,14 +2,52 @@
 
 ## Server prerequisites
 
-Before cloning Igor, make sure the host has:
+Before cloning Igor, make sure the host has the following installed.
+`bin/install.sh` pre-flights everything and bails loudly if anything's
+missing.
 
 **Required on PATH:**
 
-- `jq`, `curl`, `git`, `flock`, `timeout` -- core harness deps. On Debian/Ubuntu: `sudo apt-get install -y jq curl git util-linux coreutils` (most are usually already installed; `jq` is the one you'll typically need to add).
-- `claude` -- Anthropic's Claude CLI. Install via Anthropic's installer (see [docs.claude.com](https://docs.claude.com)). The harness invokes `claude --print` directly; `ANTHROPIC_API_KEY` from `.env` is what it authenticates with.
+- `jq`, `curl`, `git`, `flock`, `timeout` -- core harness deps.
+  `sudo apt-get install -y jq curl git util-linux coreutils` (most are
+  usually already installed; `jq` is typically the one to add).
+- `python3` + `python3-venv` -- required by the RAG layer.
+  `sudo apt-get install -y python3 python3-venv`. The harness creates
+  an isolated venv at `$IGOR_STATE_DIR/rag-venv` and installs Python
+  deps from `requirements.txt` automatically -- no manual `pip` needed.
+- `claude` -- Anthropic's Claude CLI. Install via Anthropic's installer
+  (see [docs.claude.com](https://docs.claude.com)). `ANTHROPIC_API_KEY`
+  from `.env` is what it authenticates with.
 
-`bin/install.sh` and `bin/validate.sh` both pre-flight these and bail loudly if anything's missing.
+**Required as a running service:**
+
+- **Redis 8+ from Redis's official apt repo.** The RAG layer uses
+  vector indexing, which the older Debian-packaged `redis-server`
+  (7.x) does NOT include. Redis 8+ bundles the search/vector modules
+  in the base server, so just installing `redis-server` from
+  Redis's own apt repo (NOT Debian's `redis-server` package) gets us
+  what we need.
+
+  Setup the apt repo (see [redis.io install docs](https://redis.io/docs/latest/operate/oss_and_stack/install/install-redis/install-redis-on-linux/)
+  for the canonical instructions), then:
+
+  ```sh
+  # If Debian's old redis-server is installed, purge it first:
+  sudo apt remove --purge redis-server
+  # Then install from Redis's repo (this pulls Redis 8+):
+  sudo apt install redis-server
+  sudo systemctl enable --now redis-server
+  ```
+
+  Note: the package "redis-stack-server" no longer exists for current
+  Debian codenames -- everything's in `redis-server` 8.x now.
+
+  Default config (localhost:6379) is fine; override with `REDIS_URL`
+  in `.env` if needed.
+
+  Quick check the modules loaded: `redis-cli MODULE LIST | grep -i search`
+  should return a line. If it doesn't, you're on the older
+  Debian-packaged Redis and need to switch.
 
 **Ecosystem toolchains for repos Igor will actually work:**
 

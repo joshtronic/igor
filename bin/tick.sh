@@ -1170,6 +1170,27 @@ nothing else is calling you, this is a fine tick to spend reading
     W_READING_LOG=$(cat "$W_READING_LOG_FILE")
   fi
 
+  # RAG: rebuild journal index and pull relevant past entries to inject
+  # into the user message. Best-effort -- if any step fails, the tick
+  # proceeds with no RAG context rather than blocking on it.
+  W_RAG_CONTEXT=""
+  RAG_VENV="$IGOR_STATE_DIR/rag-venv"
+  if "$IGOR_HOME/bin/setup-rag.sh" >/dev/null 2>&1; then
+    if IGOR_BRAIN_PATH="$BRAIN_PATH" \
+       "$RAG_VENV/bin/python" "$IGOR_HOME/bin/rag.py" build --quiet 2>/dev/null; then
+      # Query with the in-flight context -- the most concrete signal
+      # of what Igor is currently dealing with this tick.
+      W_RAG_CONTEXT=$(IGOR_BRAIN_PATH="$BRAIN_PATH" \
+        "$RAG_VENV/bin/python" "$IGOR_HOME/bin/rag.py" query \
+          "$W_IN_FLIGHT" -k 5 2>/dev/null || true)
+      [ -n "$W_RAG_CONTEXT" ] && log "rag: surfaced past context for discretionary tick"
+    else
+      log "warning: rag build failed -- proceeding without past-context retrieval"
+    fi
+  else
+    log "warning: rag venv setup failed -- proceeding without past-context retrieval"
+  fi
+
   W_USER_MSG=$(cat <<EOF
 You are doing self-directed work on $W_REPO. No issue is assigned;
 no human is waiting on a specific thing.
@@ -1187,6 +1208,11 @@ READING LOG (if shape c, do NOT re-read anything here -- pick fresh):
 
 ${W_READING_LOG:-(reading log not yet seeded -- pick anything)}
 
+RELEVANT PAST CONTEXT (top-K journal entries surfaced by similarity
+to current in-flight state; use as memory hooks, not directives):
+
+${W_RAG_CONTEXT:-(no past context retrieved this tick)}
+
 Pick ONE focused outcome. Three valid shapes (per AGENTS.md
 "Self-directed website ticks"):
 
@@ -1198,9 +1224,6 @@ Pick ONE focused outcome. Three valid shapes (per AGENTS.md
    write .igor/IGOR_JOURNAL.md about what struck you. No commits.
 
 ONE thing. Under scope cap (400 lines / 10 commits).
-
-This is the fever-dream venue -- personality welcome. See
-identity.md's Voice section for the register layering.
 
 If shipping (a or b):
   - Make the change on the agent branch (already checked out).
