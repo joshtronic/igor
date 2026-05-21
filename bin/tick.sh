@@ -167,14 +167,8 @@ init_igor_scratch() {
 # Order (and why):
 #   AGENTS.md           -- protocol/rules, changes by PR only
 #   identity.md         -- who I am, changes by PR only
-#   index.md            -- overview, changes by PR only
 #   memories/MEMORY.md  -- memory index, edited by Claude OCCASIONALLY
 #                          (when he adds a new memory file)
-#   memories/digest/<owner>_<repo>.md  -- per-project rolling state
-#                          for the CURRENT tick's target repo only.
-#                          Edited every tick that touches this repo;
-#                          intentionally last in the order so its
-#                          churn doesn't invalidate upstream cache.
 #
 # Files Claude edits FREQUENTLY mid-tick (notably blog-ideas.md)
 # are intentionally NOT loaded here. Loading them in-prompt
@@ -183,30 +177,16 @@ init_igor_scratch() {
 # documents that Claude reads brain/blog-ideas.md on demand
 # (via the Read tool) when shipping/considering a post.
 #
-# Isolation: digests are per-project. Loading ONLY the one matching
-# the current target prevents context bleed -- working on
-# joshing.you cannot leak into work on certifiedtradejobs.com,
-# because Claude literally never sees the other digest's content.
-#
 # Args:
 #   $1 -- path to local brain clone
-#   $2 -- target repo for this tick (e.g., "joshtronic/joshing.you")
-#         used to select the matching digest. Optional; if absent,
-#         no digest is loaded.
 #
 # Each file is optional -- missing files are skipped. Caller
 # supplies the per-tick user message separately.
 brain_system_prompt() {
-  local brain="$1" target_repo="${2:-}"
+  local brain="$1"
   local files=("$IGOR_HOME/AGENTS.md")
   [ -f "$brain/identity.md" ]         && files+=("$brain/identity.md")
-  [ -f "$brain/index.md" ]            && files+=("$brain/index.md")
   [ -f "$brain/memories/MEMORY.md" ]  && files+=("$brain/memories/MEMORY.md")
-  if [ -n "$target_repo" ]; then
-    local digest_name="${target_repo//\//_}.md"
-    local digest_path="$brain/memories/digest/$digest_name"
-    [ -f "$digest_path" ] && files+=("$digest_path")
-  fi
   cat "${files[@]}"
 }
 
@@ -543,7 +523,7 @@ EOF
 
   local m_brain="$IGOR_REPO_ROOT/${BOT_USER}/brain"
   local m_system_prompt
-  m_system_prompt=$(brain_system_prompt "$m_brain" "$target")
+  m_system_prompt=$(brain_system_prompt "$m_brain")
 
   log "invoking claude for maintenance (timeout ${IGOR_TIMEOUT})"
   local m_log="$m_worktree/.igor/claude-output.log"
@@ -903,7 +883,7 @@ EOF
 )
 
     PR_BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
-    PR_SYSTEM_PROMPT=$(brain_system_prompt "$PR_BRAIN_PATH" "$PR_REPO")
+    PR_SYSTEM_PROMPT=$(brain_system_prompt "$PR_BRAIN_PATH")
 
     cd "$PR_WORKTREE"
     log "invoking claude for PR review (timeout ${IGOR_TIMEOUT})"
@@ -1241,7 +1221,7 @@ EOF
 
   # BRAIN_PATH is set at the top of the discretionary block now
   # (so the READING_LOG load earlier can use it).
-  W_SYSTEM_PROMPT=$(brain_system_prompt "$BRAIN_PATH" "$W_REPO")
+  W_SYSTEM_PROMPT=$(brain_system_prompt "$BRAIN_PATH")
 
   log "invoking claude for website work (timeout ${IGOR_TIMEOUT})"
   W_LOG="$W_WORKTREE/.igor/claude-output.log"
@@ -1520,13 +1500,12 @@ EOF
 
 # System prompt: brain_system_prompt assembles AGENTS.md + brain
 # files in cache-friendly order. Brain files are bootstrap-required;
-# log a warning if identity.md or index.md is missing rather than
-# crashing the tick (brain_system_prompt handles the missing case
-# by skipping them).
+# log a warning if identity.md is missing rather than crashing the
+# tick (brain_system_prompt handles the missing case by skipping).
 BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
-[ -f "$BRAIN_PATH/identity.md" ] && [ -f "$BRAIN_PATH/index.md" ] \
-  || log "warning: brain identity.md or index.md missing at $BRAIN_PATH"
-SYSTEM_PROMPT=$(brain_system_prompt "$BRAIN_PATH" "$FORGEJO_REPO")
+[ -f "$BRAIN_PATH/identity.md" ] \
+  || log "warning: brain identity.md missing at $BRAIN_PATH"
+SYSTEM_PROMPT=$(brain_system_prompt "$BRAIN_PATH")
 
 log "invoking claude (timeout ${IGOR_TIMEOUT})"
 CLAUDE_LOG="$WORKTREE/.igor/claude-output.log"
