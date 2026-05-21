@@ -133,9 +133,19 @@ def build_index(brain_path: Path, quiet: bool = False):
 
     check_redis()
 
+    # Flush before rebuild. The design is intentionally ephemeral:
+    # journal files on disk are the source of truth, Redis is a
+    # derived cache that gets recomputed from scratch every tick.
+    # Self-healing -- any orphaned keys from previous shapes, model
+    # changes, or schema migrations disappear here. Dedicated Redis
+    # instance (only Igor uses it), so FLUSHDB is safe.
+    r = redis.from_url(REDIS_URL)
+    r.flushdb()
+    log("rag: flushed redis db")
+
     schema = IndexSchema.from_dict(SCHEMA)
     index = SearchIndex(schema, redis_url=REDIS_URL)
-    index.create(overwrite=True, drop=True)
+    index.create(overwrite=True)
     log(f"rag: created index {INDEX_NAME}")
 
     entries = list(collect_entries(brain_path))
