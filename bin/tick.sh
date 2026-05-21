@@ -1904,17 +1904,15 @@ Revert those changes (or do them yourself outside Igor) and remove \`Status/Bloc
     log "PR opened${NEW_PR_NUMBER:+ (#$NEW_PR_NUMBER)}"
   fi
 
-  # Record Claude's wall-clock on the PR (Forgejo time tracking).
-  # PRs and issues share the number space; logging on the PR keeps
-  # multi-PR issues legible per attempt. Best-effort; never fail the
+  # Record Claude's wall-clock on the ISSUE (Forgejo time tracking).
+  # Split rationale: Igor's coding time belongs on the issue (his
+  # work); reviewer time belongs on the PR (the human's work during
+  # review). PR-review ticks log on the PR. Discretionary ticks (no
+  # issue) log on the PR they create. Best-effort; never fail the
   # tick over this.
-  if [ -n "${NEW_PR_NUMBER:-}" ]; then
-    forgejo_log_time "$FORGEJO_REPO" "$NEW_PR_NUMBER" "$ELAPSED" \
-      && log "time logged: ${ELAPSED}s on ${FORGEJO_REPO}#${NEW_PR_NUMBER}" \
-      || log "warning: could not log time on ${FORGEJO_REPO}#${NEW_PR_NUMBER}"
-  else
-    log "warning: no PR number captured, skipping time log"
-  fi
+  forgejo_log_time "$FORGEJO_REPO" "$ISSUE_NUMBER" "$ELAPSED" \
+    && log "time logged: ${ELAPSED}s on ${FORGEJO_REPO}#${ISSUE_NUMBER} (issue)" \
+    || log "warning: could not log time on ${FORGEJO_REPO}#${ISSUE_NUMBER}"
 
   # Unassign the bot from the issue so the next tick's recovery
   # sweep stays quiet. Keep the Agent label intact -- the label is
