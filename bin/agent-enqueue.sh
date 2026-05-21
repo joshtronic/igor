@@ -49,4 +49,13 @@ NUMBER=$(forgejo_open_issue "$REPO" "$TITLE" "$BODY_WITH_MARKER")
 forgejo_add_label "$REPO" "$NUMBER" "Agent" 2>/dev/null \
   || echo "agent-enqueue: warning: Agent label not available on $REPO; issue filed without it" >&2
 
+# Drop a marker in .igor/ so the harness post-tick can find the
+# filed-issue number and log time on it (Igor's examination time
+# belongs on the issue he created, same as issue-work time belongs
+# on the issue he resolved). Marker is best-effort; if .igor/
+# doesn't exist (called from outside a tick), skip silently.
+if [ -d .igor ]; then
+  printf '%s#%s\n' "$REPO" "$NUMBER" > .igor/IGOR_FILED_ISSUE
+fi
+
 echo "agent-enqueue: filed ${REPO}#${NUMBER}" >&2

@@ -1523,7 +1523,22 @@ fi  # end if-claude-code-site-work
   W_COMMITS=$(git rev-list --count "origin/${W_BASE}..HEAD" 2>/dev/null || echo 0)
 
   if [ "$W_COMMITS" -eq 0 ]; then
-    if [ -s "$W_JOURNAL_SRC" ] && [ "$W_JOURNAL_APPENDED" -eq 1 ]; then
+    # If site-work mode filed an issue via agent-enqueue.sh, the
+    # marker file is in the worktree. Log Igor's examination time
+    # on that issue -- his work this tick produced the spec, the
+    # time belongs there.
+    W_FILED_MARKER="$W_WORKTREE/.igor/IGOR_FILED_ISSUE"
+    if [ -f "$W_FILED_MARKER" ]; then
+      W_FILED_REF=$(head -1 "$W_FILED_MARKER" | tr -d '[:space:]')
+      W_FILED_REPO="${W_FILED_REF%#*}"
+      W_FILED_NUM="${W_FILED_REF##*#}"
+      if [ -n "$W_FILED_REPO" ] && [ -n "$W_FILED_NUM" ]; then
+        forgejo_log_time "$W_FILED_REPO" "$W_FILED_NUM" "$W_ELAPSED" \
+          && log "time logged: ${W_ELAPSED}s on ${W_FILED_REPO}#${W_FILED_NUM} (filed issue)" \
+          || log "warning: could not log time on ${W_FILED_REPO}#${W_FILED_NUM}"
+      fi
+      log "discretionary: site-work tick filed ${W_FILED_REF}"
+    elif [ -s "$W_JOURNAL_SRC" ] && [ "$W_JOURNAL_APPENDED" -eq 1 ]; then
       # Reading tick: journal recorded, no PR expected. Not a noop.
       log "discretionary: reading tick complete on $W_REPO -- journal recorded, no PR"
     elif [ -s "$W_JOURNAL_SRC" ]; then
