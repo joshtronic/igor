@@ -21,17 +21,33 @@ missing.
 
 **Required as a running service:**
 
-- **Redis Stack** -- the RAG layer uses RediSearch's vector indexing,
-  which vanilla `redis-server` does NOT provide. Install
-  `redis-stack-server` from Redis's official apt repo and start it via
-  systemd. See [redis.io/docs/install](https://redis.io/docs/latest/operate/oss_and_stack/install/install-redis/install-redis-on-linux/)
-  for the apt repo setup. If you already have vanilla `redis-server`
-  installed, stop and disable it first; the two conflict on port 6379.
+- **Redis 8+ from Redis's official apt repo.** The RAG layer uses
+  vector indexing, which the older Debian-packaged `redis-server`
+  (7.x) does NOT include. Redis 8+ bundles the search/vector modules
+  in the base server, so just installing `redis-server` from
+  Redis's own apt repo (NOT Debian's `redis-server` package) gets us
+  what we need.
+
+  Setup the apt repo (see [redis.io install docs](https://redis.io/docs/latest/operate/oss_and_stack/install/install-redis/install-redis-on-linux/)
+  for the canonical instructions), then:
+
+  ```sh
+  # If Debian's old redis-server is installed, purge it first:
+  sudo apt remove --purge redis-server
+  # Then install from Redis's repo (this pulls Redis 8+):
+  sudo apt install redis-server
+  sudo systemctl enable --now redis-server
+  ```
+
+  Note: the package "redis-stack-server" no longer exists for current
+  Debian codenames -- everything's in `redis-server` 8.x now.
+
   Default config (localhost:6379) is fine; override with `REDIS_URL`
   in `.env` if needed.
 
-  Quick check it's right: `redis-cli MODULE LIST | grep -i search`
-  should return a line. If it doesn't, you're on vanilla Redis.
+  Quick check the modules loaded: `redis-cli MODULE LIST | grep -i search`
+  should return a line. If it doesn't, you're on the older
+  Debian-packaged Redis and need to switch.
 
 **Ecosystem toolchains for repos Igor will actually work:**
 

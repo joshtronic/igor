@@ -65,20 +65,25 @@ if ! python3 -c "import venv" 2>/dev/null; then
   exit 1
 fi
 
-# Pre-flight: RediSearch module must be loaded (vanilla redis-server
-# won't work for the RAG layer). Try a quick MODULE LIST; if Redis
-# isn't running we'll get a different error and fall through.
+# Pre-flight: Redis must have the vector search module loaded.
+# Redis 8+ from packages.redis.io bundles it; Debian's older Redis
+# (7.x) does not. Try a quick MODULE LIST; if Redis isn't running
+# we'll get a different error and fall through.
 if redis-cli ping >/dev/null 2>&1; then
   if ! redis-cli MODULE LIST 2>/dev/null | grep -qi search; then
-    echo "Redis is reachable but the RediSearch module is not loaded." >&2
-    echo "The RAG layer requires Redis Stack (Redis + RediSearch)." >&2
-    echo "Install redis-stack-server from Redis's official apt repo and" >&2
-    echo "stop/disable any prior redis-server. See docs/setup.md." >&2
+    echo "Redis is reachable but the search/vector module is not loaded." >&2
+    echo "The RAG layer requires Redis 8+ (which bundles vector search)." >&2
+    echo "Likely on Debian's older redis-server (7.x). Switch to Redis's" >&2
+    echo "official apt repo:" >&2
+    echo "  sudo apt remove --purge redis-server" >&2
+    echo "  # add packages.redis.io to apt, then:" >&2
+    echo "  sudo apt install redis-server" >&2
+    echo "See docs/setup.md for the full apt repo setup." >&2
     exit 1
   fi
 else
   echo "redis-cli installed but Redis is not running on localhost:6379." >&2
-  echo "Start it: sudo systemctl enable --now redis-stack-server" >&2
+  echo "Start it: sudo systemctl enable --now redis-server" >&2
   exit 1
 fi
 
