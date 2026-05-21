@@ -2,28 +2,34 @@
 # discretionary-read.sh -- harness-owned reading tick executor.
 #
 # Replaces the "claude code does a shape-c reading tick" path with
-# a direct API call. Discovers a URL via the decision tree below,
-# fetches + journals via bin/agent-read.sh, writes the journal file
-# the brain commit flow expects, and appends the URL to the reading
-# log.
+# a direct API call. Picks a source from brain's reading-sources
+# config, fetches its index, picks a fresh URL, then calls
+# bin/agent-read.sh to fetch + journal that URL via one direct API
+# call. Writes the journal file the brain commit flow expects, and
+# appends the URL to the reading log.
 #
 # Usage:
 #   bin/discretionary-read.sh <worktree-path>
 #
-# Decision tree picks a source category, then a specific URL from
-# that category. Categories reflect the sources Igor actually reads
-# in practice:
+# Source list:
+#   $BRAIN_PATH/memories/reading/sources.md
 #
-#   25%  joshtronic.com  -- Josh's blog
-#   15%  thatgirljen.com -- Jen's blog
-#   30%  Hacker News front page
-#   30%  Prior sources   -- domains already in the reading log
-#                          (find a fresh post from a site Igor
-#                          liked enough to return to)
+# Each line in sources.md that matches `- <int> -- <url> -- <label>`
+# is a candidate source, with the integer as its sampling weight.
+# Igor can edit that file himself; the harness picks up changes on
+# every tick.
 #
-# Each strategy fetches an index page, extracts candidate URLs,
-# filters anything already in the reading log, and picks one at
-# random. If a strategy comes up empty, the next one is tried.
+# Algorithm:
+#   1. Parse sources.md -> list of (weight, url) pairs.
+#   2. Weighted random sample to pick a primary source.
+#   3. Fetch the source URL, extract candidate links from it,
+#      dedupe against the reading log, pick one at random.
+#   4. If the source yields no fresh URL (offline, all already
+#      read, parse error), drop it from the list and resample
+#      until we find one or run out of sources.
+#   5. Call bin/agent-read.sh on the chosen URL, capture
+#      title + journal, write the journal file, append to the
+#      reading log.
 #
 # Reads:
 #   IGOR_BRAIN_PATH    path to local brain clone
@@ -35,8 +41,8 @@
 #
 # Exit codes:
 #   0  success
-#   1  bad args / config
-#   2  no candidate URL found in any category
+#   1  bad args / missing sources file
+#   2  no candidate URL found in any source
 #   3  agent-read.sh failed
 #   4  journal write failed
 
@@ -58,34 +64,57 @@ if [ -z "$WORKTREE" ] || [ ! -d "$WORKTREE" ]; then
 fi
 
 BRAIN_PATH="${IGOR_BRAIN_PATH:-${IGOR_STATE_DIR:-$HOME/.local/state/igor}/repos/igor/brain}"
+SOURCES_FILE="$BRAIN_PATH/memories/reading/sources.md"
 LOG_FILE="$BRAIN_PATH/memories/reading/log.md"
 JOURNAL_FILE="$WORKTREE/.igor/IGOR_JOURNAL.md"
 UA="Mozilla/5.0 (compatible; Igor/1.0; +https://igor.bot)"
 
+if [ ! -f "$SOURCES_FILE" ]; then
+  echo "discretionary-read: sources file not found at $SOURCES_FILE" >&2
+  echo "discretionary-read: brain may not be cloned, or sources.md not yet committed" >&2
+  exit 1
+fi
+
 mkdir -p "$(dirname "$JOURNAL_FILE")"
+
+# -- parse sources -----------------------------------------------
+
+# Match lines like: - 25 -- https://example.com -- label
+# Weights at 0 are skipped (so a source can stay listed but disabled).
+# Output: "<weight>|<url>" per line.
+parse_sources() {
+  awk '
+    match($0, /^[[:space:]]*-[[:space:]]+([0-9]+)[[:space:]]+--[[:space:]]+(https?:\/\/[^[:space:]]+)/, m) {
+      if (m[1] + 0 > 0) printf "%s|%s\n", m[1], m[2]
+    }
+  ' "$SOURCES_FILE"
+}
+
+sources=$(parse_sources)
+if [ -z "$sources" ]; then
+  echo "discretionary-read: no enabled sources in $SOURCES_FILE" >&2
+  exit 2
+fi
 
 # -- helpers ------------------------------------------------------
 
-# fetch_html <url> -- curl the URL or return empty on failure.
 fetch_html() {
   curl -sfL --max-time 15 --max-filesize 5000000 \
     -A "$UA" "$1" 2>/dev/null || true
 }
 
-# extract_links <html> -- print http(s) URLs from anchor tags,
-# stripped, one per line. Filters out static-asset extensions and
-# obvious non-content links.
+# Extract plausible content links from HTML. Strips static-asset
+# extensions and navigation-shaped URLs. Returns one URL per line,
+# deduped.
 extract_links() {
   printf '%s' "$1" \
     | grep -oE 'href="https?://[^"]+"' \
     | sed -E 's/^href="//; s/"$//' \
     | grep -vE '\.(jpg|jpeg|png|gif|svg|ico|css|js|pdf|xml|atom|rss)(\?|$)' \
-    | grep -vE '^https?://[^/]+/(login|signup|register|tag/|category/|search\?|rss|feed)' \
+    | grep -vE '/(login|signup|register|search\?|rss|feed|atom)([?/]|$)' \
     | sort -u
 }
 
-# filter_unread <urls> -- read URLs from stdin, print only those
-# not already in the reading log.
 filter_unread() {
   while IFS= read -r url; do
     [ -z "$url" ] && continue
@@ -96,117 +125,62 @@ filter_unread() {
   done
 }
 
-# pick_random <urls> -- read URLs from stdin, print one at random.
-pick_random() {
-  grep . | shuf -n 1
+# Weighted random sample from sources. Each iteration trims the
+# list to remove a source we've already tried, so subsequent picks
+# don't repeat the failed source.
+sample_weighted() {
+  local list="$1"
+  local total
+  total=$(awk -F'|' '{ s += $1 } END { print s + 0 }' <<<"$list")
+  [ "$total" -le 0 ] && return 1
+  local roll=$((RANDOM % total))
+  awk -F'|' -v r="$roll" '
+    {
+      s += $1
+      if (r < s) { print; exit }
+    }
+  ' <<<"$list"
 }
 
-# -- discovery strategies ----------------------------------------
-
-# Each strategy prints a URL on stdout if it finds a fresh
-# candidate, or nothing if it comes up empty.
-
-strategy_joshtronic() {
+# Try a source: fetch, extract, dedupe, pick. Returns URL on stdout
+# or empty if nothing fresh.
+try_source() {
+  local source_url="$1"
   local html
-  html=$(fetch_html "https://joshtronic.com")
+  html=$(fetch_html "$source_url")
   [ -z "$html" ] && return
-  # Look for joshtronic.com post URLs specifically (avoid links out)
-  printf '%s' "$html" \
-    | grep -oE 'href="https?://joshtronic\.com/[^"]+"' \
-    | sed -E 's/^href="//; s/"$//' \
-    | grep -vE '/(tag/|category/|page/|links/?$|colophon/?$|about/?$|now/?$|rss|feed|atom)' \
-    | grep -E '/[0-9]{4}|/[a-z][a-z0-9-]{6,}' \
-    | sort -u \
-    | filter_unread \
-    | pick_random
+  extract_links "$html" | filter_unread | shuf -n 1
 }
 
-strategy_thatgirljen() {
-  local html
-  html=$(fetch_html "https://thatgirljen.com")
-  [ -z "$html" ] && return
-  printf '%s' "$html" \
-    | grep -oE 'href="https?://thatgirljen\.com/[^"]+"' \
-    | sed -E 's/^href="//; s/"$//' \
-    | grep -vE '/(tag/|category/|page/|about|now|rss|feed|atom)' \
-    | grep -E '/[0-9]{4}|/[a-z][a-z0-9-]{6,}' \
-    | sort -u \
-    | filter_unread \
-    | pick_random
-}
-
-strategy_hackernews() {
-  # HN front page: extract story URLs (external links, not internal
-  # item pages). The 'storylink' / 'titleline' class names changed
-  # over the years; just take any https://[^/]+/ that isn't ycombinator.
-  local html
-  html=$(fetch_html "https://news.ycombinator.com/")
-  [ -z "$html" ] && return
-  extract_links "$html" \
-    | grep -vE '^https?://(news\.)?ycombinator\.com' \
-    | filter_unread \
-    | pick_random
-}
-
-strategy_prior_source() {
-  # Find domains already in the reading log -- sites Igor has read
-  # before. Pick one at random and look for a new post on it.
-  [ -f "$LOG_FILE" ] || return
-  local domain
-  domain=$(grep -oE '^- [a-z0-9.-]+\.[a-z]+' "$LOG_FILE" \
-    | sed -E 's/^- //' \
-    | grep -vE '^(joshtronic\.com|thatgirljen\.com|news\.ycombinator\.com)$' \
-    | sort -u \
-    | shuf -n 1)
-  [ -z "$domain" ] && return
-  local html
-  html=$(fetch_html "https://${domain}")
-  [ -z "$html" ] && return
-  extract_links "$html" \
-    | grep -E "^https?://${domain}/" \
-    | filter_unread \
-    | pick_random
-}
-
-# -- decision tree ----------------------------------------------
+# -- discover a fresh URL ----------------------------------------
 
 URL=""
-PICKED_STRATEGY=""
+PICKED_SOURCE=""
+remaining="$sources"
 
-pick_strategy() {
-  local roll=$((RANDOM % 100))
-  # 25 / 15 / 30 / 30 -- if a strategy comes up empty we fall
-  # through the remaining ones in order so we don't fail just
-  # because (say) Jen hasn't posted anything new.
-  local order
-  if [ "$roll" -lt 25 ]; then
-    order="joshtronic thatgirljen hackernews prior_source"
-  elif [ "$roll" -lt 40 ]; then
-    order="thatgirljen joshtronic hackernews prior_source"
-  elif [ "$roll" -lt 70 ]; then
-    order="hackernews prior_source joshtronic thatgirljen"
-  else
-    order="prior_source hackernews joshtronic thatgirljen"
+while [ -n "$remaining" ]; do
+  picked=$(sample_weighted "$remaining") || break
+  source_weight=${picked%%|*}
+  source_url=${picked#*|}
+
+  result=$(try_source "$source_url")
+  if [ -n "$result" ]; then
+    URL="$result"
+    PICKED_SOURCE="$source_url"
+    break
   fi
-  for s in $order; do
-    local result
-    result=$("strategy_${s}" 2>/dev/null)
-    if [ -n "$result" ]; then
-      URL="$result"
-      PICKED_STRATEGY="$s"
-      return
-    fi
-  done
-}
 
-pick_strategy
+  echo "discretionary-read: source $source_url yielded no fresh URL, trying another" >&2
+  # Drop this source from remaining and retry
+  remaining=$(grep -vF "$source_weight|$source_url" <<<"$remaining" || true)
+done
 
 if [ -z "$URL" ]; then
-  echo "discretionary-read: no candidate URL found in any strategy -- everything was either offline, empty, or already read" >&2
+  echo "discretionary-read: no candidate URL found across any source" >&2
   exit 2
 fi
 
-echo "discretionary-read: selected via $PICKED_STRATEGY: $URL" >&2
+echo "discretionary-read: selected via $PICKED_SOURCE -> $URL" >&2
 
 # -- call agent-read ---------------------------------------------
 
