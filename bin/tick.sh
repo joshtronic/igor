@@ -1236,10 +1236,13 @@ ONE thing. Under scope cap (400 lines / 10 commits).
 
 If shipping (a or b):
   - Make the change on the agent branch (already checked out).
-  - Write .igor/PR_BODY.md with the two-checklist format from
-    AGENTS.md (What this PR does + Test plan). The first
-    "What this PR does" item becomes the commit subject AND the
-    PR title -- make it a clean imperative sentence.
+  - **MANDATORY: write .igor/PR_BODY.md before exit.** Two-checklist
+    format from AGENTS.md (What this PR does + Test plan). NOT
+    OPTIONAL. If I skip this, the harness falls back to git log,
+    the PR ships with a thin description, and the harness yells
+    "WARNING: PR_BODY.md was NOT written" in journalctl. The first
+    "What this PR does" item becomes the commit subject AND the PR
+    title -- make it a clean conventional-commit subject.
   - Run npm test before exit -- must pass.
   - **Do NOT run git add / git commit / git push.** The harness
     owns commits. Just edit files and exit; the harness commits
@@ -1406,6 +1409,7 @@ EOF
     if [ -f .igor/PR_BODY.md ]; then
       W_PR_BODY=$(cat .igor/PR_BODY.md)
     else
+      log "WARNING: PR_BODY.md was NOT written by claude this tick. Falling back to git-log-derived body, which will be thin. AGENTS.md requires PR_BODY.md on every ship; this is not optional. PR will open with a poor description."
       W_PR_BODY=$(git log "origin/${W_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
     fi
     W_PR_BODY+=$(build_deps_section "$W_BASE")
@@ -1703,6 +1707,7 @@ Revert those changes (or do them yourself outside Igor) and remove \`Status/Bloc
     if [ -f .igor/PR_BODY.md ]; then
       PR_BODY=$(cat .igor/PR_BODY.md)
     else
+      log "WARNING: PR_BODY.md was NOT written by claude this tick. Falling back to git-log-derived body, which will be thin. AGENTS.md requires PR_BODY.md on every ship; this is not optional. PR will open with a poor description."
       PR_BODY=$(git log "origin/${PR_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
     fi
     PR_BODY+=$(build_deps_section "$PR_BASE")
