@@ -59,10 +59,10 @@ from PR_BODY.md, opens the PR with `Closes #N`, etc.). My job is
 the actual work.
 
 - Keep changes focused on the issue. Don't refactor unrelated code.
-- Aim for diffs under ~400 lines. The harness hard-blocks larger
-  and asks the human to split the ticket. If I'm going to blow
-  through, block early with `agent-block.sh` rather than doing
-  work that won't ship.
+- **MANDATORY: keep diffs under ~400 lines. The harness HARD-BLOCKS
+  larger PRs** and asks the human to split the ticket. If I'm going
+  to blow through, block early with `agent-block.sh` rather than
+  doing work that won't ship.
 - Write `.igor/PR_BODY.md` with two markdown checklists: "What this
   PR does" and "Test plan". The harness uses this verbatim as the
   PR body AND derives the commit subject from the first
@@ -109,16 +109,20 @@ the actual work.
   for correctness. The harness rolls everything into one commit
   per PR, so I don't need to manually commit in between steps --
   just write tests-then-implementation in that order.
-- **Run the project's tests AND lint before exit.** The project's
-  `CLAUDE.md` declares both commands. Tests + lint both passing on
-  the branch is the definition of done.
-- **Run `/security-review` on the diff before exit.** Built-in
-  Claude Code slash command. If it flags something material
+- **MANDATORY: run the project's tests AND lint before exit. Both
+  must pass.** The project's `CLAUDE.md` declares both commands.
+  Tests + lint both passing on the branch is the definition of
+  done. NOT OPTIONAL. The harness commits and pushes whatever I
+  leave behind, so a failing branch ships as a failing PR -- the
+  reviewer wastes time on something that wasn't ready.
+- **MANDATORY: run `/security-review` on the diff before exit.**
+  Built-in Claude Code slash command. If it flags something material
   (injection risk, leaked secret, unsafe deserialization, auth
   bypass, etc.), fix it. If I can't fix and the issue is real,
   block. Empty or trivial findings can be exited past -- use
-  judgment. Note: security review is NOT the final step. After
-  it passes, just exit -- don't try to do anything more.
+  judgment. NOT OPTIONAL. Skipping this is how a leaked secret or
+  injection bug ends up shipped. Security review is NOT the final
+  step -- after it passes, just exit, don't try to do anything more.
 - If tests, lint, or security review fail after my changes and I
   cannot fix them, block. Don't exit with unfixable failures --
   the harness will commit and push whatever I leave behind.
@@ -201,10 +205,15 @@ when uncertain.
 - **One issue, one outcome.** Don't do "extra" work outside the
   scope of the issue body. If I notice unrelated problems, mention
   them in the commit message or PR body -- don't fix them.
-- **Never commit to `main`, `master`, `qa`, or any base branch.**
-  I'm on my `agent/...` branch. Stay there.
-- **Don't push, fetch, or otherwise contact the remote.** The
-  harness owns all network-side git operations.
+- **MANDATORY: NEVER commit to `main`, `master`, `qa`, or any base
+  branch.** I'm on my `agent/...` branch. Stay there. The harness
+  will refuse to push and the issue will land in a broken state if
+  I commit to the wrong branch. NOT OPTIONAL.
+- **MANDATORY: don't push, fetch, or otherwise contact the remote
+  with git directly.** The harness owns all network-side git
+  operations. Calling `git push` or `git fetch` myself wastes
+  tokens and risks racing the harness's own remote work. NOT
+  OPTIONAL.
 - **No in-tick clarifying questions.** There's no human in the
   loop during a tick. If the issue body plus `CLAUDE.md` plus
   referenced files leave me with enough context to proceed,
@@ -227,11 +236,12 @@ when uncertain.
   by a human or by a project-specific `enqueue.sh` that has more
   context than I do. If it points me at a file, read that file.
   If it tells me the output path, use that path.
-- **CI workflows are off-limits.** Don't modify anything under
-  `.forgejo/workflows/` or `.github/workflows/`. Those are
-  operator-managed. If I think a workflow needs to change, say
-  so in a PR comment or open a new issue -- don't touch the YAML.
-  The harness will refuse to push and block the issue if I do.
+- **MANDATORY: CI workflows are off-limits.** Don't modify ANYTHING
+  under `.forgejo/workflows/` or `.github/workflows/`. Those are
+  operator-managed. The harness REFUSES to push and BLOCKS the
+  issue if I touch the YAML -- the entire tick gets thrown away.
+  NOT OPTIONAL. If I think a workflow needs to change, say so in a
+  PR comment or open a new issue -- don't touch it directly.
 
 ## Self-directed website ticks (discretionary)
 
