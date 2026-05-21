@@ -317,6 +317,77 @@ derive_commit_subject() {
   printf '%s' "$fallback"
 }
 
+# Derive a full PR body (two-checklist Markdown) from the diff. Used
+# as a fallback when Claude exited without writing .igor/PR_BODY.md
+# this tick -- AGENTS.md says it's mandatory but compliance is
+# probabilistic, and a thin git-log-derived body wastes the
+# reviewer's time. Better to spend a cent on Haiku to synth a real
+# description than ship a one-liner.
+#
+# Args:
+#   $1 -- worktree path (used to compute the diff against base)
+#   $2 -- base branch (e.g., "master")
+#
+# Returns: a markdown body string on stdout, or empty on failure.
+# Callers should fall back to git-log-derived body if this returns
+# empty. The returned body includes a visible note at the top so the
+# human reviewer knows it was harness-generated, not claude-written.
+derive_pr_body() {
+  local worktree="$1" base="$2"
+  [ -n "$worktree" ] && [ -d "$worktree" ] || return 1
+
+  local diff_summary
+  diff_summary=$( (
+    cd "$worktree" && {
+      git diff --stat "origin/${base}..HEAD" 2>/dev/null
+      echo "---"
+      git diff "origin/${base}..HEAD" 2>/dev/null | head -400
+    }
+  ) 2>/dev/null)
+
+  printf '%s' "$diff_summary" | grep -q "files\? changed" || return 1
+
+  local body
+  body=$(claude_complete \
+    "You generate Forgejo PR bodies from git diffs. Output EXACTLY this format and nothing else -- no preamble, no explanation, no fenced code blocks around the output:
+
+## What this PR does
+
+- [x] type: short imperative description (conventional commit subject -- types: feat/fix/chore/docs/style/refactor/test)
+- [x] (additional bullets describing what changed, one per logical change)
+
+## Test plan
+
+- [x] (what was verified during the run, e.g., \`npm test\` passes locally)
+- [ ] (manual steps the human reviewer should run, if any -- be specific)
+
+Rules:
+- First 'What this PR does' bullet MUST have a conventional commit prefix (feat:/fix:/chore:/docs:/style:/refactor:/test:) and be under 72 chars.
+- Pre-check ([x]) anything verifiable from the diff (tests added, lint expected to pass, scripted assertions).
+- Leave unchecked ([ ]) for steps that need a human (manual UI checks, comparing against external systems).
+- If the diff is purely doc/refactor with no manual testing needed, Test plan can be just '- [x] No manual verification needed; CI is the gate'.
+- Be terse and accurate. Don't invent context not in the diff." \
+    "$diff_summary" \
+    800)
+
+  # Strip leading/trailing whitespace and any fenced-code wrappers
+  # Haiku occasionally adds despite instructions.
+  body=$(printf '%s' "$body" \
+    | sed -E '/^```/d' \
+    | awk 'NF || found { found=1; print }' \
+    | sed -E ':a;/^\n*$/{$d;N;ba}')
+
+  # Sanity check: it must contain both required headings or we
+  # don't trust it.
+  if ! printf '%s' "$body" | grep -q "## What this PR does" \
+     || ! printf '%s' "$body" | grep -q "## Test plan"; then
+    return 1
+  fi
+
+  # Prepend a visible note so the reviewer knows this wasn't Claude.
+  printf '> _harness-generated body -- Claude did not write PR_BODY.md this tick._\n\n%s' "$body"
+}
+
 # Returns a newline-separated list of off-limits paths touched in the
 # diff against the given base ref, or empty if none. Off-limits paths
 # are CI workflow files (.forgejo/workflows/, .github/workflows/) --
@@ -1409,8 +1480,14 @@ EOF
     if [ -f .igor/PR_BODY.md ]; then
       W_PR_BODY=$(cat .igor/PR_BODY.md)
     else
-      log "WARNING: PR_BODY.md was NOT written by claude this tick. Falling back to git-log-derived body, which will be thin. AGENTS.md requires PR_BODY.md on every ship; this is not optional. PR will open with a poor description."
-      W_PR_BODY=$(git log "origin/${W_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
+      log "WARNING: PR_BODY.md was NOT written by claude this tick. AGENTS.md requires it on every ship; this is not optional. Attempting harness-side fallback via Haiku."
+      W_PR_BODY=$(derive_pr_body "$W_WORKTREE" "$W_BASE")
+      if [ -n "$W_PR_BODY" ]; then
+        log "harness-side PR body synthesized via Haiku from diff"
+      else
+        log "WARNING: Haiku fallback also failed; using git-log-derived body. PR description will be thin."
+        W_PR_BODY=$(git log "origin/${W_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
+      fi
     fi
     W_PR_BODY+=$(build_deps_section "$W_BASE")
     W_NEW_PR_NUMBER=$(forgejo_open_pr "$W_REPO" "$W_BRANCH" "$W_BASE" "$W_PR_TITLE" "$W_PR_BODY" "${IGOR_REVIEWER:-}")
@@ -1707,8 +1784,14 @@ Revert those changes (or do them yourself outside Igor) and remove \`Status/Bloc
     if [ -f .igor/PR_BODY.md ]; then
       PR_BODY=$(cat .igor/PR_BODY.md)
     else
-      log "WARNING: PR_BODY.md was NOT written by claude this tick. Falling back to git-log-derived body, which will be thin. AGENTS.md requires PR_BODY.md on every ship; this is not optional. PR will open with a poor description."
-      PR_BODY=$(git log "origin/${PR_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
+      log "WARNING: PR_BODY.md was NOT written by claude this tick. AGENTS.md requires it on every ship; this is not optional. Attempting harness-side fallback via Haiku."
+      PR_BODY=$(derive_pr_body "$WORKTREE" "$PR_BASE")
+      if [ -n "$PR_BODY" ]; then
+        log "harness-side PR body synthesized via Haiku from diff"
+      else
+        log "WARNING: Haiku fallback also failed; using git-log-derived body. PR description will be thin."
+        PR_BODY=$(git log "origin/${PR_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
+      fi
     fi
     PR_BODY+=$(build_deps_section "$PR_BASE")
     PR_BODY+=$'\n\nCloses #'"$ISSUE_NUMBER"
