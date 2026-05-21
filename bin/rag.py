@@ -25,14 +25,24 @@ Environment:
     IGOR_REPO_ROOT         where the harness clones repos
                            (default ~/.local/state/igor/repos)
     IGOR_RAG_COMMIT_DAYS   how far back to embed commits (default 30)
+    IGOR_RAG_CACHE_PATH    sqlite embedding cache location
+                           (default $IGOR_STATE_DIR/rag-embeddings.sqlite)
+
+The sqlite cache stores deterministic (model, text) -> embedding
+mappings so a full corpus re-embed only happens once. Subsequent
+ticks embed only NEW entries (new journal entries, new commits,
+edited memories). Restoring from zero is `rm $cache_path`; the
+next tick rebuilds it.
 """
 
 import argparse
 import hashlib
 import os
 import re
+import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -53,6 +63,12 @@ DEFAULT_REPO_ROOT = os.environ.get("IGOR_REPO_ROOT") or os.path.expanduser(
 )
 COMMIT_DAYS = int(os.environ.get("IGOR_RAG_COMMIT_DAYS", "30"))
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+DEFAULT_STATE_DIR = os.environ.get("IGOR_STATE_DIR") or os.path.expanduser(
+    "~/.local/state/igor"
+)
+CACHE_PATH = os.environ.get("IGOR_RAG_CACHE_PATH") or os.path.join(
+    DEFAULT_STATE_DIR, "rag-embeddings.sqlite"
+)
 
 SCHEMA = {
     "index": {
@@ -251,6 +267,84 @@ def collect_commit_entries(repo_root: Path, days: int):
             }
 
 
+# -- embedding cache -----------------------------------------------------
+
+def _open_cache():
+    """Open (and create if needed) the sqlite embedding cache."""
+    Path(CACHE_PATH).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(CACHE_PATH)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS embeddings (
+            content_hash TEXT PRIMARY KEY,
+            embedding BLOB NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    return conn
+
+
+def _hash_text(text: str) -> str:
+    """Cache key. Includes the model name so changing the embedder
+    automatically invalidates the cache (old hashes become orphans
+    that fall out of the lookup miss path)."""
+    return hashlib.sha256(f"{EMBED_MODEL}|{text}".encode("utf-8")).hexdigest()
+
+
+def embed_with_cache(texts: list, log_fn=None):
+    """Embed texts, using the sqlite cache for previously-seen content.
+
+    Returns a list of np.float32 arrays in the same order as input.
+    Only texts whose (model, content) hash isn't already cached
+    actually go through the embedder.
+    """
+    if not texts:
+        return []
+
+    hashes = [_hash_text(t) for t in texts]
+    conn = _open_cache()
+
+    cached: dict[str, np.ndarray] = {}
+    # SQLite has a ~999 parameter limit by default; chunk the IN clause.
+    chunk = 500
+    for i in range(0, len(hashes), chunk):
+        batch = hashes[i:i + chunk]
+        placeholders = ",".join("?" * len(batch))
+        rows = conn.execute(
+            f"SELECT content_hash, embedding FROM embeddings WHERE content_hash IN ({placeholders})",
+            batch,
+        ).fetchall()
+        for h, blob in rows:
+            cached[h] = np.frombuffer(blob, dtype=np.float32)
+
+    missing_indices = [i for i, h in enumerate(hashes) if h not in cached]
+    if log_fn:
+        log_fn(
+            f"rag: cache hit {len(hashes) - len(missing_indices)}/{len(hashes)}, "
+            f"need to embed {len(missing_indices)} new"
+        )
+
+    if missing_indices:
+        missing_texts = [texts[i] for i in missing_indices]
+        embedder = TextEmbedding(model_name=EMBED_MODEL)
+        new_vectors = list(embedder.embed(missing_texts))
+        now = datetime.now(timezone.utc).isoformat()
+        to_insert = []
+        for idx, vec in zip(missing_indices, new_vectors):
+            arr = np.array(vec, dtype=np.float32)
+            cached[hashes[idx]] = arr
+            to_insert.append((hashes[idx], arr.tobytes(), now))
+        conn.executemany(
+            "INSERT OR REPLACE INTO embeddings (content_hash, embedding, created_at) VALUES (?, ?, ?)",
+            to_insert,
+        )
+        conn.commit()
+
+    conn.close()
+    return [cached[h] for h in hashes]
+
+
 # -- build + query --------------------------------------------------------
 
 def build_index(brain_path: Path, repo_root: Path, days: int, quiet: bool = False):
@@ -291,10 +385,8 @@ def build_index(brain_path: Path, repo_root: Path, days: int, quiet: bool = Fals
         log("rag: no entries to embed")
         return 0
 
-    log(f"rag: embedding {len(all_rows)} entries with {EMBED_MODEL}")
-    embedder = TextEmbedding(model_name=EMBED_MODEL)
     texts = [row["text"] for row in all_rows]
-    vectors = [np.array(v, dtype=np.float32) for v in embedder.embed(texts)]
+    vectors = embed_with_cache(texts, log_fn=log)
 
     data = []
     keys = []
