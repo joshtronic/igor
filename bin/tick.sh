@@ -1229,6 +1229,37 @@ nothing else is calling you, this is a fine tick to spend reading
 
   cd "$W_WORKTREE"
 
+  # Harness-driven reading shortcut. When the dice land (configured
+  # via IGOR_HARNESS_READING_RATE, default 0), skip the Claude Code
+  # agent loop entirely and run a specialized reading executor that
+  # discovers a URL, fetches it, and journals via a single direct
+  # API call. Cheaper, faster, more predictable than relying on
+  # Claude to pick shape c and follow the read-then-journal recipe.
+  #
+  # On success, jumps past the Claude invocation -- the existing
+  # journal-commit flow at the bottom of this block picks up the
+  # IGOR_JOURNAL.md the executor wrote and commits everything
+  # normally.
+  USED_HARNESS_READING=0
+  W_HARNESS_READING_RATE="${IGOR_HARNESS_READING_RATE:-0}"
+  W_HARNESS_READING_RATE_X1000=$(awk -v r="$W_HARNESS_READING_RATE" 'BEGIN { printf "%d", r * 1000 }')
+  W_HR_ROLL=$((RANDOM % 1000))
+  if [ "$W_HR_ROLL" -lt "$W_HARNESS_READING_RATE_X1000" ]; then
+    log "discretionary: dice $W_HR_ROLL/1000 vs harness-reading rate $W_HARNESS_READING_RATE_X1000 -- routing to harness reading executor"
+    W_START=$(date +%s)
+    if IGOR_BRAIN_PATH="$BRAIN_PATH" \
+       "$IGOR_HOME/bin/discretionary-read.sh" "$W_WORKTREE" 2>&1; then
+      USED_HARNESS_READING=1
+      W_EXIT=0
+      W_ELAPSED=$(( $(date +%s) - W_START ))
+      log "discretionary: harness reading executor succeeded in ${W_ELAPSED}s"
+    else
+      log "warning: harness reading executor failed -- falling through to claude code path"
+    fi
+  fi
+
+if [ "$USED_HARNESS_READING" -eq 0 ]; then
+
   # Force-load the reading log into the user message. Reading ticks
   # historically picked the same blog post 3 nights in a row because
   # Claude didn't remember to check the MEMORY.md hook. This makes the
@@ -1344,6 +1375,8 @@ EOF
   set -e
   W_ELAPSED=$(( $(date +%s) - W_START ))
   log "claude exited $W_EXIT after ${W_ELAPSED}s"
+
+fi  # end if-not-harness-reading
 
   # Journal write -- local-day bucketing; skip byte-identical dupes.
   # W_JOURNAL_APPENDED tracks whether the journal actually made it
