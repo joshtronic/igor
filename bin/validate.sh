@@ -21,7 +21,7 @@ fail() { printf '  \033[31mx\033[0m %s%s\n' "$1" "${2:+ -- $2}"; FAIL=1; }
 # -- Required commands on PATH ----------------------------------
 
 echo "== deps =="
-for cmd in jq curl git flock timeout claude; do
+for cmd in jq curl git flock timeout claude python3 redis-cli; do
   if command -v "$cmd" >/dev/null 2>&1; then
     pass "$cmd installed"
   else
@@ -30,9 +30,19 @@ for cmd in jq curl git flock timeout claude; do
       flock)              fail "$cmd installed" "sudo apt-get install -y util-linux" ;;
       timeout)            fail "$cmd installed" "sudo apt-get install -y coreutils" ;;
       claude)             fail "$cmd installed" "install per Anthropic's CLI docs" ;;
+      python3)            fail "$cmd installed" "sudo apt-get install -y python3 python3-venv" ;;
+      redis-cli)          fail "$cmd installed" "install redis-server 8+ from packages.redis.io (see docs/setup.md)" ;;
     esac
   fi
 done
+
+if command -v python3 >/dev/null 2>&1; then
+  if python3 -c "import venv" 2>/dev/null; then
+    pass "python3-venv module available"
+  else
+    fail "python3-venv module available" "sudo apt-get install -y python3-venv"
+  fi
+fi
 echo
 
 # -- Global env -------------------------------------------------
@@ -51,6 +61,40 @@ if mkdir -p "$state_dir/worktrees" "$state_dir/repos" 2>/dev/null \
   pass "state dir writable ($state_dir)"
 else
   fail "state dir writable ($state_dir)"
+fi
+echo
+
+# -- RAG layer (Redis 8+ with vector index, Python venv, deps) --
+
+echo "== rag =="
+
+if command -v redis-cli >/dev/null 2>&1; then
+  if redis-cli ping >/dev/null 2>&1; then
+    pass "Redis reachable at localhost:6379"
+    if redis-cli MODULE LIST 2>/dev/null | grep -qi search; then
+      pass "Redis vector search module loaded"
+    else
+      fail "Redis vector search module loaded" \
+           "running older Redis without modules; install redis-server 8+ from packages.redis.io (see docs/setup.md)"
+    fi
+  else
+    fail "Redis reachable at localhost:6379" \
+         "sudo systemctl enable --now redis-server"
+  fi
+fi
+
+venv="$state_dir/rag-venv"
+if [ -x "$venv/bin/python" ]; then
+  pass "RAG venv exists ($venv)"
+  if "$venv/bin/python" -c "import redisvl, fastembed" 2>/dev/null; then
+    pass "RAG deps importable (redisvl, fastembed)"
+  else
+    fail "RAG deps importable (redisvl, fastembed)" \
+         "rerun bin/install.sh, or directly bin/setup-rag.sh"
+  fi
+else
+  fail "RAG venv exists ($venv)" \
+       "rerun bin/install.sh, or directly bin/setup-rag.sh"
 fi
 echo
 
