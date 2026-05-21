@@ -1229,36 +1229,100 @@ nothing else is calling you, this is a fine tick to spend reading
 
   cd "$W_WORKTREE"
 
-  # Harness-driven reading shortcut. When the dice land (configured
-  # via IGOR_HARNESS_READING_RATE, default 0), skip the Claude Code
-  # agent loop entirely and run a specialized reading executor that
-  # discovers a URL, fetches it, and journals via a single direct
-  # API call. Cheaper, faster, more predictable than relying on
-  # Claude to pick shape c and follow the read-then-journal recipe.
+  # Discretionary mode selection. Brain holds the weights at
+  # memories/preferences/discretionary-split.md (reading / post /
+  # site-work). Harness samples a mode and dispatches:
   #
-  # On success, jumps past the Claude invocation -- the existing
-  # journal-commit flow at the bottom of this block picks up the
-  # IGOR_JOURNAL.md the executor wrote and commits everything
-  # normally.
-  USED_HARNESS_READING=0
-  W_HARNESS_READING_RATE="${IGOR_HARNESS_READING_RATE:-0}"
-  W_HARNESS_READING_RATE_X1000=$(awk -v r="$W_HARNESS_READING_RATE" 'BEGIN { printf "%d", r * 1000 }')
-  W_HR_ROLL=$((RANDOM % 1000))
-  if [ "$W_HR_ROLL" -lt "$W_HARNESS_READING_RATE_X1000" ]; then
-    log "discretionary: dice $W_HR_ROLL/1000 vs harness-reading rate $W_HARNESS_READING_RATE_X1000 -- routing to harness reading executor"
-    W_START=$(date +%s)
-    if IGOR_BRAIN_PATH="$BRAIN_PATH" \
-       "$IGOR_HOME/bin/discretionary-read.sh" "$W_WORKTREE" 2>&1; then
-      USED_HARNESS_READING=1
-      W_EXIT=0
-      W_ELAPSED=$(( $(date +%s) - W_START ))
-      log "discretionary: harness reading executor succeeded in ${W_ELAPSED}s"
+  #   reading    -> bin/discretionary-read.sh  (direct API)
+  #   post       -> bin/discretionary-post.sh  (direct API)
+  #   site-work  -> claude code with site-work-only directive
+  #
+  # On harness-driven success, jumps past the Claude invocation;
+  # the existing journal-commit flow picks up the IGOR_JOURNAL.md
+  # the executor wrote (reading) or the post + PR_BODY.md (post)
+  # and commits/pushes/PRs normally.
+  #
+  # If a harness mode is sampled but its executor fails (post mode
+  # bails because cooldown active, reading mode fails because every
+  # source was offline, etc.), we fall through to the next mode in
+  # a fixed fallback order: post -> reading -> site-work.
+  USED_HARNESS_MODE=""
+  W_SPLIT_FILE="$BRAIN_PATH/memories/preferences/discretionary-split.md"
+  W_SPLIT_ORDER=""
+  if [ -f "$W_SPLIT_FILE" ]; then
+    W_PARSED_SPLIT=$(awk '
+      match($0, /^[[:space:]]*-[[:space:]]+([0-9]+)[[:space:]]+--[[:space:]]+([a-z-]+)/, m) {
+        if (m[1] + 0 > 0) printf "%s|%s\n", m[1], m[2]
+      }
+    ' "$W_SPLIT_FILE")
+    if [ -n "$W_PARSED_SPLIT" ]; then
+      W_SPLIT_TOTAL=$(awk -F'|' '{ s += $1 } END { print s + 0 }' <<<"$W_PARSED_SPLIT")
+      W_SPLIT_ROLL=$((RANDOM % W_SPLIT_TOTAL))
+      W_PICKED_MODE=$(awk -F'|' -v r="$W_SPLIT_ROLL" '
+        { s += $1; if (r < s) { print $2; exit } }
+      ' <<<"$W_PARSED_SPLIT")
+      # Fallback order: picked mode first, then post -> reading -> site-work
+      case "$W_PICKED_MODE" in
+        post)      W_SPLIT_ORDER="post reading site-work" ;;
+        reading)   W_SPLIT_ORDER="reading post site-work" ;;
+        site-work) W_SPLIT_ORDER="site-work post reading" ;;
+        *)         W_SPLIT_ORDER="site-work post reading" ;;
+      esac
+      log "discretionary: split roll $W_SPLIT_ROLL/$W_SPLIT_TOTAL picked mode '$W_PICKED_MODE'; order: $W_SPLIT_ORDER"
     else
-      log "warning: harness reading executor failed -- falling through to claude code path"
+      log "warning: discretionary-split.md parsed empty -- defaulting to site-work via claude code"
+      W_SPLIT_ORDER="site-work"
     fi
+  else
+    log "warning: discretionary-split.md not found at $W_SPLIT_FILE -- defaulting to site-work via claude code"
+    W_SPLIT_ORDER="site-work"
   fi
 
-if [ "$USED_HARNESS_READING" -eq 0 ]; then
+  for mode in $W_SPLIT_ORDER; do
+    [ -n "$USED_HARNESS_MODE" ] && break
+    case "$mode" in
+      reading)
+        W_START=$(date +%s)
+        if IGOR_BRAIN_PATH="$BRAIN_PATH" \
+           "$IGOR_HOME/bin/discretionary-read.sh" "$W_WORKTREE" 2>&1; then
+          USED_HARNESS_MODE="reading"
+          W_EXIT=0
+          W_ELAPSED=$(( $(date +%s) - W_START ))
+          log "discretionary: harness reading executor succeeded in ${W_ELAPSED}s"
+        else
+          log "discretionary: harness reading executor failed -- trying next mode in order"
+        fi
+        ;;
+      post)
+        # Skip post mode if posting is on cooldown; falls through
+        # to the next mode in W_SPLIT_ORDER.
+        if [ "$W_POSTING_ALLOWED" != "1" ]; then
+          log "discretionary: post mode picked but posting is on cooldown -- trying next mode"
+          continue
+        fi
+        W_START=$(date +%s)
+        if IGOR_BRAIN_PATH="$BRAIN_PATH" IGOR_WEBSITE_PATH="$W_PATH" \
+           "$IGOR_HOME/bin/discretionary-post.sh" "$W_WORKTREE" 2>&1; then
+          USED_HARNESS_MODE="post"
+          W_EXIT=0
+          W_ELAPSED=$(( $(date +%s) - W_START ))
+          W_NEW_POST=1  # mark for posts_mark_shipped downstream
+          log "discretionary: harness post executor succeeded in ${W_ELAPSED}s"
+        else
+          log "discretionary: harness post executor failed -- trying next mode in order"
+        fi
+        ;;
+      site-work)
+        # No harness executor for site-work; falls through to the
+        # Claude Code path below. Set the mode to a synthetic value
+        # so we exit the loop and enter the claude block.
+        USED_HARNESS_MODE="site-work-claude"
+        log "discretionary: dispatching site-work mode to claude code"
+        ;;
+    esac
+  done
+
+if [ "$USED_HARNESS_MODE" = "site-work-claude" ] || [ -z "$USED_HARNESS_MODE" ]; then
 
   # Force-load the reading log into the user message. Reading ticks
   # historically picked the same blog post 3 nights in a row because
@@ -1303,6 +1367,13 @@ if [ "$USED_HARNESS_READING" -eq 0 ]; then
   fi
 
   W_USER_MSG=$(cat <<EOF
+MODE: SITE-WORK. The harness sampled site-work from the discretionary
+split this tick. Do site work only -- no reading, no posting. The
+harness already handles reading and posting on its own discretionary
+ticks; on this one, your job is to find and fix something on the site
+itself (CSS, layout, copy, broken links, accessibility, tag pages,
+feeds, etc.).
+
 You are doing self-directed work on $W_REPO. No issue is assigned;
 no human is waiting on a specific thing.
 
@@ -1376,7 +1447,7 @@ EOF
   W_ELAPSED=$(( $(date +%s) - W_START ))
   log "claude exited $W_EXIT after ${W_ELAPSED}s"
 
-fi  # end if-not-harness-reading
+fi  # end if-claude-code-site-work
 
   # Journal write -- local-day bucketing; skip byte-identical dupes.
   # W_JOURNAL_APPENDED tracks whether the journal actually made it
