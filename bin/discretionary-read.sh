@@ -176,11 +176,18 @@ sample_weighted() {
 #
 # Source-specific metadata lives in the SOURCE's ledger, not on
 # random destination ledgers. HN's ledger (news.ycombinator.com.md)
-# carries `hn-rank N` and `hn-points N` for each URL surfaced via
-# HN's front page; the destination domain's ledger records the
-# same URL but stays focused on the domain itself. Future
-# aggregator sources do the same -- their metadata lives in the
-# aggregator's ledger.
+# carries three annotations per URL:
+#
+#   hn-rank N          highest position this URL reached on HN
+#                      (lowest number wins on update)
+#   hn-points N        peak upvote count Igor observed on HN
+#                      (highest number wins on update)
+#   hn-date YYYY-MM-DD HN submission date (set on first append,
+#                      immutable -- the date the story was posted)
+#
+# The destination domain's ledger records the same URL but stays
+# focused on the domain itself. Future aggregator sources do the
+# same -- their metadata lives in the aggregator's ledger.
 
 ledger_path() {
   printf '%s/memories/reading/sources/%s.md' "$BRAIN_PATH" "$(url_host "$1")"
@@ -553,19 +560,30 @@ ledger_populate() {
 # -- discovery: aggregators ---------------------------------------
 
 # HN: query the Algolia API for the current front page. Returns
-# "<rank>|<points>|<url>" rows. Algolia is preferred over the
-# raw RSS because it includes per-item upvote count, which gives
-# a much richer "should I read this?" signal than position alone.
-# A story that hit 800 points and fell off still beats today's
-# 200-point #1 in the picker.
+# "<rank>|<points>|<created_at_epoch>|<url>" rows. created_at is
+# the HN submission time (immutable), used as the hn-date
+# annotation. Algolia is preferred over the raw RSS because it
+# includes upvotes, comment counts, and timestamps in one query.
 #
 # Self-posts (Ask HN, Tell HN) have null url -- those get
 # filtered. Only external story URLs make it into the ledger.
 discover_hn() {
   local api='https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=30'
   curl -sfL --max-time 15 --max-filesize 5000000 -A "$UA" "$api" 2>/dev/null \
-    | jq -r '.hits[]? | select(.url != null) | "\(.points // 0)|\(.url)"' \
+    | jq -r '.hits[]? | select(.url != null) | "\(.points // 0)|\(.created_at_i // 0)|\(.url)"' \
     | awk -F'|' '{ print NR "|" $0 }'
+}
+
+# Convert a Unix epoch to YYYY-MM-DD. Tries GNU's `date -d @N`
+# first (Debian/Linux -- where Igor actually runs); falls back
+# to BSD's `date -r N` for local-dev portability. Empty string
+# if neither works (or the input is missing / zero).
+epoch_to_date() {
+  local epoch="$1"
+  [ -z "$epoch" ] || [ "$epoch" = "0" ] && return 0
+  date -d "@$epoch" +%Y-%m-%d 2>/dev/null \
+    || date -r "$epoch" +%Y-%m-%d 2>/dev/null \
+    || true
 }
 
 # Kagi Small Web: redirects to a random small-web URL. Follow
@@ -647,9 +665,15 @@ while [ "$attempts" -lt "$MAX_ATTEMPTS" ]; do
 
         # Ingest this tick's RSS into both ledgers. HN's gets
         # annotations; the destination's just notes the URL.
-        while IFS='|' read -r rank points url; do
+        # hn-date is set on FIRST append and never changes
+        # (submission date is immutable); rank/points get
+        # updated on subsequent appearances.
+        while IFS='|' read -r rank points created_at_i url; do
           [ -z "$url" ] && continue
-          ledger_append_url "$hn_ledger" "$url" "hn-rank $rank -- hn-points $points"
+          hn_date=$(epoch_to_date "$created_at_i")
+          annotation="hn-rank $rank -- hn-points $points"
+          [ -n "$hn_date" ] && annotation="$annotation -- hn-date $hn_date"
+          ledger_append_url "$hn_ledger" "$url" "$annotation"
           ledger_update_rank "$hn_ledger" "$url" "$rank"
           ledger_update_points "$hn_ledger" "$url" "$points"
           dest_ledger=$(ledger_path "$url")
