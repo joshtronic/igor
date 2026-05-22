@@ -105,78 +105,36 @@ fetch_html() {
     -A "$UA" "$1" 2>/dev/null || true
 }
 
-# Extract plausible content links from HTML. Strips static-asset
-# extensions, navigation-shaped URLs, and URL fragments (the
-# "#anchor" suffix is a client-side jump, not a separate resource;
-# without stripping, https://www.11ty.dev/#why-X looks distinct
-# from https://www.11ty.dev/ and gets picked as its own "fresh"
-# URL on a 200KB marketing page). Returns one URL per line, deduped.
+# Returns 0 (true) if the URL is navigation / boilerplate / asset
+# shaped -- not content worth reading. Used by extract_links (HTML
+# scrape path) and by ledger_append_urls (sitemap/RSS paths) so
+# all three discovery routes apply the same denylist.
+is_nav_url() {
+  local url="$1"
+  case "$url" in
+    *://*/login*|*://*/signup*|*://*/register*) return 0 ;;
+  esac
+  printf '%s' "$url" | grep -qE '\.(jpg|jpeg|png|gif|svg|ico|css|js|pdf|xml|atom|rss)(\?|$)' && return 0
+  printf '%s' "$url" | grep -qE '/(login|signup|register|search\?|rss|feed|atom|legal|about|about-us|contact|contact-us|privacy|privacy-policy|terms|terms-of-service|tos|imprint|cookies|cookie-policy|jobs|careers|hiring|sitemap|apply|api|tag|tags|category|categories|archive|archives|page|colophon)([?/]|$)' && return 0
+  printf '%s' "$url" | grep -qE '^https?://[^/]+/?$' && return 0
+  return 1
+}
+
+# Extract plausible content links from HTML. Returns href URLs from
+# <a href="..."> tags, fragments stripped. Doesn't apply the nav
+# filter -- ledger_append_urls runs is_nav_url on everything
+# regardless of discovery method, so filtering here would be
+# duplicative.
 extract_links() {
   printf '%s' "$1" \
     | grep -oE 'href="https?://[^"]+"' \
     | sed -E 's/^href="//; s/"$//; s/#.*$//' \
-    | grep -vE '\.(jpg|jpeg|png|gif|svg|ico|css|js|pdf|xml|atom|rss)(\?|$)' \
-    | grep -vE '/(login|signup|register|search\?|rss|feed|atom|legal|about|about-us|contact|contact-us|privacy|privacy-policy|terms|terms-of-service|tos|imprint|cookies|cookie-policy|jobs|careers|hiring|sitemap|apply|api|tag|tags|category|categories|archive|archives|page|colophon)([?/]|$)' \
-    | grep -vE '^https?://[^/]+/?$' \
     | sort -u
 }
 
 # Hostname of a URL, sans leading "www.". Trailing path is dropped.
 url_host() {
   printf '%s' "$1" | sed -E 's|^https?://([^/]+).*|\1|; s|^www\.||'
-}
-
-# Last non-empty path segment of a URL, sans query/fragment. The
-# typical "slug" of a blog post -- "fledgling" out of
-# https://thatgirljen.com/2026/02/02/fledgling/.
-url_slug() {
-  printf '%s' "$1" \
-    | sed -E 's|^https?://[^/]+||; s|[?#].*||; s|/+$||' \
-    | awk -F'/' '{ print $NF }'
-}
-
-# Dedupe filter. Drops URLs already touched, where "touched" means:
-#   1. The URL literally appears in log.md (harness-written entries
-#      include the URL).
-#   2. The domain AND slug appear on the same line in log.md OR in
-#      any brain/journal entry. Catches Claude-written prose where
-#      Igor said "Read thatgirljen.com -- fledgling" but never
-#      captured the URL itself.
-# Slug needs to be >=4 chars to reduce false positives from short
-# numeric or stop-word slugs.
-#
-# Limitation: case (2) only fires when the URL slug matches a token
-# in the prose. Multi-word titles ("a-confession-im-an-ai-first-
-# coder-now" vs "A Confession: I'm an AI-First Coder Now") slip
-# through and get re-read once -- but the harness writes the URL to
-# log.md on success, so future picks dedupe via case (1).
-filter_unread() {
-  while IFS= read -r url; do
-    [ -z "$url" ] && continue
-
-    if [ -f "$LOG_FILE" ] && grep -qF "$url" "$LOG_FILE" 2>/dev/null; then
-      continue
-    fi
-
-    local domain slug
-    domain=$(url_host "$url")
-    slug=$(url_slug "$url")
-
-    if [ -n "$domain" ] && [ -n "$slug" ] && [ ${#slug} -ge 4 ]; then
-      if [ -f "$LOG_FILE" ] \
-         && grep -F "$domain" "$LOG_FILE" 2>/dev/null \
-         | grep -qF "$slug" 2>/dev/null; then
-        continue
-      fi
-      if [ -d "$BRAIN_PATH/journal" ] \
-         && grep -rF "$domain" "$BRAIN_PATH/journal" 2>/dev/null \
-         | grep -qF "$slug" 2>/dev/null; then
-        continue
-      fi
-    fi
-
-    printf '%s\n' "$url"
-  done
 }
 
 # Weighted random sample from sources. Each iteration trims the
@@ -196,47 +154,247 @@ sample_weighted() {
   ' <<<"$list"
 }
 
-# List ALL fresh, same-host-preferred URLs from a source (newline-
-# separated). Empty if no fresh URLs.
+# -- per-source ledger ---------------------------------------------
 #
-# Prefers same-host candidates over off-host ones. On a personal
-# blog the homepage links to its own posts; off-host hrefs are
-# almost always footer cruft ("powered by GitHub Pages", social
-# icons, attribution). Falling through to off-host only when there
-# are no same-host candidates keeps aggregator-style sources (Kagi
-# Small Web etc.) working in the rare case they end up listed.
-list_source_candidates() {
+# Each reading source has a ledger at memories/reading/sources/
+# <domain>.md tracking which URLs have been seen (`- [ ]`) and
+# which have been read (`- [x] -- read YYYY-MM-DD`). The ledger
+# replaces the heuristic domain+slug-match dedupe we used to do
+# against log.md and journal entries -- exact-URL matching is
+# unambiguous, fast, and survives multi-word titles like
+# "A Confession: I'm an AI-First Coder Now" that the substring
+# heuristic missed.
+#
+# Discovery method is cached in the ledger header so each tick is
+# a single fetch (sitemap.xml / rss.xml / homepage HTML) rather
+# than re-probing the 8-path list every time.
+
+ledger_path() {
   local source_url="$1"
-  local source_host
-  source_host=$(url_host "$source_url")
-  local html
-  html=$(fetch_html "$source_url")
-  [ -z "$html" ] && return
-  local fresh
-  fresh=$(extract_links "$html" | filter_unread)
-  [ -z "$fresh" ] && return
-  local same_host
-  same_host=$(printf '%s\n' "$fresh" | while IFS= read -r u; do
-    [ -n "$u" ] && [ "$(url_host "$u")" = "$source_host" ] && printf '%s\n' "$u"
-  done)
-  if [ -n "$same_host" ]; then
-    printf '%s\n' "$same_host"
-  else
-    printf '%s\n' "$fresh"
+  printf '%s/memories/reading/sources/%s.md' "$BRAIN_PATH" "$(url_host "$source_url")"
+}
+
+ledger_init() {
+  local ledger="$1" source_url="$2"
+  [ -f "$ledger" ] && return 0
+  mkdir -p "$(dirname "$ledger")"
+  cat > "$ledger" <<HDR
+# Posts seen from $(url_host "$source_url")
+
+Source: ${source_url}
+Discovery: pending
+
+## Index
+
+HDR
+}
+
+# Read the discovery method (sitemap|rss|html|pending) from the
+# ledger header. Empty if missing or malformed.
+ledger_get_method() {
+  local ledger="$1"
+  [ -f "$ledger" ] || return 0
+  grep -m1 -E '^Discovery:' "$ledger" 2>/dev/null \
+    | sed -E 's/^Discovery:[[:space:]]*([a-z]+).*/\1/'
+}
+
+# Read the discovery URL cached in the header.
+ledger_get_discovery_url() {
+  local ledger="$1"
+  [ -f "$ledger" ] || return 0
+  grep -m1 -E '^Discovery:.*cached at' "$ledger" 2>/dev/null \
+    | sed -E 's/^Discovery:[^(]*\(cached at ([^,)]+).*$/\1/'
+}
+
+# Rewrite the Discovery: header line with the resolved method + URL.
+ledger_set_method() {
+  local ledger="$1" method="$2" discovery_url="$3"
+  local today line tmp
+  today=$(date +%Y-%m-%d)
+  line="Discovery: ${method} (cached at ${discovery_url}, last checked ${today})"
+  tmp=$(mktemp)
+  awk -v line="$line" '
+    !done && /^Discovery:/ { print line; done=1; next }
+    { print }
+  ' "$ledger" > "$tmp" && mv "$tmp" "$ledger"
+}
+
+# All URLs in the ledger (both [ ] and [x] entries).
+ledger_load_all_urls() {
+  local ledger="$1"
+  [ -f "$ledger" ] || return 0
+  grep -oE '^- \[[ x]\] https?://[^ ]+' "$ledger" 2>/dev/null \
+    | sed -E 's/^- \[[ x]\] //'
+}
+
+# Fresh (- [ ]) URLs only.
+ledger_load_fresh_urls() {
+  local ledger="$1"
+  [ -f "$ledger" ] || return 0
+  grep -oE '^- \[ \] https?://[^ ]+' "$ledger" 2>/dev/null \
+    | sed -E 's/^- \[ \] //'
+}
+
+# Append new URLs to the ledger as `- [ ] <url>`. Skips URLs that
+# are already in the ledger (any state), nav/boilerplate URLs
+# (via is_nav_url), and bare-domain URLs. Reads stdin.
+ledger_append_urls() {
+  local ledger="$1" url existing
+  existing=$(ledger_load_all_urls "$ledger")
+  while IFS= read -r url; do
+    [ -z "$url" ] && continue
+    url=$(printf '%s' "$url" | sed 's/#.*//')
+    if is_nav_url "$url"; then
+      continue
+    fi
+    if printf '%s\n' "$existing" | grep -qxF "$url"; then
+      continue
+    fi
+    printf -- '- [ ] %s\n' "$url" >> "$ledger"
+    existing="${existing}"$'\n'"${url}"
+  done
+}
+
+# Flip a URL's `[ ]` to `[x]` with a read date.
+ledger_mark_read() {
+  local ledger="$1" url="$2"
+  [ -f "$ledger" ] || return 0
+  local today tmp
+  today=$(date +%Y-%m-%d)
+  tmp=$(mktemp)
+  awk -v url="$url" -v today="$today" '
+    {
+      if ($0 == "- [ ] " url) {
+        printf "- [x] %s -- read %s\n", url, today
+      } else {
+        print
+      }
+    }
+  ' "$ledger" > "$tmp" && mv "$tmp" "$ledger"
+}
+
+# -- discovery -----------------------------------------------------
+#
+# Probe a source's homepage for the canonical post-list endpoint.
+# Sitemaps and RSS/Atom feeds are far more authoritative than
+# scraping homepage HTML (which only sees the most-recent slice of
+# the archive). HTML stays as the fallback for aggregators (HN
+# doesn't sitemap individual stories) and for sites with no feed.
+#
+# Discovery probes happen ONCE per source, the result lands in the
+# ledger header, and subsequent ticks fetch the cached URL directly.
+
+DISCOVERY_PATHS=(
+  "/sitemap.xml"
+  "/sitemap_index.xml"
+  "/rss.xml"
+  "/atom.xml"
+  "/feed.xml"
+  "/feed/"
+  "/rss/"
+  "/index.xml"
+)
+
+# Probe the discovery paths and return "<method>|<url>" for the
+# first one that returns valid sitemap/RSS content. Falls back to
+# "html|<homepage>" if none match.
+probe_discovery() {
+  local source_url="$1"
+  source_url=$(printf '%s' "$source_url" | sed 's:/$::')
+  local path try_url content
+  for path in "${DISCOVERY_PATHS[@]}"; do
+    try_url="${source_url}${path}"
+    content=$(curl -sfL --max-time 10 --max-filesize 5000000 -A "$UA" "$try_url" 2>/dev/null)
+    [ -z "$content" ] && continue
+    local head
+    head=$(printf '%s' "$content" | head -c 2048)
+    if printf '%s' "$head" | grep -qE '<urlset|<sitemapindex'; then
+      printf 'sitemap|%s' "$try_url"
+      return 0
+    fi
+    if printf '%s' "$head" | grep -qE '<rss[ >]|<feed[ >]|<feed xmlns'; then
+      printf 'rss|%s' "$try_url"
+      return 0
+    fi
+  done
+  printf 'html|%s' "$source_url"
+}
+
+parse_sitemap() {
+  local url="$1"
+  curl -sfL --max-time 15 --max-filesize 5000000 -A "$UA" "$url" 2>/dev/null \
+    | grep -oE '<loc>[^<]+</loc>' \
+    | sed -E 's,</?loc>,,g' \
+    | grep -vE '\.(xml|gz)$'
+}
+
+parse_rss() {
+  local url="$1"
+  local content
+  content=$(curl -sfL --max-time 15 --max-filesize 5000000 -A "$UA" "$url" 2>/dev/null)
+  {
+    # RSS 2.0: <link>...</link> inside <item>. Greedy global match;
+    # also catches channel-level <link> (the homepage), filtered
+    # later by ledger_append_urls' bare-domain drop.
+    printf '%s' "$content" | grep -oE '<link>[^<]+</link>' \
+      | sed -E 's,</?link>,,g'
+    # Atom: <link href="..." .../>
+    printf '%s' "$content" | grep -oE '<link[^>]+href="[^"]+"' \
+      | sed -E 's/.*href="([^"]+)".*/\1/'
+  } | grep -E '^https?://' | sort -u
+}
+
+# Discover URLs from a source using the cached discovery method.
+# Probes (and caches) on first call per ledger.
+discover_source_urls() {
+  local source_url="$1" ledger="$2"
+  local method discovery_url
+  method=$(ledger_get_method "$ledger")
+  discovery_url=$(ledger_get_discovery_url "$ledger")
+
+  if [ -z "$method" ] || [ "$method" = "pending" ]; then
+    local probe
+    probe=$(probe_discovery "$source_url")
+    method="${probe%%|*}"
+    discovery_url="${probe#*|}"
+    ledger_set_method "$ledger" "$method" "$discovery_url"
+    echo "discretionary-read: discovery for $(url_host "$source_url") -> $method ($discovery_url)" >&2
   fi
+
+  case "$method" in
+    sitemap) parse_sitemap "$discovery_url" ;;
+    rss)     parse_rss "$discovery_url" ;;
+    html|*)
+      local html
+      html=$(fetch_html "$source_url")
+      [ -n "$html" ] && extract_links "$html"
+      ;;
+  esac
 }
 
 # -- discover a fresh URL + read it (with retry) ------------------
 #
 # Loop is bounded: up to MAX_ATTEMPTS calls to agent-read.sh per
-# tick. Each iteration either picks a new source (when the current
-# source's candidate pool is empty) or pops the next URL from the
-# current source. Failed URLs are dropped from the in-memory pool
-# for this run only -- they stay re-tryable on future ticks (the
-# failure was probably transient: rate limit, momentary 5xx, page
-# that exceeded ARG_MAX before we fixed jq, etc.).
+# tick. For each source picked, the harness:
+#   1. Ensures the per-source ledger exists.
+#   2. Discovers URLs via the cached method (sitemap/rss/html).
+#   3. Appends any new URLs to the ledger as `- [ ]`.
+#   4. Picks a random `- [ ]` URL that's NOT also in log.md (cross-
+#      source dedupe -- the same article surfaced from HN and from
+#      the author's blog shouldn't get read twice).
+#   5. Calls agent-read.sh. Failures drop the URL from the current
+#      source's pool for this run.
+#
+# Failed URLs stay re-tryable on future ticks (the failure was
+# probably transient: rate limit, momentary 5xx, etc.).
+#
+# Cross-source dedupe is a soft filter against log.md (where every
+# read tick writes its URL). If we find a URL we've already read,
+# we flip it to `[x]` in the ledger so future picks don't keep
+# rejecting it.
 
 MAX_ATTEMPTS=3
+PICKED_LEDGER=""
 attempts=0
 read_output=""
 URL=""
@@ -245,7 +403,6 @@ remaining_sources="$sources"
 candidates=""
 
 while [ "$attempts" -lt "$MAX_ATTEMPTS" ]; do
-  # Need to pick a new source?
   if [ -z "$candidates" ]; then
     [ -z "$remaining_sources" ] && break
     picked=$(sample_weighted "$remaining_sources") || break
@@ -254,15 +411,37 @@ while [ "$attempts" -lt "$MAX_ATTEMPTS" ]; do
     PICKED_SOURCE="$source_url"
     remaining_sources=$(grep -vF "$source_weight|$source_url" <<<"$remaining_sources" || true)
 
-    candidates=$(list_source_candidates "$source_url")
+    PICKED_LEDGER=$(ledger_path "$source_url")
+    ledger_init "$PICKED_LEDGER" "$source_url"
+
+    # Discover + append new URLs to the ledger.
+    discovered=$(discover_source_urls "$source_url" "$PICKED_LEDGER")
+    if [ -n "$discovered" ]; then
+      printf '%s\n' "$discovered" | ledger_append_urls "$PICKED_LEDGER"
+    fi
+
+    # Candidate pool = fresh URLs in ledger, minus anything already
+    # in log.md (cross-source dedupe). URLs found in log.md get
+    # flipped to [x] in the ledger so we don't keep checking them.
+    candidates=""
+    while IFS= read -r fresh_url; do
+      [ -z "$fresh_url" ] && continue
+      if [ -f "$LOG_FILE" ] && grep -qF "$fresh_url" "$LOG_FILE" 2>/dev/null; then
+        ledger_mark_read "$PICKED_LEDGER" "$fresh_url"
+        continue
+      fi
+      candidates="${candidates}${fresh_url}"$'\n'
+    done < <(ledger_load_fresh_urls "$PICKED_LEDGER" | shuf)
+    candidates=$(printf '%s' "$candidates" | awk 'NF')
+
     if [ -z "$candidates" ]; then
-      echo "discretionary-read: source $source_url yielded no fresh URL, trying another" >&2
+      echo "discretionary-read: $(url_host "$source_url") has no fresh URLs after dedupe, trying another source" >&2
       continue
     fi
   fi
 
-  URL=$(printf '%s\n' "$candidates" | shuf -n 1)
-  candidates=$(grep -vxF "$URL" <<<"$candidates" || true)
+  URL=$(printf '%s\n' "$candidates" | head -1)
+  candidates=$(printf '%s\n' "$candidates" | tail -n +2)
 
   attempts=$((attempts + 1))
   echo "discretionary-read: attempt $attempts/$MAX_ATTEMPTS -- $PICKED_SOURCE -> $URL" >&2
@@ -287,6 +466,9 @@ if [ -z "$read_output" ]; then
   echo "discretionary-read: agent-read failed across $attempts attempt(s)" >&2
   exit 3
 fi
+
+# Mark the URL as read in the source's ledger.
+[ -n "$PICKED_LEDGER" ] && ledger_mark_read "$PICKED_LEDGER" "$URL"
 
 echo "discretionary-read: selected via $PICKED_SOURCE -> $URL" >&2
 
@@ -384,11 +566,29 @@ append_candidate() {
     {
       printf '\n## Candidates (auto-discovered)\n\n'
       printf 'Surfaced by post-read reflection. Weight 0 = listed\n'
-      printf 'but not sampled. Dial up when one looks worth trying.\n\n'
+      printf 'but not sampled. Igor promotes them to weight 1 when\n'
+      printf 'recent reads show enough signal -- no human bump needed.\n\n'
     } >> "$SOURCES_FILE"
   fi
   printf '%s\n' "- 0 -- $cand_url -- $cand_label" >> "$SOURCES_FILE"
   echo "discretionary-read: candidate added -- $cand_url ($cand_label)" >&2
+}
+
+# Promote a candidate from weight 0 to weight 1. No-op if the URL
+# isn't found at weight 0 (already promoted, never added, or sitting
+# at a higher weight already).
+promote_candidate() {
+  local target_url="$1"
+  local tmp
+  tmp=$(mktemp)
+  awk -v url="$target_url" '
+    $1 == "-" && $2 == "0" && $3 == "--" && $4 == url {
+      $2 = 1
+      print
+      next
+    }
+    { print }
+  ' "$SOURCES_FILE" > "$tmp" && mv "$tmp" "$SOURCES_FILE"
 }
 
 reflection=$("$IGOR_HOME/bin/agent-reflect-read.sh" \
@@ -423,6 +623,21 @@ if [ -n "$reflection" ]; then
     append_candidate "$cand_url" "$cand_label"
   done < "$cand_tmp"
   rm -f "$cand_tmp"
+
+  # Promotions: weight-0 candidates that the reflection thinks
+  # have earned a sample. Igor adjusts his own pool over time --
+  # no human-bump needed.
+  prom_tmp=$(mktemp)
+  jq -c '.promotions[]?' <<<"$reflection" 2>/dev/null > "$prom_tmp" || true
+  while IFS= read -r promotion; do
+    [ -z "$promotion" ] && continue
+    prom_url=$(jq -r '.url // ""' <<<"$promotion" 2>/dev/null || echo "")
+    prom_reason=$(jq -r '.reason // ""' <<<"$promotion" 2>/dev/null || echo "")
+    [ -z "$prom_url" ] && continue
+    promote_candidate "$prom_url"
+    echo "discretionary-read: promoted candidate $prom_url (0 -> 1) -- $prom_reason" >&2
+  done < "$prom_tmp"
+  rm -f "$prom_tmp"
 fi
 
 # -- post-tick ideas reflection ----------------------------------

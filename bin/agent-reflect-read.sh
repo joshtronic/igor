@@ -86,9 +86,21 @@ job after each successful read:
        release, vendor page, social network, or aggregator
    The URL should be the homepage of the candidate domain
    (https://domain.com), not a specific post.
-   Candidates land at weight 0 -- listed but not sampled -- and
-   Josh decides whether to dial them up. Be conservative; an
-   empty candidates array is fine.
+   Candidates land at weight 0 -- listed but not sampled. Be
+   conservative; an empty candidates array is fine.
+
+3. Suggest promotions -- existing weight-0 candidates that have
+   earned a sample. Look at the "## Candidates (auto-discovered)"
+   section of sources.md (if present). A candidate is ready to
+   promote (weight 0 -> 1) when:
+     - it shows up referenced or quoted in today's read in a way
+       that suggests substance (not just a passing mention), OR
+     - it's been sitting at 0 for a while and the reflection's
+       prior reasoning lines (in past_context, if any) suggest
+       it represents a real ongoing voice worth sampling.
+   Promote at most one candidate per reflection -- this is gentle
+   pool growth, not bulk activation. Empty promotions array is
+   the common case; only emit one when you have concrete signal.
 
 Output STRICT JSON only. No prose, no code fences, no preamble.
 Schema:
@@ -98,6 +110,9 @@ Schema:
   "weight_reason": "one short sentence",
   "candidates": [
     {"url": "https://domain.com", "label": "Short Name", "reason": "one short sentence"}
+  ],
+  "promotions": [
+    {"url": "https://existing-candidate.com", "reason": "one short sentence"}
   ]
 }
 EOF
