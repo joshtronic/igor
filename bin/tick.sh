@@ -831,24 +831,27 @@ posts_mark_shipped() {
   return 0
 }
 
-# Cadence assessment. Called from the discretionary block when posting
-# isn't allowed and the routing decision is between site-work and
-# reading. Computes today's real activity (open PRs, today's commits
-# across all clones, today's brain journal entries) and hands that to
-# Haiku with a "work or read?" question framed as a human's
-# end-of-day judgment, not a threshold rule.
+# Cadence assessment. Called on EVERY discretionary tick to decide
+# whether to ship more work or take a break to read & reflect. The
+# choice gates BOTH post and site-work modes -- a heavy queue can
+# overrule even an open posting slot.
+#
+# Inputs: today's real activity (open PRs, commits across all clones,
+# brain journal entries, post landed yes/no) AND whether posting is
+# eligible this tick (so Haiku knows "work" means post-something-big
+# vs file-an-issue).
 #
 # Bias is in the prompt, not in code: reading is cheap; lean toward
 # it when the day's been substantial; pick work when the queue is
-# light or nothing's shipped yet. The model returns one of "work" /
-# "read" and a one-line reason. Failure (API error, parse error)
-# defaults to "work" -- shipping is the default mode, reading is the
-# opt-in break.
+# light or nothing's shipped yet. Failure (API error, parse error)
+# defaults to "work" -- shipping is the default mode, reading is
+# the opt-in break.
 #
 # Output: "<choice>|<reason>" on stdout (caller splits on the first
 # pipe). No JSON parsing burden for the caller.
 discretionary_assess_cadence() {
   local open_prs="$1"
+  local posting_allowed="$2"
   local today journal_today commits_today repo_dir count post_today
   today=$(date +%Y-%m-%d)
 
@@ -888,6 +891,15 @@ discretionary_assess_cadence() {
     [ "${merged_count:-0}" -gt 0 ] && post_today=1
   fi
 
+  local posting_label work_label
+  if [ "$posting_allowed" = "1" ]; then
+    posting_label="yes (today's post slot is open)"
+    work_label="write the day's blog post"
+  else
+    posting_label="no (already posted today, or a post is in flight)"
+    work_label="file a site-work issue for the queue"
+  fi
+
   local activity
   activity=$(cat <<EOF
 Today is $today.
@@ -897,9 +909,12 @@ Your activity since local midnight:
 - Brain journal entries written today: $journal_today
 - Commits authored today (all repos): $commits_today
 - Post landed today: $([ "$post_today" = "1" ] && echo "yes" || echo "no")
+- Posting eligible this tick: $posting_label
 
-Question: should the next discretionary tick be more work (file a
-site-work issue) or a break (read an article + journal-reflect)?
+If the decision is "work", the tick will: $work_label.
+If the decision is "read", the tick will: read an article + journal-reflect.
+
+Question: should the next discretionary tick be work or a break?
 EOF
 )
 
@@ -908,6 +923,8 @@ EOF
     "You are deciding how Igor (an autonomous Claude process) should spend the next discretionary tick.
 
 Think like a human's end-of-day check-in. \"Did I put in a solid day's work?\" If yes, take a break to read -- reading is cheap, forward-investment, and surfaces ideas. If no -- especially if the queue is light or nothing's shipped yet -- more work is the right call.
+
+A heavy queue (many open Igor PRs not yet reviewed by the human) is a strong signal to read instead of ship. Piling on more PRs when the human is behind on review just buries the work. Even when posting is allowed, choose \"read\" if the queue is already deep -- the post can ship tomorrow.
 
 Don't grind for grinding's sake. Don't slack off when there's clear work to do. The goal is the natural rhythm of a human workday, not a rigid threshold.
 
@@ -1544,34 +1561,34 @@ if [ -z "$WINNER" ]; then
     W_POST_RULE="You already shipped a post today (local calendar day). Do NOT publish another post this tick -- max one post per day is a hard rule. Other site work (about page, layout, copy, links, tag pages, CSS) and read+journal ticks are still fair game."
   fi
 
-  # Routing: post mode is unconditional when posting's allowed
-  # (cooldown handles its own throttle -- 1/day max). Otherwise,
-  # ask Igor whether the next tick is work or a break to read.
+  # Routing: cadence assessment fires FIRST, on every discretionary
+  # tick. It gates both post and site-work -- a heavy queue can
+  # overrule an open posting slot just as easily as it can short-
+  # circuit yet another site-work issue. Posting eligibility is one
+  # of cadence's inputs (so it knows what "work" actually does this
+  # tick), not a separate code branch.
   #
-  # Earlier this file hard-capped site-work at IGOR_DISCRETIONARY_
-  # PR_CAP (default 5) open PRs. That worked but was the wrong
-  # shape: a knob, set by us, on a rigid threshold. Replaced with
-  # a single-shot Haiku call that sees today's actual activity
-  # and decides like a human would ("is this a solid day yet?").
-  # No env var, no threshold; just judgment.
-  if [ "$W_POSTING_ALLOWED" = "1" ]; then
+  # Earlier versions hard-capped site-work at IGOR_DISCRETIONARY_
+  # PR_CAP and exempted post mode entirely. Wrong shape: post is
+  # the heaviest PR Igor opens (real content, real review burden),
+  # so exempting it from queue pressure made the worst case worse.
+  # Now: judgment over thresholds, applied uniformly.
+  W_CADENCE=$(discretionary_assess_cadence "$W_OPEN_PRS_COUNT" "$W_POSTING_ALLOWED")
+  W_CADENCE_CHOICE=${W_CADENCE%%|*}
+  W_CADENCE_REASON=${W_CADENCE#*|}
+  log "discretionary: cadence -> $W_CADENCE_CHOICE ($W_CADENCE_REASON)"
+
+  if [ "$W_CADENCE_CHOICE" = "read" ]; then
+    W_PICKED_MODE="reading"
+    W_SPLIT_ORDER="reading"
+  elif [ "$W_POSTING_ALLOWED" = "1" ]; then
     W_PICKED_MODE="post"
     W_SPLIT_ORDER="post site-work reading"
-    log "discretionary: routing (posting_allowed=1, open_prs=$W_OPEN_PRS_COUNT) -> $W_SPLIT_ORDER"
   else
-    W_CADENCE=$(discretionary_assess_cadence "$W_OPEN_PRS_COUNT")
-    W_CADENCE_CHOICE=${W_CADENCE%%|*}
-    W_CADENCE_REASON=${W_CADENCE#*|}
-    if [ "$W_CADENCE_CHOICE" = "read" ]; then
-      W_PICKED_MODE="reading"
-      W_SPLIT_ORDER="reading"
-    else
-      W_PICKED_MODE="site-work"
-      W_SPLIT_ORDER="site-work reading"
-    fi
-    log "discretionary: cadence -> $W_CADENCE_CHOICE ($W_CADENCE_REASON)"
-    log "discretionary: routing (posting_allowed=0, open_prs=$W_OPEN_PRS_COUNT) -> $W_SPLIT_ORDER"
+    W_PICKED_MODE="site-work"
+    W_SPLIT_ORDER="site-work reading"
   fi
+  log "discretionary: routing (posting_allowed=$W_POSTING_ALLOWED, open_prs=$W_OPEN_PRS_COUNT) -> $W_SPLIT_ORDER"
 
   # Reading mode short-circuit: it doesn't touch the website. Use a
   # scratch dir for the .igor/IGOR_JOURNAL.md output, run the
