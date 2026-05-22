@@ -850,11 +850,17 @@ commit_brain_changes() {
   local brain="$1" subject="$2"
   [ -d "$brain/.git" ] || return 0
 
-  # Fresh pull just before push to minimize the window for
-  # non-fast-forward rejection. ensure_repo_local at tick start
-  # already pulled; this is belt-and-suspenders.
-  (cd "$brain" && git pull --rebase --quiet origin master 2>/dev/null) \
-    || log "warning: brain pull failed before commit; continuing on local copy"
+  # No pre-commit pull. The earlier version did `git pull --rebase`
+  # here as belt-and-suspenders, but by the time we reach this
+  # function the tick has already mutated brain (journal appended,
+  # ledgers updated, weights tweaked). The dirty tree blocks the
+  # rebase and the warning "brain pull failed before commit" fired
+  # on every tick that touched brain -- a confusing false alarm,
+  # because the subsequent commit + push almost always succeeded.
+  # ensure_repo_local at tick start handles the legitimate sync;
+  # if origin moved during our tick, the push below will fail
+  # loudly with non-fast-forward and the NEXT tick's ensure_repo_local
+  # reconciles.
 
   # Stage everything the harness writes. -A within each pathspec
   # captures adds / mods / deletes uniformly.
@@ -868,7 +874,7 @@ commit_brain_changes() {
 
   if (cd "$brain" && git commit --quiet -m "$subject" 2>/dev/null); then
     if ! (cd "$brain" && git push --quiet origin master 2>/dev/null); then
-      log "warning: brain push failed for: $subject (commit is local; next tick will retry)"
+      log "warning: brain push failed for: $subject (commit is local; next tick will reconcile via ensure_repo_local)"
     fi
   else
     log "warning: brain commit failed for: $subject"
