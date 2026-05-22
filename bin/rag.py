@@ -230,10 +230,21 @@ def discover_repos(repo_root: Path):
 def collect_commit_entries(repo_root: Path, days: int):
     """Walk each repo's git log and yield row dicts for recent commits.
 
+    Cross-repo: walks every clone under repo_root. All commits in
+    the window are indexed, regardless of author -- Josh's work
+    shapes Igor's context as much as Igor's own does.
+
+    Each row's text includes the author name so retrievals are
+    attributed at a glance ("commit by Igor" vs "commit by Josh
+    Sherman" vs other). Useful when reasoning about who did what
+    -- e.g., a tier-1 issue tick can tell which prior commits were
+    autonomous bot work vs human direction without parsing the
+    Co-Authored-By trailer.
+
     Uses a NUL-separated format to handle multi-line bodies safely.
     Skips merge commits (they're rarely useful retrieval context).
     """
-    fmt = "%H%x00%ai%x00%s%x00%b%x00END%x00"
+    fmt = "%H%x00%ai%x00%aN%x00%s%x00%b%x00END%x00"
     for repo_path in discover_repos(repo_root):
         try:
             owner_repo = f"{repo_path.parent.name}/{repo_path.name}"
@@ -259,16 +270,20 @@ def collect_commit_entries(repo_root: Path, days: int):
             if not record:
                 continue
             parts = record.split("\x00")
-            if len(parts) < 4:
+            if len(parts) < 5:
                 continue
-            sha, date_iso, subject, body = parts[0], parts[1], parts[2], parts[3]
+            sha, date_iso, author, subject, body = (
+                parts[0], parts[1], parts[2], parts[3], parts[4]
+            )
             sha = sha.strip()
+            author = author.strip() or "unknown"
             subject = subject.strip()
             body = body.strip()
             if not sha or not subject:
                 continue
             date_str = date_iso.split(" ")[0] if date_iso else "n/a"
-            text = subject if not body else f"{subject}\n\n{body}"
+            header = f"{subject}\n(commit by {author} in {owner_repo}@{sha[:8]})"
+            text = header if not body else f"{header}\n\n{body}"
             eid = hashlib.sha256(
                 f"commit:{owner_repo}:{sha}".encode("utf-8")
             ).hexdigest()[:16]
@@ -277,7 +292,7 @@ def collect_commit_entries(repo_root: Path, days: int):
                 "text": text,
                 "source": "commit",
                 "date": date_str,
-                "timestamp": f"{owner_repo}@{sha[:8]}: {subject}",
+                "timestamp": f"{owner_repo}@{sha[:8]} by {author}: {subject}",
                 "repo": owner_repo,
             }
 
