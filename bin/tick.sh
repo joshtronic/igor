@@ -477,8 +477,22 @@ journal_is_duplicate() {
 
 # Idempotent clone-if-missing, pull-if-present. Creates the owner
 # subdir as needed. Pulls existing clones so brain identity changes
-# and website content updates propagate to Igor on every tick (not
-# only when something else triggers a fetch).
+# and website content updates propagate to Igor on every tick.
+#
+# Self-healing for dirty trees: a crashed tick (W_LOG-style unbound
+# var, OOM, timeout, etc.) can mutate working-tree files but never
+# reach the commit step, leaving the repo in a state where every
+# subsequent `git pull --rebase` refuses to run. The warning was
+# the only signal and the silent rot meant brain stopped getting
+# new commits for hours at a time.
+#
+# Fix: at tick start, if any tracked file is dirty, auto-commit
+# the leftover state with a `recovery:` subject and try to push.
+# The commit captures whatever the previous tick was writing (likely
+# blog-ideas.md edits, journal appends, sources weight adjustments)
+# instead of leaving them orphaned in the working tree. Pull then
+# succeeds against either the just-pushed origin or a clean local
+# tree.
 ensure_repo_local() {
   local repo="$1" local_path
   local_path=$(repo_path_for "$repo")
@@ -486,10 +500,37 @@ ensure_repo_local() {
     log "bootstrap: cloning $repo to $local_path"
     mkdir -p "$(dirname "$local_path")"
     git clone "$(ssh_clone_url "$repo")" "$local_path"
-  else
-    (cd "$local_path" && git pull --rebase --quiet origin 2>/dev/null) \
-      || log "warning: pull of $repo failed; using stale local copy"
+    return
   fi
+
+  # Detect uncommitted changes (staged or unstaged, tracked files
+  # only). Untracked files aren't counted -- they don't block
+  # git pull --rebase and we don't want to sweep them up blindly.
+  if ! (cd "$local_path" \
+        && git diff --quiet HEAD 2>/dev/null \
+        && git diff --cached --quiet 2>/dev/null); then
+    local dirty_summary
+    dirty_summary=$(cd "$local_path" && git status --short 2>/dev/null | head -10)
+    log "warning: $repo has uncommitted changes from a prior tick:"
+    while IFS= read -r line; do
+      [ -n "$line" ] && log "  $line"
+    done <<<"$dirty_summary"
+    if (cd "$local_path" \
+        && git add -A \
+        && git commit --quiet -m "recovery: auto-commit leftover changes from prior tick" 2>/dev/null); then
+      log "  recovery commit created in $repo"
+      if (cd "$local_path" && git push --quiet origin 2>/dev/null); then
+        log "  recovery commit pushed"
+      else
+        log "  warning: push of recovery commit failed; will retry next tick"
+      fi
+    else
+      log "  warning: recovery commit failed; pull will likely still fail"
+    fi
+  fi
+
+  (cd "$local_path" && git pull --rebase --quiet origin 2>/dev/null) \
+    || log "warning: pull of $repo failed; using stale local copy"
 }
 
 # -- Discretionary-work state (maintenance + post cooldowns) ----
