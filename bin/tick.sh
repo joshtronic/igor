@@ -1431,14 +1431,27 @@ if [ -z "$WINNER" ]; then
     W_POST_RULE="You already shipped a post today (local calendar day). Do NOT publish another post this tick -- max one post per day is a hard rule. Other site work (about page, layout, copy, links, tag pages, CSS) and read+journal ticks are still fair game."
   fi
 
+  # Site-work mode files new issues that future ticks claim and
+  # turn into PRs. Without a cap, busy days can pile up open Igor
+  # PRs faster than the human can review them. Once that backlog
+  # hits IGOR_DISCRETIONARY_PR_CAP (default 5), discretionary work
+  # switches to reading -- learn while the queue drains, don't
+  # add to it. Post mode is exempt from the cap because it's
+  # already bounded by 1-post-per-day cooldown; the pileup risk
+  # is from site-work, which has no other throttle.
+  W_PR_CAP="${IGOR_DISCRETIONARY_PR_CAP:-5}"
   if [ "$W_POSTING_ALLOWED" = "1" ]; then
     W_PICKED_MODE="post"
     W_SPLIT_ORDER="post site-work reading"
-  else
+  elif [ "$W_OPEN_PRS_COUNT" -lt "$W_PR_CAP" ]; then
     W_PICKED_MODE="site-work"
     W_SPLIT_ORDER="site-work reading"
+  else
+    W_PICKED_MODE="reading"
+    W_SPLIT_ORDER="reading"
+    log "discretionary: $W_OPEN_PRS_COUNT open Igor PRs >= cap $W_PR_CAP -- skipping site-work for reading"
   fi
-  log "discretionary: routing (posting_allowed=$W_POSTING_ALLOWED) -> $W_SPLIT_ORDER"
+  log "discretionary: routing (posting_allowed=$W_POSTING_ALLOWED, open_prs=$W_OPEN_PRS_COUNT, cap=$W_PR_CAP) -> $W_SPLIT_ORDER"
 
   # Reading mode short-circuit: it doesn't touch the website. Use a
   # scratch dir for the .igor/IGOR_JOURNAL.md output, run the
