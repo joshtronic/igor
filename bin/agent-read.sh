@@ -63,8 +63,12 @@ if [ -z "$HTML" ]; then
 fi
 
 # Truncate HTML if absurdly large to keep API costs sane. 200KB
-# is plenty for any real blog post.
-HTML=$(printf '%s' "$HTML" | head -c 200000)
+# is plenty for any real blog post. Bash substring instead of
+# `printf | head -c` -- the pipe SIGPIPEs printf when HTML is
+# bigger than the head limit, which fires on every read of a
+# medium+ article and clutters journalctl. Substring is
+# subprocess-free.
+HTML="${HTML:0:200000}"
 
 # Load identity for voice context. Falls back gracefully if brain
 # isn't on disk (e.g., local dev without a brain clone).
