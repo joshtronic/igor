@@ -47,6 +47,24 @@ forgejo_get_issue() {
   _fj GET "/repos/${repo}/issues/${number}"
 }
 
+# All non-bot reviews on a PR, sorted oldest-to-newest. Used to
+# detect "request changes" pickup signal -- if the latest non-bot
+# review on the CURRENT head is REQUEST_CHANGES, the reviewer has
+# rejected the current state and Igor should reopen the PR for
+# revision.
+#
+# Returns a JSON array of review objects (state, commit_id,
+# submitted_at, user, etc.). Filters out the bot's own reviews so
+# they don't drown out real reviewer signal.
+forgejo_pr_non_bot_reviews() {
+  local repo="$1" number="$2" bot="$3"
+  _fj GET "/repos/${repo}/pulls/${number}/reviews" \
+    | jq -c --arg b "$bot" '
+        [.[] | select(.user.login != $b)]
+        | sort_by(.submitted_at)
+      '
+}
+
 # All open issues on a repo, regardless of label/assignee. Used to
 # brief Claude on the current queue so discretionary site-work
 # ticks don't file duplicates of issues already queued.
