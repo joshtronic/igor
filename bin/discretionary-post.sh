@@ -138,6 +138,7 @@ TAGS_YAML=$(jq -r '"[" + (map(tojson) | join(", ")) + "]"' <<<"$TAGS_JSON")
   echo "discretionary-post: failed to write $POST_FILE" >&2
   exit 4
 }
+sed -i.bak -e 's/–/--/g' -e 's/—/--/g' "$POST_FILE" && rm -f "${POST_FILE}.bak"
 echo "discretionary-post: wrote post to $POST_FILE" >&2
 
 # -- write PR_BODY.md ---------------------------------------------
@@ -146,6 +147,7 @@ printf '%s\n' "$PR_BODY" > "$PR_BODY_FILE" || {
   echo "discretionary-post: failed to write $PR_BODY_FILE" >&2
   exit 4
 }
+sed -i.bak -e 's/–/--/g' -e 's/—/--/g' "$PR_BODY_FILE" && rm -f "${PR_BODY_FILE}.bak"
 echo "discretionary-post: wrote PR body to $PR_BODY_FILE" >&2
 
 # -- remove the used idea from blog-ideas.md ----------------------

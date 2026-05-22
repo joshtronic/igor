@@ -87,6 +87,15 @@ export BOT_USER
 export IGOR_REVIEWER="${IGOR_REVIEWER:-}"
 export IGOR_HOME
 
+# Put the harness's bin dir on PATH for every Claude invocation in
+# this script. Without this, Claude can't call agent-enqueue.sh /
+# agent-ask.sh / agent-block.sh / agent-report.sh by name -- it
+# either uses an absolute path (and trips the permission hook's
+# static analysis around command substitution) or shells out via a
+# temp script as a workaround. Allowlist already permits these by
+# name in agent-settings.json; PATH just needs to find them.
+export PATH="$IGOR_HOME/bin:$PATH"
+
 # -- Global lock (one tick at a time) --------------------------
 
 mkdir -p "$IGOR_STATE_DIR"
@@ -197,6 +206,44 @@ brain_system_prompt() {
 # Hits the API directly with curl so we don't pay the Claude Code
 # overhead.
 #
+# Normalize Unicode dashes that Claude/Haiku tend to emit. Forgejo
+# highlights U+2013 (en-dash) as an "ambiguous code point" because
+# it looks like a hyphen but isn't; the warning fires on every
+# PR/file that has one, which becomes constant background noise
+# given how often model output uses en-/em-dashes for emphasis.
+# Replace both with the ASCII "--" we use in prose anyway. Safe
+# for code, since en/em dashes are never load-bearing in code.
+#
+# Two flavors: pipe form (stdin -> stdout) and in-place file form.
+normalize_unicode_dashes() {
+  # If args given, treat as input text; otherwise read stdin.
+  if [ "$#" -gt 0 ]; then
+    printf '%s' "$*" | sed -e 's/–/--/g' -e 's/—/--/g'
+  else
+    sed -e 's/–/--/g' -e 's/—/--/g'
+  fi
+}
+
+normalize_unicode_dashes_in_file() {
+  local path="$1"
+  [ -f "$path" ] || return 0
+  local tmp; tmp=$(mktemp)
+  sed -e 's/–/--/g' -e 's/—/--/g' "$path" > "$tmp" && mv "$tmp" "$path"
+}
+
+# Sweep the well-known Claude-output files in a worktree's .igor/
+# scratch dir. Idempotent and silent on missing files. Called once
+# after each Claude invocation returns; catches PR_BODY.md / journal
+# / maintenance findings before any downstream step reads them.
+normalize_worktree_dashes() {
+  local worktree="$1"
+  [ -n "$worktree" ] || return 0
+  local f
+  for f in PR_BODY.md IGOR_JOURNAL.md IGOR_MAINTENANCE_FINDINGS.md; do
+    normalize_unicode_dashes_in_file "$worktree/.igor/$f"
+  done
+}
+
 # Model defaults to Haiku (cheap, fast, good enough for short
 # completions). Override via IGOR_MODEL_THINKING. Returns the text
 # of the response on stdout; empty on failure.
@@ -384,8 +431,11 @@ Rules:
     return 1
   fi
 
-  # Prepend a visible note so the reviewer knows this wasn't Claude.
-  printf '> _harness-generated body -- Claude did not write PR_BODY.md this tick._\n\n%s' "$body"
+  # No "harness-generated, claude didn't write this" marker. The
+  # signal lives in the harness log ("WARNING: PR_BODY.md was NOT
+  # written by claude this tick"). PR bodies don't need to advertise
+  # their provenance to the reviewer -- the body is the body.
+  printf '%s' "$(normalize_unicode_dashes "$body")"
 }
 
 # Returns a newline-separated list of off-limits paths touched in the
@@ -611,6 +661,8 @@ EOF
   m_exit=${PIPESTATUS[0]}
   set -e
   log "claude exited $m_exit after $(( $(date +%s) - m_start ))s"
+
+  normalize_worktree_dashes "$m_worktree"
 
   local findings="$m_worktree/.igor/IGOR_MAINTENANCE_FINDINGS.md"
   if [ -s "$findings" ]; then
@@ -1077,6 +1129,8 @@ EOF
     set -e
     PR_ELAPSED=$(( $(date +%s) - PR_START ))
     log "claude exited $PR_EXIT after ${PR_ELAPSED}s"
+
+    normalize_worktree_dashes "$PR_WORKTREE"
 
     cd "$PR_WORKTREE"
 
@@ -1644,6 +1698,8 @@ EOF
   W_ELAPSED=$(( $(date +%s) - W_START ))
   log "claude exited $W_EXIT after ${W_ELAPSED}s"
 
+  normalize_worktree_dashes "$W_WORKTREE"
+
 fi  # end if-claude-code-site-work
 
   # Journal write -- local-day bucketing; skip byte-identical dupes.
@@ -1844,9 +1900,9 @@ log "branch: ${BRANCH}"
 # can find the current issue. BOT_USER and IGOR_REVIEWER are
 # exported earlier (right after bot-identity resolution) so they're
 # available to agent-ask.sh from any tick shape (tier-1, tier-3,
-# PR-review, maintenance).
+# PR-review, maintenance). PATH is set at the top of the script so
+# all Claude invocations -- not just tier-1 -- find the harness bin.
 export ISSUE_NUMBER ISSUE_TITLE FORGEJO_REPO PR_BASE
-export PATH="$IGOR_HOME/bin:$PATH"
 
 # -- Cleanup on exit (set before worktree creation) ------------
 
@@ -1951,6 +2007,8 @@ CLAUDE_EXIT=${PIPESTATUS[0]}
 set -e
 ELAPSED=$(( $(date +%s) - START_TS ))
 log "claude exited $CLAUDE_EXIT (elapsed ${ELAPSED}s)"
+
+normalize_worktree_dashes "$WORKTREE"
 
 # Harness-owned commits: see derive_commit_subject + tier-3 comment.
 # Auto-commit anything dirty outside .igor/ so Claude doesn't have

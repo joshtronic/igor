@@ -273,6 +273,10 @@ printf '%s\n' "$JOURNAL" > "$JOURNAL_FILE" || {
   echo "discretionary-read: failed to write $JOURNAL_FILE" >&2
   exit 4
 }
+# Forgejo flags U+2013/U+2014 as "ambiguous code points" when they
+# show up in committed text. Model output uses them freely; collapse
+# to ASCII "--" before the brain commit picks the journal up.
+sed -i.bak -e 's/–/--/g' -e 's/—/--/g' "$JOURNAL_FILE" && rm -f "${JOURNAL_FILE}.bak"
 echo "discretionary-read: wrote journal entry to $JOURNAL_FILE" >&2
 
 # -- append to reading log ---------------------------------------
