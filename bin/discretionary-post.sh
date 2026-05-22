@@ -68,24 +68,129 @@ fi
 # uniform-random sample was thrown away once the reflection loop
 # landed -- random + reflective re-ordering would be working
 # against each other.
-ideas_count=$(grep -cE '^- ' "$IDEAS_FILE" 2>/dev/null || echo 0)
-if [ "$ideas_count" -le 0 ]; then
-  echo "discretionary-post: blog-ideas.md is empty -- nothing to draft" >&2
+# Helpers for dedupe-against-shipped scan.
+#
+# An idea is considered already-shipped if 2+ significant tokens
+# from its title appear in any existing post filename under
+# src/posts/. "Significant" = lowercase, >=4 chars, not a common
+# stop-word. Slugs are derived from titles via kebab-case, so
+# token-overlap on the filename is a robust proxy for "we already
+# shipped a post on this idea" even when the slug isn't byte-equal
+# to a naive slugify of the title.
+#
+# Examples:
+#   "hand-written by the robot" -> tokens: hand, written, robot
+#   matches: 2026-05-19-hand-written-by-the-robot.md (3/3 match)
+#   "the security model you get for free" -> tokens: security,
+#   model, free -> no shipped post matches
+extract_title_from_idea() {
+  printf '%s' "$1" | head -1 | grep -oE '"[^"]+"' | head -1 | sed 's/^"//; s/"$//'
+}
+
+title_significant_tokens() {
+  printf '%s' "$1" \
+    | tr 'A-Z' 'a-z' \
+    | tr -c 'a-z0-9' '\n' \
+    | awk 'length($0) >= 4' \
+    | grep -vxE 'this|that|with|when|what|from|have|been|were|over|into|than|then|just|like|some|even|most|will|your|they|them|their|about|after|under|while|every|might|could|would|should|where|which'
+}
+
+# Returns 0 (dupe found) if any post file in src/posts/ matches
+# 2+ significant tokens from the title. Echoes the matched filename
+# on stdout for logging.
+idea_is_dupe() {
+  local title="$1"
+  local posts_dir="$WORKTREE/src/posts"
+  [ -d "$posts_dir" ] || return 1
+
+  local tokens
+  tokens=$(title_significant_tokens "$title")
+  [ -z "$tokens" ] && return 1
+
+  # Need at least 2 tokens to make the match meaningful; otherwise
+  # a single-word title would false-positive everywhere.
+  local token_count
+  token_count=$(printf '%s\n' "$tokens" | wc -l)
+  [ "$token_count" -lt 2 ] && return 1
+
+  local post_file filename match_count tok matched_file
+  while IFS= read -r post_file; do
+    [ -z "$post_file" ] && continue
+    filename=$(basename "$post_file" .md | tr 'A-Z' 'a-z')
+    match_count=0
+    while IFS= read -r tok; do
+      [ -z "$tok" ] && continue
+      case "$filename" in
+        *"$tok"*) match_count=$((match_count + 1)) ;;
+      esac
+    done <<<"$tokens"
+    if [ "$match_count" -ge 2 ]; then
+      printf '%s' "$(basename "$post_file")"
+      return 0
+    fi
+  done < <(find "$posts_dir" -name '*.md' -type f 2>/dev/null)
+  return 1
+}
+
+# Remove the Nth `- ` block from blog-ideas.md (in place).
+remove_idea_at() {
+  local n="$1"
+  local tmp; tmp=$(mktemp)
+  awk -v n="$n" '
+    /^- / { count++; if (count == n) { in_skip = 1; next } if (in_skip) { in_skip = 0 } }
+    in_skip { next }
+    { print }
+  ' "$IDEAS_FILE" > "$tmp" && mv "$tmp" "$IDEAS_FILE"
+}
+
+# Loop: scan the top of the stack, remove any dupes we find,
+# stop at the first idea that doesn't match a shipped post.
+# Cap iterations so a malformed ideas file can't loop forever.
+PICK=1
+IDEA_TEXT=""
+DUPE_REMOVED=0
+MAX_DUPE_SCAN=10
+scan=0
+while [ "$scan" -lt "$MAX_DUPE_SCAN" ]; do
+  scan=$((scan + 1))
+  ideas_count=$(grep -cE '^- ' "$IDEAS_FILE" 2>/dev/null || echo 0)
+  if [ "$ideas_count" -le 0 ]; then
+    echo "discretionary-post: blog-ideas.md is empty -- nothing to draft" >&2
+    exit 2
+  fi
+
+  IDEA_TEXT=$(awk -v n="$PICK" '
+    /^- / { count++; if (count == n) { in_idea = 1; print; next } if (in_idea) { in_idea = 0; exit } }
+    in_idea { print }
+  ' "$IDEAS_FILE")
+  if [ -z "$IDEA_TEXT" ]; then
+    echo "discretionary-post: idea extraction returned empty (pick=$PICK / $ideas_count)" >&2
+    exit 2
+  fi
+
+  TITLE_FOR_DUPE=$(extract_title_from_idea "$IDEA_TEXT")
+  if [ -z "$TITLE_FOR_DUPE" ]; then
+    # Malformed idea (no quoted title); skip dupe check, take it as-is.
+    break
+  fi
+
+  matched=$(idea_is_dupe "$TITLE_FOR_DUPE") && {
+    echo "discretionary-post: idea '$TITLE_FOR_DUPE' looks like already-shipped post '$matched' -- removing from stack" >&2
+    remove_idea_at "$PICK"
+    DUPE_REMOVED=$((DUPE_REMOVED + 1))
+    IDEA_TEXT=""
+    continue
+  }
+  break
+done
+
+if [ -z "$IDEA_TEXT" ]; then
+  echo "discretionary-post: scanned $scan idea(s), removed $DUPE_REMOVED dupe(s), nothing left to draft" >&2
   exit 2
 fi
 
-PICK=1
-
-# Extract the picked idea: from the Nth `- ` line until the next
-# `- ` line (or end of file). awk handles the multi-line case.
-IDEA_TEXT=$(awk -v n="$PICK" '
-  /^- / { count++; if (count == n) { in_idea = 1; print; next } if (in_idea) { in_idea = 0; exit } }
-  in_idea { print }
-' "$IDEAS_FILE")
-
-if [ -z "$IDEA_TEXT" ]; then
-  echo "discretionary-post: idea extraction returned empty (pick=$PICK / $ideas_count)" >&2
-  exit 2
+if [ "$DUPE_REMOVED" -gt 0 ]; then
+  echo "discretionary-post: cleaned $DUPE_REMOVED already-shipped idea(s) from blog-ideas.md before picking" >&2
 fi
 
 echo "discretionary-post: picked idea $PICK / $ideas_count:" >&2
