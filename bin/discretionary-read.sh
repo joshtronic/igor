@@ -174,10 +174,34 @@ ledger_path() {
   printf '%s/memories/reading/sources/%s.md' "$BRAIN_PATH" "$(url_host "$source_url")"
 }
 
+# Strip trailing blank lines from a file. Used to keep ledger files
+# clean for markdownlint MD012 (no multiple consecutive blank lines),
+# which fires when a file ends with one or more blank lines AND
+# implicitly counts EOF as a blank.
+ledger_strip_trailing_blanks() {
+  local f="$1"
+  [ -f "$f" ] || return 0
+  local tmp; tmp=$(mktemp)
+  # Classic sed idiom: at EOF in an empty line, delete; otherwise
+  # accumulate and continue. Strips all trailing empty lines.
+  sed -e :a -e '/^$/{$d;N;ba' -e '}' "$f" > "$tmp" && mv "$tmp" "$f"
+}
+
 ledger_init() {
   local ledger="$1" source_url="$2"
-  [ -f "$ledger" ] && return 0
+  if [ -f "$ledger" ]; then
+    # Auto-heal: pre-existing ledgers from before the MD012 fix
+    # end with a trailing blank line that trips markdownlint.
+    # Normalize on every init so brain CI passes after the next
+    # commit_brain_changes picks up the modification.
+    ledger_strip_trailing_blanks "$ledger"
+    return 0
+  fi
   mkdir -p "$(dirname "$ledger")"
+  # No trailing blank line after "## Index" -- markdownlint MD012
+  # treats it as multiple consecutive blanks at EOF. The first URL
+  # appended via ledger_append_urls will insert the blank-line
+  # separator between the heading and the list (for MD022).
   cat > "$ledger" <<HDR
 # Posts seen from $(url_host "$source_url")
 
@@ -185,7 +209,6 @@ Source: ${source_url}
 Discovery: pending
 
 ## Index
-
 HDR
 }
 
@@ -238,9 +261,14 @@ ledger_load_fresh_urls() {
 # Append new URLs to the ledger as `- [ ] <url>`. Skips URLs that
 # are already in the ledger (any state), nav/boilerplate URLs
 # (via is_nav_url), and bare-domain URLs. Reads stdin.
+#
+# If the ledger has no URL entries yet, the first appended URL
+# gets a blank-line separator inserted before it -- "## Index"
+# needs a blank line before the list for markdownlint MD022.
 ledger_append_urls() {
-  local ledger="$1" url existing
+  local ledger="$1" url existing first_append=0
   existing=$(ledger_load_all_urls "$ledger")
+  [ -z "$existing" ] && first_append=1
   while IFS= read -r url; do
     [ -z "$url" ] && continue
     url=$(printf '%s' "$url" | sed 's/#.*//')
@@ -249,6 +277,10 @@ ledger_append_urls() {
     fi
     if printf '%s\n' "$existing" | grep -qxF "$url"; then
       continue
+    fi
+    if [ "$first_append" = "1" ]; then
+      printf '\n' >> "$ledger"
+      first_append=0
     fi
     printf -- '- [ ] %s\n' "$url" >> "$ledger"
     existing="${existing}"$'\n'"${url}"
