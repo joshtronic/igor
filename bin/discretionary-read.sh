@@ -306,4 +306,88 @@ if ! grep -qF "$entry" "$LOG_FILE"; then
 fi
 
 echo "discretionary-read: appended to reading log -> $entry" >&2
+
+# -- post-read reflection ----------------------------------------
+#
+# Single-shot Haiku call: did this read deserve a weight nudge on
+# the source? Any new domains worth pulling into the pool? Bounded
+# (delta -1/0/1, min weight 1, candidates land at weight 0). If
+# the reflection fails for any reason -- API error, parse error,
+# timeout -- we log it and continue. The read tick already succeeded;
+# rebalancing is a nice-to-have on top.
+
+apply_weight_delta() {
+  local target_url="$1"
+  local delta="$2"
+  local tmp
+  tmp=$(mktemp)
+  awk -v url="$target_url" -v delta="$delta" '
+    $1 == "-" && $2 ~ /^[0-9]+$/ && $3 == "--" && $4 == url {
+      newweight = $2 + delta
+      if (newweight < 1) newweight = 1
+      $2 = newweight
+      print
+      next
+    }
+    { print }
+  ' "$SOURCES_FILE" > "$tmp" && mv "$tmp" "$SOURCES_FILE"
+}
+
+append_candidate() {
+  local cand_url="$1"
+  local cand_label="$2"
+  # Already listed (any weight)? Match the URL as the 4th field on
+  # a source line -- avoids false-positives from inline mentions in
+  # surrounding prose.
+  if awk -v url="$cand_url" '
+       $1 == "-" && $2 ~ /^[0-9]+$/ && $3 == "--" && $4 == url { found=1; exit }
+       END { exit !found }
+     ' "$SOURCES_FILE"; then
+    return
+  fi
+  if ! grep -qF "## Candidates" "$SOURCES_FILE"; then
+    {
+      printf '\n## Candidates (auto-discovered)\n\n'
+      printf 'Surfaced by post-read reflection. Weight 0 = listed\n'
+      printf 'but not sampled. Dial up when one looks worth trying.\n\n'
+    } >> "$SOURCES_FILE"
+  fi
+  printf '%s\n' "- 0 -- $cand_url -- $cand_label" >> "$SOURCES_FILE"
+  echo "discretionary-read: candidate added -- $cand_url ($cand_label)" >&2
+}
+
+reflection=$("$IGOR_HOME/bin/agent-reflect-read.sh" \
+  "$PICKED_SOURCE" "$URL" "$TITLE" "$JOURNAL_FILE" "$SOURCES_FILE" 2>/dev/null) || {
+  echo "discretionary-read: reflection skipped (executor failed)" >&2
+  reflection=""
+}
+
+if [ -n "$reflection" ]; then
+  delta=$(jq -r '.weight_delta // 0' <<<"$reflection" 2>/dev/null || echo 0)
+  case "$delta" in
+    -1|0|1) ;;
+    *) delta=0 ;;
+  esac
+  weight_reason=$(jq -r '.weight_reason // ""' <<<"$reflection" 2>/dev/null || echo "")
+
+  if [ "$delta" -ne 0 ]; then
+    apply_weight_delta "$PICKED_SOURCE" "$delta"
+    echo "discretionary-read: weight delta $delta for $PICKED_SOURCE -- $weight_reason" >&2
+  else
+    echo "discretionary-read: weight held for $PICKED_SOURCE -- $weight_reason" >&2
+  fi
+
+  cand_tmp=$(mktemp)
+  jq -c '.candidates[]?' <<<"$reflection" 2>/dev/null > "$cand_tmp" || true
+  while IFS= read -r candidate; do
+    [ -z "$candidate" ] && continue
+    cand_url=$(jq -r '.url // ""' <<<"$candidate" 2>/dev/null || echo "")
+    cand_label=$(jq -r '.label // ""' <<<"$candidate" 2>/dev/null || echo "")
+    [ -z "$cand_url" ] && continue
+    [ -z "$cand_label" ] && cand_label="(unlabeled)"
+    append_candidate "$cand_url" "$cand_label"
+  done < "$cand_tmp"
+  rm -f "$cand_tmp"
+fi
+
 echo "discretionary-read: success" >&2
