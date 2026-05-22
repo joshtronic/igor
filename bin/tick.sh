@@ -943,11 +943,21 @@ if [ -n "$REVIEW_PR" ]; then
     (cd "$PR_REPO_PATH" && git worktree add -B "$PR_HEAD" "$PR_WORKTREE" "origin/${PR_HEAD}")
     init_igor_scratch "$PR_WORKTREE"
 
-    # Fetch comments defensively -- a 404 on either endpoint shouldn't
-    # kill the tick; just treat as no-comments. PRs without inline
-    # review comments hit the empty case via [] from `|| echo '[]'`.
+    # Fetch comments defensively -- a 404 on any endpoint shouldn't
+    # kill the tick; just treat as no-comments.
+    #
+    # Three sources of reviewer signal, all need to be passed to
+    # Claude:
+    #   1. Issue-level comments (the "Conversation" tab text)
+    #   2. Inline review comments (file/line-tied)
+    #   3. Review BODIES -- the summary text attached to a formal
+    #      review verdict (APPROVED / REQUEST_CHANGES / COMMENT).
+    #      Forgejo's "Request changes" UI puts the reviewer's main
+    #      message HERE, not in issue-level comments. Missing this
+    #      = Claude sees "no comments" and exits without action.
     PR_ISSUE_RAW=$(forgejo_pr_comments "$PR_REPO" "$PR_NUMBER" 2>/dev/null || echo '[]')
     PR_INLINE_RAW=$(forgejo_pr_review_comments "$PR_REPO" "$PR_NUMBER" 2>/dev/null || echo '[]')
+    PR_REVIEWS_RAW=$(forgejo_pr_non_bot_reviews "$PR_REPO" "$PR_NUMBER" "$BOT_USER" 2>/dev/null || echo '[]')
 
     PR_ISSUE_COMMENTS=$(jq -r --arg me "$BOT_USER" '
         [.[] | select(.user.login != $me)
@@ -959,8 +969,17 @@ if [ -n "$REVIEW_PR" ]; then
             + (if .original_line then " line " + (.original_line|tostring) else "" end)
             + " (" + (.created_at // "") + "):\n\n" + (.body // "")]
         | join("\n\n---\n\n")' <<<"$PR_INLINE_RAW" 2>/dev/null || echo "")
+    # Review bodies: only include reviews that have a non-empty body
+    # (a review with state but no comment is just an approval click).
+    PR_REVIEW_BODIES=$(jq -r '
+        [.[] | select((.body // "") | length > 0)
+          | "**" + (.user.login // "?") + "** "
+            + "(state: " + (.state // "?") + ", "
+            + (.submitted_at // "") + "):\n\n"
+            + (.body // "")]
+        | join("\n\n---\n\n")' <<<"$PR_REVIEWS_RAW" 2>/dev/null || echo "")
 
-    log "PR-review: ${#PR_ISSUE_COMMENTS} chars of issue comments, ${#PR_INLINE_COMMENTS} chars of inline review"
+    log "PR-review: ${#PR_ISSUE_COMMENTS} chars of issue comments, ${#PR_INLINE_COMMENTS} chars of inline review, ${#PR_REVIEW_BODIES} chars of review bodies"
 
     PR_USER_MSG=$(cat <<EOF
 You opened PR ${PR_REPO}#${PR_NUMBER}: ${PR_TITLE}
@@ -983,13 +1002,22 @@ Branch: ${PR_HEAD}
 PR body:
 ${PR_BODY}
 
-## Issue-level comments
+## Review summaries (Forgejo "Request changes" / "Approve" / "Comment" verdicts)
 
-${PR_ISSUE_COMMENTS}
+These are the formal review bodies attached to a state change.
+If a reviewer hit "Request changes" with a comment, the comment
+is HERE (not in issue-level comments below). Address what's
+actionable in these first.
 
-## Inline review comments
+${PR_REVIEW_BODIES:-(no formal review bodies on this PR)}
 
-${PR_INLINE_COMMENTS}
+## Issue-level comments (the Conversation tab)
+
+${PR_ISSUE_COMMENTS:-(no issue-level comments on this PR)}
+
+## Inline review comments (file/line-tied)
+
+${PR_INLINE_COMMENTS:-(no inline review comments on this PR)}
 
 Same rules as PR mode (AGENTS.md): TDD where the repo supports it,
 project tests + lint must pass before exit, /security-review on your
