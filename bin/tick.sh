@@ -1079,6 +1079,29 @@ EOF
     log "claude exited $PR_EXIT after ${PR_ELAPSED}s"
 
     cd "$PR_WORKTREE"
+
+    # Harness-side auto-commit: if Claude made edits but forgot to
+    # `git commit` (common -- the issue-work mode has the same
+    # safety net), commit them ourselves with a derived subject.
+    # Same pattern as issue-work: harness owns the procedural step,
+    # Claude owns the content step.
+    #
+    # Excludes .igor/ (per-tick scratch, never committed).
+    PR_DIRTY=$(git status --porcelain 2>/dev/null \
+      | grep -vE '^.. \.igor/' \
+      | head -c 1)
+    if [ -n "$PR_DIRTY" ]; then
+      log "PR-review: claude left dirty files in the worktree without committing -- harness committing"
+      (cd "$PR_WORKTREE" && git add -A -- ':!.igor' 2>/dev/null) || true
+      PR_AUTO_SUBJECT=$(derive_commit_subject \
+        "$PR_WORKTREE/.igor/PR_BODY.md" \
+        "$PR_WORKTREE" \
+        "chore: PR-review revisions for ${PR_REPO}#${PR_NUMBER}")
+      log "PR-review: harness-commit subject: $PR_AUTO_SUBJECT"
+      (cd "$PR_WORKTREE" && git commit --quiet -m "$PR_AUTO_SUBJECT") \
+        || log "warning: harness commit failed"
+    fi
+
     PR_NEW=$(git rev-list --count "origin/${PR_HEAD}..HEAD" 2>/dev/null || echo 0)
 
     if [ "$PR_NEW" -gt 0 ]; then
