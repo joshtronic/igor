@@ -896,17 +896,20 @@ commit_brain_changes() {
 discretionary_assess_cadence() {
   local open_prs="$1"
   local posting_allowed="$2"
-  local today journal_today commits_today repo_dir count post_today
+  local today reflections_today commits_today repo_dir count post_today prs_opened_today
   today=$(date +%Y-%m-%d)
 
-  # Today's brain journal entries (count of '## ' headers in today's
-  # file). Imperfect -- Claude sometimes skips journaling on site-work
-  # ticks -- but the other metrics (PRs, commits) catch what matters.
+  # Tick reflections logged today: count of harness-written separator
+  # lines in today's brain journal file. Each tick that writes a
+  # journal entry adds a "## <ISO-timestamp> -- <mode>" header, so
+  # the date-prefixed pattern is what we want -- Claude's prose H2
+  # headers inside an entry (like "## What it means to be...") would
+  # also match a looser '^## ' pattern and inflate the count.
   local journal_file="${BRAIN_PATH:-}/journal/${today}.md"
   if [ -n "${BRAIN_PATH:-}" ] && [ -f "$journal_file" ]; then
-    journal_today=$(grep -c '^## ' "$journal_file" 2>/dev/null || echo 0)
+    reflections_today=$(grep -cE '^## [0-9]+-[0-9]+-[0-9]+T' "$journal_file" 2>/dev/null || echo 0)
   else
-    journal_today=0
+    reflections_today=0
   fi
 
   # Today's commits across cloned repos. No author filter: Josh's
@@ -921,6 +924,19 @@ discretionary_assess_cadence() {
             --no-merges --oneline 2>/dev/null | wc -l | tr -d ' ')
       commits_today=$((commits_today + ${count:-0}))
     done
+  fi
+
+  # PRs Igor authored TODAY across the website repo, regardless of
+  # current state. Open + merged + closed-without-merge all count
+  # as "Igor shipped work today" -- the cadence is asking whether
+  # the day's been productive, not whether the queue is reviewed.
+  # state=all + user.login filter + created_at-startswith-today.
+  prs_opened_today=0
+  if [ -n "${BOT_USER:-}" ]; then
+    prs_opened_today=$(_fj GET "/repos/${BOT_USER}/website/pulls?state=all&sort=newest&limit=50" 2>/dev/null \
+      | jq --arg u "$BOT_USER" --arg today "$today" \
+          '[.[] | select(.user.login == $u) | select(.created_at | startswith($today))] | length' 2>/dev/null \
+      || echo 0)
   fi
 
   # Did a post land on website master today?
@@ -950,10 +966,17 @@ Today is $today.
 
 Your activity since local midnight:
 - Open Igor PRs in the queue: $open_prs
-- Brain journal entries written today: $journal_today
+- Igor PRs opened today (any state): $prs_opened_today
+- Tick reflections logged today: $reflections_today
 - Commits authored today (all repos): $commits_today
 - Post landed today: $([ "$post_today" = "1" ] && echo "yes" || echo "no")
 - Posting eligible this tick: $posting_label
+
+"Igor PRs opened today" is the most direct "did I ship work today?"
+signal -- it counts the new PRs Igor authored regardless of whether
+they're still open, merged, or closed without merge. "Tick reflections"
+is how many ticks logged a journal entry; it's a measure of activity,
+not output.
 
 If the decision is "work", the tick will: $work_label.
 If the decision is "read", the tick will: read an article + journal-reflect.
