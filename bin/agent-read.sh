@@ -104,29 +104,62 @@ preamble. Just the JSON object:
 EOF
 )
 
-USER_MESSAGE=$(printf 'URL: %s\n\nHTML content:\n\n%s' "$URL" "$HTML")
+# Build the JSON payload via files, not --arg. Truncated HTML can
+# be ~200KB; passing that as a command-line argument blows past
+# ARG_MAX on smaller-stack systems with "Argument list too long".
+# --rawfile reads the contents as a literal string and embeds it
+# correctly in the JSON.
+USER_MSG_FILE=$(mktemp)
+SYSTEM_FILE=$(mktemp)
+PAYLOAD_FILE=$(mktemp)
+trap 'rm -f "$USER_MSG_FILE" "$SYSTEM_FILE" "$PAYLOAD_FILE" "$RESPONSE_FILE" 2>/dev/null' EXIT
+printf 'URL: %s\n\nHTML content:\n\n%s' "$URL" "$HTML" > "$USER_MSG_FILE"
+printf '%s' "$SYSTEM_PROMPT" > "$SYSTEM_FILE"
 
-PAYLOAD=$(jq -n \
+jq -n \
   --arg m "$MODEL" \
-  --arg s "$SYSTEM_PROMPT" \
-  --arg u "$USER_MESSAGE" \
+  --rawfile s "$SYSTEM_FILE" \
+  --rawfile u "$USER_MSG_FILE" \
   '{
     model: $m,
     max_tokens: 1500,
     system: $s,
     messages: [{role: "user", content: $u}]
-  }')
+  }' > "$PAYLOAD_FILE" || {
+  echo "agent-read: failed to build request payload for $URL" >&2
+  exit 3
+}
 
-RESPONSE=$(curl -sf \
+# Capture HTTP status + curl exit separately so failures point at
+# something actionable ("HTTP 529" vs "curl exit 22") instead of
+# the generic "API call failed".
+RESPONSE_FILE=$(mktemp)
+HTTP_STATUS=$(curl -sS \
   -X POST https://api.anthropic.com/v1/messages \
   -H "x-api-key: $ANTHROPIC_API_KEY" \
   -H "anthropic-version: 2023-06-01" \
   -H "Content-Type: application/json" \
   --max-time 120 \
-  -d "$PAYLOAD" 2>/dev/null) || {
-  echo "agent-read: API call failed for $URL" >&2
+  -w '%{http_code}' \
+  -o "$RESPONSE_FILE" \
+  --data-binary "@$PAYLOAD_FILE" 2>/tmp/agent-read-curl-err.$$)
+CURL_EXIT=$?
+
+if [ "$CURL_EXIT" -ne 0 ]; then
+  CURL_ERR=$(cat /tmp/agent-read-curl-err.$$ 2>/dev/null | head -1)
+  rm -f /tmp/agent-read-curl-err.$$ 2>/dev/null
+  echo "agent-read: curl failed for $URL (exit $CURL_EXIT): $CURL_ERR" >&2
   exit 3
-}
+fi
+rm -f /tmp/agent-read-curl-err.$$ 2>/dev/null
+
+if [ "$HTTP_STATUS" != "200" ]; then
+  ERR_DETAIL=$(jq -r '.error.message // .error.type // empty' < "$RESPONSE_FILE" 2>/dev/null | head -c 200)
+  echo "agent-read: API returned HTTP $HTTP_STATUS for $URL${ERR_DETAIL:+ -- $ERR_DETAIL}" >&2
+  exit 3
+fi
+
+RESPONSE=$(cat "$RESPONSE_FILE")
 
 # Extract the text content the model returned
 TEXT=$(jq -r '.content[0].text // ""' <<<"$RESPONSE")
