@@ -390,4 +390,20 @@ if [ -n "$reflection" ]; then
   rm -f "$cand_tmp"
 fi
 
+# -- post-tick ideas reflection ----------------------------------
+#
+# A read shifts what feels timely. The just-written journal entry
+# is the freshest signal of where Igor's head is right now -- pass
+# it to the ideas reflection helper, which asks Haiku whether any
+# blog-ideas should move up or down a slot. Bounded (max 3 moves,
+# 1 slot each). Failures are silent -- the read tick succeeded.
+
+IDEAS_FILE="$BRAIN_PATH/blog-ideas.md"
+if [ -x "$IGOR_HOME/bin/agent-reflect-ideas.py" ] && [ -f "$IDEAS_FILE" ]; then
+  python3 "$IGOR_HOME/bin/agent-reflect-ideas.py" \
+    "$JOURNAL_FILE" "$IDEAS_FILE" 2>&1 \
+    | sed 's/^/discretionary-read: ideas-reflection: /' >&2 \
+    || true
+fi
+
 echo "discretionary-read: success" >&2

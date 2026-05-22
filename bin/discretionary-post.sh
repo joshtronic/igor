@@ -61,16 +61,20 @@ fi
 # lines (indented or following). Treat any "- " at column 0 as the
 # start of an idea, gather until the next "- " or EOF.
 #
-# Strategy: number ideas, pick one at random, return its full
-# text (header + continuation).
+# Strategy: the ideas list is priority-ordered (top = next up).
+# A post-discretionary-tick reflection (bin/agent-reflect-ideas.py)
+# shuffles ideas up/down based on freshness signals, so picking
+# the top is "take the most timely idea right now". The old
+# uniform-random sample was thrown away once the reflection loop
+# landed -- random + reflective re-ordering would be working
+# against each other.
 ideas_count=$(grep -cE '^- ' "$IDEAS_FILE" 2>/dev/null || echo 0)
 if [ "$ideas_count" -le 0 ]; then
   echo "discretionary-post: blog-ideas.md is empty -- nothing to draft" >&2
   exit 2
 fi
 
-# Pick a random 1-indexed idea number
-PICK=$((RANDOM % ideas_count + 1))
+PICK=1
 
 # Extract the picked idea: from the Nth `- ` line until the next
 # `- ` line (or end of file). awk handles the multi-line case.
@@ -156,5 +160,20 @@ awk -v n="$PICK" '
   { print }
 ' "$IDEAS_FILE" > "$tmp" && mv "$tmp" "$IDEAS_FILE"
 echo "discretionary-post: removed used idea from blog-ideas.md" >&2
+
+# -- post-tick ideas reflection ----------------------------------
+#
+# What Igor just wrote shifts what feels timely. Hand the post
+# body to the reflection helper; it asks Haiku whether any
+# remaining ideas should bubble up or sink down a slot. Bounded
+# (max 3 moves, 1 slot each). Failures are silent -- the post
+# already shipped.
+
+if [ -x "$IGOR_HOME/bin/agent-reflect-ideas.py" ]; then
+  python3 "$IGOR_HOME/bin/agent-reflect-ideas.py" \
+    "$POST_FILE" "$IDEAS_FILE" 2>&1 \
+    | sed 's/^/discretionary-post: ideas-reflection: /' >&2 \
+    || true
+fi
 
 echo "discretionary-post: success" >&2
