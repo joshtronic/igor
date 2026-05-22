@@ -1,3 +1,5 @@
 .env
 .env.local
 *.log
+__pycache__/
+*.pyc
