@@ -857,24 +857,69 @@ do_maintenance_tick || true
 
 # -- PR-review pickup ------------------------------------------
 #
-# The "assignment dance": Igor opens a PR assigned to IGOR_REVIEWER;
-# the human reviews, leaves comments, and reassigns the PR back to
-# Igor. Next tick finds it here and reopens the work on the PR's
-# existing branch -- new commits, push, reassign to reviewer, exit.
+# Two pickup signals, in priority order:
+#
+# 1. Forgejo "Request changes" review on the current PR HEAD --
+#    reviewer rejected the current state via Forgejo's native
+#    review UI. Picked up automatically; no label/assignment
+#    dance needed.
+#
+# 2. The "assignment dance" (legacy/manual override): reviewer
+#    reassigns the PR back to Igor. Next tick finds it here and
+#    reopens the work.
 #
 # Disabled when IGOR_REVIEWER is unset (testing / solo runs without
 # a reviewer configured).
 
-if [ -n "${IGOR_REVIEWER:-}" ]; then
+REVIEW_PR=""
+REVIEW_PR_TRIGGER=""
+
+# Signal 1: scan all bot-accessible repos for open Igor PRs where
+# the latest non-bot review on the CURRENT HEAD is REQUEST_CHANGES.
+# The HEAD check is important -- if Igor already pushed follow-up
+# commits, the old REQUEST_CHANGES no longer applies and we
+# shouldn't re-pickup until the reviewer reviews again.
+RC_REPOS=$(forgejo_list_bot_repos 2>/dev/null || echo '[]')
+while read -r repo_full; do
+  [ -n "$REVIEW_PR" ] && break
+  [ -z "$repo_full" ] && continue
+  rc_open_prs=$(forgejo_list_open_bot_prs "$repo_full" "$BOT_USER" 2>/dev/null || echo '[]')
+  while read -r pr_num; do
+    [ -n "$REVIEW_PR" ] && break
+    [ -z "$pr_num" ] && continue
+    pr_details_json=$(forgejo_get_pr "$repo_full" "$pr_num" 2>/dev/null || echo '{}')
+    pr_head_sha=$(jq -r '.head.sha // ""' <<<"$pr_details_json")
+    [ -z "$pr_head_sha" ] && continue
+    latest_review=$(forgejo_pr_non_bot_reviews "$repo_full" "$pr_num" "$BOT_USER" 2>/dev/null \
+      | jq -c '.[-1] // empty')
+    [ -z "$latest_review" ] && continue
+    review_state=$(jq -r '.state // ""' <<<"$latest_review")
+    review_commit=$(jq -r '.commit_id // ""' <<<"$latest_review")
+    if [ "$review_state" = "REQUEST_CHANGES" ] && [ "$review_commit" = "$pr_head_sha" ]; then
+      # Synthesize the PR record into the same shape forgejo_my_assigned_prs
+      # returns so the downstream flow can consume it uniformly.
+      REVIEW_PR=$(jq -c --arg r "$repo_full" '. + {repository: {full_name: $r}}' <<<"$pr_details_json")
+      REVIEW_PR_TRIGGER="REQUEST_CHANGES review on current HEAD"
+    fi
+  done < <(jq -r '.[].number' <<<"$rc_open_prs" 2>/dev/null)
+done < <(jq -r '.[].full_name' <<<"$RC_REPOS" 2>/dev/null)
+
+# Signal 2: assignment dance (only if no request-changes signal fired)
+if [ -z "$REVIEW_PR" ] && [ -n "${IGOR_REVIEWER:-}" ]; then
   REVIEW_PRS=$(forgejo_my_assigned_prs 2>/dev/null || echo '[]')
   REVIEW_COUNT=$(jq 'length' <<<"$REVIEW_PRS")
   if [ "$REVIEW_COUNT" -gt 0 ]; then
     REVIEW_PR=$(jq -c '.[0]' <<<"$REVIEW_PRS")
+    REVIEW_PR_TRIGGER="reassigned back to bot"
+  fi
+fi
+
+if [ -n "$REVIEW_PR" ]; then
     PR_NUMBER=$(jq -r .number <<<"$REVIEW_PR")
     PR_REPO=$(jq -r '.repository.full_name' <<<"$REVIEW_PR")
     PR_TITLE=$(jq -r .title <<<"$REVIEW_PR")
 
-    log "PR-review: ${PR_REPO}#${PR_NUMBER} assigned back -- reopening"
+    log "PR-review: ${PR_REPO}#${PR_NUMBER} -- reopening (${REVIEW_PR_TRIGGER})"
 
     PR_DETAILS=$(forgejo_get_pr "$PR_REPO" "$PR_NUMBER" 2>/dev/null || echo '{}')
     PR_HEAD=$(jq -r '.head.ref // ""' <<<"$PR_DETAILS")
@@ -1020,7 +1065,6 @@ Reassigning back so a human can review/discard." 2>/dev/null \
     (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || true
 
     exit 0
-  fi
 fi
 
 # -- Discovery: find globally oldest claimable -----------------
