@@ -1459,8 +1459,20 @@ What to do:
      re-discovering the problem. Reference specific files, give
      acceptance criteria.
 
+   IF agent-enqueue.sh FAILS for any reason (permission gate,
+   network error, label problem, etc.): do NOT silently exit with
+   only a journal entry. Surface the failure as a question issue
+   via:
+
+     agent-ask.sh igor/brain "harness gap: <short summary>" "<details>"
+
+   This puts a Status/Needs More Info issue on Josh's dashboard so
+   the gap is visible without him scrolling journalctl. Journal
+   entries are private and easy to miss; issues are not.
+
 5. Exit cleanly. NO commits, NO edits to files in the worktree,
-   NO PR. The issue you filed is the tick's output.
+   NO PR. The issue you filed (or the agent-ask question, if
+   enqueue failed) is the tick's output.
 
 IN-FLIGHT PRs: $W_IN_FLIGHT
 
