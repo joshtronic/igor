@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -36,6 +37,33 @@ import urllib.request
 MAX_MOVES = 3
 SECTION_OPEN = "## Open ideas"
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+
+
+def rag_query(query: str) -> str:
+    """Call lib/rag.sh's rag_query via a shell, return the markdown
+    blob on stdout. Empty string on any failure -- the reflection
+    works fine without RAG context."""
+    if not query.strip():
+        return ""
+    igor_home = os.environ.get("IGOR_HOME")
+    if not igor_home:
+        return ""
+    rag_sh = os.path.join(igor_home, "lib", "rag.sh")
+    if not os.path.isfile(rag_sh):
+        return ""
+    try:
+        result = subprocess.run(
+            ["bash", "-c", f'. "{rag_sh}" && rag_query "$1"', "_", query],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            env=os.environ.copy(),
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
 
 
 def log(msg: str) -> None:
@@ -175,11 +203,18 @@ def call_haiku(
         "}"
     )
 
+    # Pull past context related to the tick's output so the reflection
+    # can spot recurring framings or just-shipped topics.
+    rag_context = rag_query(context[:2000])
+
     user = (
         "Context (what Igor just did this tick):\n\n"
         f"{context.strip()}\n\n"
         "Current blog-ideas list (1-indexed, top = next up):\n\n"
-        f"{listing}\n"
+        f"{listing}\n\n"
+        "---\n\n"
+        "## Past context (RAG -- prior thinking related to what just happened)\n\n"
+        f"{rag_context if rag_context else '(no past context retrieved this tick)'}\n"
     )
 
     payload = {

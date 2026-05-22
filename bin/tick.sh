@@ -71,6 +71,14 @@ FORGEJO_SSH_HOST="${FORGEJO_SSH_HOST:-$(echo "$FORGEJO_URL" | sed -E 's|^[a-z]+:
 . "$IGOR_HOME/lib/forgejo.sh"
 # shellcheck source=lib/repo-checks.sh
 . "$IGOR_HOME/lib/repo-checks.sh"
+# shellcheck source=lib/rag.sh
+. "$IGOR_HOME/lib/rag.sh"
+
+# Children (discretionary executors, agent-* scripts) re-source
+# lib/rag.sh and share our per-tick build marker via $IGOR_TICK_PID.
+# Without this, each child would think it owns the build and either
+# duplicate the ~25s flush+rebuild or fail to find the marker.
+export IGOR_TICK_PID=$$
 
 # -- Resolve bot identity --------------------------------------
 
@@ -607,9 +615,18 @@ do_maintenance_tick() {
   # need global scope so the trap can see them.
   M_WT_PATH="$m_worktree"
   M_TGT_PATH="$target_path"
-  trap '[ -d "$M_WT_PATH" ] && (cd "$M_TGT_PATH" && git worktree remove --force "$M_WT_PATH") 2>/dev/null || true' EXIT
+  trap '[ -d "$M_WT_PATH" ] && (cd "$M_TGT_PATH" && git worktree remove --force "$M_WT_PATH") 2>/dev/null || true; rag_cleanup_marker' EXIT
 
   cd "$m_worktree"
+
+  local m_brain="$IGOR_REPO_ROOT/${BOT_USER}/brain"
+
+  # RAG context: prior maintenance findings, related commits, any
+  # journal entries about this repo. Helps catch repeat-offender
+  # findings vs the first-time surface.
+  local m_rag_context
+  m_rag_context=$(IGOR_BRAIN_PATH="$m_brain" rag_query "maintenance pass on $target")
+  [ -n "$m_rag_context" ] && log "rag: surfaced past context for maintenance"
 
   local m_user_msg
   m_user_msg=$(cat <<EOF
@@ -639,10 +656,15 @@ No human is waiting on you. Your job:
 Don't commit fixes during a maintenance pass -- file findings and
 let normal work flow address them on a future tick. Same content
 rules as always: identity guardrails apply.
+
+---
+
+## Past context (RAG)
+
+${m_rag_context:-(no past context retrieved this tick)}
 EOF
 )
 
-  local m_brain="$IGOR_REPO_ROOT/${BOT_USER}/brain"
   local m_system_prompt
   m_system_prompt=$(brain_system_prompt "$m_brain")
 
@@ -1033,6 +1055,13 @@ if [ -n "$REVIEW_PR" ]; then
 
     log "PR-review: ${#PR_ISSUE_COMMENTS} chars of issue comments, ${#PR_INLINE_COMMENTS} chars of inline review, ${#PR_REVIEW_BODIES} chars of review bodies"
 
+    # RAG context for the review pickup: the PR title + body is the
+    # most concrete signal of what this PR's about. Helps surface
+    # past discussions of the same code area / topic.
+    PR_RAG_CONTEXT=$(rag_query "${PR_TITLE}
+${PR_BODY}")
+    [ -n "$PR_RAG_CONTEXT" ] && log "rag: surfaced past context for PR review"
+
     PR_USER_MSG=$(cat <<EOF
 You opened PR ${PR_REPO}#${PR_NUMBER}: ${PR_TITLE}
 
@@ -1107,6 +1136,12 @@ Same rules as PR mode (AGENTS.md): TDD where the repo supports it,
 project tests + lint must pass before exit, /security-review on your
 diff. Stay on this branch. Do not open a new PR -- this one already
 exists.
+
+---
+
+## Past context (RAG)
+
+${PR_RAG_CONTEXT:-(no past context retrieved this tick)}
 EOF
 )
 
@@ -1352,7 +1387,10 @@ if [ -z "$WINNER" ]; then
   if [ "$W_PICKED_MODE" = "reading" ]; then
     W_SCRATCH="$IGOR_STATE_DIR/scratch-reading-$$"
     mkdir -p "$W_SCRATCH/.igor"
-    R_CLEANUP() { rm -rf "$W_SCRATCH" 2>/dev/null || true; }
+    R_CLEANUP() {
+      rm -rf "$W_SCRATCH" 2>/dev/null || true
+      rag_cleanup_marker
+    }
     trap R_CLEANUP EXIT
     W_START=$(date +%s)
     if IGOR_BRAIN_PATH="$BRAIN_PATH" \
@@ -1494,6 +1532,7 @@ nothing else is calling you, this is a fine tick to spend reading
   W_CLEANUP() {
     [ -d "$W_WORKTREE" ] && (cd "$W_PATH" && git worktree remove --force "$W_WORKTREE") 2>/dev/null || true
     cleanup_agent_branches "discretionary-${W_TS}" "$W_PATH"
+    rag_cleanup_marker
   }
   trap W_CLEANUP EXIT
 
@@ -1576,35 +1615,12 @@ if [ "$USED_HARNESS_MODE" = "site-work-claude" ] || [ -z "$USED_HARNESS_MODE" ];
     ' <<<"$W_OPEN_ISSUES_JSON")
   fi
 
-  # RAG: rebuild journal index and pull relevant past entries to inject
-  # into the user message. Best-effort -- if any step fails, the tick
-  # proceeds with no RAG context rather than blocking on it.
-  W_RAG_CONTEXT=""
-  RAG_VENV="$IGOR_STATE_DIR/rag-venv"
-  # Setup is idempotent and silent on success; only emit if it has
-  # something to say (first-time install, requirements changed).
-  if "$IGOR_HOME/bin/setup-rag.sh"; then
-    # Build/query both write progress + counts to stderr; let them
-    # through to journalctl so the flush+rebuild cycle is auditable
-    # ("rag: flushed redis db (N keys removed)", "rag: indexed N
-    # entries (dbsize now N+M)", etc.). Stderr is captured by
-    # systemd-journald alongside the harness's own [igor] log lines.
-    if IGOR_BRAIN_PATH="$BRAIN_PATH" \
-       "$RAG_VENV/bin/python" "$IGOR_HOME/bin/rag.py" build; then
-      # Query with the in-flight context -- the most concrete signal
-      # of what Igor is currently dealing with this tick. stdout is
-      # the markdown blob we capture; stderr (errors only here) flows
-      # to journalctl.
-      W_RAG_CONTEXT=$(IGOR_BRAIN_PATH="$BRAIN_PATH" \
-        "$RAG_VENV/bin/python" "$IGOR_HOME/bin/rag.py" query \
-          "$W_IN_FLIGHT" -k 5 || true)
-      [ -n "$W_RAG_CONTEXT" ] && log "rag: surfaced past context for discretionary tick"
-    else
-      log "warning: rag build failed -- proceeding without past-context retrieval"
-    fi
-  else
-    log "warning: rag venv setup failed -- proceeding without past-context retrieval"
-  fi
+  # RAG: pull relevant past entries to inject into the user message.
+  # Build happens lazily on first rag_query in the tick (other Claude
+  # paths share the build via $IGOR_TICK_PID). Best-effort -- failures
+  # log a warning and return empty.
+  W_RAG_CONTEXT=$(rag_query "$W_IN_FLIGHT")
+  [ -n "$W_RAG_CONTEXT" ] && log "rag: surfaced past context for discretionary tick"
 
   W_USER_MSG=$(cat <<EOF
 MODE: FILE A SITE-WORK ISSUE. The harness sampled site-work from
@@ -1917,6 +1933,7 @@ cleanup() {
   if [ -n "${ISSUE_NUMBER:-}" ] && [ -d "$REPO_PATH/.git" ]; then
     cleanup_agent_branches "$ISSUE_NUMBER" "$REPO_PATH"
   fi
+  rag_cleanup_marker
   exit "$rc"
 }
 trap cleanup EXIT
@@ -1972,17 +1989,6 @@ init_igor_scratch "$WORKTREE"
 
 cd "$WORKTREE"
 
-USER_MSG=$(cat <<EOF
-You are working Forgejo issue #${ISSUE_NUMBER} in ${FORGEJO_REPO}.
-
-Title: ${ISSUE_TITLE}
-Labels: ${ISSUE_LABELS}
-
-Body:
-${ISSUE_BODY}
-EOF
-)
-
 # System prompt: brain_system_prompt assembles AGENTS.md + brain
 # files in cache-friendly order. Brain files are bootstrap-required;
 # log a warning if identity.md is missing rather than crashing the
@@ -1991,6 +1997,30 @@ BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
 [ -f "$BRAIN_PATH/identity.md" ] \
   || log "warning: brain identity.md missing at $BRAIN_PATH"
 SYSTEM_PROMPT=$(brain_system_prompt "$BRAIN_PATH")
+
+# RAG context: the issue title + body is the most concrete signal of
+# what Igor is about to work on. Pulls past journal entries, related
+# commits, and prior reviews touching the same area.
+TIER1_RAG_CONTEXT=$(IGOR_BRAIN_PATH="$BRAIN_PATH" rag_query "${ISSUE_TITLE}
+${ISSUE_BODY}")
+[ -n "$TIER1_RAG_CONTEXT" ] && log "rag: surfaced past context for tier-1 issue work"
+
+USER_MSG=$(cat <<EOF
+You are working Forgejo issue #${ISSUE_NUMBER} in ${FORGEJO_REPO}.
+
+Title: ${ISSUE_TITLE}
+Labels: ${ISSUE_LABELS}
+
+Body:
+${ISSUE_BODY}
+
+---
+
+## Past context (RAG)
+
+${TIER1_RAG_CONTEXT:-(no past context retrieved this tick)}
+EOF
+)
 
 log "invoking claude (timeout ${IGOR_TIMEOUT})"
 CLAUDE_LOG="$WORKTREE/.igor/claude-output.log"

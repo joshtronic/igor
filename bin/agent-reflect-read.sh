@@ -103,6 +103,13 @@ Schema:
 EOF
 )
 
+# RAG: surface past reflections on this source so we don't pingpong
+# the weight back and forth across ticks ("I bumped this twice last
+# week" is useful signal when deciding to bump again).
+# shellcheck source=../lib/rag.sh
+. "$IGOR_HOME/lib/rag.sh"
+RAG_CONTEXT=$(rag_query "reading source $SOURCE_URL")
+
 USER_MESSAGE=$(cat <<EOF
 Source picked: $SOURCE_URL
 Article read: $ARTICLE_URL
@@ -116,6 +123,12 @@ Current sources.md (use this to dedupe candidates -- any URL
 already listed here, at any weight, is NOT a fresh candidate):
 
 $SOURCES
+
+---
+
+## Past context (RAG -- prior thinking about this source)
+
+${RAG_CONTEXT:-(no past context retrieved this tick)}
 EOF
 )
 
