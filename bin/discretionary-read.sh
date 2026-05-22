@@ -805,9 +805,19 @@ if [ -n "$reflection" ]; then
   esac
   weight_reason=$(jq -r '.weight_reason // ""' <<<"$reflection" 2>/dev/null || echo "")
 
+  # Weight adjustments only make sense when source domain == URL
+  # domain (personal sites). For aggregator sources (HN, Kagi),
+  # the URL lives on some destination domain that has nothing to
+  # do with the source's quality -- a thin Verge article should
+  # not downweight HN. Candidates + promotions still apply; the
+  # weight stays where it is.
   if [ "$delta" -ne 0 ]; then
-    apply_weight_delta "$PICKED_SOURCE" "$delta"
-    echo "discretionary-read: weight delta $delta for $PICKED_SOURCE -- $weight_reason" >&2
+    if [ "$PICKED_SOURCE_TYPE" = "personal" ]; then
+      apply_weight_delta "$PICKED_SOURCE" "$delta"
+      echo "discretionary-read: weight delta $delta for $PICKED_SOURCE -- $weight_reason" >&2
+    else
+      echo "discretionary-read: weight delta $delta SKIPPED for $PICKED_SOURCE (aggregator -- destination quality doesn't reflect source) -- $weight_reason" >&2
+    fi
   else
     echo "discretionary-read: weight held for $PICKED_SOURCE -- $weight_reason" >&2
   fi
