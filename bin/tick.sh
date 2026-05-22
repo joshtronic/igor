@@ -765,39 +765,31 @@ EOF
 # Calendar-day semantics (not rolling 24h) so "once a day" matches
 # what a human means -- the day ticks over at local midnight.
 #
-# Reads from reality, not state. The git log on origin/master is the
-# authoritative signal -- if a post was merged today, the rule fires.
-# Paired with the W_INFLIGHT_POST check in the discretionary block
-# (which scans open Igor PRs for src/posts/ files added), this
-# covers both "shipped" and "shipping" cases. A closed-without-merge
-# PR leaves no trace in either -- intentional, so rejected posts
-# don't block the next attempt.
+# Reads from reality, scoped strictly to TODAY:
+#
+#   (a) origin/master tree contains a post file whose filename
+#       begins with today's date (src/posts/YYYY/YYYY-MM-DD-...)
+#       -> already shipped today, cooldown fires.
+#   (b) Open Igor PRs adding a post file whose filename begins
+#       with today's date (checked by the caller as
+#       W_INFLIGHT_POST, NOT by this function) -> today's slot
+#       is in flight, cooldown fires.
+#
+# An open PR carrying YESTERDAY's post (still awaiting review)
+# does NOT block today's posting slot. A closed-without-merge PR
+# from any day leaves no trace. Tomorrow's tick is similarly
+# scoped to tomorrow's date and unaffected by yesterday's open
+# PRs.
+#
+# State files used to be a third source here, but they drifted
+# out of sync with reality when ticks crashed mid-flow. Dropped
+# entirely; filename-date in master + open PRs is the only truth.
 #
 # Only gates posts -- other site work (about page, layout, copy)
 # and read+journal ticks are unthrottled.
 posts_cooldown_clear() {
   local today website_path
   today=$(date +%Y-%m-%d)
-
-  # Ground truth from reality, not state files. Two sources:
-  #
-  #   (a) origin/master git log: if a post was merged today, the
-  #       1-post-per-day rule fires.
-  #   (b) Open Igor PRs adding src/posts/*.md (checked by the
-  #       caller as W_INFLIGHT_POST, NOT by this function).
-  #
-  # Together those cover both "shipped" and "shipping" cases. A
-  # closed-without-merge PR leaves no trace in either -- which is
-  # exactly the desired behavior: a rejected post should not block
-  # the next attempt.
-  #
-  # Earlier versions also consulted ~/.local/state/igor/discretionary-
-  # state.json (.tier3.website_last_day), but state files drift out
-  # of sync with reality when ticks crash mid-flow (e.g., a post-tick
-  # crashed after marking shipped but before opening the PR -- the
-  # rest of the day was blocked even though no post was actually
-  # in flight). Dropped entirely. The state file is regenerable and
-  # losing its post-related fields is harmless.
 
   website_path=$(repo_path_for "${BOT_USER}/website")
   if [ ! -d "$website_path/.git" ]; then
@@ -807,19 +799,24 @@ posts_cooldown_clear() {
     return 0
   fi
 
-  # Fetch origin master so the log check sees current truth, not a
-  # stale local copy. Best-effort -- a transient fetch failure means
-  # we look at whatever's already in origin/master, which the
-  # top-of-tick ensure_repo_local pulled. Bounded cost.
+  # Fetch origin master so the tree check sees current truth, not
+  # a stale local copy. Best-effort -- a transient fetch failure
+  # means we look at whatever's already in origin/master, which
+  # the top-of-tick ensure_repo_local pulled. Bounded cost.
   (cd "$website_path" && git fetch --quiet origin master 2>/dev/null) || true
 
-  local merged_today
-  merged_today=$(cd "$website_path" \
-    && git log --since="$today 00:00:00" --until="$today 23:59:59" \
-        origin/master --diff-filter=A --name-only --pretty=format: \
-        -- 'src/posts/*' 2>/dev/null \
-    | grep -cE '^src/posts/.+\.md$' || true)
-  if [ "${merged_today:-0}" -gt 0 ]; then
+  # Check the CURRENT TREE of origin/master for a post file whose
+  # filename starts with today's date. The earlier version of this
+  # check looked at git log --since/--until (commit date), which
+  # confused backdated commits and same-day reverts. The filename
+  # date is what matters -- "did Igor publish a post FOR today?"
+  # -- and that's recoverable from a tree listing without ambiguity.
+  local today_re="^src/posts/[0-9]{4}/${today}-.+\\.md$"
+  local today_count
+  today_count=$(cd "$website_path" \
+    && git ls-tree --name-only -r origin/master 2>/dev/null \
+    | grep -cE "$today_re" || true)
+  if [ "${today_count:-0}" -gt 0 ]; then
     return 1
   fi
 
@@ -1530,12 +1527,23 @@ if [ -z "$WINNER" ]; then
   # state BEFORE routing, not after.
   W_OPEN_PRS_JSON=$(forgejo_list_open_bot_prs "$W_REPO" "$BOT_USER" 2>/dev/null || echo '[]')
   W_OPEN_PRS_COUNT=$(jq 'length' <<<"$W_OPEN_PRS_JSON")
+
+  # Inflight-post scan is TODAY-SCOPED. The filename format from
+  # discretionary-post.sh is src/posts/YYYY/YYYY-MM-DD-slug.md, so
+  # we filter the PR's added files to ones whose basename starts
+  # with today's date. An open PR carrying a post from yesterday
+  # (still awaiting review) does NOT block today's posting slot --
+  # tomorrow's tick should not be blocked by yesterday's PR either.
+  W_TODAY=$(date +%Y-%m-%d)
+  W_TODAY_POST_RE="^src/posts/[0-9]{4}/${W_TODAY}-.+\\.md$"
   W_INFLIGHT_POST=0
   if [ "$W_OPEN_PRS_COUNT" -gt 0 ]; then
     while read -r pr_number; do
       [ -z "$pr_number" ] && continue
       if forgejo_pr_files "$W_REPO" "$pr_number" 2>/dev/null \
-          | jq -e '[.[] | select(.status == "added") | .filename] | any(. ; test("^src/posts/.+\\.md$"))' >/dev/null 2>&1; then
+          | jq -e --arg re "$W_TODAY_POST_RE" \
+              '[.[] | select(.status == "added") | .filename | select(test($re))] | length > 0' \
+              >/dev/null 2>&1; then
         W_INFLIGHT_POST=1
         break
       fi
