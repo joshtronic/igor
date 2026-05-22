@@ -6,10 +6,15 @@ Subcommands:
                     plus recent commits from each bot-accessible repo.
     query <text>    Find top-K relevant entries for <text>.
 
-The corpus has three sources, distinguishable via the `source` tag:
+The corpus has four sources, distinguishable via the `source` tag:
     journal -- per-tick reflections from brain/journal/
     memory  -- distilled memory files from brain/memories/
     commit  -- recent commits across cloned repos (default last 30 days)
+    review  -- review bodies + inline comments from recently merged
+               PRs (default last 30 days). Captures human feedback
+               that's actionable for future work (e.g., "ship it but
+               next time consider X"). Approval comments that
+               otherwise vanish into Forgejo's UI surface here.
 
 Both commands require Redis 8+ (or Redis Stack -- needs the vector
 search module) at $REDIS_URL (default redis://localhost:6379), and
@@ -25,8 +30,11 @@ Environment:
     IGOR_REPO_ROOT         where the harness clones repos
                            (default ~/.local/state/igor/repos)
     IGOR_RAG_COMMIT_DAYS   how far back to embed commits (default 30)
+    IGOR_RAG_REVIEW_DAYS   how far back to embed PR reviews (default 30)
     IGOR_RAG_CACHE_PATH    sqlite embedding cache location
                            (default $IGOR_STATE_DIR/rag-embeddings.sqlite)
+    FORGEJO_URL            Forgejo base URL (for review fetch)
+    FORGEJO_TOKEN          Forgejo API token (for review fetch)
 
 The sqlite cache stores deterministic (model, text) -> embedding
 mappings so a full corpus re-embed only happens once. Subsequent
@@ -37,12 +45,16 @@ next tick rebuilds it.
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timezone
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -62,6 +74,9 @@ DEFAULT_REPO_ROOT = os.environ.get("IGOR_REPO_ROOT") or os.path.expanduser(
     "~/.local/state/igor/repos"
 )
 COMMIT_DAYS = int(os.environ.get("IGOR_RAG_COMMIT_DAYS", "30"))
+REVIEW_DAYS = int(os.environ.get("IGOR_RAG_REVIEW_DAYS", "30"))
+FORGEJO_URL = os.environ.get("FORGEJO_URL", "").rstrip("/")
+FORGEJO_TOKEN = os.environ.get("FORGEJO_TOKEN", "")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 DEFAULT_STATE_DIR = os.environ.get("IGOR_STATE_DIR") or os.path.expanduser(
     "~/.local/state/igor"
@@ -267,6 +282,132 @@ def collect_commit_entries(repo_root: Path, days: int):
             }
 
 
+# -- review collector ----------------------------------------------------
+
+def _forgejo_get(path: str):
+    """GET /api/v1/<path> against FORGEJO_URL with token auth.
+    Returns parsed JSON, or None on any failure."""
+    if not FORGEJO_URL or not FORGEJO_TOKEN:
+        return None
+    url = f"{FORGEJO_URL}/api/v1/{path.lstrip('/')}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"token {FORGEJO_TOKEN}",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, TimeoutError):
+        return None
+
+
+def collect_review_entries(repo_root: Path, days: int):
+    """Walk recently merged PRs in each repo, yield row dicts for
+    each non-bot review body and inline comment.
+
+    Captures human feedback that would otherwise vanish into
+    Forgejo's UI once a PR is merged: approval comments, request-
+    changes summaries, line-level corrections. These inform
+    future ticks via RAG retrieval.
+    """
+    if not FORGEJO_URL or not FORGEJO_TOKEN:
+        return  # API not configured (e.g., local dev without .env)
+
+    bot_user = os.environ.get("BOT_USER", "")  # best-effort filter
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    for repo_path in discover_repos(repo_root):
+        owner_repo = f"{repo_path.parent.name}/{repo_path.name}"
+
+        # List recently closed/merged PRs. Forgejo's pulls endpoint
+        # sorts by recently updated; limit 50 covers most active
+        # repos for ~30 days. Pagination could be added later.
+        prs = _forgejo_get(
+            f"repos/{owner_repo}/pulls?state=closed&sort=newest&limit=50"
+        )
+        if not prs:
+            continue
+
+        for pr in prs:
+            # Skip if older than cutoff
+            updated = pr.get("updated_at") or ""
+            try:
+                pr_dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if pr_dt < cutoff:
+                continue
+
+            pr_num = pr.get("number")
+            pr_title = (pr.get("title") or "").strip()
+            if not pr_num:
+                continue
+
+            # Fetch reviews on this PR
+            reviews = _forgejo_get(
+                f"repos/{owner_repo}/pulls/{pr_num}/reviews"
+            ) or []
+
+            for rev in reviews:
+                reviewer = (rev.get("user") or {}).get("login") or ""
+                if bot_user and reviewer == bot_user:
+                    continue  # skip bot's own reviews
+
+                rev_state = rev.get("state") or ""
+                rev_body = (rev.get("body") or "").strip()
+                rev_id = rev.get("id")
+                rev_date = (rev.get("submitted_at") or updated)[:10]
+
+                # Review body as one entry (if non-empty)
+                if rev_body:
+                    text = (
+                        f"PR {owner_repo}#{pr_num}: {pr_title}\n"
+                        f"Review by {reviewer} ({rev_state}):\n\n{rev_body}"
+                    )
+                    eid = hashlib.sha256(
+                        f"review:{owner_repo}:{pr_num}:{rev_id}".encode("utf-8")
+                    ).hexdigest()[:16]
+                    yield {
+                        "key": f"igor:review:{eid}",
+                        "text": text,
+                        "source": "review",
+                        "date": rev_date,
+                        "timestamp": f"{owner_repo}#{pr_num} review by {reviewer}",
+                        "repo": owner_repo,
+                    }
+
+                # Inline comments embedded in review.comments[]
+                for c in (rev.get("comments") or []):
+                    c_body = (c.get("body") or "").strip()
+                    if not c_body:
+                        continue
+                    c_author = (c.get("user") or {}).get("login") or reviewer
+                    if bot_user and c_author == bot_user:
+                        continue
+                    c_path = c.get("path") or ""
+                    c_line = c.get("original_line") or c.get("line") or ""
+                    c_id = c.get("id")
+                    text = (
+                        f"PR {owner_repo}#{pr_num}: {pr_title}\n"
+                        f"Inline comment by {c_author} on `{c_path}`"
+                        f"{f' line {c_line}' if c_line else ''}:\n\n{c_body}"
+                    )
+                    eid = hashlib.sha256(
+                        f"review-inline:{owner_repo}:{pr_num}:{c_id}".encode("utf-8")
+                    ).hexdigest()[:16]
+                    yield {
+                        "key": f"igor:review:{eid}",
+                        "text": text,
+                        "source": "review",
+                        "date": rev_date,
+                        "timestamp": f"{owner_repo}#{pr_num} inline by {c_author}",
+                        "repo": owner_repo,
+                    }
+
+
 # -- embedding cache -----------------------------------------------------
 
 def _open_cache():
@@ -373,12 +514,14 @@ def build_index(brain_path: Path, repo_root: Path, days: int, quiet: bool = Fals
     journal_rows = list(collect_journal_entries(brain_path))
     memory_rows = list(collect_memory_entries(brain_path))
     commit_rows = list(collect_commit_entries(repo_root, days))
-    all_rows = journal_rows + memory_rows + commit_rows
+    review_rows = list(collect_review_entries(repo_root, REVIEW_DAYS))
+    all_rows = journal_rows + memory_rows + commit_rows + review_rows
 
     log(
         f"rag: collected {len(journal_rows)} journal + "
         f"{len(memory_rows)} memory + {len(commit_rows)} commit "
-        f"(last {days}d) = {len(all_rows)} total"
+        f"(last {days}d) + {len(review_rows)} review "
+        f"(last {REVIEW_DAYS}d) = {len(all_rows)} total"
     )
 
     if not all_rows:
