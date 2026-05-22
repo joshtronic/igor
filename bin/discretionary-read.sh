@@ -321,8 +321,35 @@ probe_discovery() {
 }
 
 parse_sitemap() {
-  local url="$1"
-  curl -sfL --max-time 15 --max-filesize 5000000 -A "$UA" "$url" 2>/dev/null \
+  local url="$1" content
+  content=$(curl -sfL --max-time 15 --max-filesize 5000000 -A "$UA" "$url" 2>/dev/null)
+  [ -z "$content" ] && return
+
+  # WordPress and many other CMSes return a sitemap INDEX at
+  # /sitemap.xml or /wp-sitemap.xml -- a list of sub-sitemap URLs,
+  # not actual posts. Detect <sitemapindex> and recurse one level:
+  # fetch each sub-sitemap, extract its <loc> entries, aggregate.
+  # No deeper recursion (sitemap indexes rarely nest beyond one
+  # level; if they do, we just miss those URLs -- not fatal).
+  if printf '%s' "$content" | head -c 2048 | grep -qE '<sitemapindex'; then
+    local sub_urls sub
+    sub_urls=$(printf '%s' "$content" \
+      | grep -oE '<loc>[^<]+</loc>' \
+      | sed -E 's,</?loc>,,g')
+    while IFS= read -r sub; do
+      [ -z "$sub" ] && continue
+      curl -sfL --max-time 15 --max-filesize 5000000 -A "$UA" "$sub" 2>/dev/null \
+        | grep -oE '<loc>[^<]+</loc>' \
+        | sed -E 's,</?loc>,,g' \
+        | grep -vE '\.(xml|gz)$'
+    done <<<"$sub_urls"
+    return
+  fi
+
+  # Plain urlset: extract <loc> entries directly. Skip any that
+  # point to sub-sitemaps (shouldn't happen in a urlset, but
+  # defensive).
+  printf '%s' "$content" \
     | grep -oE '<loc>[^<]+</loc>' \
     | sed -E 's,</?loc>,,g' \
     | grep -vE '\.(xml|gz)$'
