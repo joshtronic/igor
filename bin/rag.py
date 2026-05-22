@@ -7,14 +7,22 @@ Subcommands:
     query <text>    Find top-K relevant entries for <text>.
 
 The corpus has four sources, distinguishable via the `source` tag:
-    journal -- per-tick reflections from brain/journal/
-    memory  -- distilled memory files from brain/memories/
-    commit  -- recent commits across cloned repos (default last 30 days)
-    review  -- review bodies + inline comments from recently merged
-               PRs (default last 30 days). Captures human feedback
-               that's actionable for future work (e.g., "ship it but
-               next time consider X"). Approval comments that
-               otherwise vanish into Forgejo's UI surface here.
+    journal   -- per-tick reflections from brain/journal/
+    memory    -- distilled memory files from brain/memories/
+    commit    -- recent commits across cloned repos (default last 30 days)
+    review    -- review bodies + inline comments from recently merged
+                 PRs (default last 30 days). Captures human feedback
+                 that's actionable for future work (e.g., "ship it but
+                 next time consider X"). Approval comments that
+                 otherwise vanish into Forgejo's UI surface here.
+    closed-pr -- per-PR metadata for closed PRs Igor authored (last
+                 30 days): title + body + resolution + the closer's
+                 issue-tab comments. Fills the gap for closed-without-
+                 merge PRs which produce no commit and may have no
+                 formal review -- the rejection reason was previously
+                 invisible to Igor on future ticks. Merged PRs also
+                 produce a row here so the PR-level conversation
+                 supplements the commit's diff.
 
 Both commands require Redis 8+ (or Redis Stack -- needs the vector
 search module) at $REDIS_URL (default redis://localhost:6379), and
@@ -408,6 +416,118 @@ def collect_review_entries(repo_root: Path, days: int):
                     }
 
 
+# -- closed-PR collector -------------------------------------------------
+
+def collect_closed_pr_entries(repo_root: Path, days: int):
+    """Per-PR metadata for recently closed PRs Igor authored.
+
+    Fills a real gap: closed-without-merge PRs leave no trace in the
+    other sources. They produce no commits (so the commit collector
+    misses them), and if no review body was filed the review
+    collector misses them too. The rejection reason lives in the
+    issue-comment thread of a now-closed PR -- functionally
+    invisible to Igor on future ticks.
+
+    For each closed PR Igor authored in the window:
+      - title + body (truncated)
+      - resolution (merged vs closed-without-merge, with date)
+      - last few non-bot issue comments (the "why" for closes)
+    Per-PR, one entry. Body truncation keeps tokens bounded.
+    """
+    if not FORGEJO_URL or not FORGEJO_TOKEN:
+        return
+
+    bot_user = os.environ.get("BOT_USER", "")
+    if not bot_user:
+        return  # without a bot identity we can't tell which PRs are Igor's
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    for repo_path in discover_repos(repo_root):
+        owner_repo = f"{repo_path.parent.name}/{repo_path.name}"
+
+        prs = _forgejo_get(
+            f"repos/{owner_repo}/pulls?state=closed&sort=newest&limit=50"
+        )
+        if not prs:
+            continue
+
+        for pr in prs:
+            updated = pr.get("updated_at") or ""
+            try:
+                pr_dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if pr_dt < cutoff:
+                continue
+
+            pr_author = (pr.get("user") or {}).get("login") or ""
+            if pr_author != bot_user:
+                continue  # only Igor's own PRs
+
+            pr_num = pr.get("number")
+            if not pr_num:
+                continue
+            pr_title = (pr.get("title") or "").strip()
+            pr_body = (pr.get("body") or "").strip()
+            merged = bool(pr.get("merged"))
+            closed_at = (pr.get("closed_at") or pr.get("merged_at") or updated)[:10]
+            merge_commit = pr.get("merge_commit_sha") or ""
+
+            if merged:
+                resolution = f"merged {closed_at}"
+                if merge_commit:
+                    resolution += f" as {merge_commit[:8]}"
+            else:
+                resolution = f"closed {closed_at} WITHOUT merge"
+
+            # Issue-tab comments. The closer's note explains "why
+            # not" for rejected PRs; the last few capture the
+            # resolution context in either direction.
+            comments = _forgejo_get(
+                f"repos/{owner_repo}/issues/{pr_num}/comments"
+            ) or []
+            close_context = []
+            for c in comments[-3:]:
+                c_body = (c.get("body") or "").strip()
+                if not c_body:
+                    continue
+                c_author = (c.get("user") or {}).get("login") or ""
+                if c_author == bot_user:
+                    continue  # skip Igor's own comments
+                snippet = c_body[:300] + ("..." if len(c_body) > 300 else "")
+                close_context.append(f"  {c_author}: {snippet}")
+
+            body_excerpt = pr_body[:1000]
+            if len(pr_body) > 1000:
+                body_excerpt += "..."
+
+            text_parts = [
+                f"PR {owner_repo}#{pr_num}: {pr_title}",
+                f"Resolution: {resolution}",
+            ]
+            if body_excerpt:
+                text_parts.append("")
+                text_parts.append(body_excerpt)
+            if close_context:
+                text_parts.append("")
+                text_parts.append("Close context:")
+                text_parts.extend(close_context)
+
+            text = "\n".join(text_parts)
+            eid = hashlib.sha256(
+                f"closed-pr:{owner_repo}:{pr_num}".encode("utf-8")
+            ).hexdigest()[:16]
+            yield {
+                "key": f"igor:closed-pr:{eid}",
+                "text": text,
+                "source": "closed-pr",
+                "date": closed_at,
+                "timestamp": f"{owner_repo}#{pr_num} {'merged' if merged else 'closed'}",
+                "repo": owner_repo,
+            }
+
+
 # -- embedding cache -----------------------------------------------------
 
 def _open_cache():
@@ -515,13 +635,15 @@ def build_index(brain_path: Path, repo_root: Path, days: int, quiet: bool = Fals
     memory_rows = list(collect_memory_entries(brain_path))
     commit_rows = list(collect_commit_entries(repo_root, days))
     review_rows = list(collect_review_entries(repo_root, REVIEW_DAYS))
-    all_rows = journal_rows + memory_rows + commit_rows + review_rows
+    closed_pr_rows = list(collect_closed_pr_entries(repo_root, REVIEW_DAYS))
+    all_rows = journal_rows + memory_rows + commit_rows + review_rows + closed_pr_rows
 
     log(
         f"rag: collected {len(journal_rows)} journal + "
         f"{len(memory_rows)} memory + {len(commit_rows)} commit "
-        f"(last {days}d) + {len(review_rows)} review "
-        f"(last {REVIEW_DAYS}d) = {len(all_rows)} total"
+        f"(last {days}d) + {len(review_rows)} review + "
+        f"{len(closed_pr_rows)} closed-PR (last {REVIEW_DAYS}d) "
+        f"= {len(all_rows)} total"
     )
 
     if not all_rows:
