@@ -166,21 +166,21 @@ sample_weighted() {
 # Lines look like:
 #
 #   - [ ] https://thatgirljen.com/2026/02/02/fledgling/
-#   - [ ] https://news.example.com/story -- hn-rank 1 -- hn-points 847
-#   - [x] https://other.example.com/post -- read 2026-05-22 -- hn-rank 3 -- hn-points 230
+#   - [x] https://thatgirljen.com/2026/03/15/spring/ -- read 2026-05-22
 #
 # URL is the first token after `[ ]`/`[x]`. Everything after the
 # first `--` is annotations (space-separated key+value, recurring
 # `--` separators). Annotations:
 #
 #   read YYYY-MM-DD    when this URL was read (only on [x] lines)
-#   hn-rank N          highest position this URL reached on HN
-#                      (lowest number wins on update)
-#   hn-points N        peak upvote count Igor observed on HN
-#                      (highest number wins on update)
 #
-# Future annotations slot in the same way -- just don't break the
-# "URL is first space-delimited token" parse.
+# Source-specific metadata lives in the SOURCE's ledger, not on
+# random destination ledgers. HN's ledger (news.ycombinator.com.md)
+# carries `hn-rank N` and `hn-points N` for each URL surfaced via
+# HN's front page; the destination domain's ledger records the
+# same URL but stays focused on the domain itself. Future
+# aggregator sources do the same -- their metadata lives in the
+# aggregator's ledger.
 
 ledger_path() {
   printf '%s/memories/reading/sources/%s.md' "$BRAIN_PATH" "$(url_host "$1")"
@@ -624,38 +624,65 @@ while [ "$attempts" -lt "$MAX_ATTEMPTS" ]; do
         candidates=$(printf '%s' "$candidates" | awk 'NF')
         ;;
       hn)
-        # HN fanout: each URL goes to its destination domain's
-        # ledger with hn-rank AND hn-points annotations. Candidates
-        # are sorted by points DESC (peak upvotes), then rank ASC
-        # as tiebreaker -- a story that hit 800 points and fell
-        # off ranks above today's 200-point #1.
+        # HN flow: hn-rank / hn-points annotations live on HN's
+        # OWN ledger (news.ycombinator.com.md) -- the master list
+        # of URLs Igor has ever seen on HN's front page. The
+        # destination domain ledger (e.g. theverge.com.md, etc.)
+        # records the URL too, but without HN-specific gunk -- so
+        # foo.com's ledger stays focused on foo.com.
+        #
+        # Picker walks HN's ledger (sorted by points DESC, rank
+        # ASC), filters out URLs marked read in EITHER ledger.
+        # That cross-source dedup catches the case where Igor
+        # read a URL via HN and later the same URL turns up in
+        # the destination's own sitemap (after promotion).
         discovered=$(discover_hn)
         if [ -z "$discovered" ]; then
           echo "discretionary-read: HN API empty or unreachable, trying another source" >&2
           continue
         fi
-        sorted_candidates=""
+
+        hn_ledger=$(ledger_path "https://news.ycombinator.com")
+        ledger_init_minimal "$hn_ledger" "https://news.ycombinator.com"
+
+        # Ingest this tick's RSS into both ledgers. HN's gets
+        # annotations; the destination's just notes the URL.
         while IFS='|' read -r rank points url; do
           [ -z "$url" ] && continue
+          ledger_append_url "$hn_ledger" "$url" "hn-rank $rank -- hn-points $points"
+          ledger_update_rank "$hn_ledger" "$url" "$rank"
+          ledger_update_points "$hn_ledger" "$url" "$points"
           dest_ledger=$(ledger_path "$url")
-          ledger_init_minimal "$dest_ledger" "$url"
-          if ledger_url_is_read "$dest_ledger" "$url"; then
-            continue
+          if [ "$dest_ledger" != "$hn_ledger" ]; then
+            ledger_init_minimal "$dest_ledger" "$url"
+            ledger_append_url "$dest_ledger" "$url"
           fi
-          # Initial append stores both annotations; subsequent
-          # updates keep the strongest signal (lowest rank seen,
-          # highest points seen).
-          ledger_append_url "$dest_ledger" "$url" "hn-rank $rank -- hn-points $points"
-          ledger_update_rank "$dest_ledger" "$url" "$rank"
-          ledger_update_points "$dest_ledger" "$url" "$points"
+          # If log.md already shows this URL as read, mark in both.
           if [ -f "$LOG_FILE" ] && grep -qF "$url" "$LOG_FILE" 2>/dev/null; then
-            ledger_mark_read "$dest_ledger" "$url"
+            ledger_mark_read "$hn_ledger" "$url"
+            [ "$dest_ledger" != "$hn_ledger" ] && ledger_mark_read "$dest_ledger" "$url"
+          fi
+        done <<<"$discovered"
+
+        # Candidate set: HN's fresh URLs (- [ ]) minus anything
+        # marked read in its destination domain's ledger.
+        # Sort key extracted from annotations on each HN line.
+        sorted_candidates=""
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+          # URL is the first token after "- [ ] "
+          cand_url=$(printf '%s' "$line" | sed -E 's/^- \[ \] ([^ ]+).*/\1/')
+          [ -z "$cand_url" ] && continue
+          cand_dest=$(ledger_path "$cand_url")
+          if [ "$cand_dest" != "$hn_ledger" ] \
+             && ledger_url_is_read "$cand_dest" "$cand_url"; then
+            ledger_mark_read "$hn_ledger" "$cand_url"
             continue
           fi
-          # Sort key: points (desc), rank (asc). Format
-          # "<points>|<rank>|<url>" then sort -k1nr -k2n.
-          sorted_candidates="${sorted_candidates}${points}|${rank}|${url}"$'\n'
-        done <<<"$discovered"
+          cand_points=$(printf '%s' "$line" | grep -oE 'hn-points [0-9]+' | awk '{print $2}')
+          cand_rank=$(printf '%s' "$line" | grep -oE 'hn-rank [0-9]+' | awk '{print $2}')
+          sorted_candidates="${sorted_candidates}${cand_points:-0}|${cand_rank:-999}|${cand_url}"$'\n'
+        done < <(grep '^- \[ \]' "$hn_ledger" 2>/dev/null)
         candidates=$(printf '%s' "$sorted_candidates" \
           | awk 'NF' \
           | sort -t'|' -k1nr -k2n \
@@ -725,6 +752,16 @@ fi
 # the same file. For HN/Kagi, it's the destination domain.
 TARGET_LEDGER=$(ledger_path "$URL")
 ledger_mark_read "$TARGET_LEDGER" "$URL"
+
+# For HN reads: mark in HN's ledger too (where the URL was
+# tracked with its rank/points annotations). The destination
+# ledger above and HN's ledger now both have the URL as [x].
+if [ "$PICKED_SOURCE_TYPE" = "hn" ]; then
+  HN_LEDGER=$(ledger_path "https://news.ycombinator.com")
+  if [ "$HN_LEDGER" != "$TARGET_LEDGER" ]; then
+    ledger_mark_read "$HN_LEDGER" "$URL"
+  fi
+fi
 
 # Lazy sitemap fetch: NOW that Igor's actually read from this
 # domain, populate its ledger with the rest of the archive.
