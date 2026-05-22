@@ -116,7 +116,7 @@ extract_links() {
     | grep -oE 'href="https?://[^"]+"' \
     | sed -E 's/^href="//; s/"$//; s/#.*$//' \
     | grep -vE '\.(jpg|jpeg|png|gif|svg|ico|css|js|pdf|xml|atom|rss)(\?|$)' \
-    | grep -vE '/(login|signup|register|search\?|rss|feed|atom)([?/]|$)' \
+    | grep -vE '/(login|signup|register|search\?|rss|feed|atom|legal|about|about-us|contact|contact-us|privacy|privacy-policy|terms|terms-of-service|tos|imprint|cookies|cookie-policy|jobs|careers|hiring|sitemap|apply|api|tag|tags|category|categories|archive|archives|page|colophon)([?/]|$)' \
     | grep -vE '^https?://[^/]+/?$' \
     | sort -u
 }
