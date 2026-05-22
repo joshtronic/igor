@@ -155,9 +155,39 @@ forgejo_pr_comments() {
 }
 
 # Inline review comments (tied to a file path and line).
+#
+# Forgejo's inline review comments live UNDER each review, not at a
+# top-level pull endpoint. We have to iterate every review on the PR
+# and aggregate their .comments[] arrays. The reviews list endpoint
+# returns embedded .comments per review object on most recent Forgejo
+# versions; older versions require a separate fetch per review id.
+# We try the embedded path first and fall back to per-review fetches
+# if it's empty but reviews exist.
+#
+# Returns a flat JSON array of inline comment objects (each with
+# path, original_line, body, user, created_at, etc.).
 forgejo_pr_review_comments() {
   local repo="$1" number="$2"
-  _fj GET "/repos/${repo}/pulls/${number}/comments"
+  local reviews
+  reviews=$(_fj GET "/repos/${repo}/pulls/${number}/reviews" 2>/dev/null || echo '[]')
+
+  # Path 1: comments embedded in each review object
+  local embedded
+  embedded=$(jq -c '[.[] | (.comments // [])[]]' <<<"$reviews" 2>/dev/null || echo '[]')
+  if [ "$(jq 'length' <<<"$embedded" 2>/dev/null || echo 0)" -gt 0 ]; then
+    printf '%s' "$embedded"
+    return
+  fi
+
+  # Path 2: fetch each review's comments individually
+  local all='[]'
+  while read -r rid; do
+    [ -z "$rid" ] && continue
+    local rc
+    rc=$(_fj GET "/repos/${repo}/pulls/${number}/reviews/${rid}/comments" 2>/dev/null || echo '[]')
+    all=$(jq -c --argjson c "$rc" '. + $c' <<<"$all" 2>/dev/null || echo "$all")
+  done < <(jq -r '.[].id' <<<"$reviews" 2>/dev/null)
+  printf '%s' "$all"
 }
 
 # Open PRs authored by the given user on this repo, as JSON
