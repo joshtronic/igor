@@ -104,6 +104,12 @@ preamble. Just the JSON object:
 EOF
 )
 
+# RAG: surface past journal entries / posts / commits related to the
+# URL's domain or title (extracted post-fetch). Best-effort.
+# shellcheck source=../lib/rag.sh
+. "$IGOR_HOME/lib/rag.sh"
+RAG_CONTEXT=$(rag_query "$URL")
+
 # Build the JSON payload via files, not --arg. Truncated HTML can
 # be ~200KB; passing that as a command-line argument blows past
 # ARG_MAX on smaller-stack systems with "Argument list too long".
@@ -113,7 +119,11 @@ USER_MSG_FILE=$(mktemp)
 SYSTEM_FILE=$(mktemp)
 PAYLOAD_FILE=$(mktemp)
 trap 'rm -f "$USER_MSG_FILE" "$SYSTEM_FILE" "$PAYLOAD_FILE" "$RESPONSE_FILE" 2>/dev/null' EXIT
-printf 'URL: %s\n\nHTML content:\n\n%s' "$URL" "$HTML" > "$USER_MSG_FILE"
+{
+  printf 'URL: %s\n\nHTML content:\n\n%s\n\n' "$URL" "$HTML"
+  printf '\n---\n\n## Past context (RAG -- prior reads/journals related to this URL)\n\n'
+  printf '%s\n' "${RAG_CONTEXT:-(no past context retrieved this tick)}"
+} > "$USER_MSG_FILE"
 printf '%s' "$SYSTEM_PROMPT" > "$SYSTEM_FILE"
 
 jq -n \

@@ -107,6 +107,13 @@ shape:
 EOF
 )
 
+# RAG: surface past journal entries / posts / commits relevant to
+# the idea so the post can build on prior thinking instead of
+# re-litigating it. Best-effort; empty if rag stack unavailable.
+# shellcheck source=../lib/rag.sh
+. "$IGOR_HOME/lib/rag.sh"
+RAG_CONTEXT=$(rag_query "$IDEA")
+
 USER_MESSAGE=$(cat <<EOF
 Today is ${TODAY}.
 
@@ -115,6 +122,12 @@ Blog idea (from brain/blog-ideas.md):
 ${IDEA}
 
 Draft a full post on this idea. Be terse, grounded, in voice.
+
+---
+
+## Past context (RAG -- prior journals/posts/commits related to this idea)
+
+${RAG_CONTEXT:-(no past context retrieved this tick)}
 EOF
 )
 
