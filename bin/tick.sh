@@ -477,8 +477,22 @@ journal_is_duplicate() {
 
 # Idempotent clone-if-missing, pull-if-present. Creates the owner
 # subdir as needed. Pulls existing clones so brain identity changes
-# and website content updates propagate to Igor on every tick (not
-# only when something else triggers a fetch).
+# and website content updates propagate to Igor on every tick.
+#
+# Self-healing for dirty trees: a crashed tick (W_LOG-style unbound
+# var, OOM, timeout, etc.) can mutate working-tree files but never
+# reach the commit step, leaving the repo in a state where every
+# subsequent `git pull --rebase` refuses to run. The warning was
+# the only signal and the silent rot meant brain stopped getting
+# new commits for hours at a time.
+#
+# Fix: at tick start, if any tracked file is dirty, auto-commit
+# the leftover state with a `recovery:` subject and try to push.
+# The commit captures whatever the previous tick was writing (likely
+# blog-ideas.md edits, journal appends, sources weight adjustments)
+# instead of leaving them orphaned in the working tree. Pull then
+# succeeds against either the just-pushed origin or a clean local
+# tree.
 ensure_repo_local() {
   local repo="$1" local_path
   local_path=$(repo_path_for "$repo")
@@ -486,10 +500,37 @@ ensure_repo_local() {
     log "bootstrap: cloning $repo to $local_path"
     mkdir -p "$(dirname "$local_path")"
     git clone "$(ssh_clone_url "$repo")" "$local_path"
-  else
-    (cd "$local_path" && git pull --rebase --quiet origin 2>/dev/null) \
-      || log "warning: pull of $repo failed; using stale local copy"
+    return
   fi
+
+  # Detect uncommitted changes (staged or unstaged, tracked files
+  # only). Untracked files aren't counted -- they don't block
+  # git pull --rebase and we don't want to sweep them up blindly.
+  if ! (cd "$local_path" \
+        && git diff --quiet HEAD 2>/dev/null \
+        && git diff --cached --quiet 2>/dev/null); then
+    local dirty_summary
+    dirty_summary=$(cd "$local_path" && git status --short 2>/dev/null | head -10)
+    log "warning: $repo has uncommitted changes from a prior tick:"
+    while IFS= read -r line; do
+      [ -n "$line" ] && log "  $line"
+    done <<<"$dirty_summary"
+    if (cd "$local_path" \
+        && git add -A \
+        && git commit --quiet -m "recovery: auto-commit leftover changes from prior tick" 2>/dev/null); then
+      log "  recovery commit created in $repo"
+      if (cd "$local_path" && git push --quiet origin 2>/dev/null); then
+        log "  recovery commit pushed"
+      else
+        log "  warning: push of recovery commit failed; will retry next tick"
+      fi
+    else
+      log "  warning: recovery commit failed; pull will likely still fail"
+    fi
+  fi
+
+  (cd "$local_path" && git pull --rebase --quiet origin 2>/dev/null) \
+    || log "warning: pull of $repo failed; using stale local copy"
 }
 
 # -- Discretionary-work state (maintenance + post cooldowns) ----
@@ -724,70 +765,73 @@ EOF
 # Calendar-day semantics (not rolling 24h) so "once a day" matches
 # what a human means -- the day ticks over at local midnight.
 #
-# Authoritative sources, checked in order (any "yes" blocks):
-#   1. git log on origin/master -- any post file added today?
-#      (Authoritative: state file can be lost or out of sync; the
-#      merged history can't lie.)
-#   2. State file `.tier3.website_last_day` -- did we ship today?
-#      (Covers same-tick-day post when nothing's merged yet.)
-#   3. State file `.tier3.website` (legacy UTC timestamp) -- did the
-#      previous code mark today? (Migration safety; harmless to keep.)
+# Reads from reality, not state. The git log on origin/master is the
+# authoritative signal -- if a post was merged today, the rule fires.
+# Paired with the W_INFLIGHT_POST check in the discretionary block
+# (which scans open Igor PRs for src/posts/ files added), this
+# covers both "shipped" and "shipping" cases. A closed-without-merge
+# PR leaves no trace in either -- intentional, so rejected posts
+# don't block the next attempt.
 #
 # Only gates posts -- other site work (about page, layout, copy)
 # and read+journal ticks are unthrottled.
 posts_cooldown_clear() {
-  local today website_path state_file last_day last_legacy
+  local today website_path
   today=$(date +%Y-%m-%d)
 
-  # Layer 1: git log on the website's master. Authoritative for
-  # anything that's already merged. Skips silently if the website
-  # isn't cloned yet (first tick after bootstrap).
+  # Ground truth from reality, not state files. Two sources:
+  #
+  #   (a) origin/master git log: if a post was merged today, the
+  #       1-post-per-day rule fires.
+  #   (b) Open Igor PRs adding src/posts/*.md (checked by the
+  #       caller as W_INFLIGHT_POST, NOT by this function).
+  #
+  # Together those cover both "shipped" and "shipping" cases. A
+  # closed-without-merge PR leaves no trace in either -- which is
+  # exactly the desired behavior: a rejected post should not block
+  # the next attempt.
+  #
+  # Earlier versions also consulted ~/.local/state/igor/discretionary-
+  # state.json (.tier3.website_last_day), but state files drift out
+  # of sync with reality when ticks crash mid-flow (e.g., a post-tick
+  # crashed after marking shipped but before opening the PR -- the
+  # rest of the day was blocked even though no post was actually
+  # in flight). Dropped entirely. The state file is regenerable and
+  # losing its post-related fields is harmless.
+
   website_path=$(repo_path_for "${BOT_USER}/website")
-  if [ -d "$website_path/.git" ]; then
-    local merged_today
-    merged_today=$(cd "$website_path" \
-      && git log --since="$today 00:00:00" --until="$today 23:59:59" \
-          origin/master --diff-filter=A --name-only --pretty=format: \
-          -- 'src/posts/*' 2>/dev/null \
-      | grep -cE '^src/posts/.+\.md$' || true)
-    if [ "${merged_today:-0}" -gt 0 ]; then
-      return 1
-    fi
+  if [ ! -d "$website_path/.git" ]; then
+    # Bootstrap case: no clone yet. Default to allowed -- a duplicate
+    # post on the very first run is acceptable; refusing to ever
+    # post until the clone exists is worse.
+    return 0
   fi
 
-  # Layer 2: state file, current schema.
-  state_file=$(discretionary_state_file)
-  if [ -f "$state_file" ]; then
-    last_day=$(jq -r '.tier3.website_last_day // ""' "$state_file" 2>/dev/null || echo "")
-    if [ -n "$last_day" ] && [ "$last_day" = "$today" ]; then
-      return 1
-    fi
+  # Fetch origin master so the log check sees current truth, not a
+  # stale local copy. Best-effort -- a transient fetch failure means
+  # we look at whatever's already in origin/master, which the
+  # top-of-tick ensure_repo_local pulled. Bounded cost.
+  (cd "$website_path" && git fetch --quiet origin master 2>/dev/null) || true
 
-    # Layer 3: legacy UTC timestamp from pre-refactor harness runs.
-    # Translate to local date and compare; if today, block.
-    last_legacy=$(jq -r '.tier3.website // ""' "$state_file" 2>/dev/null || echo "")
-    if [ -n "$last_legacy" ]; then
-      local legacy_local_day
-      legacy_local_day=$(date -d "$last_legacy" +%Y-%m-%d 2>/dev/null \
-        || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last_legacy" +%Y-%m-%d 2>/dev/null \
-        || echo "")
-      if [ "$legacy_local_day" = "$today" ]; then
-        return 1
-      fi
-    fi
+  local merged_today
+  merged_today=$(cd "$website_path" \
+    && git log --since="$today 00:00:00" --until="$today 23:59:59" \
+        origin/master --diff-filter=A --name-only --pretty=format: \
+        -- 'src/posts/*' 2>/dev/null \
+    | grep -cE '^src/posts/.+\.md$' || true)
+  if [ "${merged_today:-0}" -gt 0 ]; then
+    return 1
   fi
 
   return 0
 }
 
+# Kept as a no-op so any leftover call sites don't error out. Post
+# cooldown no longer relies on state -- it reads git log on origin
+# master. Remove this function (and any callers) in a follow-up
+# cleanup; left in place to keep this PR scoped to the behavior fix.
 posts_mark_shipped() {
-  local state_file tmp today
-  today=$(date +%Y-%m-%d)
-  state_file=$(discretionary_state_file)
-  [ -f "$state_file" ] || echo '{}' > "$state_file"
-  tmp=$(mktemp)
-  jq --arg d "$today" '.tier3 //= {} | .tier3.website_last_day = $d' "$state_file" > "$tmp"
-  mv "$tmp" "$state_file"
+  return 0
 }
 
 # Shift window. Returns 0 if a configured shift is active OR no shift
