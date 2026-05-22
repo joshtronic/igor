@@ -163,17 +163,34 @@ fi
 # Strip code-fence wrappers if model added them despite instructions.
 TEXT=$(printf '%s' "$TEXT" | sed -E '/^```/d')
 
-# Validate the JSON parses and has the expected fields.
+# Validate the JSON parses and has the expected fields. pr_body is
+# the field the model drops most often in practice -- it's the
+# last, longest, and most structured chunk of the output, and
+# every once in a while it just doesn't get emitted. Title and
+# body are content only the model can write; pr_body is mechanical
+# (a fixed two-checklist scaffold with the title interpolated), so
+# we synthesize it when missing rather than killing the tick.
 TITLE=$(jq -r '.title // ""' <<<"$TEXT" 2>/dev/null || echo "")
 SLUG=$(jq -r '.slug // ""' <<<"$TEXT" 2>/dev/null || echo "")
 DESC=$(jq -r '.description // ""' <<<"$TEXT" 2>/dev/null || echo "")
 BODY=$(jq -r '.body // ""' <<<"$TEXT" 2>/dev/null || echo "")
 PR_BODY=$(jq -r '.pr_body // ""' <<<"$TEXT" 2>/dev/null || echo "")
 
-if [ -z "$TITLE" ] || [ -z "$SLUG" ] || [ -z "$BODY" ] || [ -z "$PR_BODY" ]; then
-  echo "agent-post: model output didn't parse as expected JSON" >&2
+# Required fields with no fallback. Missing one is fatal.
+missing=()
+[ -z "$TITLE" ] && missing+=("title")
+[ -z "$SLUG" ]  && missing+=("slug")
+[ -z "$BODY" ]  && missing+=("body")
+
+if [ "${#missing[@]}" -gt 0 ]; then
+  echo "agent-post: model output missing required field(s): ${missing[*]}" >&2
   echo "$TEXT" >&2
   exit 3
+fi
+
+if [ -z "$PR_BODY" ]; then
+  echo "agent-post: model dropped pr_body -- synthesizing from template" >&2
+  PR_BODY=$(printf '## What this PR does\n\n- [x] feat: add post '\''%s'\''\n\n## Test plan\n\n- [x] markdownlint passes\n- [ ] Manual: read it on the rendered site' "$TITLE")
 fi
 
 # Emit the parsed structure, plus date fields for the harness to
