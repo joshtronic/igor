@@ -120,15 +120,19 @@ source_type() {
 }
 
 # Returns 0 (true) if the URL is navigation / boilerplate / asset
-# shaped -- not content worth reading.
+# shaped -- not content worth reading. Pure bash `[[ =~ ]]` matches
+# (no `printf | grep` pipelines) -- called per-URL in tight loops
+# (HN fanout = 30 URLs/tick), so avoiding subprocess spawn keeps
+# the loop fast and eliminates SIGPIPE warnings on early-exit
+# grep.
 is_nav_url() {
   local url="$1"
   case "$url" in
     *://*/login*|*://*/signup*|*://*/register*) return 0 ;;
   esac
-  printf '%s' "$url" | grep -qE '\.(jpg|jpeg|png|gif|svg|ico|css|js|pdf|xml|atom|rss)(\?|$)' && return 0
-  printf '%s' "$url" | grep -qE '/(login|signup|register|search\?|rss|feed|atom|legal|about|about-us|contact|contact-us|privacy|privacy-policy|terms|terms-of-service|tos|imprint|cookies|cookie-policy|jobs|careers|hiring|sitemap|apply|api|tag|tags|category|categories|archive|archives|page|colophon)([?/]|$)' && return 0
-  printf '%s' "$url" | grep -qE '^https?://[^/]+/?$' && return 0
+  [[ "$url" =~ \.(jpg|jpeg|png|gif|svg|ico|css|js|pdf|xml|atom|rss)(\?|$) ]] && return 0
+  [[ "$url" =~ /(login|signup|register|search\?|rss|feed|atom|legal|about|about-us|contact|contact-us|privacy|privacy-policy|terms|terms-of-service|tos|imprint|cookies|cookie-policy|jobs|careers|hiring|sitemap|apply|api|tag|tags|category|categories|archive|archives|page|colophon)([?/]|$) ]] && return 0
+  [[ "$url" =~ ^https?://[^/]+/?$ ]] && return 0
   return 1
 }
 
@@ -420,21 +424,25 @@ DISCOVERY_PATHS=(
 
 probe_discovery() {
   local source_url="$1"
-  source_url=$(printf '%s' "$source_url" | sed 's:/$::')
+  source_url="${source_url%/}"
   local path try_url content head
   for path in "${DISCOVERY_PATHS[@]}"; do
     try_url="${source_url}${path}"
     content=$(curl -sfL --max-time 10 --max-filesize 5000000 -A "$UA" "$try_url" 2>/dev/null)
     [ -z "$content" ] && continue
-    head=$(printf '%s' "$content" | head -c 2048)
-    if printf '%s' "$head" | grep -qE '<urlset|<sitemapindex'; then
-      printf 'sitemap|%s' "$try_url"
-      return 0
-    fi
-    if printf '%s' "$head" | grep -qE '<rss[ >]|<feed[ >]|<feed xmlns'; then
-      printf 'rss|%s' "$try_url"
-      return 0
-    fi
+    # Bash substring -- avoids `printf | head -c` which sends SIGPIPE
+    # to printf when content is large (sitemap.xml can be 100KB+).
+    head="${content:0:2048}"
+    case "$head" in
+      *"<urlset"*|*"<sitemapindex"*)
+        printf 'sitemap|%s' "$try_url"
+        return 0
+        ;;
+      *"<rss "*|*"<rss>"*|*"<feed "*|*"<feed>"*|*"<feed xmlns"*)
+        printf 'rss|%s' "$try_url"
+        return 0
+        ;;
+    esac
   done
   printf 'html|%s' "$source_url"
 }
@@ -444,7 +452,8 @@ parse_sitemap() {
   content=$(curl -sfL --max-time 15 --max-filesize 5000000 -A "$UA" "$url" 2>/dev/null)
   [ -z "$content" ] && return
   # WordPress / CMS sitemap indexes list sub-sitemaps; recurse one level.
-  if printf '%s' "$content" | head -c 2048 | grep -qE '<sitemapindex'; then
+  # Bash substring + glob -- no `printf | head | grep` pipeline.
+  if [[ "${content:0:2048}" == *"<sitemapindex"* ]]; then
     local sub_urls sub
     sub_urls=$(printf '%s' "$content" \
       | grep -oE '<loc>[^<]+</loc>' \
