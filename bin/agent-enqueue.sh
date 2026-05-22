@@ -8,12 +8,30 @@
 # directed site work goes through the same pipeline as
 # ticket-driven work.
 #
-# Usage: agent-enqueue.sh <owner/repo> "<title>" "<body>"
+# Two body forms:
 #
-# Example:
+#   Positional (short bodies, single-line preferred):
+#     agent-enqueue.sh <owner/repo> "<title>" "<body>"
+#
+#   File-based (multi-line bodies):
+#     agent-enqueue.sh <owner/repo> "<title>" --body-file <path>
+#
+#   The file form exists because Claude Code's static analysis
+#   blocks command substitution like "$(cat body.md)" -- it can't
+#   tell what the substituted text will be, so the permission hook
+#   refuses to run it. A file path is a literal, statically-
+#   analyzable argument.
+#
+# Example (short):
 #   agent-enqueue.sh igor/website \
 #     "fix: footer links wrap on narrow viewports" \
 #     "On <600px the three footer links stack awkwardly..."
+#
+# Example (multi-line, recommended):
+#   # write the body to a scratch file inside .igor/ first
+#   agent-enqueue.sh igor/website \
+#     "fix: footer links wrap on narrow viewports" \
+#     --body-file .igor/footer-issue-body.md
 #
 # No throttle on filing -- issues are spec, they wait, no human
 # review burden until claimed. (Distinct from PR-open throttle.)
@@ -25,9 +43,27 @@
 
 set -euo pipefail
 
-REPO="${1:?usage: agent-enqueue.sh <owner/repo> \"<title>\" \"<body>\"}"
-TITLE="${2:?usage: agent-enqueue.sh <owner/repo> \"<title>\" \"<body>\"}"
-BODY="${3:?usage: agent-enqueue.sh <owner/repo> \"<title>\" \"<body>\"}"
+usage() {
+  cat <<'USAGE' >&2
+usage: agent-enqueue.sh <owner/repo> "<title>" "<body>"
+       agent-enqueue.sh <owner/repo> "<title>" --body-file <path>
+USAGE
+  exit 1
+}
+
+REPO="${1:-}"
+TITLE="${2:-}"
+[ -z "$REPO" ] || [ -z "$TITLE" ] && usage
+
+if [ "${3:-}" = "--body-file" ]; then
+  BODY_FILE="${4:-}"
+  [ -n "$BODY_FILE" ] || { echo "agent-enqueue: --body-file requires a path" >&2; usage; }
+  [ -f "$BODY_FILE" ] || { echo "agent-enqueue: body file not found: $BODY_FILE" >&2; exit 1; }
+  BODY=$(cat "$BODY_FILE")
+else
+  BODY="${3:-}"
+  [ -n "$BODY" ] || usage
+fi
 
 : "${IGOR_HOME:?IGOR_HOME not set -- are you being run from a tick?}"
 : "${BOT_USER:?BOT_USER not set -- are you being run from a tick?}"
