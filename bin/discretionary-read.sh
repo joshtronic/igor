@@ -106,14 +106,18 @@ fetch_html() {
 }
 
 # Extract plausible content links from HTML. Strips static-asset
-# extensions and navigation-shaped URLs. Returns one URL per line,
-# deduped.
+# extensions, navigation-shaped URLs, and URL fragments (the
+# "#anchor" suffix is a client-side jump, not a separate resource;
+# without stripping, https://www.11ty.dev/#why-X looks distinct
+# from https://www.11ty.dev/ and gets picked as its own "fresh"
+# URL on a 200KB marketing page). Returns one URL per line, deduped.
 extract_links() {
   printf '%s' "$1" \
     | grep -oE 'href="https?://[^"]+"' \
-    | sed -E 's/^href="//; s/"$//' \
+    | sed -E 's/^href="//; s/"$//; s/#.*$//' \
     | grep -vE '\.(jpg|jpeg|png|gif|svg|ico|css|js|pdf|xml|atom|rss)(\?|$)' \
     | grep -vE '/(login|signup|register|search\?|rss|feed|atom)([?/]|$)' \
+    | grep -vE '^https?://[^/]+/?$' \
     | sort -u
 }
 
@@ -192,8 +196,8 @@ sample_weighted() {
   ' <<<"$list"
 }
 
-# Try a source: fetch, extract, dedupe, pick. Returns URL on stdout
-# or empty if nothing fresh.
+# List ALL fresh, same-host-preferred URLs from a source (newline-
+# separated). Empty if no fresh URLs.
 #
 # Prefers same-host candidates over off-host ones. On a personal
 # blog the homepage links to its own posts; off-host hrefs are
@@ -201,7 +205,7 @@ sample_weighted() {
 # icons, attribution). Falling through to off-host only when there
 # are no same-host candidates keeps aggregator-style sources (Kagi
 # Small Web etc.) working in the rare case they end up listed.
-try_source() {
+list_source_candidates() {
   local source_url="$1"
   local source_host
   source_host=$(url_host "$source_url")
@@ -216,48 +220,75 @@ try_source() {
     [ -n "$u" ] && [ "$(url_host "$u")" = "$source_host" ] && printf '%s\n' "$u"
   done)
   if [ -n "$same_host" ]; then
-    printf '%s\n' "$same_host" | shuf -n 1
+    printf '%s\n' "$same_host"
   else
-    printf '%s\n' "$fresh" | shuf -n 1
+    printf '%s\n' "$fresh"
   fi
 }
 
-# -- discover a fresh URL ----------------------------------------
+# -- discover a fresh URL + read it (with retry) ------------------
+#
+# Loop is bounded: up to MAX_ATTEMPTS calls to agent-read.sh per
+# tick. Each iteration either picks a new source (when the current
+# source's candidate pool is empty) or pops the next URL from the
+# current source. Failed URLs are dropped from the in-memory pool
+# for this run only -- they stay re-tryable on future ticks (the
+# failure was probably transient: rate limit, momentary 5xx, page
+# that exceeded ARG_MAX before we fixed jq, etc.).
 
+MAX_ATTEMPTS=3
+attempts=0
+read_output=""
 URL=""
 PICKED_SOURCE=""
-remaining="$sources"
+remaining_sources="$sources"
+candidates=""
 
-while [ -n "$remaining" ]; do
-  picked=$(sample_weighted "$remaining") || break
-  source_weight=${picked%%|*}
-  source_url=${picked#*|}
-
-  result=$(try_source "$source_url")
-  if [ -n "$result" ]; then
-    URL="$result"
+while [ "$attempts" -lt "$MAX_ATTEMPTS" ]; do
+  # Need to pick a new source?
+  if [ -z "$candidates" ]; then
+    [ -z "$remaining_sources" ] && break
+    picked=$(sample_weighted "$remaining_sources") || break
+    source_weight=${picked%%|*}
+    source_url=${picked#*|}
     PICKED_SOURCE="$source_url"
-    break
+    remaining_sources=$(grep -vF "$source_weight|$source_url" <<<"$remaining_sources" || true)
+
+    candidates=$(list_source_candidates "$source_url")
+    if [ -z "$candidates" ]; then
+      echo "discretionary-read: source $source_url yielded no fresh URL, trying another" >&2
+      continue
+    fi
   fi
 
-  echo "discretionary-read: source $source_url yielded no fresh URL, trying another" >&2
-  # Drop this source from remaining and retry
-  remaining=$(grep -vF "$source_weight|$source_url" <<<"$remaining" || true)
+  URL=$(printf '%s\n' "$candidates" | shuf -n 1)
+  candidates=$(grep -vxF "$URL" <<<"$candidates" || true)
+
+  attempts=$((attempts + 1))
+  echo "discretionary-read: attempt $attempts/$MAX_ATTEMPTS -- $PICKED_SOURCE -> $URL" >&2
+
+  err_file=$(mktemp)
+  if read_output=$("$IGOR_HOME/bin/agent-read.sh" "$URL" 2>"$err_file"); then
+    rm -f "$err_file"
+    break
+  fi
+  last_err=$(tail -1 "$err_file")
+  rm -f "$err_file"
+  echo "discretionary-read: agent-read failed for $URL -- ${last_err:-unknown error}" >&2
+  read_output=""
+  URL=""
 done
 
-if [ -z "$URL" ]; then
-  echo "discretionary-read: no candidate URL found across any source" >&2
-  exit 2
+if [ -z "$read_output" ]; then
+  if [ "$attempts" -eq 0 ]; then
+    echo "discretionary-read: no candidate URL found across any source" >&2
+    exit 2
+  fi
+  echo "discretionary-read: agent-read failed across $attempts attempt(s)" >&2
+  exit 3
 fi
 
 echo "discretionary-read: selected via $PICKED_SOURCE -> $URL" >&2
-
-# -- call agent-read ---------------------------------------------
-
-read_output=$("$IGOR_HOME/bin/agent-read.sh" "$URL") || {
-  echo "discretionary-read: agent-read failed for $URL" >&2
-  exit 3
-}
 
 TITLE=$(jq -r '.title // ""' <<<"$read_output")
 JOURNAL=$(jq -r '.journal // ""' <<<"$read_output")
