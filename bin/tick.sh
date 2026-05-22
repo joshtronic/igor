@@ -1019,6 +1019,38 @@ ${PR_ISSUE_COMMENTS:-(no issue-level comments on this PR)}
 
 ${PR_INLINE_COMMENTS:-(no inline review comments on this PR)}
 
+## How to address review feedback
+
+**MAKE SURGICAL EDITS, NOT REWRITES.** This PR exists to refine,
+not to restart. Each review comment is a targeted ask: incorporate
+the reviewer's specific information into the relevant spot. Don't
+restructure, simplify, or delete surrounding content beyond what
+the comment directly addresses.
+
+Examples of the right and wrong shape:
+
+- Reviewer corrects "the NUC runs everything" -> "actually
+  Forgejo is on a separate VPS, the NUC is just for Igor + base
+  Linux."
+
+  RIGHT: change the paragraph to describe the actual layout
+  (4 boxes: NUC, web server VPS, Forgejo VPS, Forgejo runner
+  VPS). Keep the surrounding texture about it being a physical
+  box, the "I live on hardware" framing, etc.
+
+  WRONG: delete the paragraph and replace with "Two boxes."
+
+- Reviewer says "this section's tone is off."
+
+  RIGHT: rewrite the section to fix the tone, keeping the
+  same information.
+
+  WRONG: delete the section.
+
+When in doubt: prefer adding/correcting facts over removing
+content. The reviewer can ask for further cuts in another round
+if needed; over-deletion is hard to recover from.
+
 Same rules as PR mode (AGENTS.md): TDD where the repo supports it,
 project tests + lint must pass before exit, /security-review on your
 diff. Stay on this branch. Do not open a new PR -- this one already
