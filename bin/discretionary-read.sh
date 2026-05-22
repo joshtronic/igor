@@ -117,12 +117,60 @@ extract_links() {
     | sort -u
 }
 
+# Hostname of a URL, sans leading "www.". Trailing path is dropped.
+url_host() {
+  printf '%s' "$1" | sed -E 's|^https?://([^/]+).*|\1|; s|^www\.||'
+}
+
+# Last non-empty path segment of a URL, sans query/fragment. The
+# typical "slug" of a blog post -- "fledgling" out of
+# https://thatgirljen.com/2026/02/02/fledgling/.
+url_slug() {
+  printf '%s' "$1" \
+    | sed -E 's|^https?://[^/]+||; s|[?#].*||; s|/+$||' \
+    | awk -F'/' '{ print $NF }'
+}
+
+# Dedupe filter. Drops URLs already touched, where "touched" means:
+#   1. The URL literally appears in log.md (harness-written entries
+#      include the URL).
+#   2. The domain AND slug appear on the same line in log.md OR in
+#      any brain/journal entry. Catches Claude-written prose where
+#      Igor said "Read thatgirljen.com -- fledgling" but never
+#      captured the URL itself.
+# Slug needs to be >=4 chars to reduce false positives from short
+# numeric or stop-word slugs.
+#
+# Limitation: case (2) only fires when the URL slug matches a token
+# in the prose. Multi-word titles ("a-confession-im-an-ai-first-
+# coder-now" vs "A Confession: I'm an AI-First Coder Now") slip
+# through and get re-read once -- but the harness writes the URL to
+# log.md on success, so future picks dedupe via case (1).
 filter_unread() {
   while IFS= read -r url; do
     [ -z "$url" ] && continue
+
     if [ -f "$LOG_FILE" ] && grep -qF "$url" "$LOG_FILE" 2>/dev/null; then
       continue
     fi
+
+    local domain slug
+    domain=$(url_host "$url")
+    slug=$(url_slug "$url")
+
+    if [ -n "$domain" ] && [ -n "$slug" ] && [ ${#slug} -ge 4 ]; then
+      if [ -f "$LOG_FILE" ] \
+         && grep -F "$domain" "$LOG_FILE" 2>/dev/null \
+         | grep -qF "$slug" 2>/dev/null; then
+        continue
+      fi
+      if [ -d "$BRAIN_PATH/journal" ] \
+         && grep -rF "$domain" "$BRAIN_PATH/journal" 2>/dev/null \
+         | grep -qF "$slug" 2>/dev/null; then
+        continue
+      fi
+    fi
+
     printf '%s\n' "$url"
   done
 }
@@ -146,12 +194,32 @@ sample_weighted() {
 
 # Try a source: fetch, extract, dedupe, pick. Returns URL on stdout
 # or empty if nothing fresh.
+#
+# Prefers same-host candidates over off-host ones. On a personal
+# blog the homepage links to its own posts; off-host hrefs are
+# almost always footer cruft ("powered by GitHub Pages", social
+# icons, attribution). Falling through to off-host only when there
+# are no same-host candidates keeps aggregator-style sources (Kagi
+# Small Web etc.) working in the rare case they end up listed.
 try_source() {
   local source_url="$1"
+  local source_host
+  source_host=$(url_host "$source_url")
   local html
   html=$(fetch_html "$source_url")
   [ -z "$html" ] && return
-  extract_links "$html" | filter_unread | shuf -n 1
+  local fresh
+  fresh=$(extract_links "$html" | filter_unread)
+  [ -z "$fresh" ] && return
+  local same_host
+  same_host=$(printf '%s\n' "$fresh" | while IFS= read -r u; do
+    [ -n "$u" ] && [ "$(url_host "$u")" = "$source_host" ] && printf '%s\n' "$u"
+  done)
+  if [ -n "$same_host" ]; then
+    printf '%s\n' "$same_host" | shuf -n 1
+  else
+    printf '%s\n' "$fresh" | shuf -n 1
+  fi
 }
 
 # -- discover a fresh URL ----------------------------------------
