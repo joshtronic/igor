@@ -1342,43 +1342,59 @@ if [ -z "$WINNER" ]; then
   W_PATH=$(repo_path_for "$W_REPO")
   BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
 
-  # Sample the discretionary mode FIRST, before any website-specific
-  # setup. Reading is self-improvement -- it has nothing to do with
-  # the website and shouldn't pretend to (no worktree, no website
-  # context, no in-flight PR scan). Post and site-work both produce
-  # for the website and continue to need that setup.
-  W_SPLIT_FILE="$BRAIN_PATH/memories/preferences/discretionary-split.md"
-  W_PICKED_MODE=""
-  W_SPLIT_ORDER=""
-  if [ -f "$W_SPLIT_FILE" ]; then
-    # Portable awk (works on mawk -- no 3-arg match()).
-    # Format: "- <weight> -- <mode>" => $1='-' $2=weight $3='--' $4=mode.
-    W_PARSED_SPLIT=$(awk '
-      $1 == "-" && $2 ~ /^[0-9]+$/ && $3 == "--" && $4 ~ /^[a-z-]+$/ {
-        if ($2 + 0 > 0) printf "%s|%s\n", $2, $4
-      }
-    ' "$W_SPLIT_FILE")
-    if [ -n "$W_PARSED_SPLIT" ]; then
-      W_SPLIT_TOTAL=$(awk -F'|' '{ s += $1 } END { print s + 0 }' <<<"$W_PARSED_SPLIT")
-      W_SPLIT_ROLL=$((RANDOM % W_SPLIT_TOTAL))
-      W_PICKED_MODE=$(awk -F'|' -v r="$W_SPLIT_ROLL" '
-        { s += $1; if (r < s) { print $2; exit } }
-      ' <<<"$W_PARSED_SPLIT")
-      case "$W_PICKED_MODE" in
-        post)      W_SPLIT_ORDER="post reading site-work" ;;
-        reading)   W_SPLIT_ORDER="reading post site-work" ;;
-        site-work) W_SPLIT_ORDER="site-work post reading" ;;
-        *)         W_SPLIT_ORDER="site-work post reading" ;;
-      esac
-      log "discretionary: split roll $W_SPLIT_ROLL/$W_SPLIT_TOTAL picked mode '$W_PICKED_MODE'; order: $W_SPLIT_ORDER"
-    else
-      log "warning: discretionary-split.md parsed empty -- defaulting to site-work via claude code"
-      W_SPLIT_ORDER="site-work"
-    fi
-  else
-    log "warning: discretionary-split.md not found at $W_SPLIT_FILE -- defaulting to site-work via claude code"
-    W_SPLIT_ORDER="site-work"
+  # Determine the discretionary mode by deterministic priority, not
+  # by dice-roll. Earlier the harness sampled a weighted split from
+  # brain/memories/preferences/discretionary-split.md (50/25/25
+  # reading/post/site-work) -- which had the failure mode of randomly
+  # not-posting for two days in a row, and burning 50% of ticks on
+  # reading when there was actual work to ship.
+  #
+  # New routing:
+  #   1. If posting is allowed (no blog today, none in flight) -> post.
+  #   2. Else -> site-work (file an issue; no per-PR cap).
+  #   3. Reading is the bottom-of-chain fallback in both -- only fires
+  #      when the primary mode's executor fails or skips.
+  #
+  # The dice-roll's blog-ideas.md ordering still matters (the picker
+  # takes the top idea); reflection still re-orders the stack after
+  # each tick. discretionary-split.md is unused now and can be deleted
+  # from brain in a follow-up.
+
+  # Hoisted from the worktree setup block: we need posting-allowed
+  # state BEFORE routing, not after.
+  W_OPEN_PRS_JSON=$(forgejo_list_open_bot_prs "$W_REPO" "$BOT_USER" 2>/dev/null || echo '[]')
+  W_OPEN_PRS_COUNT=$(jq 'length' <<<"$W_OPEN_PRS_JSON")
+  W_INFLIGHT_POST=0
+  if [ "$W_OPEN_PRS_COUNT" -gt 0 ]; then
+    while read -r pr_number; do
+      [ -z "$pr_number" ] && continue
+      if forgejo_pr_files "$W_REPO" "$pr_number" 2>/dev/null \
+          | jq -e '[.[] | select(.status == "added") | .filename] | any(. ; test("^src/posts/.+\\.md$"))' >/dev/null 2>&1; then
+        W_INFLIGHT_POST=1
+        break
+      fi
+    done < <(jq -r '.[].number' <<<"$W_OPEN_PRS_JSON" 2>/dev/null || echo "")
   fi
+
+  if [ "$W_INFLIGHT_POST" -eq 1 ]; then
+    W_POSTING_ALLOWED=0
+    W_POST_RULE="An open Igor PR on this repo already contains a new post for today (not yet merged). Do NOT publish another post -- one post per day is the rule and today's slot is already taken. Site work, follow-ups, or a read+journal tick are still fair game."
+  elif posts_cooldown_clear; then
+    W_POSTING_ALLOWED=1
+    W_POST_RULE="You MAY publish a new post this tick if that's the right call."
+  else
+    W_POSTING_ALLOWED=0
+    W_POST_RULE="You already shipped a post today (local calendar day). Do NOT publish another post this tick -- max one post per day is a hard rule. Other site work (about page, layout, copy, links, tag pages, CSS) and read+journal ticks are still fair game."
+  fi
+
+  if [ "$W_POSTING_ALLOWED" = "1" ]; then
+    W_PICKED_MODE="post"
+    W_SPLIT_ORDER="post site-work reading"
+  else
+    W_PICKED_MODE="site-work"
+    W_SPLIT_ORDER="site-work reading"
+  fi
+  log "discretionary: routing (posting_allowed=$W_POSTING_ALLOWED) -> $W_SPLIT_ORDER"
 
   # Reading mode short-circuit: it doesn't touch the website. Use a
   # scratch dir for the .igor/IGOR_JOURNAL.md output, run the
@@ -1439,37 +1455,9 @@ if [ -z "$WINNER" ]; then
     exit 0
   fi
 
-  # Brief Claude on what's already in flight so he doesn't duplicate.
-  # Open PR titles are the cheapest collision-avoidance signal we have
-  # short of full diff overlap analysis.
-  W_OPEN_PRS_JSON=$(forgejo_list_open_bot_prs "$W_REPO" "$BOT_USER" 2>/dev/null || echo '[]')
-  W_OPEN_PRS_COUNT=$(jq 'length' <<<"$W_OPEN_PRS_JSON")
-
-  # Scan each open PR for a new post file. If any open PR is already
-  # adding src/posts/*.md, today's post is in flight (just unmerged);
-  # the cooldown should fire even though git log on master is clean.
-  W_INFLIGHT_POST=0
-  if [ "$W_OPEN_PRS_COUNT" -gt 0 ]; then
-    while read -r pr_number; do
-      [ -z "$pr_number" ] && continue
-      if forgejo_pr_files "$W_REPO" "$pr_number" 2>/dev/null \
-          | jq -e '[.[] | select(.status == "added") | .filename] | any(. ; test("^src/posts/.+\\.md$"))' >/dev/null 2>&1; then
-        W_INFLIGHT_POST=1
-        break
-      fi
-    done < <(jq -r '.[].number' <<<"$W_OPEN_PRS_JSON" 2>/dev/null || echo "")
-  fi
-
-  if [ "$W_INFLIGHT_POST" -eq 1 ]; then
-    W_POSTING_ALLOWED=0
-    W_POST_RULE="An open Igor PR on this repo already contains a new post for today (not yet merged). Do NOT publish another post -- one post per day is the rule and today's slot is already taken. Site work, follow-ups, or a read+journal tick are still fair game."
-  elif posts_cooldown_clear; then
-    W_POSTING_ALLOWED=1
-    W_POST_RULE="You MAY publish a new post this tick if that's the right call."
-  else
-    W_POSTING_ALLOWED=0
-    W_POST_RULE="You already shipped a post today (local calendar day). Do NOT publish another post this tick -- max one post per day is a hard rule. Other site work (about page, layout, copy, links, tag pages, CSS) and read+journal ticks are still fair game."
-  fi
+  # W_OPEN_PRS_JSON, W_OPEN_PRS_COUNT, W_INFLIGHT_POST, W_POSTING_ALLOWED,
+  # W_POST_RULE were all computed earlier (above the routing decision).
+  # No re-fetch -- we reuse what we already have.
 
   if [ "$W_OPEN_PRS_COUNT" -gt 0 ]; then
     W_OPEN_PRS_LIST=$(jq -r '.[] | "  - #\(.number) (branch `\(.head)`): \(.title)"' <<<"$W_OPEN_PRS_JSON")
