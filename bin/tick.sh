@@ -831,6 +831,50 @@ posts_mark_shipped() {
   return 0
 }
 
+# Commit any pending mutations to the brain repo. Stages the three
+# harness-writable surfaces (journal/, memories/, blog-ideas.md),
+# commits with the given subject if anything is staged, and pushes.
+#
+# Called unconditionally at end-of-tick. The previous design gated
+# the entire commit block on "Claude wrote an IGOR_JOURNAL.md this
+# tick" -- which left dedupe edits, reflection swaps, source-weight
+# adjustments, and any other harness-side brain mutations orphaned
+# in the working tree. The recovery-commit step at next tick start
+# eventually picked them up, but that masked the bug: every tick
+# was leaving brain dirty and relying on the next tick to clean up.
+#
+# Now: journal append is one step (still gated on journal source
+# existing); commit-brain-changes is a separate step that ALWAYS
+# runs and is a no-op when there's truly nothing staged.
+commit_brain_changes() {
+  local brain="$1" subject="$2"
+  [ -d "$brain/.git" ] || return 0
+
+  # Fresh pull just before push to minimize the window for
+  # non-fast-forward rejection. ensure_repo_local at tick start
+  # already pulled; this is belt-and-suspenders.
+  (cd "$brain" && git pull --rebase --quiet origin master 2>/dev/null) \
+    || log "warning: brain pull failed before commit; continuing on local copy"
+
+  # Stage everything the harness writes. -A within each pathspec
+  # captures adds / mods / deletes uniformly.
+  (cd "$brain" && git add -A journal/ memories/ blog-ideas.md 2>/dev/null) || true
+
+  # No-op if nothing is staged -- the common case for ticks that
+  # didn't touch brain at all.
+  if (cd "$brain" && git diff --cached --quiet 2>/dev/null); then
+    return 0
+  fi
+
+  if (cd "$brain" && git commit --quiet -m "$subject" 2>/dev/null); then
+    if ! (cd "$brain" && git push --quiet origin master 2>/dev/null); then
+      log "warning: brain push failed for: $subject (commit is local; next tick will retry)"
+    fi
+  else
+    log "warning: brain commit failed for: $subject"
+  fi
+}
+
 # Cadence assessment. Called on EVERY discretionary tick to decide
 # whether to ship more work or take a break to read & reflect. The
 # choice gates BOTH post and site-work modes -- a heavy queue can
@@ -1608,18 +1652,18 @@ if [ -z "$WINNER" ]; then
       W_ELAPSED=$(( $(date +%s) - W_START ))
       log "discretionary: reading mode succeeded in ${W_ELAPSED}s"
 
-      # Append the journal entry to brain and commit (mirrors the
-      # tail of the website discretionary flow, minus all the
-      # website / PR / cooldown bits).
+      # Append journal entry (if Claude wrote one), then commit
+      # any brain mutations regardless. The reading executor also
+      # updates memories/reading/log.md, sources.md weight tweaks,
+      # and blog-ideas.md (post-tick ideas reflection) -- all of
+      # which need to land even if no journal was produced.
       R_JOURNAL_SRC="$W_SCRATCH/.igor/IGOR_JOURNAL.md"
+      R_JDATE=$(date +%Y-%m-%d)
+      R_JFILE="$BRAIN_PATH/journal/${R_JDATE}.md"
       if [ -s "$R_JOURNAL_SRC" ]; then
-        R_JDATE=$(date +%Y-%m-%d)
-        R_JFILE="$BRAIN_PATH/journal/${R_JDATE}.md"
         R_JTS=$(date +%Y-%m-%dT%H:%M:%S%z)
-        (cd "$BRAIN_PATH" && git pull --rebase --quiet origin master 2>/dev/null) \
-          || log "warning: brain pull failed"
         if journal_is_duplicate "$R_JOURNAL_SRC" "$R_JFILE"; then
-          log "journal: reading entry duplicates an earlier entry today -- skipping"
+          log "journal: reading entry duplicates an earlier entry today -- skipping append"
         else
           log "journal: appending reading-mode tick"
           mkdir -p "$BRAIN_PATH/journal"
@@ -1627,17 +1671,11 @@ if [ -z "$WINNER" ]; then
             printf '\n## %s -- discretionary reading\n\n' "$R_JTS"
             cat "$R_JOURNAL_SRC"
           } >> "$R_JFILE"
-          (cd "$BRAIN_PATH" \
-            && git add "journal/${R_JDATE}.md" \
-            && git add -A memories/ blog-ideas.md 2>/dev/null || true) \
-            && (cd "$BRAIN_PATH" \
-            && git commit --quiet -m "journal: discretionary reading on ${R_JDATE}" \
-            && git push --quiet origin master) \
-            || log "warning: brain commit/push failed"
         fi
       else
         log "discretionary: reading mode produced no journal entry"
       fi
+      commit_brain_changes "$BRAIN_PATH" "journal: discretionary reading on ${R_JDATE}"
     else
       log "warning: reading mode failed -- this mode does not fall through to other modes (no website worktree set up)"
     fi
@@ -1908,20 +1946,22 @@ EOF
 
 fi  # end if-claude-code-site-work
 
-  # Journal write -- local-day bucketing; skip byte-identical dupes.
+  # Journal append (best-effort; gated on Claude/executor having
+  # written a journal source). Brain commit happens after, regardless
+  # -- the harness-side executors (discretionary-post.sh's dedupe,
+  # the ideas reflection, source-weight tweaks) mutate brain without
+  # writing a journal, and those changes need to land too.
   # W_JOURNAL_APPENDED tracks whether the journal actually made it
   # into brain (vs being skipped as a duplicate) so the outcome log
   # message downstream doesn't lie.
   W_JOURNAL_SRC="$W_WORKTREE/.igor/IGOR_JOURNAL.md"
   W_JOURNAL_APPENDED=0
+  W_JDATE=$(date +%Y-%m-%d)
+  W_JFILE="$BRAIN_PATH/journal/${W_JDATE}.md"
   if [ -s "$W_JOURNAL_SRC" ]; then
-    W_JDATE=$(date +%Y-%m-%d)
-    W_JFILE="$BRAIN_PATH/journal/${W_JDATE}.md"
     W_JTS=$(date +%Y-%m-%dT%H:%M:%S%z)
-    (cd "$BRAIN_PATH" && git pull --rebase --quiet origin master 2>/dev/null) \
-      || log "warning: brain pull failed"
     if journal_is_duplicate "$W_JOURNAL_SRC" "$W_JFILE"; then
-      log "journal: discretionary entry duplicates an earlier entry today -- skipping"
+      log "journal: discretionary entry duplicates an earlier entry today -- skipping append"
     else
       log "journal: appending discretionary website tick"
       mkdir -p "$BRAIN_PATH/journal"
@@ -1929,21 +1969,10 @@ fi  # end if-claude-code-site-work
         printf '\n## %s -- discretionary on %s\n\n' "$W_JTS" "$W_REPO"
         cat "$W_JOURNAL_SRC"
       } >> "$W_JFILE"
-      # Stage journal + any new/edited memories + blog-ideas updates.
-      # Claude may have written to memories/* or blog-ideas.md during
-      # the tick; pick them up in the same commit so the brain reflects
-      # the tick's full state. `git add memories/ blog-ideas.md` is a
-      # no-op when those paths are absent.
-      (cd "$BRAIN_PATH" \
-        && git add "journal/${W_JDATE}.md" \
-        && git add -A memories/ blog-ideas.md 2>/dev/null || true) \
-        && (cd "$BRAIN_PATH" \
-        && git commit --quiet -m "journal: discretionary on $W_REPO" \
-        && git push --quiet origin master) \
-        || log "warning: brain commit/push failed"
       W_JOURNAL_APPENDED=1
     fi
   fi
+  commit_brain_changes "$BRAIN_PATH" "journal: discretionary on $W_REPO"
 
   # Harness-owned commits: Claude doesn't run git commit; the harness
   # commits anything dirty (outside .igor/) at end of tick. Subject is
@@ -2262,36 +2291,24 @@ fi
 # don't fail the tick over a journal entry.
 
 JOURNAL_SRC="$WORKTREE/.igor/IGOR_JOURNAL.md"
+BRAIN_LOCAL="$IGOR_REPO_ROOT/${BOT_USER}/brain"
+JOURNAL_DATE=$(date +%Y-%m-%d)
+JOURNAL_FILE="$BRAIN_LOCAL/journal/${JOURNAL_DATE}.md"
+
 if [ -s "$JOURNAL_SRC" ]; then
-  BRAIN_LOCAL="$IGOR_REPO_ROOT/${BOT_USER}/brain"
-  JOURNAL_DATE=$(date +%Y-%m-%d)
-  JOURNAL_FILE="$BRAIN_LOCAL/journal/${JOURNAL_DATE}.md"
   JOURNAL_TS=$(date +%Y-%m-%dT%H:%M:%S%z)
-
-  (cd "$BRAIN_LOCAL" && git pull --rebase --quiet origin master 2>/dev/null) \
-    || log "warning: brain pull failed; appending to local copy anyway"
-
   if journal_is_duplicate "$JOURNAL_SRC" "$JOURNAL_FILE"; then
-    log "journal: entry duplicates an earlier entry today -- skipping"
+    log "journal: entry duplicates an earlier entry today -- skipping append"
   else
     log "journal: appending tick reflection to brain/journal/${JOURNAL_DATE}.md"
     mkdir -p "$BRAIN_LOCAL/journal"
-
     {
       printf '\n## %s -- %s#%s\n\n' "$JOURNAL_TS" "$FORGEJO_REPO" "$ISSUE_NUMBER"
       cat "$JOURNAL_SRC"
     } >> "$JOURNAL_FILE"
-
-    # Journal + any new/edited memories + blog-ideas in one commit.
-    (cd "$BRAIN_LOCAL" \
-      && git add "journal/${JOURNAL_DATE}.md" \
-      && git add -A memories/ blog-ideas.md 2>/dev/null || true) \
-      && (cd "$BRAIN_LOCAL" \
-      && git commit --quiet -m "journal: ${FORGEJO_REPO}#${ISSUE_NUMBER}" \
-      && git push --quiet origin master) \
-      || log "warning: brain commit/push failed; entry may be local-only"
   fi
 fi
+commit_brain_changes "$BRAIN_LOCAL" "journal: ${FORGEJO_REPO}#${ISSUE_NUMBER}"
 
 # -- Determine outcome -----------------------------------------
 
