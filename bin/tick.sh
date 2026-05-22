@@ -1170,6 +1170,93 @@ if [ -z "$WINNER" ]; then
   W_PATH=$(repo_path_for "$W_REPO")
   BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
 
+  # Sample the discretionary mode FIRST, before any website-specific
+  # setup. Reading is self-improvement -- it has nothing to do with
+  # the website and shouldn't pretend to (no worktree, no website
+  # context, no in-flight PR scan). Post and site-work both produce
+  # for the website and continue to need that setup.
+  W_SPLIT_FILE="$BRAIN_PATH/memories/preferences/discretionary-split.md"
+  W_PICKED_MODE=""
+  W_SPLIT_ORDER=""
+  if [ -f "$W_SPLIT_FILE" ]; then
+    W_PARSED_SPLIT=$(awk '
+      match($0, /^[[:space:]]*-[[:space:]]+([0-9]+)[[:space:]]+--[[:space:]]+([a-z-]+)/, m) {
+        if (m[1] + 0 > 0) printf "%s|%s\n", m[1], m[2]
+      }
+    ' "$W_SPLIT_FILE")
+    if [ -n "$W_PARSED_SPLIT" ]; then
+      W_SPLIT_TOTAL=$(awk -F'|' '{ s += $1 } END { print s + 0 }' <<<"$W_PARSED_SPLIT")
+      W_SPLIT_ROLL=$((RANDOM % W_SPLIT_TOTAL))
+      W_PICKED_MODE=$(awk -F'|' -v r="$W_SPLIT_ROLL" '
+        { s += $1; if (r < s) { print $2; exit } }
+      ' <<<"$W_PARSED_SPLIT")
+      case "$W_PICKED_MODE" in
+        post)      W_SPLIT_ORDER="post reading site-work" ;;
+        reading)   W_SPLIT_ORDER="reading post site-work" ;;
+        site-work) W_SPLIT_ORDER="site-work post reading" ;;
+        *)         W_SPLIT_ORDER="site-work post reading" ;;
+      esac
+      log "discretionary: split roll $W_SPLIT_ROLL/$W_SPLIT_TOTAL picked mode '$W_PICKED_MODE'; order: $W_SPLIT_ORDER"
+    else
+      log "warning: discretionary-split.md parsed empty -- defaulting to site-work via claude code"
+      W_SPLIT_ORDER="site-work"
+    fi
+  else
+    log "warning: discretionary-split.md not found at $W_SPLIT_FILE -- defaulting to site-work via claude code"
+    W_SPLIT_ORDER="site-work"
+  fi
+
+  # Reading mode short-circuit: it doesn't touch the website. Use a
+  # scratch dir for the .igor/IGOR_JOURNAL.md output, run the
+  # executor, append the journal to brain, exit. No website worktree
+  # is set up; no website context computed.
+  if [ "$W_PICKED_MODE" = "reading" ]; then
+    W_SCRATCH="$IGOR_STATE_DIR/scratch-reading-$$"
+    mkdir -p "$W_SCRATCH/.igor"
+    R_CLEANUP() { rm -rf "$W_SCRATCH" 2>/dev/null || true; }
+    trap R_CLEANUP EXIT
+    W_START=$(date +%s)
+    if IGOR_BRAIN_PATH="$BRAIN_PATH" \
+       "$IGOR_HOME/bin/discretionary-read.sh" "$W_SCRATCH" 2>&1; then
+      W_ELAPSED=$(( $(date +%s) - W_START ))
+      log "discretionary: reading mode succeeded in ${W_ELAPSED}s"
+
+      # Append the journal entry to brain and commit (mirrors the
+      # tail of the website discretionary flow, minus all the
+      # website / PR / cooldown bits).
+      R_JOURNAL_SRC="$W_SCRATCH/.igor/IGOR_JOURNAL.md"
+      if [ -s "$R_JOURNAL_SRC" ]; then
+        R_JDATE=$(date +%Y-%m-%d)
+        R_JFILE="$BRAIN_PATH/journal/${R_JDATE}.md"
+        R_JTS=$(date +%Y-%m-%dT%H:%M:%S%z)
+        (cd "$BRAIN_PATH" && git pull --rebase --quiet origin master 2>/dev/null) \
+          || log "warning: brain pull failed"
+        if journal_is_duplicate "$R_JOURNAL_SRC" "$R_JFILE"; then
+          log "journal: reading entry duplicates an earlier entry today -- skipping"
+        else
+          log "journal: appending reading-mode tick"
+          mkdir -p "$BRAIN_PATH/journal"
+          {
+            printf '\n## %s -- discretionary reading\n\n' "$R_JTS"
+            cat "$R_JOURNAL_SRC"
+          } >> "$R_JFILE"
+          (cd "$BRAIN_PATH" \
+            && git add "journal/${R_JDATE}.md" \
+            && git add -A memories/ blog-ideas.md 2>/dev/null || true) \
+            && (cd "$BRAIN_PATH" \
+            && git commit --quiet -m "journal: discretionary reading on ${R_JDATE}" \
+            && git push --quiet origin master) \
+            || log "warning: brain commit/push failed"
+        fi
+      else
+        log "discretionary: reading mode produced no journal entry"
+      fi
+    else
+      log "warning: reading mode failed -- this mode does not fall through to other modes (no website worktree set up)"
+    fi
+    exit 0
+  fi
+
   if [ ! -d "$W_PATH/.git" ]; then
     log "discretionary: no website cloned -- nothing to do"
     exit 0
@@ -1273,55 +1360,13 @@ nothing else is calling you, this is a fine tick to spend reading
 
   cd "$W_WORKTREE"
 
-  # Discretionary mode selection. Brain holds the weights at
-  # memories/preferences/discretionary-split.md (reading / post /
-  # site-work). Harness samples a mode and dispatches:
-  #
-  #   reading    -> bin/discretionary-read.sh  (direct API)
-  #   post       -> bin/discretionary-post.sh  (direct API)
-  #   site-work  -> claude code with site-work-only directive
-  #
-  # On harness-driven success, jumps past the Claude invocation;
-  # the existing journal-commit flow picks up the IGOR_JOURNAL.md
-  # the executor wrote (reading) or the post + PR_BODY.md (post)
-  # and commits/pushes/PRs normally.
-  #
-  # If a harness mode is sampled but its executor fails (post mode
-  # bails because cooldown active, reading mode fails because every
-  # source was offline, etc.), we fall through to the next mode in
-  # a fixed fallback order: post -> reading -> site-work.
+  # Dispatch by mode. W_PICKED_MODE and W_SPLIT_ORDER were sampled
+  # at the top of the discretionary block (before website setup) so
+  # reading mode could short-circuit out entirely. At this point
+  # W_PICKED_MODE is post or site-work; reading is in W_SPLIT_ORDER
+  # only as a fallback if the primary mode fails (it'd run inside
+  # the website worktree, which is wasteful but works).
   USED_HARNESS_MODE=""
-  W_SPLIT_FILE="$BRAIN_PATH/memories/preferences/discretionary-split.md"
-  W_SPLIT_ORDER=""
-  if [ -f "$W_SPLIT_FILE" ]; then
-    W_PARSED_SPLIT=$(awk '
-      match($0, /^[[:space:]]*-[[:space:]]+([0-9]+)[[:space:]]+--[[:space:]]+([a-z-]+)/, m) {
-        if (m[1] + 0 > 0) printf "%s|%s\n", m[1], m[2]
-      }
-    ' "$W_SPLIT_FILE")
-    if [ -n "$W_PARSED_SPLIT" ]; then
-      W_SPLIT_TOTAL=$(awk -F'|' '{ s += $1 } END { print s + 0 }' <<<"$W_PARSED_SPLIT")
-      W_SPLIT_ROLL=$((RANDOM % W_SPLIT_TOTAL))
-      W_PICKED_MODE=$(awk -F'|' -v r="$W_SPLIT_ROLL" '
-        { s += $1; if (r < s) { print $2; exit } }
-      ' <<<"$W_PARSED_SPLIT")
-      # Fallback order: picked mode first, then post -> reading -> site-work
-      case "$W_PICKED_MODE" in
-        post)      W_SPLIT_ORDER="post reading site-work" ;;
-        reading)   W_SPLIT_ORDER="reading post site-work" ;;
-        site-work) W_SPLIT_ORDER="site-work post reading" ;;
-        *)         W_SPLIT_ORDER="site-work post reading" ;;
-      esac
-      log "discretionary: split roll $W_SPLIT_ROLL/$W_SPLIT_TOTAL picked mode '$W_PICKED_MODE'; order: $W_SPLIT_ORDER"
-    else
-      log "warning: discretionary-split.md parsed empty -- defaulting to site-work via claude code"
-      W_SPLIT_ORDER="site-work"
-    fi
-  else
-    log "warning: discretionary-split.md not found at $W_SPLIT_FILE -- defaulting to site-work via claude code"
-    W_SPLIT_ORDER="site-work"
-  fi
-
   for mode in $W_SPLIT_ORDER; do
     [ -n "$USED_HARNESS_MODE" ] && break
     case "$mode" in
