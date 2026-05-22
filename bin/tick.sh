@@ -1826,7 +1826,14 @@ fi  # end if-claude-code-site-work
     exit 0
   fi
 
-  if grep -qiE 'tests:[[:space:]]+0[[:space:]]+(passed|failed|of|total)|no tests (ran|found|collected)|collected 0 items|(^|[^0-9])0 passing([^0-9]|$)|running 0 tests|ran 0 tests' "$W_LOG"; then
+  # Vacuous-tests check: only meaningful for the Claude Code path,
+  # which actually runs the project's test suite and captures stdout
+  # in W_LOG. The harness post executor doesn't run tests -- it just
+  # writes a markdown file -- so W_LOG isn't set and the check would
+  # die under `set -u` with "unbound variable". Skip when the file
+  # isn't there.
+  if [ -n "${W_LOG:-}" ] && [ -f "$W_LOG" ] \
+     && grep -qiE 'tests:[[:space:]]+0[[:space:]]+(passed|failed|of|total)|no tests (ran|found|collected)|collected 0 items|(^|[^0-9])0 passing([^0-9]|$)|running 0 tests|ran 0 tests' "$W_LOG"; then
     log "discretionary: vacuous tests -- abandoning"
     exit 0
   fi
