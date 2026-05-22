@@ -166,8 +166,8 @@ sample_weighted() {
 # Lines look like:
 #
 #   - [ ] https://thatgirljen.com/2026/02/02/fledgling/
-#   - [ ] https://news.example.com/story -- hn-rank 1
-#   - [x] https://other.example.com/post -- read 2026-05-22 -- hn-rank 3
+#   - [ ] https://news.example.com/story -- hn-rank 1 -- hn-points 847
+#   - [x] https://other.example.com/post -- read 2026-05-22 -- hn-rank 3 -- hn-points 230
 #
 # URL is the first token after `[ ]`/`[x]`. Everything after the
 # first `--` is annotations (space-separated key+value, recurring
@@ -176,6 +176,8 @@ sample_weighted() {
 #   read YYYY-MM-DD    when this URL was read (only on [x] lines)
 #   hn-rank N          highest position this URL reached on HN
 #                      (lowest number wins on update)
+#   hn-points N        peak upvote count Igor observed on HN
+#                      (highest number wins on update)
 #
 # Future annotations slot in the same way -- just don't break the
 # "URL is first space-delimited token" parse.
@@ -376,6 +378,35 @@ ledger_update_rank() {
   ' "$ledger" > "$tmp" && mv "$tmp" "$ledger"
 }
 
+# Update (or add) the hn-points annotation. If the URL already
+# has points, keep the HIGHER number (peak upvotes Igor observed).
+ledger_update_points() {
+  local ledger="$1" url="$2" new_points="$3"
+  [ -f "$ledger" ] || return 0
+  local tmp; tmp=$(mktemp)
+  awk -v url="$url" -v points="$new_points" '
+    /^- \[[ x]\] / {
+      line = $0
+      first = $0
+      sub(/^- \[[ x]\] /, "", first)
+      sub(/ .*$/, "", first)
+      if (first == url) {
+        if (match(line, /hn-points [0-9]+/)) {
+          existing = substr(line, RSTART + 10, RLENGTH - 10) + 0
+          if (points + 0 > existing) {
+            sub(/hn-points [0-9]+/, "hn-points " points, line)
+          }
+        } else {
+          line = line " -- hn-points " points
+        }
+        print line
+        next
+      }
+    }
+    { print }
+  ' "$ledger" > "$tmp" && mv "$tmp" "$ledger"
+}
+
 # Flip [ ] to [x] and add `read YYYY-MM-DD`. Preserves any
 # existing annotations on the line.
 ledger_mark_read() {
@@ -521,16 +552,20 @@ ledger_populate() {
 
 # -- discovery: aggregators ---------------------------------------
 
-# HN: fetch the RSS feed, return "<rank>|<url>" pairs. Position
-# in the feed is the rank; first <link> is the channel link
-# (homepage) and gets stripped, items start at rank 1.
+# HN: query the Algolia API for the current front page. Returns
+# "<rank>|<points>|<url>" rows. Algolia is preferred over the
+# raw RSS because it includes per-item upvote count, which gives
+# a much richer "should I read this?" signal than position alone.
+# A story that hit 800 points and fell off still beats today's
+# 200-point #1 in the picker.
+#
+# Self-posts (Ask HN, Tell HN) have null url -- those get
+# filtered. Only external story URLs make it into the ledger.
 discover_hn() {
-  local rss_url="https://news.ycombinator.com/rss"
-  curl -sfL --max-time 15 --max-filesize 5000000 -A "$UA" "$rss_url" 2>/dev/null \
-    | grep -oE '<link>[^<]+</link>' \
-    | sed -E 's,</?link>,,g' \
-    | grep -E '^https?://' \
-    | awk 'NR == 1 { next } { print (NR - 1) "|" $0 }'
+  local api='https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=30'
+  curl -sfL --max-time 15 --max-filesize 5000000 -A "$UA" "$api" 2>/dev/null \
+    | jq -r '.hits[]? | select(.url != null) | "\(.points // 0)|\(.url)"' \
+    | awk -F'|' '{ print NR "|" $0 }'
 }
 
 # Kagi Small Web: redirects to a random small-web URL. Follow
@@ -590,38 +625,41 @@ while [ "$attempts" -lt "$MAX_ATTEMPTS" ]; do
         ;;
       hn)
         # HN fanout: each URL goes to its destination domain's
-        # ledger (minimal init, no sitemap fetch yet) with an
-        # hn-rank annotation. Candidates are the just-fetched
-        # URLs, sorted by rank ascending.
+        # ledger with hn-rank AND hn-points annotations. Candidates
+        # are sorted by points DESC (peak upvotes), then rank ASC
+        # as tiebreaker -- a story that hit 800 points and fell
+        # off ranks above today's 200-point #1.
         discovered=$(discover_hn)
         if [ -z "$discovered" ]; then
-          echo "discretionary-read: HN RSS empty or unreachable, trying another source" >&2
+          echo "discretionary-read: HN API empty or unreachable, trying another source" >&2
           continue
         fi
         sorted_candidates=""
-        while IFS='|' read -r rank url; do
+        while IFS='|' read -r rank points url; do
           [ -z "$url" ] && continue
           dest_ledger=$(ledger_path "$url")
           ledger_init_minimal "$dest_ledger" "$url"
-          # Skip if Igor already read this URL (via HN before, or
-          # via the domain's own source if it's promoted).
           if ledger_url_is_read "$dest_ledger" "$url"; then
             continue
           fi
-          ledger_append_url "$dest_ledger" "$url" "hn-rank $rank"
+          # Initial append stores both annotations; subsequent
+          # updates keep the strongest signal (lowest rank seen,
+          # highest points seen).
+          ledger_append_url "$dest_ledger" "$url" "hn-rank $rank -- hn-points $points"
           ledger_update_rank "$dest_ledger" "$url" "$rank"
-          # Cross-source dedupe against log.md (paranoid; the
-          # is_read check above usually catches it).
+          ledger_update_points "$dest_ledger" "$url" "$points"
           if [ -f "$LOG_FILE" ] && grep -qF "$url" "$LOG_FILE" 2>/dev/null; then
             ledger_mark_read "$dest_ledger" "$url"
             continue
           fi
-          sorted_candidates="${sorted_candidates}${rank}|${url}"$'\n'
+          # Sort key: points (desc), rank (asc). Format
+          # "<points>|<rank>|<url>" then sort -k1nr -k2n.
+          sorted_candidates="${sorted_candidates}${points}|${rank}|${url}"$'\n'
         done <<<"$discovered"
         candidates=$(printf '%s' "$sorted_candidates" \
           | awk 'NF' \
-          | sort -t'|' -k1n \
-          | cut -d'|' -f2-)
+          | sort -t'|' -k1nr -k2n \
+          | cut -d'|' -f3-)
         ;;
       kagi)
         # Kagi Small Web one-shot: follow the redirect, get a
@@ -654,8 +692,15 @@ while [ "$attempts" -lt "$MAX_ATTEMPTS" ]; do
   attempts=$((attempts + 1))
   echo "discretionary-read: attempt $attempts/$MAX_ATTEMPTS -- $PICKED_SOURCE -> $URL" >&2
 
+  # Tee agent-read's stderr: streams through to journalctl in real
+  # time (so RAG build progress, curl errors, etc., are visible)
+  # AND gets captured to a temp file so we can pluck the last line
+  # on failure for the discretionary-read warning. Previously stderr
+  # was redirected to file only -- the RAG `rag: flushed redis db /
+  # rag: collected N journal + M memory / rag: indexed ... entries`
+  # output never surfaced on reading ticks because it was buried.
   err_file=$(mktemp)
-  if read_output=$("$IGOR_HOME/bin/agent-read.sh" "$URL" 2>"$err_file"); then
+  if read_output=$("$IGOR_HOME/bin/agent-read.sh" "$URL" 2> >(tee "$err_file" >&2)); then
     rm -f "$err_file"
     break
   fi
