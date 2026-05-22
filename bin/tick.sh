@@ -834,6 +834,111 @@ posts_mark_shipped() {
   return 0
 }
 
+# Cadence assessment. Called from the discretionary block when posting
+# isn't allowed and the routing decision is between site-work and
+# reading. Computes today's real activity (open PRs, today's commits
+# across all clones, today's brain journal entries) and hands that to
+# Haiku with a "work or read?" question framed as a human's
+# end-of-day judgment, not a threshold rule.
+#
+# Bias is in the prompt, not in code: reading is cheap; lean toward
+# it when the day's been substantial; pick work when the queue is
+# light or nothing's shipped yet. The model returns one of "work" /
+# "read" and a one-line reason. Failure (API error, parse error)
+# defaults to "work" -- shipping is the default mode, reading is the
+# opt-in break.
+#
+# Output: "<choice>|<reason>" on stdout (caller splits on the first
+# pipe). No JSON parsing burden for the caller.
+discretionary_assess_cadence() {
+  local open_prs="$1"
+  local today journal_today commits_today repo_dir count post_today
+  today=$(date +%Y-%m-%d)
+
+  # Today's brain journal entries (count of '## ' headers in today's
+  # file). Imperfect -- Claude sometimes skips journaling on site-work
+  # ticks -- but the other metrics (PRs, commits) catch what matters.
+  local journal_file="${BRAIN_PATH:-}/journal/${today}.md"
+  if [ -n "${BRAIN_PATH:-}" ] && [ -f "$journal_file" ]; then
+    journal_today=$(grep -c '^## ' "$journal_file" 2>/dev/null || echo 0)
+  else
+    journal_today=0
+  fi
+
+  # Today's commits across cloned repos. No author filter: Josh's
+  # commits to brain (manual edits) also count as "stuff happened
+  # today" from Igor's perspective.
+  commits_today=0
+  if [ -d "${IGOR_REPO_ROOT:-}/${BOT_USER}" ]; then
+    for repo_dir in "$IGOR_REPO_ROOT/${BOT_USER}"/*; do
+      [ -d "$repo_dir/.git" ] || continue
+      count=$(cd "$repo_dir" \
+        && git log --since="$today 00:00:00" --until="$today 23:59:59" \
+            --no-merges --oneline 2>/dev/null | wc -l | tr -d ' ')
+      commits_today=$((commits_today + ${count:-0}))
+    done
+  fi
+
+  # Did a post land on website master today?
+  post_today=0
+  if [ -d "${IGOR_REPO_ROOT:-}/${BOT_USER}/website/.git" ]; then
+    local merged_count
+    merged_count=$(cd "$IGOR_REPO_ROOT/${BOT_USER}/website" \
+      && git log --since="$today 00:00:00" --until="$today 23:59:59" \
+          origin/master --diff-filter=A --name-only --pretty=format: \
+          -- 'src/posts/*' 2>/dev/null \
+      | grep -cE '^src/posts/.+\.md$' || true)
+    [ "${merged_count:-0}" -gt 0 ] && post_today=1
+  fi
+
+  local activity
+  activity=$(cat <<EOF
+Today is $today.
+
+Your activity since local midnight:
+- Open Igor PRs in the queue: $open_prs
+- Brain journal entries written today: $journal_today
+- Commits authored today (all repos): $commits_today
+- Post landed today: $([ "$post_today" = "1" ] && echo "yes" || echo "no")
+
+Question: should the next discretionary tick be more work (file a
+site-work issue) or a break (read an article + journal-reflect)?
+EOF
+)
+
+  local response choice reason
+  response=$(claude_complete \
+    "You are deciding how Igor (an autonomous Claude process) should spend the next discretionary tick.
+
+Think like a human's end-of-day check-in. \"Did I put in a solid day's work?\" If yes, take a break to read -- reading is cheap, forward-investment, and surfaces ideas. If no -- especially if the queue is light or nothing's shipped yet -- more work is the right call.
+
+Don't grind for grinding's sake. Don't slack off when there's clear work to do. The goal is the natural rhythm of a human workday, not a rigid threshold.
+
+Output STRICT JSON. No code fences, no preamble.
+
+Schema:
+{
+  \"decision\": \"work\" | \"read\",
+  \"reason\": \"one short sentence\"
+}" \
+    "$activity" \
+    200)
+
+  response=$(printf '%s' "$response" | sed -E '/^```/d')
+  choice=$(jq -r '.decision // ""' <<<"$response" 2>/dev/null || echo "")
+  reason=$(jq -r '.reason // ""' <<<"$response" 2>/dev/null || echo "")
+
+  case "$choice" in
+    work|read) ;;
+    *)
+      choice="work"
+      reason="cadence assessment failed -- defaulting to work"
+      ;;
+  esac
+
+  printf '%s|%s' "$choice" "$reason"
+}
+
 # Shift window. Returns 0 if a configured shift is active OR no shift
 # is configured (testing / always-on). When IGOR_SHIFT_START + _END
 # are both set, only fire ticks during [START, END) local hours.
@@ -1431,27 +1536,34 @@ if [ -z "$WINNER" ]; then
     W_POST_RULE="You already shipped a post today (local calendar day). Do NOT publish another post this tick -- max one post per day is a hard rule. Other site work (about page, layout, copy, links, tag pages, CSS) and read+journal ticks are still fair game."
   fi
 
-  # Site-work mode files new issues that future ticks claim and
-  # turn into PRs. Without a cap, busy days can pile up open Igor
-  # PRs faster than the human can review them. Once that backlog
-  # hits IGOR_DISCRETIONARY_PR_CAP (default 5), discretionary work
-  # switches to reading -- learn while the queue drains, don't
-  # add to it. Post mode is exempt from the cap because it's
-  # already bounded by 1-post-per-day cooldown; the pileup risk
-  # is from site-work, which has no other throttle.
-  W_PR_CAP="${IGOR_DISCRETIONARY_PR_CAP:-5}"
+  # Routing: post mode is unconditional when posting's allowed
+  # (cooldown handles its own throttle -- 1/day max). Otherwise,
+  # ask Igor whether the next tick is work or a break to read.
+  #
+  # Earlier this file hard-capped site-work at IGOR_DISCRETIONARY_
+  # PR_CAP (default 5) open PRs. That worked but was the wrong
+  # shape: a knob, set by us, on a rigid threshold. Replaced with
+  # a single-shot Haiku call that sees today's actual activity
+  # and decides like a human would ("is this a solid day yet?").
+  # No env var, no threshold; just judgment.
   if [ "$W_POSTING_ALLOWED" = "1" ]; then
     W_PICKED_MODE="post"
     W_SPLIT_ORDER="post site-work reading"
-  elif [ "$W_OPEN_PRS_COUNT" -lt "$W_PR_CAP" ]; then
-    W_PICKED_MODE="site-work"
-    W_SPLIT_ORDER="site-work reading"
+    log "discretionary: routing (posting_allowed=1, open_prs=$W_OPEN_PRS_COUNT) -> $W_SPLIT_ORDER"
   else
-    W_PICKED_MODE="reading"
-    W_SPLIT_ORDER="reading"
-    log "discretionary: $W_OPEN_PRS_COUNT open Igor PRs >= cap $W_PR_CAP -- skipping site-work for reading"
+    W_CADENCE=$(discretionary_assess_cadence "$W_OPEN_PRS_COUNT")
+    W_CADENCE_CHOICE=${W_CADENCE%%|*}
+    W_CADENCE_REASON=${W_CADENCE#*|}
+    if [ "$W_CADENCE_CHOICE" = "read" ]; then
+      W_PICKED_MODE="reading"
+      W_SPLIT_ORDER="reading"
+    else
+      W_PICKED_MODE="site-work"
+      W_SPLIT_ORDER="site-work reading"
+    fi
+    log "discretionary: cadence -> $W_CADENCE_CHOICE ($W_CADENCE_REASON)"
+    log "discretionary: routing (posting_allowed=0, open_prs=$W_OPEN_PRS_COUNT) -> $W_SPLIT_ORDER"
   fi
-  log "discretionary: routing (posting_allowed=$W_POSTING_ALLOWED, open_prs=$W_OPEN_PRS_COUNT, cap=$W_PR_CAP) -> $W_SPLIT_ORDER"
 
   # Reading mode short-circuit: it doesn't touch the website. Use a
   # scratch dir for the .igor/IGOR_JOURNAL.md output, run the
