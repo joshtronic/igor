@@ -82,10 +82,12 @@ mkdir -p "$(dirname "$JOURNAL_FILE")"
 # Match lines like: - 25 -- https://example.com -- label
 # Weights at 0 are skipped (so a source can stay listed but disabled).
 # Output: "<weight>|<url>" per line.
+# Portable awk (works on mawk -- no 3-arg match()).
+# Format: "- <weight> -- <url> [-- <label>]" => $1='-' $2=weight $3='--' $4=url.
 parse_sources() {
   awk '
-    match($0, /^[[:space:]]*-[[:space:]]+([0-9]+)[[:space:]]+--[[:space:]]+(https?:\/\/[^[:space:]]+)/, m) {
-      if (m[1] + 0 > 0) printf "%s|%s\n", m[1], m[2]
+    $1 == "-" && $2 ~ /^[0-9]+$/ && $3 == "--" && $4 ~ /^https?:\/\// {
+      if ($2 + 0 > 0) printf "%s|%s\n", $2, $4
     }
   ' "$SOURCES_FILE"
 }

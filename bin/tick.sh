@@ -1262,9 +1262,11 @@ if [ -z "$WINNER" ]; then
   W_PICKED_MODE=""
   W_SPLIT_ORDER=""
   if [ -f "$W_SPLIT_FILE" ]; then
+    # Portable awk (works on mawk -- no 3-arg match()).
+    # Format: "- <weight> -- <mode>" => $1='-' $2=weight $3='--' $4=mode.
     W_PARSED_SPLIT=$(awk '
-      match($0, /^[[:space:]]*-[[:space:]]+([0-9]+)[[:space:]]+--[[:space:]]+([a-z-]+)/, m) {
-        if (m[1] + 0 > 0) printf "%s|%s\n", m[1], m[2]
+      $1 == "-" && $2 ~ /^[0-9]+$/ && $3 == "--" && $4 ~ /^[a-z-]+$/ {
+        if ($2 + 0 > 0) printf "%s|%s\n", $2, $4
       }
     ' "$W_SPLIT_FILE")
     if [ -n "$W_PARSED_SPLIT" ]; then
