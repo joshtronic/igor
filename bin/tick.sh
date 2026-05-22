@@ -1649,15 +1649,23 @@ What to do:
    typos, missing meta tags, RSS issues, a tag page that needs
    work, a new page that would help. Pick something concrete and
    bounded -- one PR's worth of work.
-4. File the issue via:
+4. File the issue via agent-enqueue.sh. Two forms:
 
+     # Short body, single-line:
      agent-enqueue.sh $W_REPO "title" "body"
+
+     # Multi-line body (RECOMMENDED for real specs):
+     #   1. Write the body to a scratch file in .igor/ (gitignored).
+     #   2. Pass the file path -- no command substitution needed,
+     #      static-analyzable, no permission-hook fights.
+     agent-enqueue.sh $W_REPO "title" --body-file .igor/issue-body.md
 
    - Title: short, imperative, conventional-commit-style
      ("fix: footer links wrap on narrow viewports").
    - Body: enough spec that a future tick can do the work without
      re-discovering the problem. Reference specific files, give
-     acceptance criteria.
+     acceptance criteria. Multi-paragraph spec bodies are normal --
+     use --body-file for those.
 
    IF agent-enqueue.sh FAILS for any reason (permission gate,
    network error, label problem, etc.): do NOT silently exit with
