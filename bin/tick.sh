@@ -1073,13 +1073,19 @@ discretionary_assess_cadence() {
 
   # Recent tick modes (last 5 reflections, newest last). The
   # symmetric 3-in-a-row rule below uses this to break streaks
-  # in either direction.
+  # in any direction (work / read / reflect).
   local journal_file="${BRAIN_PATH:-}/journal/${today}.md"
   recent_modes=""
   if [ -n "${BRAIN_PATH:-}" ] && [ -f "$journal_file" ]; then
     recent_modes=$(grep -E '^## [0-9]+-[0-9]+-[0-9]+T' "$journal_file" 2>/dev/null \
       | tail -5 \
-      | sed -E 's/.*-- discretionary reading$/read/; s/.*-- discretionary on .*/work/; s/.*-- [^ ]+\/[^#]+#.*/work/; s/^## .*/work/' \
+      | sed -E '
+          s/.*-- discretionary reading$/read/
+          s/.*-- discretionary reflection$/reflect/
+          s/.*-- discretionary on .*/work/
+          s/.*-- [^ ]+\/[^#]+#.*/work/
+          s/^## .*/work/
+        ' \
       | paste -sd, -)
   fi
   [ -n "$recent_modes" ] || recent_modes="(none yet today)"
@@ -1091,33 +1097,43 @@ discretionary_assess_cadence() {
   #      first in W_SPLIT_ORDER. Don't roll dice when there's a post
   #      slot waiting.
   #
-  #   2. Else, if the last 3 modes are all the same, FLIP. Three
-  #      ticks of the same shape is enough; switch gears. Symmetric:
-  #      work,work,work -> read; read,read,read -> work.
+  #   2. Else, if the last 3 modes are all the same, FLIP to one of
+  #      the other two modes uniformly. Symmetric across all three.
   #
-  #   3. Else, coin flip. Work or read with equal probability.
+  #   3. Else, pick uniformly among work / read / reflect.
+  #
+  # Reflect = cheap, no fetch, no PR. Just journal what's on the
+  # bot's mind from today's activity. Keeps recent_modes diverse
+  # without burning external bandwidth.
   #
   # The TOTAL/ACTIVE pr counts are logged for visibility but no
   # longer gate the decision -- Josh's call: "mindfulness, not a
   # wall". The shift window is the actual brake on volume.
-  local tail3
+  local tail3 flip_pick
   tail3=$(printf '%s' "$recent_modes" | tr ',' '\n' | tail -3 | tr '\n' ',')
 
   if [ "$posting_allowed" = "1" ]; then
     choice="work"
     reason="post slot is open today; prioritize publishing"
   elif [ "$tail3" = "work,work,work" ]; then
-    choice="read"
-    reason="3 consecutive work ticks; switching gears to read"
+    flip_pick=$((RANDOM % 2))
+    if [ "$flip_pick" -eq 0 ]; then choice="read"; else choice="reflect"; fi
+    reason="3 consecutive work ticks; switching gears to $choice"
   elif [ "$tail3" = "read,read,read" ]; then
-    choice="work"
-    reason="3 consecutive read ticks; switching gears to work"
-  elif [ $((RANDOM % 2)) -eq 0 ]; then
-    choice="work"
-    reason="coin flip (open=$open_prs active=$active_prs recent=$recent_modes)"
+    flip_pick=$((RANDOM % 2))
+    if [ "$flip_pick" -eq 0 ]; then choice="work"; else choice="reflect"; fi
+    reason="3 consecutive read ticks; switching gears to $choice"
+  elif [ "$tail3" = "reflect,reflect,reflect" ]; then
+    flip_pick=$((RANDOM % 2))
+    if [ "$flip_pick" -eq 0 ]; then choice="work"; else choice="read"; fi
+    reason="3 consecutive reflect ticks; switching gears to $choice"
   else
-    choice="read"
-    reason="coin flip (open=$open_prs active=$active_prs recent=$recent_modes)"
+    case $((RANDOM % 3)) in
+      0) choice="work" ;;
+      1) choice="read" ;;
+      2) choice="reflect" ;;
+    esac
+    reason="3-way pick (open=$open_prs active=$active_prs recent=$recent_modes)"
   fi
 
   printf '%s|%s' "$choice" "$reason"
@@ -1755,6 +1771,9 @@ if [ -z "$WINNER" ]; then
   if [ "$W_CADENCE_CHOICE" = "read" ]; then
     W_PICKED_MODE="reading"
     W_SPLIT_ORDER="reading"
+  elif [ "$W_CADENCE_CHOICE" = "reflect" ]; then
+    W_PICKED_MODE="reflect"
+    W_SPLIT_ORDER="reflect"
   elif [ "$W_POSTING_ALLOWED" = "1" ]; then
     W_PICKED_MODE="post"
     W_SPLIT_ORDER="post site-work reading"
@@ -1791,6 +1810,30 @@ if [ -z "$WINNER" ]; then
       commit_brain_changes "$BRAIN_PATH" "journal: discretionary reading on $(date +%Y-%m-%d)"
     else
       log "warning: reading mode failed -- this mode does not fall through to other modes (no website worktree set up)"
+    fi
+    exit 0
+  fi
+
+  # Reflect mode short-circuit: cheaper than reading (no fetch).
+  # Just calls discretionary-reflect.sh which writes a journal
+  # entry from today's local context. No PR, no external network.
+  if [ "$W_PICKED_MODE" = "reflect" ]; then
+    W_SCRATCH="$AGENT_STATE_DIR/scratch-reflect-$$"
+    mkdir -p "$W_SCRATCH/.agent"
+    F_CLEANUP() {
+      rm -rf "$W_SCRATCH" 2>/dev/null || true
+      rag_cleanup_marker
+    }
+    trap F_CLEANUP EXIT
+    W_START=$(date +%s)
+    if AGENT_BRAIN_PATH="$BRAIN_PATH" \
+       "$AGENT_HOME/bin/discretionary-reflect.sh" "$W_SCRATCH" 2>&1; then
+      W_ELAPSED=$(( $(date +%s) - W_START ))
+      log "discretionary: reflect mode succeeded in ${W_ELAPSED}s"
+      append_journal_entry "discretionary reflection" "$W_SCRATCH/.agent/AGENT_JOURNAL.md"
+      commit_brain_changes "$BRAIN_PATH" "journal: discretionary reflection on $(date +%Y-%m-%d)"
+    else
+      log "warning: reflect mode failed"
     fi
     exit 0
   fi
