@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# doctor.sh -- runtime health check for a live Igor install.
+# doctor.sh -- runtime health check for a live the agent install.
 #
 # Read-only. Reports on the current state of the system in one
 # screen so the operator can spot anomalies without spelunking
 # through journalctl, the state dir, and Forgejo manually.
 #
-# Run on the server (or anywhere with IGOR_HOME + .env):
+# Run on the server (or anywhere with AGENT_HOME + .env):
 #   bin/doctor.sh
 #
 # Sections:
@@ -22,20 +22,20 @@
 
 set -uo pipefail  # NOT -e: don't bail on first failing check
 
-IGOR_HOME="${IGOR_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
-IGOR_STATE_DIR="${IGOR_STATE_DIR:-$HOME/.local/state/igor}"
-IGOR_REPO_ROOT="$IGOR_STATE_DIR/repos"
+AGENT_HOME="${AGENT_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
+AGENT_STATE_DIR="${AGENT_STATE_DIR:-$HOME/.local/state/agent}"
+AGENT_REPO_ROOT="$AGENT_STATE_DIR/repos"
 
-if [ -f "$IGOR_HOME/.env" ]; then
+if [ -f "$AGENT_HOME/.env" ]; then
   set -a
   # shellcheck source=/dev/null
-  . "$IGOR_HOME/.env"
+  . "$AGENT_HOME/.env"
   set +a
 fi
 
 # shellcheck source=lib/forgejo.sh
-. "$IGOR_HOME/lib/forgejo.sh" 2>/dev/null || {
-  echo "doctor: cannot source lib/forgejo.sh from $IGOR_HOME/lib/" >&2
+. "$AGENT_HOME/lib/forgejo.sh" 2>/dev/null || {
+  echo "doctor: cannot source lib/forgejo.sh from $AGENT_HOME/lib/" >&2
   exit 1
 }
 
@@ -50,15 +50,15 @@ info()    { printf '         %s\n' "$*"; }
 # ----- environment ----------------------------------------------
 
 section "Environment"
-info "IGOR_HOME=$IGOR_HOME"
-info "IGOR_STATE_DIR=$IGOR_STATE_DIR"
+info "AGENT_HOME=$AGENT_HOME"
+info "AGENT_STATE_DIR=$AGENT_STATE_DIR"
 [ -n "${ANTHROPIC_API_KEY:-}" ] && ok "ANTHROPIC_API_KEY set" || bad "ANTHROPIC_API_KEY missing"
 [ -n "${FORGEJO_URL:-}" ]       && ok "FORGEJO_URL=$FORGEJO_URL" || bad "FORGEJO_URL missing"
 [ -n "${FORGEJO_TOKEN:-}" ]     && ok "FORGEJO_TOKEN set"  || bad "FORGEJO_TOKEN missing"
-[ -n "${IGOR_MODEL:-}" ]        && ok "IGOR_MODEL=$IGOR_MODEL" || bad "IGOR_MODEL missing"
-info "IGOR_DISCRETIONARY_RATE=${IGOR_DISCRETIONARY_RATE:-(unset, default 0)}"
-info "IGOR_REVIEWER=${IGOR_REVIEWER:-(unset)}"
-info "IGOR_SHIFT_START=${IGOR_SHIFT_START:-(unset)}  IGOR_SHIFT_END=${IGOR_SHIFT_END:-(unset)}"
+[ -n "${AGENT_MODEL:-}" ]        && ok "AGENT_MODEL=$AGENT_MODEL" || bad "AGENT_MODEL missing"
+info "AGENT_DISCRETIONARY_RATE=${AGENT_DISCRETIONARY_RATE:-(unset, default 0)}"
+info "FORGEJO_REVIEWER=${FORGEJO_REVIEWER:-(unset)}"
+info "AGENT_SHIFT_START=${AGENT_SHIFT_START:-(unset)}  AGENT_SHIFT_END=${AGENT_SHIFT_END:-(unset)}"
 
 # ----- Forgejo connectivity + bot identity ----------------------
 
@@ -75,7 +75,7 @@ fi
 
 section "Local clones"
 for repo in brain website; do
-  CLONE="$IGOR_REPO_ROOT/${BOT_USER}/$repo"
+  CLONE="$AGENT_REPO_ROOT/${BOT_USER}/$repo"
   if [ -d "$CLONE/.git" ]; then
     AHEAD=$(cd "$CLONE" && git rev-list --count HEAD..@{u} 2>/dev/null || echo "?")
     BEHIND=$(cd "$CLONE" && git rev-list --count @{u}..HEAD 2>/dev/null || echo "?")
@@ -91,7 +91,7 @@ done
 # ----- State files ----------------------------------------------
 
 section "State files"
-STATE_FILE="$IGOR_STATE_DIR/discretionary-state.json"
+STATE_FILE="$AGENT_STATE_DIR/discretionary-state.json"
 if [ -f "$STATE_FILE" ]; then
   ok "discretionary-state.json present"
   if command -v jq >/dev/null 2>&1; then
@@ -104,7 +104,7 @@ else
   info "discretionary-state.json not yet created"
 fi
 
-LOCK_FILE="$IGOR_STATE_DIR/lock"
+LOCK_FILE="$AGENT_STATE_DIR/lock"
 if [ -e "$LOCK_FILE" ]; then
   if command -v fuser >/dev/null 2>&1; then
     if fuser "$LOCK_FILE" >/dev/null 2>&1; then
@@ -120,7 +120,7 @@ fi
 # ----- Worktrees ------------------------------------------------
 
 section "Worktrees on disk"
-WT_DIR="$IGOR_STATE_DIR/worktrees"
+WT_DIR="$AGENT_STATE_DIR/worktrees"
 if [ -d "$WT_DIR" ]; then
   WT_COUNT=$(find "$WT_DIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
   if [ "$WT_COUNT" -eq 0 ]; then
@@ -137,7 +137,7 @@ fi
 # ----- Stale local agent branches -------------------------------
 
 section "Local agent branches per clone"
-for repo_path in $(find "$IGOR_REPO_ROOT" -maxdepth 2 -mindepth 2 -type d 2>/dev/null); do
+for repo_path in $(find "$AGENT_REPO_ROOT" -maxdepth 2 -mindepth 2 -type d 2>/dev/null); do
   BRANCHES=$(cd "$repo_path" && git for-each-ref --format='%(refname:short)' 'refs/heads/agent/*' 2>/dev/null)
   if [ -n "$BRANCHES" ]; then
     COUNT=$(echo "$BRANCHES" | wc -l | tr -d ' ')

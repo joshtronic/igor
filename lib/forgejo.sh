@@ -3,7 +3,7 @@
 #
 # Requires in environment:
 #   FORGEJO_URL    -- e.g., https://git.sherver.org
-#   FORGEJO_TOKEN  -- bot's API token (loaded from $IGOR_HOME/.env)
+#   FORGEJO_TOKEN  -- bot's API token (loaded from $AGENT_HOME/.env)
 #
 # Requires on PATH: curl, jq.
 
@@ -50,7 +50,7 @@ forgejo_get_issue() {
 # All non-bot reviews on a PR, sorted oldest-to-newest. Used to
 # detect "request changes" pickup signal -- if the latest non-bot
 # review on the CURRENT head is REQUEST_CHANGES, the reviewer has
-# rejected the current state and Igor should reopen the PR for
+# rejected the current state and the agent should reopen the PR for
 # revision.
 #
 # Returns a JSON array of review objects (state, commit_id,
@@ -231,7 +231,7 @@ forgejo_count_bot_comments_matching() {
 }
 
 # Returns 0 if a label with the given name exists on this repo, 1
-# otherwise. Used by repo-checks to verify Igor's required label set
+# otherwise. Used by repo-checks to verify the agent's required label set
 # is present before we try to apply any of them.
 forgejo_repo_has_label() {
   local repo="$1" name="$2"
@@ -312,7 +312,7 @@ forgejo_my_assigned() {
 }
 
 # Returns 0 if the repo exists and the bot can access it, 1 otherwise.
-# Used by the bootstrap step to verify Igor's required repos
+# Used by the bootstrap step to verify the agent's required repos
 # (<bot>/brain, optionally <bot>/website) are present before the
 # discovery loop runs.
 forgejo_repo_exists() {

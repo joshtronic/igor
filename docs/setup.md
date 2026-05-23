@@ -2,7 +2,7 @@
 
 ## Server prerequisites
 
-Before cloning Igor, make sure the host has the following installed.
+Before cloning the agent, make sure the host has the following installed.
 `bin/install.sh` pre-flights everything and bails loudly if anything's
 missing.
 
@@ -13,7 +13,7 @@ missing.
   usually already installed; `jq` is typically the one to add).
 - `python3` + `python3-venv` -- required by the RAG layer.
   `sudo apt-get install -y python3 python3-venv`. The harness creates
-  an isolated venv at `$IGOR_STATE_DIR/rag-venv` and installs Python
+  an isolated venv at `$AGENT_STATE_DIR/rag-venv` and installs Python
   deps from `requirements.txt` automatically -- no manual `pip` needed.
 - `claude` -- Anthropic's Claude CLI. Install via Anthropic's installer
   (see [docs.claude.com](https://docs.claude.com)). `ANTHROPIC_API_KEY`
@@ -49,21 +49,21 @@ missing.
   should return a line. If it doesn't, you're on the older
   Debian-packaged Redis and need to switch.
 
-**Ecosystem toolchains for repos Igor will actually work:**
+**Ecosystem toolchains for repos the agent will actually work:**
 
 Tier 2 maintenance auto-detects the stack and runs standard audit tools (`npm audit`, `cargo audit`, `pip-audit`, `govulncheck`, `bundle audit`, etc.). Claude will `cargo install cargo-audit` or `pip install pip-audit` within his session as needed, but the base toolchain must be on the host:
 
-- Node projects (including Igor's own website) → `sudo apt-get install -y nodejs npm`
+- Node projects (including the agent's own website) → `sudo apt-get install -y nodejs npm`
 - Python projects → `sudo apt-get install -y python3 python3-pip python3-venv`
 - Go projects → `sudo apt-get install -y golang-go`
 - Rust projects → install [rustup](https://rustup.rs) (not in apt)
 - Ruby projects → `sudo apt-get install -y ruby ruby-dev`
 
-You only need toolchains for languages Igor will actually touch.
+You only need toolchains for languages the agent will actually touch.
 
 ## Auth and secrets
 
-Igor runs against the Anthropic API (not the Max plan). Create a dedicated
+The agent runs against the Anthropic API (not the Max plan). Create a dedicated
 API key in the [Anthropic Console](https://console.anthropic.com) and set
 a hard spending limit on it -- a pathological tick should not be able to
 drain the account. Set the key as `ANTHROPIC_API_KEY` in `.env`.
@@ -73,9 +73,9 @@ robot is a separate workload with different cost shape -- metered billing
 gives real per-task visibility, model selection, and prompt caching you
 control.
 
-Pick the model in `IGOR_MODEL` (also in `.env`). Sensible defaults:
+Pick the model in `AGENT_MODEL` (also in `.env`). Sensible defaults:
 `claude-sonnet-4-6` for normal coding work, `claude-opus-4-7` if you find
-Igor consistently noops on tickets that need deeper reasoning,
+The agent consistently noops on tickets that need deeper reasoning,
 `claude-haiku-4-5-20251001` only for cheap/light tasks.
 
 The bot's Forgejo token (`FORGEJO_TOKEN`) lives in the same `.env`, chmod
@@ -98,16 +98,16 @@ the systemd units and owns the SSH key). The Forgejo user needs:
   later with a `403 token does not have at least one of required scope(s)`
   message. Push access for git (clone/push) is via the SSH key, separate
   from API scopes.
-- An SSH key for git operations (clone and push). Igor clones via
+- An SSH key for git operations (clone and push). The agent clones via
   `git@<host>:<owner>/<repo>.git`, where `<host>` is derived from
-  `FORGEJO_URL` (override with `FORGEJO_SSH_HOST` if SSH is on a different
+  `FORGEJO_URL` (override with `FORGEJO_HOST` if SSH is on a different
   endpoint).
 - Branch protection bypass on each repo's default branch, so the harness can
   push `agent/N-<slug>` branches and `Closes #N`-linked merges work uniformly.
 
-The server account owns the runtime checkout at `~/.local/share/igor/`, its
-state at `~/.local/state/igor/` (which includes the per-repo clones
-under `~/.local/state/igor/repos/<owner>/<repo>/`).
+The server account owns the runtime checkout at `~/.local/share/agent/`, its
+state at `~/.local/state/agent/` (which includes the per-repo clones
+under `~/.local/state/agent/repos/<owner>/<repo>/`).
 Git authorship on all bot commits and PRs attributes to this user.
 
 ## Install
@@ -115,16 +115,16 @@ Git authorship on all bot commits and PRs attributes to this user.
 Clone the repo, drop the `.env` in place, then run install.sh:
 
 ```sh
-git clone <forgejo-url>/igor ~/.local/share/igor
-cd ~/.local/share/igor
+git clone <forgejo-url>/<bot-user>/agent ~/.local/share/agent
+cd ~/.local/share/agent
 cp .env.example .env && chmod 600 .env
-$EDITOR .env                           # fill in tokens
+$EDITOR .env                           # fill in every var -- no defaults
 bin/install.sh
 ```
 
 `install.sh` symlinks the systemd unit files into `~/.config/systemd/user/`
 (so future `git pull`s update them with a `daemon-reload`) and enables
-`tick.timer`. Verify the setup:
+`agent.timer`. Verify the setup:
 
 ```sh
 bin/validate.sh   # checks env, Forgejo reachability, bot identity, accessible repos
@@ -137,7 +137,7 @@ bin/uninstall.sh   # stops, disables, removes units (leaves config + state)
 ```
 
 Schedule override goes in a drop-in at
-`~/.config/systemd/user/tick.timer.d/override.conf`.
+`~/.config/systemd/user/agent.timer.d/override.conf`.
 
 ## Local dev / manual runs
 
@@ -145,8 +145,8 @@ Schedule override goes in a drop-in at
 manually (against a dev clone or to test changes):
 
 ```sh
-git clone <forgejo-url>/igor ~/Code/igor
-cd ~/Code/igor
+git clone <forgejo-url>/<bot-user>/agent ~/Code/agent
+cd ~/Code/agent
 cp .env.example .env && chmod 600 .env && $EDITOR .env
 bin/tick.sh
 ```
@@ -156,8 +156,8 @@ running systemd-managed tick.
 
 ## Operating
 
-- Schedule: `systemctl --user list-timers tick.timer`
-- Logs: `journalctl --user -u tick.service -f`
-- Force a tick now: `systemctl --user start tick.service`
+- Schedule: `systemctl --user list-timers agent.timer`
+- Logs: `journalctl --user -u agent.service -f`
+- Force a tick now: `systemctl --user start agent.service`
 - Audit a repo's readiness: `bin/validate-repo.sh <owner>/<name>` (or
   `bin/validate-repo.sh --all` to sweep every accessible repo)

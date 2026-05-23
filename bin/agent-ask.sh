@@ -19,9 +19,9 @@
 # save the thought to journal/blog-ideas instead.
 #
 # Requires in environment (exported by tick.sh):
-#   BOT_USER, FORGEJO_URL, FORGEJO_TOKEN, IGOR_HOME
+#   BOT_USER, FORGEJO_URL, FORGEJO_TOKEN, AGENT_HOME
 # Optional:
-#   IGOR_REVIEWER  -- if set, the issue is assigned to this user
+#   FORGEJO_REVIEWER  -- if set, the issue is assigned to this user
 #                     for Forgejo notification
 
 set -euo pipefail
@@ -30,13 +30,13 @@ REPO="${1:?usage: agent-ask.sh <owner/repo> \"<title>\" \"<body>\"}"
 TITLE="${2:?usage: agent-ask.sh <owner/repo> \"<title>\" \"<body>\"}"
 BODY="${3:?usage: agent-ask.sh <owner/repo> \"<title>\" \"<body>\"}"
 
-: "${IGOR_HOME:?IGOR_HOME not set -- are you being run from a tick?}"
+: "${AGENT_HOME:?AGENT_HOME not set -- are you being run from a tick?}"
 : "${BOT_USER:?BOT_USER not set -- are you being run from a tick?}"
 
 # shellcheck source=../lib/forgejo.sh
-. "$IGOR_HOME/lib/forgejo.sh"
+. "$AGENT_HOME/lib/forgejo.sh"
 
-QUESTION_MARKER='<!-- igor:question -->'
+QUESTION_MARKER='<!-- agent:question -->'
 
 # Throttle: refuse if an open bot question exists on this repo.
 # Marker + Agent-label absence distinguishes pending question from
@@ -74,9 +74,9 @@ forgejo_add_label "$REPO" "$NUMBER" "Status/Needs More Info" 2>/dev/null \
   || echo "agent-ask: warning: Status/Needs More Info label not available on $REPO; issue filed without it" >&2
 
 # Notify the reviewer if configured.
-if [ -n "${IGOR_REVIEWER:-}" ]; then
-  forgejo_assign "$REPO" "$NUMBER" "$IGOR_REVIEWER" 2>/dev/null \
-    || echo "agent-ask: warning: could not assign to $IGOR_REVIEWER" >&2
+if [ -n "${FORGEJO_REVIEWER:-}" ]; then
+  forgejo_assign "$REPO" "$NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null \
+    || echo "agent-ask: warning: could not assign to $FORGEJO_REVIEWER" >&2
 fi
 
 echo "agent-ask: filed ${REPO}#${NUMBER}" >&2

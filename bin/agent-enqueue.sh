@@ -28,10 +28,10 @@
 #     "On <600px the three footer links stack awkwardly..."
 #
 # Example (multi-line, recommended):
-#   # write the body to a scratch file inside .igor/ first
+#   # write the body to a scratch file inside .agent/ first
 #   agent-enqueue.sh igor/website \
 #     "fix: footer links wrap on narrow viewports" \
-#     --body-file .igor/footer-issue-body.md
+#     --body-file .agent/footer-issue-body.md
 #
 # No throttle on filing -- issues are spec, they wait, no human
 # review burden until claimed. (Distinct from PR-open throttle.)
@@ -39,7 +39,7 @@
 # pre-flight check on claim is the planned safety net.
 #
 # Requires in environment (exported by tick.sh):
-#   BOT_USER, FORGEJO_URL, FORGEJO_TOKEN, IGOR_HOME
+#   BOT_USER, FORGEJO_URL, FORGEJO_TOKEN, AGENT_HOME
 
 set -euo pipefail
 
@@ -65,13 +65,13 @@ else
   [ -n "$BODY" ] || usage
 fi
 
-: "${IGOR_HOME:?IGOR_HOME not set -- are you being run from a tick?}"
+: "${AGENT_HOME:?AGENT_HOME not set -- are you being run from a tick?}"
 : "${BOT_USER:?BOT_USER not set -- are you being run from a tick?}"
 
 # shellcheck source=../lib/forgejo.sh
-. "$IGOR_HOME/lib/forgejo.sh"
+. "$AGENT_HOME/lib/forgejo.sh"
 
-ENQUEUE_MARKER='<!-- igor:enqueue -->'
+ENQUEUE_MARKER='<!-- agent:enqueue -->'
 
 BODY_WITH_MARKER="${ENQUEUE_MARKER}
 
@@ -85,13 +85,13 @@ NUMBER=$(forgejo_open_issue "$REPO" "$TITLE" "$BODY_WITH_MARKER")
 forgejo_add_label "$REPO" "$NUMBER" "Agent" 2>/dev/null \
   || echo "agent-enqueue: warning: Agent label not available on $REPO; issue filed without it" >&2
 
-# Drop a marker in .igor/ so the harness post-tick can find the
-# filed-issue number and log time on it (Igor's examination time
+# Drop a marker in .agent/ so the harness post-tick can find the
+# filed-issue number and log time on it (the agent's examination time
 # belongs on the issue he created, same as issue-work time belongs
-# on the issue he resolved). Marker is best-effort; if .igor/
+# on the issue he resolved). Marker is best-effort; if .agent/
 # doesn't exist (called from outside a tick), skip silently.
-if [ -d .igor ]; then
-  printf '%s#%s\n' "$REPO" "$NUMBER" > .igor/IGOR_FILED_ISSUE
+if [ -d .agent ]; then
+  printf '%s#%s\n' "$REPO" "$NUMBER" > .agent/AGENT_FILED_ISSUE
 fi
 
 echo "agent-enqueue: filed ${REPO}#${NUMBER}" >&2

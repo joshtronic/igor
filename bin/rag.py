@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""rag.py -- build or query Igor's cross-tick RAG index.
+"""rag.py -- build or query the agent's cross-tick RAG index.
 
 Subcommands:
     build           Rebuild the index from brain (journal + memories)
@@ -15,12 +15,12 @@ The corpus has four sources, distinguishable via the `source` tag:
                  that's actionable for future work (e.g., "ship it but
                  next time consider X"). Approval comments that
                  otherwise vanish into Forgejo's UI surface here.
-    closed-pr -- per-PR metadata for closed PRs Igor authored (last
+    closed-pr -- per-PR metadata for closed PRs the agent authored (last
                  30 days): title + body + resolution + the closer's
                  issue-tab comments. Fills the gap for closed-without-
                  merge PRs which produce no commit and may have no
                  formal review -- the rejection reason was previously
-                 invisible to Igor on future ticks. Merged PRs also
+                 invisible to the agent on future ticks. Merged PRs also
                  produce a row here so the PR-level conversation
                  supplements the commit's diff.
 
@@ -34,13 +34,13 @@ on non-zero exit.
 
 Environment:
     REDIS_URL              redis connection (default redis://localhost:6379)
-    IGOR_BRAIN_PATH        path to brain repo
-    IGOR_REPO_ROOT         where the harness clones repos
-                           (default ~/.local/state/igor/repos)
-    IGOR_RAG_COMMIT_DAYS   how far back to embed commits (default 30)
-    IGOR_RAG_REVIEW_DAYS   how far back to embed PR reviews (default 30)
-    IGOR_RAG_CACHE_PATH    sqlite embedding cache location
-                           (default $IGOR_STATE_DIR/rag-embeddings.sqlite)
+    AGENT_BRAIN_PATH        path to brain repo
+    AGENT_REPO_ROOT         where the harness clones repos
+                           (default ~/.local/state/agent/repos)
+    AGENT_RECALL_DAYS   how far back to embed commits AND merged-PR
+                           reviews (one knob, default 30)
+    AGENT_RECALL_CACHE_PATH    sqlite embedding cache location
+                           (default $AGENT_STATE_DIR/rag-embeddings.sqlite)
     FORGEJO_URL            Forgejo base URL (for review fetch)
     FORGEJO_TOKEN          Forgejo API token (for review fetch)
 
@@ -74,29 +74,29 @@ from redisvl.schema import IndexSchema
 
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 EMBED_DIMS = 384
-INDEX_NAME = "igor-rag"
-DEFAULT_BRAIN = os.environ.get("IGOR_BRAIN_PATH") or os.path.expanduser(
-    "~/.local/state/igor/repos/igor/brain"
+INDEX_NAME = "agent-recall"
+DEFAULT_BRAIN = os.environ.get("AGENT_BRAIN_PATH") or os.path.expanduser(
+    "~/.local/state/agent/repos/igor/brain"
 )
-DEFAULT_REPO_ROOT = os.environ.get("IGOR_REPO_ROOT") or os.path.expanduser(
-    "~/.local/state/igor/repos"
+DEFAULT_REPO_ROOT = os.environ.get("AGENT_REPO_ROOT") or os.path.expanduser(
+    "~/.local/state/agent/repos"
 )
-COMMIT_DAYS = int(os.environ.get("IGOR_RAG_COMMIT_DAYS", "30"))
-REVIEW_DAYS = int(os.environ.get("IGOR_RAG_REVIEW_DAYS", "30"))
+COMMIT_DAYS = int(os.environ.get("AGENT_RECALL_DAYS", "30"))
+REVIEW_DAYS = int(os.environ.get("AGENT_RECALL_DAYS", "30"))
 FORGEJO_URL = os.environ.get("FORGEJO_URL", "").rstrip("/")
 FORGEJO_TOKEN = os.environ.get("FORGEJO_TOKEN", "")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
-DEFAULT_STATE_DIR = os.environ.get("IGOR_STATE_DIR") or os.path.expanduser(
-    "~/.local/state/igor"
+DEFAULT_STATE_DIR = os.environ.get("AGENT_STATE_DIR") or os.path.expanduser(
+    "~/.local/state/agent"
 )
-CACHE_PATH = os.environ.get("IGOR_RAG_CACHE_PATH") or os.path.join(
+CACHE_PATH = os.environ.get("AGENT_RECALL_CACHE_PATH") or os.path.join(
     DEFAULT_STATE_DIR, "rag-embeddings.sqlite"
 )
 
 SCHEMA = {
     "index": {
         "name": INDEX_NAME,
-        "prefix": "igor:",
+        "prefix": "agent:",
         "storage_type": "hash",
     },
     "fields": [
@@ -175,7 +175,7 @@ def collect_journal_entries(brain_path: Path):
                 f"journal:{jf.name}:{header}".encode("utf-8")
             ).hexdigest()[:16]
             yield {
-                "key": f"igor:journal:{eid}",
+                "key": f"agent:journal:{eid}",
                 "text": text,
                 "source": "journal",
                 "date": date_str,
@@ -207,7 +207,7 @@ def collect_memory_entries(brain_path: Path):
         ).hexdigest()[:16]
         # Use the file path as the human-readable header
         yield {
-            "key": f"igor:memory:{eid}",
+            "key": f"agent:memory:{eid}",
             "text": content,
             "source": "memory",
             "date": "n/a",
@@ -221,7 +221,7 @@ def collect_memory_entries(brain_path: Path):
 def discover_repos(repo_root: Path):
     """Yield Path objects for every git repo under repo_root.
 
-    Layout: $IGOR_REPO_ROOT/<owner>/<repo>/.git
+    Layout: $AGENT_REPO_ROOT/<owner>/<repo>/.git
     """
     if not repo_root.is_dir():
         return
@@ -240,11 +240,11 @@ def collect_commit_entries(repo_root: Path, days: int):
 
     Cross-repo: walks every clone under repo_root. All commits in
     the window are indexed, regardless of author -- Josh's work
-    shapes Igor's context as much as Igor's own does.
+    shapes the agent's context as much as the agent's own does.
 
     Each row's text includes the author name so retrievals are
-    attributed at a glance ("commit by Igor" vs "commit by Josh
-    Sherman" vs other). Useful when reasoning about who did what
+    attributed at a glance ("commit by <bot>" vs "commit by <human>"
+    vs other). Useful when reasoning about who did what
     -- e.g., a tier-1 issue tick can tell which prior commits were
     autonomous bot work vs human direction without parsing the
     Co-Authored-By trailer.
@@ -296,7 +296,7 @@ def collect_commit_entries(repo_root: Path, days: int):
                 f"commit:{owner_repo}:{sha}".encode("utf-8")
             ).hexdigest()[:16]
             yield {
-                "key": f"igor:commit:{eid}",
+                "key": f"agent:commit:{eid}",
                 "text": text,
                 "source": "commit",
                 "date": date_str,
@@ -394,7 +394,7 @@ def collect_review_entries(repo_root: Path, days: int):
                         f"review:{owner_repo}:{pr_num}:{rev_id}".encode("utf-8")
                     ).hexdigest()[:16]
                     yield {
-                        "key": f"igor:review:{eid}",
+                        "key": f"agent:review:{eid}",
                         "text": text,
                         "source": "review",
                         "date": rev_date,
@@ -422,7 +422,7 @@ def collect_review_entries(repo_root: Path, days: int):
                         f"review-inline:{owner_repo}:{pr_num}:{c_id}".encode("utf-8")
                     ).hexdigest()[:16]
                     yield {
-                        "key": f"igor:review:{eid}",
+                        "key": f"agent:review:{eid}",
                         "text": text,
                         "source": "review",
                         "date": rev_date,
@@ -434,16 +434,16 @@ def collect_review_entries(repo_root: Path, days: int):
 # -- closed-PR collector -------------------------------------------------
 
 def collect_closed_pr_entries(repo_root: Path, days: int):
-    """Per-PR metadata for recently closed PRs Igor authored.
+    """Per-PR metadata for recently closed PRs the agent authored.
 
     Fills a real gap: closed-without-merge PRs leave no trace in the
     other sources. They produce no commits (so the commit collector
     misses them), and if no review body was filed the review
     collector misses them too. The rejection reason lives in the
     issue-comment thread of a now-closed PR -- functionally
-    invisible to Igor on future ticks.
+    invisible to the agent on future ticks.
 
-    For each closed PR Igor authored in the window:
+    For each closed PR the agent authored in the window:
       - title + body (truncated)
       - resolution (merged vs closed-without-merge, with date)
       - last few non-bot issue comments (the "why" for closes)
@@ -454,7 +454,7 @@ def collect_closed_pr_entries(repo_root: Path, days: int):
 
     bot_user = os.environ.get("BOT_USER", "")
     if not bot_user:
-        return  # without a bot identity we can't tell which PRs are Igor's
+        return  # without a bot identity we can't tell which PRs are the agent's
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
@@ -478,7 +478,7 @@ def collect_closed_pr_entries(repo_root: Path, days: int):
 
             pr_author = (pr.get("user") or {}).get("login") or ""
             if pr_author != bot_user:
-                continue  # only Igor's own PRs
+                continue  # only the agent's own PRs
 
             pr_num = pr.get("number")
             if not pr_num:
@@ -509,7 +509,7 @@ def collect_closed_pr_entries(repo_root: Path, days: int):
                     continue
                 c_author = (c.get("user") or {}).get("login") or ""
                 if c_author == bot_user:
-                    continue  # skip Igor's own comments
+                    continue  # skip the agent's own comments
                 snippet = c_body[:300] + ("..." if len(c_body) > 300 else "")
                 close_context.append(f"  {c_author}: {snippet}")
 
@@ -534,7 +534,7 @@ def collect_closed_pr_entries(repo_root: Path, days: int):
                 f"closed-pr:{owner_repo}:{pr_num}".encode("utf-8")
             ).hexdigest()[:16]
             yield {
-                "key": f"igor:closed-pr:{eid}",
+                "key": f"agent:closed-pr:{eid}",
                 "text": text,
                 "source": "closed-pr",
                 "date": closed_at,
@@ -635,7 +635,7 @@ def build_index(brain_path: Path, repo_root: Path, days: int, quiet: bool = Fals
     # source of truth; Redis is a derived cache that gets recomputed
     # from scratch every tick. Self-healing -- orphans from previous
     # shapes, model changes, or schema migrations disappear here.
-    # Dedicated Redis instance (only Igor uses it), so FLUSHDB is safe.
+    # Dedicated Redis instance (only the agent uses it), so FLUSHDB is safe.
     r = redis.from_url(REDIS_URL)
     pre_count = r.dbsize()
     r.flushdb()
@@ -722,7 +722,7 @@ def query_index(text: str, k: int = 5):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Igor's cross-tick RAG tool")
+    p = argparse.ArgumentParser(description="The agent's cross-tick recall tool")
     p.add_argument("--brain", default=DEFAULT_BRAIN, help="path to brain repo")
     p.add_argument("--repo-root", default=DEFAULT_REPO_ROOT,
                    help="path under which bot-accessible repo clones live")

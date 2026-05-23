@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # agent-read.sh -- harness-side reading executor.
 #
-# Fetches a URL, sends the HTML to the Anthropic API with Igor's
+# Fetches a URL, sends the HTML to the Anthropic API with the agent's
 # identity baked into the system prompt, and outputs a JSON blob
 # containing the article title and a first-person journal entry.
 #
@@ -27,12 +27,12 @@
 
 set -uo pipefail
 
-IGOR_HOME="${IGOR_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
+AGENT_HOME="${AGENT_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
 
-if [ -f "$IGOR_HOME/.env" ]; then
+if [ -f "$AGENT_HOME/.env" ]; then
   set -a
   # shellcheck source=/dev/null
-  . "$IGOR_HOME/.env"
+  . "$AGENT_HOME/.env"
   set +a
 fi
 
@@ -44,14 +44,14 @@ fi
 
 : "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set}"
 
-MODEL="${IGOR_MODEL:-claude-sonnet-4-6}"
+MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 
 # Polite fetch: realistic User-Agent, follow redirects, 30s cap,
 # limit body size so we don't OOM on absurdly large pages.
 HTML=$(curl -sfL \
   --max-time 30 \
   --max-filesize 5000000 \
-  -A "Mozilla/5.0 (compatible; Igor/1.0; +https://igor.bot)" \
+  -A "Mozilla/5.0 (compatible; Agent/1.0)" \
   "$URL" 2>/dev/null) || {
   echo "agent-read: fetch failed for $URL" >&2
   exit 2
@@ -73,7 +73,7 @@ HTML="${HTML:0:200000}"
 # Load identity for voice context. Falls back gracefully if brain
 # isn't on disk (e.g., local dev without a brain clone).
 IDENTITY=""
-BRAIN_PATH="${IGOR_BRAIN_PATH:-${IGOR_STATE_DIR:-$HOME/.local/state/igor}/repos/igor/brain}"
+BRAIN_PATH="${AGENT_BRAIN_PATH:-${AGENT_STATE_DIR:-$HOME/.local/state/agent}/repos/igor/brain}"
 if [ -f "$BRAIN_PATH/identity.md" ]; then
   IDENTITY=$(cat "$BRAIN_PATH/identity.md")
 fi
@@ -111,7 +111,7 @@ EOF
 # RAG: surface past journal entries / posts / commits related to the
 # URL's domain or title (extracted post-fetch). Best-effort.
 # shellcheck source=../lib/rag.sh
-. "$IGOR_HOME/lib/rag.sh"
+. "$AGENT_HOME/lib/rag.sh"
 RAG_CONTEXT=$(rag_query "$URL")
 
 # Build the JSON payload via files, not --arg. Truncated HTML can

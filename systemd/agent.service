@@ -1,14 +1,14 @@
 [Unit]
-Description=Igor -- one tick: claim and work one Forgejo issue across known projects
+Description=Agent -- one tick: claim and work one Forgejo issue across known projects
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/.local/share/igor
+WorkingDirectory=%h/.local/share/agent
 # Systemd's default PATH doesn't include ~/.local/bin (where Anthropic's
 # claude CLI installer typically lands), and shell startup files (.bashrc
 # etc.) aren't sourced for services. Spell out the PATH explicitly.
 Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-ExecStart=%h/.local/share/igor/bin/tick.sh
+ExecStart=%h/.local/share/agent/bin/tick.sh
 Nice=10

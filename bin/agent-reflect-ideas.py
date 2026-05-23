@@ -45,7 +45,7 @@ def rag_query(query: str) -> str:
     works fine without RAG context."""
     if not query.strip():
         return ""
-    igor_home = os.environ.get("IGOR_HOME")
+    igor_home = os.environ.get("AGENT_HOME")
     if not igor_home:
         return ""
     rag_sh = os.path.join(igor_home, "lib", "rag.sh")
@@ -186,10 +186,10 @@ def call_haiku(
     listing = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(titles))
 
     system = (
-        "You are a reflection step that runs after Igor (an autonomous "
-        "Claude process) finishes a discretionary tick. Igor maintains a "
+        "You are a reflection step that runs after the agent (an autonomous "
+        "Claude process) finishes a discretionary tick. the agent maintains a "
         "priority-ordered list of blog post ideas; the topmost idea is "
-        "the next one to ship. Your job is to look at what Igor just did "
+        "the next one to ship. Your job is to look at what the agent just did "
         "and propose at most 3 small re-orderings of the ideas list -- "
         'each move is "shift this idea up one slot" or "down one slot". '
         "Bias toward 0 moves: only shift an idea when the just-finished "
@@ -208,7 +208,7 @@ def call_haiku(
     rag_context = rag_query(context[:2000])
 
     user = (
-        "Context (what Igor just did this tick):\n\n"
+        "Context (what the agent just did this tick):\n\n"
         f"{context.strip()}\n\n"
         "Current blog-ideas list (1-indexed, top = next up):\n\n"
         f"{listing}\n\n"
@@ -284,7 +284,7 @@ def main() -> int:
         log("ANTHROPIC_API_KEY not set")
         return 1
 
-    model = os.environ.get("IGOR_MODEL_THINKING", DEFAULT_MODEL)
+    model = os.environ.get("AGENT_MODEL_THINKING", DEFAULT_MODEL)
 
     with open(context_path, encoding="utf-8") as f:
         context = f.read()

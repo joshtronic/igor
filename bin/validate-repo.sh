@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# validate-repo.sh -- audit a Forgejo repo for Igor readiness without
+# validate-repo.sh -- audit a Forgejo repo for the agent readiness without
 # cloning it. Prints a markdown checklist; exits 0 if all checks pass,
 # 1 if any fail. Use this to spot-check before adding a repo, or to
 # debug an auto-filed onboarding ticket.
@@ -10,19 +10,19 @@
 
 set -uo pipefail
 
-IGOR_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+AGENT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
 
-if [ -f "$IGOR_HOME/.env" ]; then
+if [ -f "$AGENT_HOME/.env" ]; then
   set -a
   # shellcheck source=/dev/null
-  . "$IGOR_HOME/.env"
+  . "$AGENT_HOME/.env"
   set +a
 fi
 
 # shellcheck source=../lib/forgejo.sh
-. "$IGOR_HOME/lib/forgejo.sh"
+. "$AGENT_HOME/lib/forgejo.sh"
 # shellcheck source=../lib/repo-checks.sh
-. "$IGOR_HOME/lib/repo-checks.sh"
+. "$AGENT_HOME/lib/repo-checks.sh"
 
 if [ $# -ne 1 ]; then
   echo "usage: validate-repo.sh <owner>/<name> | --all" >&2
