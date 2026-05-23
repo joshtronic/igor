@@ -579,18 +579,17 @@ maintenance_mark_done() {
 # week, biased to Mondays. Same-week re-runs are blocked.
 #
 # Skips:
-# - Bot-owned repos (brain, website, anything else under <bot>/). These
-#   are the agent's internal infrastructure, not target code. Auditing your
-#   own notes repo for npm audit findings is busywork.
 # - Repos with an open onboarding ticket. Issue-work refused to clone
 #   them for cause; maintenance shouldn't sneak around that gate.
+#
+# Bot-owned repos (brain, website, the agent itself) are NOT excluded
+# -- they have real audit surface (website has npm deps, agent has
+# requirements.txt) and security findings matter there too. Repos
+# with no detectable stack (brain is just markdown) naturally no-op
+# under the auto-detection branch of the maintenance prompt -- one
+# wasted Claude call per week per such repo, acceptable cost.
 maintenance_eligible() {
-  local repo="$1" last last_week this_week existing owner
-
-  owner="${repo%%/*}"
-  if [ "$owner" = "$BOT_USER" ]; then
-    return 1
-  fi
+  local repo="$1" last last_week this_week existing
 
   existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$ONBOARDING_MARKER" 2>/dev/null)
   if [ -n "$existing" ] && [ "$existing" != "null" ] && [ "$existing" != "empty" ]; then
