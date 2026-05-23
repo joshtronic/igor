@@ -31,17 +31,17 @@ A timer fires `bin/tick.sh`. Per tick:
 7. **Work.** Make a worktree, invoke Claude with the project's `CLAUDE.md`
    plus the universal `AGENTS.md`, react to whatever Claude leaves behind.
 8. **Discretionary maintenance (tier 2).** If steps 4-7 found no
-   claimable work, optionally fire one maintenance pass on a random
-   eligible repo. Gated by `AGENT_DISCRETIONARY_RATE` (default off),
-   `AGENT_MAX_OPEN_PRS` (default 3), and per-repo 5-7 day random
-   cooldown. Claude reads the repo's `CLAUDE.md` Maintenance section,
-   runs the declared checks, writes findings to
-   `.git/AGENT_MAINTENANCE_FINDINGS.md`. Harness files an Agent-labeled
-   issue with those findings if non-empty, then updates the cooldown
-   state at `~/.local/state/agent/discretionary-state.json`.
+   claimable work, fire one maintenance pass on a random eligible
+   repo. Gated by `AGENT_MAX_OPEN_PRS` (default 3) and per-repo
+   weekly cadence (one audit per repo per ISO week). Claude reads
+   the repo's `CLAUDE.md` Maintenance section, runs the declared
+   checks, writes findings to `.git/AGENT_MAINTENANCE_FINDINGS.md`.
+   Harness files an Agent-labeled issue with those findings if
+   non-empty, then updates the cooldown state at
+   `~/.local/state/agent/discretionary-state.json`.
 9. **Discretionary self-directed work (tier 3).** If no maintenance
    repos are eligible either, the agent does one freeform pass on his
-   own website. Same throttles apply (rate, open-PR cap), plus the
+   own website. Same throttles apply (open-PR cap), plus the
    one-PR-per-repo rule (skip if there's an open bot PR on the
    website). Claude reads the website's `CLAUDE.md`, picks one
    focused improvement (post, design, copy, layout), and opens a
