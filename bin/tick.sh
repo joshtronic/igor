@@ -1067,28 +1067,14 @@ repo_lint_passes() {
 discretionary_assess_cadence() {
   local active_prs="$1"
   local posting_allowed="$2"
-  local open_prs="${3:-$active_prs}"  # total open count; defaults to active if not passed
-  local today work_reflections_today commits_today repo_dir count post_today prs_opened_today recent_modes
+  local open_prs="${3:-$active_prs}"
+  local today recent_modes choice reason
   today=$(date +%Y-%m-%d)
 
-  # WORK reflections logged today: count of harness-written tick
-  # headers EXCLUDING reading-mode entries. Including reading would
-  # be a self-licking ice-cream cone -- each reading tick bumps the
-  # count, which the cadence then reads as "active day", which
-  # justifies more reading. Only tier-1 / site-work / maintenance /
-  # post / PR-review reflections count as "did real work".
+  # Recent tick modes (last 5 reflections, newest last). The
+  # symmetric 3-in-a-row rule below uses this to break streaks
+  # in either direction.
   local journal_file="${BRAIN_PATH:-}/journal/${today}.md"
-  if [ -n "${BRAIN_PATH:-}" ] && [ -f "$journal_file" ]; then
-    work_reflections_today=$(grep -E '^## [0-9]+-[0-9]+-[0-9]+T' "$journal_file" 2>/dev/null \
-      | grep -vcE -- '-- discretionary reading$' || echo 0)
-  else
-    work_reflections_today=0
-  fi
-
-  # Recent tick modes (last 5 reflections, newest last). Tells the
-  # cadence assessor what the bot was JUST doing -- without this it
-  # decides fresh each tick from raw counters and can roll "read"
-  # five times in a row without noticing.
   recent_modes=""
   if [ -n "${BRAIN_PATH:-}" ] && [ -f "$journal_file" ]; then
     recent_modes=$(grep -E '^## [0-9]+-[0-9]+-[0-9]+T' "$journal_file" 2>/dev/null \
@@ -1098,150 +1084,40 @@ discretionary_assess_cadence() {
   fi
   [ -n "$recent_modes" ] || recent_modes="(none yet today)"
 
-  # Today's commits across cloned repos. No author filter: Josh's
-  # commits to brain (manual edits) also count as "stuff happened
-  # today" from the agent's perspective.
-  commits_today=0
-  if [ -d "${AGENT_REPO_ROOT:-}/${BOT_USER}" ]; then
-    for repo_dir in "$AGENT_REPO_ROOT/${BOT_USER}"/*; do
-      [ -d "$repo_dir/.git" ] || continue
-      count=$(cd "$repo_dir" \
-        && git log --since="$today 00:00:00" --until="$today 23:59:59" \
-            --no-merges --oneline 2>/dev/null | wc -l | tr -d ' ')
-      commits_today=$((commits_today + ${count:-0}))
-    done
-  fi
+  # Decision tree (deterministic, no API call):
+  #
+  #   1. If posting is allowed (no post today, none in flight) -> work.
+  #      The post is the day's priority; the routing layer fires it
+  #      first in W_SPLIT_ORDER. Don't roll dice when there's a post
+  #      slot waiting.
+  #
+  #   2. Else, if the last 3 modes are all the same, FLIP. Three
+  #      ticks of the same shape is enough; switch gears. Symmetric:
+  #      work,work,work -> read; read,read,read -> work.
+  #
+  #   3. Else, coin flip. Work or read with equal probability.
+  #
+  # The TOTAL/ACTIVE pr counts are logged for visibility but no
+  # longer gate the decision -- Josh's call: "mindfulness, not a
+  # wall". The shift window is the actual brake on volume.
+  local tail3
+  tail3=$(printf '%s' "$recent_modes" | tr ',' '\n' | tail -3 | tr '\n' ',')
 
-  # PRs the agent authored TODAY across the website repo, regardless of
-  # current state. Open + merged + closed-without-merge all count
-  # as "The agent shipped work today" -- the cadence is asking whether
-  # the day's been productive, not whether the queue is reviewed.
-  # state=all + user.login filter + created_at-startswith-today.
-  prs_opened_today=0
-  if [ -n "${BOT_USER:-}" ]; then
-    prs_opened_today=$(_fj GET "/repos/${BOT_USER}/website/pulls?state=all&sort=newest&limit=50" 2>/dev/null \
-      | jq --arg u "$BOT_USER" --arg today "$today" \
-          '[.[] | select(.user.login == $u) | select(.created_at | startswith($today))] | length' 2>/dev/null \
-      || echo 0)
-  fi
-
-  # Did a post land on website master today?
-  post_today=0
-  if [ -d "${AGENT_REPO_ROOT:-}/${BOT_USER}/website/.git" ]; then
-    local merged_count
-    merged_count=$(cd "$AGENT_REPO_ROOT/${BOT_USER}/website" \
-      && git log --since="$today 00:00:00" --until="$today 23:59:59" \
-          origin/master --diff-filter=A --name-only --pretty=format: \
-          -- 'src/posts/*' 2>/dev/null \
-      | grep -cE '^src/posts/.+\.md$' || true)
-    [ "${merged_count:-0}" -gt 0 ] && post_today=1
-  fi
-
-  local posting_label work_label
   if [ "$posting_allowed" = "1" ]; then
-    posting_label="yes (today's post slot is open)"
-    work_label="write the day's blog post"
+    choice="work"
+    reason="post slot is open today; prioritize publishing"
+  elif [ "$tail3" = "work,work,work" ]; then
+    choice="read"
+    reason="3 consecutive work ticks; switching gears to read"
+  elif [ "$tail3" = "read,read,read" ]; then
+    choice="work"
+    reason="3 consecutive read ticks; switching gears to work"
+  elif [ $((RANDOM % 2)) -eq 0 ]; then
+    choice="work"
+    reason="coin flip (open=$open_prs active=$active_prs recent=$recent_modes)"
   else
-    posting_label="no (already posted today, or a post is in flight)"
-    work_label="file a site-work issue for the queue"
-  fi
-
-  local activity
-  activity=$(cat <<EOF
-Today is $today.
-
-Your activity since local midnight:
-- TOTAL open bot PRs in the queue: $open_prs
-- ACTIVE bot PRs (open AND with activity in last 8h): $active_prs
-- bot PRs opened today (any state): $prs_opened_today
-- Work reflections logged today (excludes reading ticks): $work_reflections_today
-- Commits authored today (all repos): $commits_today
-- Post landed today: $([ "$post_today" = "1" ] && echo "yes" || echo "no")
-- Posting eligible this tick: $posting_label
-- Recent tick modes (oldest -> newest): $recent_modes
-
-Two queue signals matter, and they answer different questions:
-
-"ACTIVE bot PRs" = is the human engaging right now? High = they're processing
-the queue, capacity exists. Low = quiet from their side.
-
-"TOTAL open bot PRs" = how deep is the pile they have to come back to? High
-total + low active means PRs are stacking up while the human is offline or
-busy elsewhere. Piling more on top makes their next review session worse,
-even though they're not actively reviewing now.
-
-When TOTAL is high (say >= 4) regardless of ACTIVE, lean read. Don't
-out-ship the human's review velocity.
-
-If the decision is "work", the tick will: $work_label.
-If the decision is "read", the tick will: read an article + journal-reflect.
-
-Question: should the next discretionary tick be work or a break?
-EOF
-)
-
-  local response choice reason
-  response=$(claude_complete \
-    "You are deciding how the agent (an autonomous Claude process) should spend the next discretionary tick.
-
-Default bias is WORK. Reading is the opt-in break, taken when shipping more would be counterproductive.
-
-Choose \"read\" when ANY of these hold:
-  - TOTAL open bot PRs is >= 4 (pile is deep -- don't make it worse)
-  - Active queue is heavy (open bot PRs with recent reviewer activity)
-  - Multiple posts shipped today AND queue is at least somewhat full
-  - Recent-modes list shows mostly work (a short break is fine)
-
-Choose \"work\" when ALL of these hold:
-  - TOTAL open queue is shallow (under ~4) -- room exists in the pile
-  - Active queue is light (no current human pressure)
-  - Recent-modes shows mostly read OR no work today yet
-
-Don't congratulate yourself on a productive day if recent ticks have been
-reading. Reading ticks are NOT work output -- they're consumption. The
-recent-modes list reveals whether shipping happened recently or whether
-the bot has been coasting.
-
-CRITICAL: a low \"active\" count does NOT mean low queue pressure when
-TOTAL is high. It means the human is offline or busy elsewhere; the
-pile is still waiting for them. Don't out-ship review velocity.
-
-Output STRICT JSON. No code fences, no preamble.
-
-Schema:
-{
-  \"decision\": \"work\" | \"read\",
-  \"reason\": \"one short sentence\"
-}" \
-    "$activity" \
-    200 \
-    "cadence-assess")
-
-  response=$(printf '%s' "$response" | sed -E '/^```/d')
-  choice=$(jq -r '.decision // ""' <<<"$response" 2>/dev/null || echo "")
-  reason=$(jq -r '.reason // ""' <<<"$response" 2>/dev/null || echo "")
-
-  case "$choice" in
-    work|read) ;;
-    *)
-      choice="work"
-      reason="cadence assessment failed -- defaulting to work"
-      ;;
-  esac
-
-  # Hard consecutive-read cap, conditional on capacity. The cap is
-  # meant to break smoke-break streaks when there's actual room to
-  # ship -- NOT to pile on PRs when the human is already swamped.
-  # Fires only when the active queue is small (< 2 active PRs). If
-  # active_prs is high, the model's "keep reading" judgment stands;
-  # the bot keeps reading until the human catches up.
-  if [ "$choice" = "read" ] && [ "${active_prs:-0}" -lt 2 ]; then
-    local tail3
-    tail3=$(printf '%s' "$recent_modes" | tr ',' '\n' | tail -3 | tr '\n' ',')
-    if [ "$tail3" = "read,read,read," ]; then
-      choice="work"
-      reason="consecutive-read cap: last 3 ticks were all reading and queue is light, forcing work"
-    fi
+    choice="read"
+    reason="coin flip (open=$open_prs active=$active_prs recent=$recent_modes)"
   fi
 
   printf '%s|%s' "$choice" "$reason"
@@ -1875,18 +1751,6 @@ if [ -z "$WINNER" ]; then
   W_CADENCE_CHOICE=${W_CADENCE%%|*}
   W_CADENCE_REASON=${W_CADENCE#*|}
   log "discretionary: cadence -> $W_CADENCE_CHOICE ($W_CADENCE_REASON)"
-
-  # Hard cap on shipping. If the open queue is already deep, no more
-  # PRs this tick regardless of what cadence decided -- the bot can
-  # rationalize endless work tickets; this is the floor. Reading
-  # still runs (it's cheap, and the journal entry shifts the
-  # recent_modes signal for the next cadence call).
-  W_OPEN_PR_SHIP_CAP=4
-  if [ "$W_CADENCE_CHOICE" = "work" ] && [ "${W_OPEN_PRS_COUNT:-0}" -ge "$W_OPEN_PR_SHIP_CAP" ]; then
-    log "discretionary: ship-cap hit ($W_OPEN_PRS_COUNT open PRs >= $W_OPEN_PR_SHIP_CAP) -- forcing read"
-    W_CADENCE_CHOICE="read"
-    W_CADENCE_REASON="ship-cap: $W_OPEN_PRS_COUNT open PRs awaiting review, don't out-ship human review velocity"
-  fi
 
   if [ "$W_CADENCE_CHOICE" = "read" ]; then
     W_PICKED_MODE="reading"
