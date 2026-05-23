@@ -606,9 +606,15 @@ ensure_repo_local() {
     while IFS= read -r line; do
       [ -n "$line" ] && log "  $line"
     done <<<"$dirty_summary"
-    if (cd "$local_path" \
-        && git add -A \
-        && git commit --quiet -m "recovery: auto-commit leftover changes from prior tick" 2>/dev/null); then
+    (cd "$local_path" && git add -A 2>/dev/null) || true
+    # Pre-commit lint gate (no-op for non-brain repos -- see
+    # repo_lint_passes). If brain's dirty state itself is what's
+    # breaking lint, don't push more broken content. Leave dirty
+    # and surface; a future tick or human can untangle.
+    if ! repo_lint_passes "$local_path"; then
+      log "  warning: $repo lint failed on dirty state; refusing recovery commit. Inspect: (cd $local_path && npm test)"
+    elif (cd "$local_path" \
+          && git commit --quiet -m "recovery: auto-commit leftover changes from prior tick" 2>/dev/null); then
       log "  recovery commit created in $repo"
       if (cd "$local_path" && git push --quiet origin 2>/dev/null); then
         log "  recovery commit pushed"
@@ -961,6 +967,18 @@ commit_brain_changes() {
     return 0
   fi
 
+  # Pre-commit lint gate. If brain has `npm test` configured and it
+  # fails on the staged content, refuse to commit -- pushing broken
+  # content would just fail brain's CI on every commit until a human
+  # cleans it up. Better to leave brain dirty locally so the
+  # divergence is visible and a future tick can fix the lint issue
+  # before piling on more.
+  if ! repo_lint_passes "$brain"; then
+    log "warning: brain lint failed -- refusing to commit. Brain stays dirty locally. Run: (cd $brain && npm test) to see why."
+    (cd "$brain" && git reset --quiet HEAD -- journal/ memories/ blog-ideas.md 2>/dev/null) || true
+    return 1
+  fi
+
   if (cd "$brain" && git commit --quiet -m "$subject" 2>/dev/null); then
     if ! (cd "$brain" && git push --quiet origin master 2>/dev/null); then
       log "warning: brain push failed for: $subject (commit is local; next tick will reconcile via ensure_repo_local)"
@@ -968,6 +986,20 @@ commit_brain_changes() {
   else
     log "warning: brain commit failed for: $subject"
   fi
+}
+
+# Returns 0 if the repo passes its declared lint, OR if no lint
+# is configured. Best-effort: missing toolchain (no package.json,
+# no node_modules, no npm) is treated as "no lint" (pass) so
+# non-brain repos and unconfigured hosts no-op cleanly. Currently
+# scoped to npm-based lint -- extend per stack as other repos
+# start needing pre-commit gating.
+repo_lint_passes() {
+  local repo_path="$1"
+  [ -f "$repo_path/package.json" ] || return 0
+  [ -d "$repo_path/node_modules" ] || return 0
+  command -v npm >/dev/null 2>&1 || return 0
+  (cd "$repo_path" && npm test --silent >/dev/null 2>&1)
 }
 
 # Cadence assessment. Called on EVERY discretionary tick to decide
