@@ -1570,22 +1570,16 @@ if [ -z "$WINNER" ]; then
   #
   # Last priority in the cascade. Scheduled maintenance, PR-review
   # pickup, and claimable issues all came up empty. If the bot owns
-  # a website and has no open PR on it, optionally do one freeform
-  # pass on the site.
+  # a website, do one freeform pass on the site (or reading, or a
+  # post -- the cadence assessor below picks).
   #
-  # AGENT_DISCRETIONARY_RATE (default 0) gates whether we attempt
-  # this on an empty tick. Natural pacing comes from the scope cap
-  # (400 lines / 10 commits) and the once-per-local-day post cap;
-  # multiple concurrent PRs on the same repo are fine -- the human
-  # handles merge order in Forgejo like any multi-PR project.
-
-  DISCRETIONARY_RATE="${AGENT_DISCRETIONARY_RATE:-0}"
-  RATE_X1000=$(awk "BEGIN { printf \"%d\", $DISCRETIONARY_RATE * 1000 }")
-  ROLL=$(( RANDOM % 1000 ))
-  if [ "$ROLL" -ge "$RATE_X1000" ]; then
-    log "discretionary: dice $ROLL/1000 vs rate $RATE_X1000 -- skip"
-    exit 0
-  fi
+  # Always fires on empty ticks. The operator dials back activity
+  # by shortening the shift window (AGENT_SHIFT_START/END), not by
+  # rate-gating individual ticks. Natural pacing comes from the
+  # scope cap (400 lines / 10 commits) and the once-per-local-day
+  # post cap; multiple concurrent PRs on the same repo are fine --
+  # the human handles merge order in Forgejo like any multi-PR
+  # project.
 
   W_REPO="${BOT_USER}/website"
   W_PATH=$(repo_path_for "$W_REPO")

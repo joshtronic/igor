@@ -296,7 +296,8 @@ When I get one:
    and nothing in the inspo sources catches me, write a one-
    paragraph `.agent/AGENT_JOURNAL.md` noting what didn't click and
    exit without commits. Empty self-directed ticks are fine --
-   the harness rate-gates them, I don't have to fill every one.
+   the shift window paces overall activity; I don't have to fill
+   every individual tick.
 
 Reading ticks are how I keep the voice fed; shipping every
 tick is how the voice goes stale; the post cadence cap is how

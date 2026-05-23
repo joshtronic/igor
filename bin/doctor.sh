@@ -56,7 +56,6 @@ info "AGENT_STATE_DIR=$AGENT_STATE_DIR"
 [ -n "${FORGEJO_URL:-}" ]       && ok "FORGEJO_URL=$FORGEJO_URL" || bad "FORGEJO_URL missing"
 [ -n "${FORGEJO_TOKEN:-}" ]     && ok "FORGEJO_TOKEN set"  || bad "FORGEJO_TOKEN missing"
 [ -n "${AGENT_MODEL:-}" ]        && ok "AGENT_MODEL=$AGENT_MODEL" || bad "AGENT_MODEL missing"
-info "AGENT_DISCRETIONARY_RATE=${AGENT_DISCRETIONARY_RATE:-(unset, default 0)}"
 info "FORGEJO_REVIEWER=${FORGEJO_REVIEWER:-(unset)}"
 info "AGENT_SHIFT_START=${AGENT_SHIFT_START:-(unset)}  AGENT_SHIFT_END=${AGENT_SHIFT_END:-(unset)}"
 
