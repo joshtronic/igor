@@ -749,11 +749,14 @@ while [ "$attempts" -lt "$MAX_ATTEMPTS" ]; do
         # hn-date is set on FIRST append and never changes
         # (submission date is immutable); rank/points get
         # updated on subsequent appearances.
-        # Track URLs on HN's OWN ledger only. Destination domain
-        # ledgers are NOT auto-spawned -- a Microsoft blog routed
-        # from HN gets read + reflected on, but no per-domain
-        # ledger for microsoft.com appears unless reflection
-        # promotes it. Dedupe across reads happens via log.md.
+        # Track URLs on HN's ledger AND on destination domain
+        # ledgers (so we have read-history per domain). What we
+        # DON'T do for destinations: ledger_populate -- no
+        # sitemap spider. The bot never picks from destination
+        # ledgers anyway (sources.md is the picker's source of
+        # truth); the destination ledger is read-history only.
+        # Blacklisted destinations get filtered out by
+        # ledger_init_minimal's intake gate.
         while IFS='|' read -r rank points created_at_i url; do
           [ -z "$url" ] && continue
           hn_date=$(epoch_to_date "$created_at_i")
@@ -762,21 +765,28 @@ while [ "$attempts" -lt "$MAX_ATTEMPTS" ]; do
           ledger_append_url "$hn_ledger" "$url" "$annotation"
           ledger_update_rank "$hn_ledger" "$url" "$rank"
           ledger_update_points "$hn_ledger" "$url" "$points"
-          # If log.md already shows this URL as read, mark in HN.
+          dest_ledger=$(ledger_path "$url")
+          if [ "$dest_ledger" != "$hn_ledger" ]; then
+            ledger_init_minimal "$dest_ledger" "$url"
+            ledger_append_url "$dest_ledger" "$url"
+          fi
+          # If log.md already shows this URL as read, mark in both.
           if [ -f "$LOG_FILE" ] && grep -qF "$url" "$LOG_FILE" 2>/dev/null; then
             ledger_mark_read "$hn_ledger" "$url"
+            [ "$dest_ledger" != "$hn_ledger" ] && ledger_mark_read "$dest_ledger" "$url"
           fi
         done <<<"$discovered"
 
-        # Candidate set: HN's fresh URLs (- [ ]). Cross-source
-        # dedupe is now log.md only (no destination ledgers to
-        # consult).
+        # Candidate set: HN's fresh URLs (- [ ]) minus anything
+        # marked read in its destination domain's ledger.
         sorted_candidates=""
         while IFS= read -r line; do
           [ -z "$line" ] && continue
           cand_url=$(printf '%s' "$line" | sed -E 's/^- \[ \] ([^ ]+).*/\1/')
           [ -z "$cand_url" ] && continue
-          if [ -f "$LOG_FILE" ] && grep -qF "$cand_url" "$LOG_FILE" 2>/dev/null; then
+          cand_dest=$(ledger_path "$cand_url")
+          if [ "$cand_dest" != "$hn_ledger" ] \
+             && ledger_url_is_read "$cand_dest" "$cand_url"; then
             ledger_mark_read "$hn_ledger" "$cand_url"
             continue
           fi
@@ -797,11 +807,16 @@ while [ "$attempts" -lt "$MAX_ATTEMPTS" ]; do
           echo "discretionary-read: Kagi smallweb redirect failed, trying another source" >&2
           continue
         fi
-        # No destination ledger -- dedupe via log.md.
-        if [ -f "$LOG_FILE" ] && grep -qF "$target" "$LOG_FILE" 2>/dev/null; then
+        # Track on the destination ledger for read history; don't
+        # spider (no ledger_populate). Blacklisted destinations
+        # filtered by ledger_init_minimal's intake gate.
+        dest_ledger=$(ledger_path "$target")
+        ledger_init_minimal "$dest_ledger" "$target"
+        if ledger_url_is_read "$dest_ledger" "$target"; then
           echo "discretionary-read: Kagi sent us to a URL we've read, trying another source" >&2
           continue
         fi
+        ledger_append_url "$dest_ledger" "$target"
         candidates="$target"
         ;;
     esac
@@ -846,17 +861,19 @@ if [ -z "$read_output" ]; then
   exit 3
 fi
 
-# For personal sources, the URL's domain is the source's own
-# domain -- mark read in that ledger and populate sitemap. For
-# HN/Kagi (aggregator-routed), there's no per-destination ledger
-# to touch; dedupe lives in log.md (written below).
+# Mark the URL as read on the destination's per-domain ledger.
+# For personal sources, source == destination and we also run
+# the sitemap populate (spider) -- it's a weighted source, we
+# want fresh URLs to pick from. For HN/Kagi, the destination
+# ledger is read-history only; never populated, never sampled.
+TARGET_LEDGER=$(ledger_path "$URL")
+ledger_mark_read "$TARGET_LEDGER" "$URL"
 if [ "$PICKED_SOURCE_TYPE" = "personal" ]; then
-  TARGET_LEDGER=$(ledger_path "$URL")
-  ledger_mark_read "$TARGET_LEDGER" "$URL"
   ledger_populate "$TARGET_LEDGER" "$URL"
-elif [ "$PICKED_SOURCE_TYPE" = "hn" ]; then
+fi
+if [ "$PICKED_SOURCE_TYPE" = "hn" ]; then
   HN_LEDGER=$(ledger_path "https://news.ycombinator.com")
-  ledger_mark_read "$HN_LEDGER" "$URL"
+  [ "$HN_LEDGER" != "$TARGET_LEDGER" ] && ledger_mark_read "$HN_LEDGER" "$URL"
 fi
 
 echo "discretionary-read: selected via $PICKED_SOURCE -> $URL" >&2
