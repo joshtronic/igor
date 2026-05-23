@@ -68,21 +68,31 @@ if [ -f "$BRAIN_PATH/journal/${TODAY}.md" ]; then
   JOURNAL_TODAY="${JOURNAL_TODAY: -3000}"
 fi
 
-# Today's commits across bot-owned cloned repos. Subject lines only.
+# What landed on origin/master today, per repo. Uses --first-parent
+# on origin/master so each entry is either a merge commit (PR
+# landing) or a direct push -- the canonical "what shipped today"
+# timeline. --no-merges would HIDE merge commits dated today, even
+# when a PR opened yesterday merged this morning. We want those.
+#
+# Per-repo `git fetch` before reading: ensure_repo_local at tick
+# start sees only what was on origin then; PRs merged during the
+# day need a refetch to appear here. Best-effort.
 COMMITS_TODAY=""
 if [ -d "${AGENT_REPO_ROOT:-}/${BOT_USER:-igor}" ]; then
   for repo_dir in "${AGENT_REPO_ROOT}/${BOT_USER:-igor}"/*; do
     [ -d "$repo_dir/.git" ] || continue
     repo_name=$(basename "$repo_dir")
+    (cd "$repo_dir" && git fetch --quiet origin master 2>/dev/null) || true
     while IFS= read -r line; do
       [ -z "$line" ] && continue
       COMMITS_TODAY+="  - [${repo_name}] ${line}"$'\n'
     done < <(cd "$repo_dir" \
-             && git log --since="$TODAY 00:00:00" --until="$TODAY 23:59:59" \
-                  --no-merges --pretty='%s' 2>/dev/null | head -20)
+             && git log origin/master --first-parent \
+                  --since="$TODAY 00:00:00" --until="$TODAY 23:59:59" \
+                  --pretty='%s' 2>/dev/null | head -20)
   done
 fi
-[ -n "$COMMITS_TODAY" ] || COMMITS_TODAY="  (no commits yet today)"
+[ -n "$COMMITS_TODAY" ] || COMMITS_TODAY="  (no commits or merges to master yet today)"
 
 # Open blog ideas (top of the stack).
 IDEAS=""
@@ -206,13 +216,16 @@ echo "discretionary-reflect: wrote journal entry to $JOURNAL_FILE" >&2
 # Best-effort -- a failure here doesn't fail the reflection.
 if [ -n "$IDEA_LINE" ] && [ -f "$BRAIN_PATH/blog-ideas.md" ]; then
   TMP=$(mktemp)
+  # Inject the new idea as the first bullet under "## Open ideas".
+  # The heading is followed by exactly one blank line (the file's
+  # convention -- and markdownlint MD012/MD022 require it). Print
+  # heading, print the existing blank, then the bullet -- no extra
+  # blank line, that would create two consecutive blanks.
   awk -v idea="$IDEA_LINE" -v today="$TODAY" '
     BEGIN { injected=0 }
     /^## Open ideas/ && !injected {
-      print
-      getline next_line
-      print next_line
-      print ""
+      print                # the heading
+      if ((getline blank) > 0) print blank  # existing blank line after
       print "- **" idea "** -- Surfaced " today " (reflection tick)."
       injected=1
       next
