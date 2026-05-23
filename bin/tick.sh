@@ -1090,6 +1090,19 @@ discretionary_assess_cadence() {
   fi
   [ -n "$recent_modes" ] || recent_modes="(none yet today)"
 
+  # Has the bot already reflected today? Reflect is capped at one
+  # per day -- two reflections in 11 minutes happened on day one
+  # because they're 1/3 of the random pick. The dedup check on
+  # journal bodies failed because the model paraphrased rather
+  # than copied. Capping by day eliminates that whole class of
+  # near-duplicate.
+  local reflected_today=0
+  if [ -n "${BRAIN_PATH:-}" ] && [ -f "$journal_file" ]; then
+    if grep -qE '^## [0-9]+-[0-9]+-[0-9]+T.*-- discretionary reflection$' "$journal_file" 2>/dev/null; then
+      reflected_today=1
+    fi
+  fi
+
   # Decision tree (deterministic, no API call):
   #
   #   1. If posting is allowed (no post today, none in flight) -> work.
@@ -1116,17 +1129,33 @@ discretionary_assess_cadence() {
     choice="work"
     reason="post slot is open today; prioritize publishing"
   elif [ "$tail3" = "work,work,work" ]; then
-    flip_pick=$((RANDOM % 2))
-    if [ "$flip_pick" -eq 0 ]; then choice="read"; else choice="reflect"; fi
-    reason="3 consecutive work ticks; switching gears to $choice"
+    if [ "$reflected_today" = "1" ]; then
+      choice="read"
+      reason="3 consecutive work ticks; switching to read (already reflected today)"
+    else
+      flip_pick=$((RANDOM % 2))
+      if [ "$flip_pick" -eq 0 ]; then choice="read"; else choice="reflect"; fi
+      reason="3 consecutive work ticks; switching gears to $choice"
+    fi
   elif [ "$tail3" = "read,read,read" ]; then
-    flip_pick=$((RANDOM % 2))
-    if [ "$flip_pick" -eq 0 ]; then choice="work"; else choice="reflect"; fi
-    reason="3 consecutive read ticks; switching gears to $choice"
+    if [ "$reflected_today" = "1" ]; then
+      choice="work"
+      reason="3 consecutive read ticks; switching to work (already reflected today)"
+    else
+      flip_pick=$((RANDOM % 2))
+      if [ "$flip_pick" -eq 0 ]; then choice="work"; else choice="reflect"; fi
+      reason="3 consecutive read ticks; switching gears to $choice"
+    fi
   elif [ "$tail3" = "reflect,reflect,reflect" ]; then
+    # Shouldn't happen with the daily cap, but keep the rule for
+    # robustness if the cap is ever lifted.
     flip_pick=$((RANDOM % 2))
     if [ "$flip_pick" -eq 0 ]; then choice="work"; else choice="read"; fi
     reason="3 consecutive reflect ticks; switching gears to $choice"
+  elif [ "$reflected_today" = "1" ]; then
+    # Daily cap on reflect: drop to a work/read coin flip.
+    if [ $((RANDOM % 2)) -eq 0 ]; then choice="work"; else choice="read"; fi
+    reason="coin flip (reflected already today; open=$open_prs active=$active_prs recent=$recent_modes)"
   else
     case $((RANDOM % 3)) in
       0) choice="work" ;;
