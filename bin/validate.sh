@@ -7,8 +7,10 @@ set -uo pipefail
 
 AGENT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
 FAIL=0
+ENV_PRESENT=0
 
 if [ -f "$AGENT_HOME/.env" ]; then
+  ENV_PRESENT=1
   set -a
   # shellcheck source=/dev/null
   . "$AGENT_HOME/.env"
@@ -48,10 +50,53 @@ echo
 # -- Global env -------------------------------------------------
 
 echo "== env =="
-[ -n "${FORGEJO_URL:-}" ]       && pass "FORGEJO_URL set"       || fail "FORGEJO_URL set"       "missing from .env"
-[ -n "${FORGEJO_TOKEN:-}" ]     && pass "FORGEJO_TOKEN set"     || fail "FORGEJO_TOKEN set"     "missing from .env"
-[ -n "${ANTHROPIC_API_KEY:-}" ] && pass "ANTHROPIC_API_KEY set" || fail "ANTHROPIC_API_KEY set" "missing from .env"
-[ -n "${AGENT_MODEL:-}" ]        && pass "AGENT_MODEL set ($AGENT_MODEL)" || fail "AGENT_MODEL set" "missing from .env"
+if [ "$ENV_PRESENT" -eq 1 ]; then
+  pass ".env present"
+else
+  fail ".env present" "cp .env.example .env, then fill in every var"
+fi
+
+# Mirrors the required-var list enforced at tick.sh entry. Keep
+# these two in sync -- a var added there should be added here so
+# operators see the missing config before kicking off a tick.
+for var in \
+    ANTHROPIC_API_KEY \
+    AGENT_MODEL \
+    AGENT_MODEL_THINKING \
+    FORGEJO_URL \
+    FORGEJO_TOKEN \
+    FORGEJO_HOST \
+    FORGEJO_REVIEWER \
+    REDIS_URL \
+    TICK_TIMEOUT \
+    AGENT_SHIFT_START \
+    AGENT_SHIFT_END \
+    AGENT_RECALL_DAYS \
+    ; do
+  if [ -n "${!var:-}" ]; then
+    case "$var" in
+      ANTHROPIC_API_KEY|FORGEJO_TOKEN) pass "$var set" ;;
+      *) pass "$var set (${!var})" ;;
+    esac
+  else
+    fail "$var set" "missing from .env"
+  fi
+done
+
+# Light format checks on the vars where a typo silently breaks
+# behavior later (timeout that won't parse, shift outside 0-23, etc.).
+if [ -n "${TICK_TIMEOUT:-}" ] && ! [[ "$TICK_TIMEOUT" =~ ^[0-9]+[smhd]$ ]]; then
+  fail "TICK_TIMEOUT format" "expected like 60m, 2h, 30s, 1d -- got '$TICK_TIMEOUT'"
+fi
+for shift_var in AGENT_SHIFT_START AGENT_SHIFT_END; do
+  val="${!shift_var:-}"
+  if [ -n "$val" ] && ! [[ "$val" =~ ^([0-9]|1[0-9]|2[0-3])$ ]]; then
+    fail "$shift_var format" "expected 0-23 (24h clock) -- got '$val'"
+  fi
+done
+if [ -n "${AGENT_RECALL_DAYS:-}" ] && ! [[ "$AGENT_RECALL_DAYS" =~ ^[1-9][0-9]*$ ]]; then
+  fail "AGENT_RECALL_DAYS format" "expected positive integer -- got '$AGENT_RECALL_DAYS'"
+fi
 
 [ -f "$AGENT_HOME/agent-settings.json" ] && pass "agent-settings.json present" || fail "agent-settings.json present"
 
