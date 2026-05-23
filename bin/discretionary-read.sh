@@ -219,6 +219,55 @@ ledger_strip_trailing_blanks() {
   sed -e :a -e '/^$/{$d;N;ba' -e '}' "$f" > "$tmp" && mv "$tmp" "$f"
 }
 
+# -- blacklist read helpers --------------------------------------
+#
+# These three are hoisted above the ledger helpers because
+# ledger_init_minimal and ledger_populate call is_blacklisted().
+# Bash function lookup is at call time, not parse time, BUT only
+# functions defined BEFORE the call site exist in the function
+# table when execution hits the call. The full write-side helpers
+# (append_blacklist, remove_source, delete_domain_ledger) live
+# further down with the reflection-action code -- they're only
+# called after every function in the file has been parsed.
+
+is_blacklist_exempt() {
+  local url="$1"
+  case "$url" in
+    *://news.ycombinator.com*|news.ycombinator.com|*://kagi.com*|kagi.com)
+      return 0 ;;
+  esac
+  return 1
+}
+
+# Read blacklist entries (URLs only) from sources.md. The blacklist
+# section is "## Blacklist" through end-of-file or next "## " header.
+parse_blacklist() {
+  awk '
+    /^## Blacklist/ { in_bl=1; next }
+    in_bl && /^## / { in_bl=0 }
+    in_bl && /^- / {
+      # match "- <url> --" or "- <url>"
+      for (i=2; i<=NF; i++) {
+        if ($i ~ /^https?:\/\//) { print $i; break }
+      }
+    }
+  ' "$SOURCES_FILE"
+}
+
+is_blacklisted() {
+  local url="$1"
+  is_blacklist_exempt "$url" && return 1
+  local host
+  host=$(url_host "$url")
+  # Compare hosts (not raw URLs) so http vs https, trailing slash,
+  # www. differences don't cause false negatives. url_host already
+  # strips the www. prefix.
+  parse_blacklist | while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    [ "$(url_host "$entry")" = "$host" ] && printf 'MATCH\n'
+  done | grep -q MATCH
+}
+
 # Create a ledger with just the header. No sitemap fetch.
 # Idempotent: if the file already exists, strip trailing blanks
 # (auto-heal of older format) and return.
@@ -948,44 +997,10 @@ promote_candidate() {
 # blacklist-able regardless of what the reflection says.
 #
 # Section header is exact ("## Blacklist") so the parser is simple.
-
-is_blacklist_exempt() {
-  local url="$1"
-  case "$url" in
-    *://news.ycombinator.com*|news.ycombinator.com|*://kagi.com*|kagi.com)
-      return 0 ;;
-  esac
-  return 1
-}
-
-# Read blacklist entries (URLs only) from sources.md. The blacklist
-# section is "## Blacklist" through end-of-file or next "## " header.
-parse_blacklist() {
-  awk '
-    /^## Blacklist/ { in_bl=1; next }
-    in_bl && /^## / { in_bl=0 }
-    in_bl && /^- / {
-      # match "- <url> --" or "- <url>"
-      for (i=2; i<=NF; i++) {
-        if ($i ~ /^https?:\/\//) { print $i; break }
-      }
-    }
-  ' "$SOURCES_FILE"
-}
-
-is_blacklisted() {
-  local url="$1"
-  is_blacklist_exempt "$url" && return 1
-  local host
-  host=$(url_host "$url")
-  # Compare hosts (not raw URLs) so http vs https, trailing slash,
-  # www. differences don't cause false negatives. url_host already
-  # strips the www. prefix.
-  parse_blacklist | while IFS= read -r entry; do
-    [ -z "$entry" ] && continue
-    [ "$(url_host "$entry")" = "$host" ] && printf 'MATCH\n'
-  done | grep -q MATCH
-}
+#
+# Read helpers (is_blacklist_exempt, parse_blacklist, is_blacklisted)
+# are hoisted above the ledger helpers since those call into them.
+# Only the write-side helpers below are defined here.
 
 append_blacklist() {
   local url="$1" reason="$2"
