@@ -65,13 +65,13 @@ ${BODY}"
 
 NUMBER=$(forgejo_open_issue "$REPO" "$TITLE" "$BODY_WITH_MARKER")
 
-# Apply Status/Needs More Info -- the Forgejo default for "bot is
+# Apply Status/Need More Info -- the Forgejo default for "bot is
 # asking, human input needed." Same label maintenance findings use
 # (also "bot wants human input"). The body marker distinguishes
 # questions from maintenance findings when we need to tell them
 # apart (e.g., the throttle above).
-forgejo_add_label "$REPO" "$NUMBER" "Status/Needs More Info" 2>/dev/null \
-  || echo "agent-ask: warning: Status/Needs More Info label not available on $REPO; issue filed without it" >&2
+forgejo_add_label "$REPO" "$NUMBER" "Status/Need More Info" 2>/dev/null \
+  || echo "agent-ask: warning: Status/Need More Info label not available on $REPO; issue filed without it" >&2
 
 # Notify the reviewer if configured.
 if [ -n "${FORGEJO_REVIEWER:-}" ]; then

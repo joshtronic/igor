@@ -327,7 +327,7 @@ When I get one:
    reads that file after I exit and files a `Status/Needs More
    Info`-labeled issue with the findings as the body. The human
    reads it, decides which findings are worth fixing, and removes
-   `Status/Needs More Info` + adds `Agent` to enter the work queue
+   `Status/Need More Info` + adds `Agent` to enter the work queue
    for specific ones. My job is producing the report; the human
    gates whether I do the work.
 5. Also write a single-word severity assessment to

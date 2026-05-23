@@ -6,7 +6,7 @@ There is no per-project config. To put a repo under the agent's care:
 2. Set up the labels the agent reads. Three of them come from Forgejo's
    **Advanced** label template; the fourth is custom:
    - From the Advanced template (repo Settings -> Labels -> load
-     template -> Advanced): `Status/Blocked`, `Status/Needs More Info`,
+     template -> Advanced): `Status/Blocked`, `Status/Need More Info`,
      `Priority/Critical`. (The Advanced template also brings `Kind/*` and
      other useful families; harmless to keep them.)
    - Create manually as a new label: `Agent`.
@@ -47,7 +47,7 @@ There is no per-project config. To put a repo under the agent's care:
    ```
 
 That's it. The next tick validates the repo via the Forgejo API. If any
-checks fail, the agent files a `Status/Needs More Info` ticket listing what's
+checks fail, the agent files a `Status/Need More Info` ticket listing what's
 missing and skips the repo. Fix the gaps, close the ticket, and the next
 tick re-validates and clones if ready (or reopens the ticket with what's
 still wrong).
