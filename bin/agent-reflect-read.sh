@@ -9,22 +9,30 @@
 # new domains mentioned in the read are worth pulling into the
 # source list as candidates.
 #
-# Output is strict JSON on stdout, nothing else:
+# Output is strict JSON on stdout, nothing else (full schema below
+# in the SYSTEM_PROMPT). Adds two brain self-healing actions:
 #
-#   {
-#     "weight_delta": -1 | 0 | 1,
-#     "weight_reason": "one sentence",
-#     "candidates": [
-#       {"url": "https://...", "label": "Short Name", "reason": "..."}
-#     ]
-#   }
+#   - blacklist: judgment that a domain isn't worth long-term
+#     rotation. For aggregator-routed reads, this targets the
+#     destination domain (we landed there from HN; this domain
+#     itself shouldn't graduate into the weighted pool). For
+#     direct-sampled reads of weighted sources, blacklist is NOT
+#     used -- use demote instead.
 #
-# Weight delta is bounded -- this script never proposes more than
-# one step in either direction. The caller (discretionary-read.sh)
-# enforces the floor (min weight 1, so a source never self-eliminates).
+#   - demote: judgment that an existing weighted source has
+#     drifted off small-web (programmatic content, marketing
+#     pivot, abandoned). Removes from weighted list, adds to
+#     blacklist with reason.
+#
+# Default-strict: a new domain is blacklisted unless it
+# affirmatively reads as small-web (personal voice, single
+# author, original content, not press/marketing/programmatic).
+# Aggregators (HN, Kagi) are never blacklist-able.
 #
 # Usage:
-#   bin/agent-reflect-read.sh <source-url> <article-url> <title> <journal-file> <sources-file>
+#   bin/agent-reflect-read.sh <source-url> <article-url> <title> <journal-file> <sources-file> <source-type>
+#
+# source-type is one of: personal, hn, kagi
 #
 # Exit codes:
 #   0  success (JSON on stdout)
@@ -48,10 +56,11 @@ ARTICLE_URL="${2:-}"
 TITLE="${3:-}"
 JOURNAL_FILE="${4:-}"
 SOURCES_FILE="${5:-}"
+SOURCE_TYPE="${6:-personal}"
 
 if [ -z "$SOURCE_URL" ] || [ -z "$ARTICLE_URL" ] || [ -z "$TITLE" ] \
    || [ -z "$JOURNAL_FILE" ] || [ -z "$SOURCES_FILE" ]; then
-  echo "usage: agent-reflect-read.sh <source-url> <article-url> <title> <journal-file> <sources-file>" >&2
+  echo "usage: agent-reflect-read.sh <source-url> <article-url> <title> <journal-file> <sources-file> <source-type>" >&2
   exit 1
 fi
 
@@ -67,43 +76,73 @@ SOURCES=$(cat "$SOURCES_FILE")
 
 SYSTEM_PROMPT=$(cat <<'EOF'
 You are a reflection step that runs after the agent (an autonomous
-Claude process) reads a blog post. the agent picks reading sources by
-weighted random sample from a list maintained in sources.md. Your
-job after each successful read:
+Claude process) reads a blog post. The agent picks reading sources
+by weighted random sample from a list maintained in sources.md.
+The long-term rotation is curated to small-web personal blogs;
+aggregators (HN, Kagi small web) are one-shot windows onto random
+URLs, NOT shapers of the rotation.
 
-1. Suggest a small adjustment to the source's weight: -1, 0, or +1.
-   Bias toward 0 -- a single read isn't strong evidence. Only
-   nudge when the read was genuinely standout (+1, "more like
-   this please") or notably thin / off-target (-1, "less of this").
-   Never propose a delta outside [-1, 1].
+## Small-web criteria (the rubric for what belongs in rotation)
 
-2. Suggest new source candidates -- domains that appeared in the
-   read (linked, cited, or referenced) and look worth pulling into
-   the rotation. Only propose a domain if ALL of these hold:
-     - it was actually mentioned in the article or in the agent's journal
-     - it is NOT already in sources.md (any weight)
-     - it looks like personal / independent writing, not a press
-       release, vendor page, social network, or aggregator
-   The URL should be the homepage of the candidate domain
-   (https://domain.com), not a specific post.
-   Candidates land at weight 0 -- listed but not sampled. Be
-   conservative; an empty candidates array is fine.
+A domain belongs in the long-term rotation only if it AFFIRMATIVELY
+reads as small-web:
 
-3. Suggest promotions -- existing weight-0 candidates that have
-   earned a sample. Look at the "## Candidates (auto-discovered)"
-   section of sources.md (if present). A candidate is ready to
-   promote (weight 0 -> 1) when:
-     - it shows up referenced or quoted in today's read in a way
-       that suggests substance (not just a passing mention), OR
-     - it's been sitting at 0 for a while and the reflection's
-       prior reasoning lines (in past_context, if any) suggest
-       it represents a real ongoing voice worth sampling.
-   Promote at most one candidate per reflection -- this is gentle
-   pool growth, not bulk activation. Empty promotions array is
-   the common case; only emit one when you have concrete signal.
+  - Personal voice -- first-person, opinions, reflection, lived
+    experience. Not corporate "we", not press-release "the team".
+  - Single author or small team. Independent, not staff-written
+    for a publication.
+  - Original content. Not press releases, product docs,
+    programmatic benchmarks, marketing pages, aggregator feeds,
+    or auto-generated comparison pages.
+  - Alive -- updated, not abandoned years ago.
+  - Shape of Kagi small web. If you'd be surprised to see it in
+    that directory, it doesn't belong in the rotation.
+
+DEFAULT STRICT: when in doubt, BLACKLIST. We're not building a
+search engine; we're curating a small set of voices worth coming
+back to. False negatives (blacklisting something borderline) are
+recoverable -- you can always un-blacklist later. False positives
+(letting in a slop site) bloat the rotation and the brain.
+
+## Your job
+
+1. WEIGHT DELTA (-1, 0, +1). For aggregator-routed reads (source
+   type "hn" or "kagi"), ALWAYS use 0 -- the aggregator's quality
+   doesn't depend on what it happened to route to. For
+   direct-sampled reads from a weighted source, nudge -1 if the
+   read was notably thin, +1 if standout. Bias toward 0.
+
+2. CANDIDATES. New small-web domains mentioned in the read that
+   look worth sampling. Default STRICT: only propose when the
+   domain affirmatively meets the criteria above. If you wouldn't
+   confidently call it small-web, leave it out -- an empty array
+   is the common case.
+
+3. PROMOTIONS. Existing weight-0 candidates ready to graduate.
+   At most one per reflection.
+
+4. BLACKLIST. When the source type is "hn" or "kagi", judge the
+   DESTINATION domain (the article_url's domain). If it doesn't
+   meet small-web criteria, emit a blacklist entry. Reason should
+   name WHY (e.g., "programmatic benchmark site", "product
+   marketing", "abandoned, last post 2014"). For source type
+   "personal", do NOT emit blacklist -- use demote instead.
+
+5. DEMOTE. When the source type is "personal" (a weighted source
+   was directly sampled), and the read reveals the source has
+   drifted off small-web (gone all marketing, gone programmatic,
+   gone dead), emit a demote entry. The caller will remove from
+   weighted list and add to blacklist with the same reason. Be
+   conservative -- one off-tone read isn't drift; require a clear
+   pattern shift you can name.
+
+Aggregator EXEMPTION: never blacklist or demote news.ycombinator.com
+or kagi.com themselves. They're functional reading windows; only
+their destinations are judged.
 
 Output STRICT JSON only. No prose, no code fences, no preamble.
-Schema:
+Schema (blacklist and demote are nullable -- use null when not
+applicable):
 
 {
   "weight_delta": -1 | 0 | 1,
@@ -113,7 +152,9 @@ Schema:
   ],
   "promotions": [
     {"url": "https://existing-candidate.com", "reason": "one short sentence"}
-  ]
+  ],
+  "blacklist": {"url": "https://domain.com", "reason": "one short sentence"} | null,
+  "demote":    {"url": "https://existing-source.com", "reason": "one short sentence"} | null
 }
 EOF
 )
@@ -130,6 +171,7 @@ RAG_CONTEXT=$(rag_query "reading source $SOURCE_URL")
 
 USER_MESSAGE=$(cat <<EOF
 Source picked: $SOURCE_URL
+Source type: $SOURCE_TYPE
 Article read: $ARTICLE_URL
 Title: $TITLE
 
