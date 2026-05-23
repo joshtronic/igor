@@ -111,6 +111,16 @@ export BOT_USER
 export FORGEJO_REVIEWER
 export AGENT_HOME
 
+# Brain + website paths derived from the bot user. Exported so every
+# Claude Code invocation (tier-1, PR-review, maintenance, site-work)
+# can resolve absolute paths into the bot's own repos -- e.g. writing
+# memory files to $AGENT_BRAIN_PATH/memories/projects/X.md from inside
+# a worktree that's on a different repo. Without these exported,
+# AGENTS.md's instruction to "use $AGENT_BRAIN_PATH" is a dead
+# reference.
+export AGENT_BRAIN_PATH="$AGENT_REPO_ROOT/${BOT_USER}/brain"
+export AGENT_WEBSITE_PATH="$AGENT_REPO_ROOT/${BOT_USER}/website"
+
 # Put the harness's bin dir on PATH for every Claude invocation in
 # this script. Without this, Claude can't call agent-enqueue.sh /
 # agent-ask.sh / agent-block.sh / agent-report.sh by name -- it

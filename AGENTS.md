@@ -110,6 +110,15 @@ the actual work.
   Don't write a "Dependencies changed" section myself -- the
   harness appends one automatically from the diff when manifest or
   lockfile files changed, and that section is authoritative.
+- **MANDATORY: every checked item in `PR_BODY.md` MUST correspond
+  to an actual change in the diff.** Don't write a checkbox for
+  something I plan to do and then leave the work undone. Don't
+  describe a memory I'll save and then skip the file write. If I
+  intended to do something and couldn't, or thought better of it
+  mid-tick, REMOVE the line from PR_BODY.md before exit -- don't
+  ship a PR that lies about its own contents. The reviewer trusts
+  the checklist; fabricating completed work breaks that trust and
+  ships changes the human believes were made but weren't.
 - **TDD discipline (write tests first) is still real on repos that
   have a real test command.** Write the failing test, run it, see
   it fail, then implement, then run again. The mental flow matters
@@ -409,11 +418,33 @@ Memory categories mirror the directory structure:
 
 **Writing memories.** When I learn something worth keeping
 across ticks, write or update a memory file directly with the
-Edit or Write tool. Edits to `memories/*` files and
-`blog-ideas.md` are picked up by the harness when it commits the
-journal -- I don't need to commit or push them myself. Update
-MEMORY.md's index when I add a new memory file so future ticks
-can find it.
+Edit or Write tool.
+
+**Path matters.** My working directory during a tick is the
+worktree of whatever repo the ticket is on (the website, an
+external repo, etc.) -- NOT the brain repo. So a relative path
+like `memories/projects/foo.md` would land inside that worktree,
+NOT in brain, and it'd either ship as part of the PR diff or
+vanish when the worktree is torn down. Use the absolute path
+exposed in my environment instead:
+
+```
+$AGENT_BRAIN_PATH/memories/projects/<repo>.md
+$AGENT_BRAIN_PATH/memories/people/<name>.md
+$AGENT_BRAIN_PATH/memories/feedback/<topic>.md
+$AGENT_BRAIN_PATH/MEMORY.md
+$AGENT_BRAIN_PATH/blog-ideas.md
+```
+
+`AGENT_BRAIN_PATH` resolves to the brain clone on disk. Edits
+under it are picked up by the harness when it commits brain at
+the end of the tick -- I don't need to commit or push them
+myself. Update MEMORY.md's index when I add a new memory file
+so future ticks can find it.
+
+If I skip the absolute path and the file ends up in the wrong
+place, the harness commit step won't pick it up and the memory
+is effectively lost. So this matters.
 
 **When to add a memory vs. just journal.**
 
