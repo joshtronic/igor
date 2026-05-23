@@ -125,6 +125,9 @@ EOF
 . "$AGENT_HOME/lib/rag.sh"
 RAG_CONTEXT=$(rag_query "reading source $SOURCE_URL")
 
+# shellcheck source=../lib/cost.sh
+. "$AGENT_HOME/lib/cost.sh"
+
 USER_MESSAGE=$(cat <<EOF
 Source picked: $SOURCE_URL
 Article read: $ARTICLE_URL
@@ -168,6 +171,8 @@ RESPONSE=$(curl -sf \
   echo "agent-reflect-read: API call failed" >&2
   exit 2
 }
+
+cost_record_api "agent-reflect-read" "$MODEL" "$RESPONSE"
 
 TEXT=$(jq -r '.content[0].text // ""' <<<"$RESPONSE")
 if [ -z "$TEXT" ]; then

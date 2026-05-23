@@ -87,6 +87,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/repo-checks.sh"
 # shellcheck source=lib/rag.sh
 . "$AGENT_HOME/lib/rag.sh"
+# shellcheck source=lib/cost.sh
+. "$AGENT_HOME/lib/cost.sh"
 
 # Children (discretionary executors, agent-* scripts) re-source
 # lib/rag.sh and share our per-tick build marker via $TICK_PID.
@@ -266,13 +268,75 @@ normalize_worktree_dashes() {
   done
 }
 
+# Run `claude --print` with stream-json output so the tick keeps live
+# progress in journalctl AND we can extract the precomputed
+# total_cost_usd from the final result event for the ledger.
+#
+# Pipeline shape:
+#   claude (stream-json) -> tee raw-stream-log -> jq display-text -> tee display-log
+#
+# Raw stream log holds every event (one JSON object per line) for
+# post-run cost extraction + debugging. Display log + journalctl get
+# the same readable text the old plain --print mode produced.
+#
+# Args: <call_site> <display_log_path> <timeout_spec> <claude_args...>
+# Returns: claude's exit code (PIPESTATUS[0] captured into $?)
+#
+# Sets globals (read by the caller after return):
+#   CLAUDE_RUN_STREAM_LOG -- path to the raw stream-json file
+claude_run_with_cost() {
+  local call_site="$1" display_log="$2" timeout_spec="$3"
+  shift 3
+  local scratch
+  scratch=$(dirname "$display_log")
+  local stream_log="$scratch/claude-stream.jsonl"
+  CLAUDE_RUN_STREAM_LOG="$stream_log"
+  : > "$stream_log"
+  : > "$display_log"
+  # stderr inline with stdout (old behavior); jq filter drops
+  # non-JSON lines so stray stderr doesn't break the pipeline.
+  # --verbose is required by Claude Code when using stream-json
+  # with --print (it refuses without it).
+  set +e
+  set -o pipefail
+  timeout --kill-after=30s "$timeout_spec" \
+    claude --output-format stream-json --verbose --include-partial-messages "$@" 2>&1 \
+    | tee "$stream_log" \
+    | jq -r --unbuffered '
+        if (try .type catch null) == "assistant" then
+          (.message.content // [])[]
+          | if .type == "text" then .text
+            elif .type == "tool_use" then "[tool: \(.name)]"
+            else empty
+            end
+        elif (try .type catch null) == "user" then
+          (.message.content // [])[]
+          | if .type == "tool_result" then "[tool_result]"
+            else empty
+            end
+        else empty
+        end
+      ' 2>/dev/null \
+    | tee "$display_log"
+  local rc=${PIPESTATUS[0]}
+  set +o pipefail
+  set -e
+  cost_record_cli "$call_site" "$stream_log"
+  return "$rc"
+}
+
 # Model defaults to Haiku (cheap, fast, good enough for short
 # completions). Override via AGENT_MODEL_THINKING. Returns the text
 # of the response on stdout; empty on failure.
+#
+# Optional 4th arg: a call-site tag for the cost ledger. If unset,
+# the call is logged as "claude-complete" (still tracked, but the
+# caller could be more specific -- "commit-subject", "cadence", etc).
 claude_complete() {
   local system_prompt="$1" user_msg="$2"
   local model="${AGENT_MODEL_THINKING:-claude-haiku-4-5-20251001}"
   local max_tokens="${3:-256}"
+  local call_site="${4:-claude-complete}"
   local response
   response=$(curl -sf -X POST https://api.anthropic.com/v1/messages \
     -H "x-api-key: $ANTHROPIC_API_KEY" \
@@ -286,6 +350,7 @@ claude_complete() {
       --arg u "$user_msg" \
       '{model: $m, max_tokens: $mt, system: $s, messages: [{role: "user", content: $u}]}')" \
     2>/dev/null) || return 1
+  cost_record_api "$call_site" "$model" "$response"
   jq -r '.content[0].text // ""' <<<"$response" 2>/dev/null
 }
 
@@ -367,7 +432,8 @@ derive_commit_subject() {
       api_subject=$(claude_complete \
         "You generate ONE single-line conventional-commit subject. Output ONLY the subject line -- no quotes, no preamble, no explanation, no questions. Format: 'type: description' where type is one of feat/fix/chore/docs/style/refactor/test. Under 72 chars. Imperative mood ('Add X' not 'Added X'). Be specific about what changed. If the input is empty or you cannot tell what changed, output exactly: chore: tick work" \
         "$diff_summary" \
-        80)
+        80 \
+        "commit-subject")
       # Strip surrounding whitespace and any stray quotes
       api_subject=$(printf '%s' "$api_subject" \
         | head -1 \
@@ -437,7 +503,8 @@ Rules:
 - If the diff is purely doc/refactor with no manual testing needed, Test plan can be just '- [x] No manual verification needed; CI is the gate'.
 - Be terse and accurate. Don't invent context not in the diff." \
     "$diff_summary" \
-    800)
+    800 \
+    "pr-body-fallback")
 
   # Strip leading/trailing whitespace and any fenced-code wrappers
   # Haiku occasionally adds despite instructions.
@@ -727,14 +794,13 @@ EOF
   local m_start; m_start=$(date +%s)
   local m_exit
   set +e
-  timeout --kill-after=30s "$TICK_TIMEOUT" \
-    claude \
-      --model "$AGENT_MODEL" \
-      --append-system-prompt "$m_system_prompt" \
-      --settings "$AGENT_HOME/agent-settings.json" \
-      --max-turns 50 \
-      --print "$m_user_msg" 2>&1 | tee "$m_log"
-  m_exit=${PIPESTATUS[0]}
+  claude_run_with_cost "maintenance" "$m_log" "$TICK_TIMEOUT" \
+    --model "$AGENT_MODEL" \
+    --append-system-prompt "$m_system_prompt" \
+    --settings "$AGENT_HOME/agent-settings.json" \
+    --max-turns 50 \
+    --print "$m_user_msg"
+  m_exit=$?
   set -e
   log "claude exited $m_exit after $(( $(date +%s) - m_start ))s"
 
@@ -1022,7 +1088,8 @@ Schema:
   \"reason\": \"one short sentence\"
 }" \
     "$activity" \
-    200)
+    200 \
+    "cadence-assess")
 
   response=$(printf '%s' "$response" | sed -E '/^```/d')
   choice=$(jq -r '.decision // ""' <<<"$response" 2>/dev/null || echo "")
@@ -1402,14 +1469,13 @@ EOF
     PR_LOG="$PR_WORKTREE/.agent/claude-output.log"
     PR_START=$(date +%s)
     set +e
-    timeout --kill-after=30s "$TICK_TIMEOUT" \
-      claude \
-        --model "$AGENT_MODEL" \
-        --append-system-prompt "$PR_SYSTEM_PROMPT" \
-        --settings "$AGENT_HOME/agent-settings.json" \
-        --max-turns 50 \
-        --print "$PR_USER_MSG" 2>&1 | tee "$PR_LOG"
-    PR_EXIT=${PIPESTATUS[0]}
+    claude_run_with_cost "pr-review" "$PR_LOG" "$TICK_TIMEOUT" \
+      --model "$AGENT_MODEL" \
+      --append-system-prompt "$PR_SYSTEM_PROMPT" \
+      --settings "$AGENT_HOME/agent-settings.json" \
+      --max-turns 50 \
+      --print "$PR_USER_MSG"
+    PR_EXIT=$?
     set -e
     PR_ELAPSED=$(( $(date +%s) - PR_START ))
     log "claude exited $PR_EXIT after ${PR_ELAPSED}s"
@@ -1966,14 +2032,13 @@ EOF
   W_LOG="$W_WORKTREE/.agent/claude-output.log"
   W_START=$(date +%s)
   set +e
-  timeout --kill-after=30s "$TICK_TIMEOUT" \
-    claude \
-      --model "$AGENT_MODEL" \
-      --append-system-prompt "$W_SYSTEM_PROMPT" \
-      --settings "$AGENT_HOME/agent-settings.json" \
-      --max-turns 50 \
-      --print "$W_USER_MSG" 2>&1 | tee "$W_LOG"
-  W_EXIT=${PIPESTATUS[0]}
+  claude_run_with_cost "site-work" "$W_LOG" "$TICK_TIMEOUT" \
+    --model "$AGENT_MODEL" \
+    --append-system-prompt "$W_SYSTEM_PROMPT" \
+    --settings "$AGENT_HOME/agent-settings.json" \
+    --max-turns 50 \
+    --print "$W_USER_MSG"
+  W_EXIT=$?
   set -e
   W_ELAPSED=$(( $(date +%s) - W_START ))
   log "claude exited $W_EXIT after ${W_ELAPSED}s"
@@ -2288,14 +2353,13 @@ log "invoking claude (timeout ${TICK_TIMEOUT})"
 CLAUDE_LOG="$WORKTREE/.agent/claude-output.log"
 START_TS=$(date +%s)
 set +e
-timeout --kill-after=30s "$TICK_TIMEOUT" \
-  claude \
-    --model "$AGENT_MODEL" \
-    --append-system-prompt "$SYSTEM_PROMPT" \
-    --settings "$AGENT_HOME/agent-settings.json" \
-    --max-turns 50 \
-    --print "$USER_MSG" 2>&1 | tee "$CLAUDE_LOG"
-CLAUDE_EXIT=${PIPESTATUS[0]}
+claude_run_with_cost "tier-1-issue" "$CLAUDE_LOG" "$TICK_TIMEOUT" \
+  --model "$AGENT_MODEL" \
+  --append-system-prompt "$SYSTEM_PROMPT" \
+  --settings "$AGENT_HOME/agent-settings.json" \
+  --max-turns 50 \
+  --print "$USER_MSG"
+CLAUDE_EXIT=$?
 set -e
 ELAPSED=$(( $(date +%s) - START_TS ))
 log "claude exited $CLAUDE_EXIT (elapsed ${ELAPSED}s)"

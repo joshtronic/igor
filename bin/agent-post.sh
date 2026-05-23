@@ -114,6 +114,9 @@ EOF
 . "$AGENT_HOME/lib/rag.sh"
 RAG_CONTEXT=$(rag_query "$IDEA")
 
+# shellcheck source=../lib/cost.sh
+. "$AGENT_HOME/lib/cost.sh"
+
 USER_MESSAGE=$(cat <<EOF
 Today is ${TODAY}.
 
@@ -152,6 +155,8 @@ RESPONSE=$(curl -sf \
   echo "agent-post: API call failed" >&2
   exit 2
 }
+
+cost_record_api "agent-post" "$MODEL" "$RESPONSE"
 
 TEXT=$(jq -r '.content[0].text // ""' <<<"$RESPONSE")
 if [ -z "$TEXT" ]; then

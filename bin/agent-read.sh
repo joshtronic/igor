@@ -114,6 +114,11 @@ EOF
 . "$AGENT_HOME/lib/rag.sh"
 RAG_CONTEXT=$(rag_query "$URL")
 
+# Cost-ledger helpers (cost_record_api). rag.sh has already set
+# AGENT_STATE_DIR via its own default.
+# shellcheck source=../lib/cost.sh
+. "$AGENT_HOME/lib/cost.sh"
+
 # Build the JSON payload via files, not --arg. Truncated HTML can
 # be ~200KB; passing that as a command-line argument blows past
 # ARG_MAX on smaller-stack systems with "Argument list too long".
@@ -174,6 +179,8 @@ if [ "$HTTP_STATUS" != "200" ]; then
 fi
 
 RESPONSE=$(cat "$RESPONSE_FILE")
+
+cost_record_api "agent-read" "$MODEL" "$RESPONSE"
 
 # Extract the text content the model returned
 TEXT=$(jq -r '.content[0].text // ""' <<<"$RESPONSE")
