@@ -1021,23 +1021,37 @@ repo_lint_passes() {
 # Output: "<choice>|<reason>" on stdout (caller splits on the first
 # pipe). No JSON parsing burden for the caller.
 discretionary_assess_cadence() {
-  local open_prs="$1"
+  local active_prs="$1"
   local posting_allowed="$2"
-  local today reflections_today commits_today repo_dir count post_today prs_opened_today
+  local today work_reflections_today commits_today repo_dir count post_today prs_opened_today recent_modes
   today=$(date +%Y-%m-%d)
 
-  # Tick reflections logged today: count of harness-written separator
-  # lines in today's brain journal file. Each tick that writes a
-  # journal entry adds a "## <ISO-timestamp> -- <mode>" header, so
-  # the date-prefixed pattern is what we want -- Claude's prose H2
-  # headers inside an entry (like "## What it means to be...") would
-  # also match a looser '^## ' pattern and inflate the count.
+  # WORK reflections logged today: count of harness-written tick
+  # headers EXCLUDING reading-mode entries. Including reading would
+  # be a self-licking ice-cream cone -- each reading tick bumps the
+  # count, which the cadence then reads as "active day", which
+  # justifies more reading. Only tier-1 / site-work / maintenance /
+  # post / PR-review reflections count as "did real work".
   local journal_file="${BRAIN_PATH:-}/journal/${today}.md"
   if [ -n "${BRAIN_PATH:-}" ] && [ -f "$journal_file" ]; then
-    reflections_today=$(grep -cE '^## [0-9]+-[0-9]+-[0-9]+T' "$journal_file" 2>/dev/null || echo 0)
+    work_reflections_today=$(grep -E '^## [0-9]+-[0-9]+-[0-9]+T' "$journal_file" 2>/dev/null \
+      | grep -vcE -- '-- discretionary reading$' || echo 0)
   else
-    reflections_today=0
+    work_reflections_today=0
   fi
+
+  # Recent tick modes (last 5 reflections, newest last). Tells the
+  # cadence assessor what the bot was JUST doing -- without this it
+  # decides fresh each tick from raw counters and can roll "read"
+  # five times in a row without noticing.
+  recent_modes=""
+  if [ -n "${BRAIN_PATH:-}" ] && [ -f "$journal_file" ]; then
+    recent_modes=$(grep -E '^## [0-9]+-[0-9]+-[0-9]+T' "$journal_file" 2>/dev/null \
+      | tail -5 \
+      | sed -E 's/.*-- discretionary reading$/read/; s/.*-- discretionary on .*/work/; s/.*-- [^ ]+\/[^#]+#.*/work/; s/^## .*/work/' \
+      | paste -sd, -)
+  fi
+  [ -n "$recent_modes" ] || recent_modes="(none yet today)"
 
   # Today's commits across cloned repos. No author filter: Josh's
   # commits to brain (manual edits) also count as "stuff happened
@@ -1092,18 +1106,18 @@ discretionary_assess_cadence() {
 Today is $today.
 
 Your activity since local midnight:
-- open bot PRs in the queue: $open_prs
+- ACTIVE bot PRs in the queue (opened or with activity in last 8h): $active_prs
 - bot PRs opened today (any state): $prs_opened_today
-- Tick reflections logged today: $reflections_today
+- Work reflections logged today (excludes reading ticks): $work_reflections_today
 - Commits authored today (all repos): $commits_today
 - Post landed today: $([ "$post_today" = "1" ] && echo "yes" || echo "no")
 - Posting eligible this tick: $posting_label
+- Recent tick modes (oldest -> newest): $recent_modes
 
-"bot PRs opened today" is the most direct "did I ship work today?"
-signal -- it counts the new PRs the agent authored regardless of whether
-they're still open, merged, or closed without merge. "Tick reflections"
-is how many ticks logged a journal entry; it's a measure of activity,
-not output.
+"ACTIVE bot PRs" filters out stale PRs the human hasn't touched recently.
+A high count means there's real queue pressure -- review-burden lives in
+that number. A low count means the human has been processing the queue
+and there's CAPACITY TO SHIP MORE, not permission to coast.
 
 If the decision is "work", the tick will: $work_label.
 If the decision is "read", the tick will: read an article + journal-reflect.
@@ -1116,11 +1130,22 @@ EOF
   response=$(claude_complete \
     "You are deciding how the agent (an autonomous Claude process) should spend the next discretionary tick.
 
-Think like a human's end-of-day check-in. \"Did I put in a solid day's work?\" If yes, take a break to read -- reading is cheap, forward-investment, and surfaces ideas. If no -- especially if the queue is light or nothing's shipped yet -- more work is the right call.
+Default bias is WORK. Reading is the opt-in break, taken when shipping more would be counterproductive.
 
-A heavy queue (many open bot PRs not yet reviewed by the human) is a strong signal to read instead of ship. Piling on more PRs when the human is behind on review just buries the work. Even when posting is allowed, choose \"read\" if the queue is already deep -- the post can ship tomorrow.
+Choose \"read\" only when:
+  - Active queue is heavy (many open bot PRs with recent activity, indicating the human is still processing them)
+  - OR multiple posts already shipped today AND the queue is at least somewhat full
+  - OR the recent-modes list shows mostly work (the bot HAS been shipping; a short break is fine)
 
-Don't grind for grinding's sake. Don't slack off when there's clear work to do. The goal is the natural rhythm of a human workday, not a rigid threshold.
+Choose \"work\" when:
+  - Active queue is light (room to ship -- this is NOT permission to coast)
+  - OR no PRs shipped today yet
+  - OR recent-modes shows mostly read (the bot has been on break too long; get back to it)
+
+Don't congratulate yourself on a productive day if recent ticks have been
+reading. Reading ticks are NOT work output -- they're consumption. The
+recent-modes list reveals whether shipping happened recently or whether
+the bot has been coasting.
 
 Output STRICT JSON. No code fences, no preamble.
 
@@ -1144,6 +1169,18 @@ Schema:
       reason="cadence assessment failed -- defaulting to work"
       ;;
   esac
+
+  # Hard consecutive-read cap. If the model picks read AND the last 3
+  # entries in recent_modes are all "read", override to work. The
+  # model can rationalize anything; this is the floor.
+  if [ "$choice" = "read" ]; then
+    local tail3
+    tail3=$(printf '%s' "$recent_modes" | tr ',' '\n' | tail -3 | tr '\n' ',')
+    if [ "$tail3" = "read,read,read," ]; then
+      choice="work"
+      reason="consecutive-read cap: last 3 ticks were all reading, forcing work"
+    fi
+  fi
 
   printf '%s|%s' "$choice" "$reason"
 }
@@ -1716,6 +1753,17 @@ if [ -z "$WINNER" ]; then
   W_OPEN_PRS_JSON=$(forgejo_list_open_bot_prs "$W_REPO" "$BOT_USER" 2>/dev/null || echo '[]')
   W_OPEN_PRS_COUNT=$(jq 'length' <<<"$W_OPEN_PRS_JSON")
 
+  # "Active" = opened or had updated activity within last 8 hours.
+  # Stale PRs (opened a day ago, no review action since) shouldn't
+  # register as queue pressure -- they're abandoned, not active.
+  # The cadence assessor uses the ACTIVE count, not the raw open
+  # count, to decide whether the queue is "heavy".
+  W_ACTIVE_CUTOFF=$(date -u -d "8 hours ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+                    || date -u -v-8H +%Y-%m-%dT%H:%M:%SZ)
+  W_ACTIVE_PRS_COUNT=$(jq --arg cutoff "$W_ACTIVE_CUTOFF" \
+    '[.[] | select((.updated_at // .created_at // "") >= $cutoff)] | length' \
+    <<<"$W_OPEN_PRS_JSON" 2>/dev/null || echo 0)
+
   # Inflight-post scan is TODAY-SCOPED. The filename format from
   # discretionary-post.sh is src/posts/YYYY/YYYY-MM-DD-slug.md, so
   # we filter the PR's added files to ones whose basename starts
@@ -1761,7 +1809,7 @@ if [ -z "$WINNER" ]; then
   # heaviest PR the agent opens (real content, real review burden),
   # so exempting it from queue pressure made the worst case worse.
   # Now: judgment over thresholds, applied uniformly.
-  W_CADENCE=$(discretionary_assess_cadence "$W_OPEN_PRS_COUNT" "$W_POSTING_ALLOWED")
+  W_CADENCE=$(discretionary_assess_cadence "$W_ACTIVE_PRS_COUNT" "$W_POSTING_ALLOWED")
   W_CADENCE_CHOICE=${W_CADENCE%%|*}
   W_CADENCE_REASON=${W_CADENCE#*|}
   log "discretionary: cadence -> $W_CADENCE_CHOICE ($W_CADENCE_REASON)"
@@ -1776,7 +1824,7 @@ if [ -z "$WINNER" ]; then
     W_PICKED_MODE="site-work"
     W_SPLIT_ORDER="site-work reading"
   fi
-  log "discretionary: routing (posting_allowed=$W_POSTING_ALLOWED, open_prs=$W_OPEN_PRS_COUNT) -> $W_SPLIT_ORDER"
+  log "discretionary: routing (posting_allowed=$W_POSTING_ALLOWED, open_prs=$W_OPEN_PRS_COUNT, active_prs=$W_ACTIVE_PRS_COUNT) -> $W_SPLIT_ORDER"
 
   # Reading mode short-circuit: it doesn't touch the website. Use a
   # scratch dir for the .agent/AGENT_JOURNAL.md output, run the

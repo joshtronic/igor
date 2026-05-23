@@ -97,6 +97,24 @@ if [ -z "$sources" ]; then
   exit 2
 fi
 
+# Picker variety: deprioritize the source that was read on the
+# previous tick so the bot doesn't sample joshtronic.com (or
+# whatever) seven times in a row. We extract the last domain from
+# the reading log and filter it out of `sources` IF there's at
+# least one other source to pick. If it's the only source available,
+# the filter no-ops and we sample it anyway.
+last_read_domain=""
+if [ -f "$LOG_FILE" ]; then
+  last_read_domain=$(grep -E '^- [^ ]+ -- ' "$LOG_FILE" 2>/dev/null \
+    | tail -1 | awk '{print $2}')
+fi
+if [ -n "$last_read_domain" ]; then
+  filtered=$(grep -vE "\\|https?://${last_read_domain}([/?]|$)" <<<"$sources" || true)
+  if [ -n "$filtered" ]; then
+    sources="$filtered"
+  fi
+fi
+
 # -- generic helpers ----------------------------------------------
 
 fetch_html() {
