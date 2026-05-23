@@ -277,9 +277,11 @@ is_blacklisted() {
 # vpsshowdown.com.md ledger if vpsshowdown is blacklisted.
 ledger_init_minimal() {
   local ledger="$1" source_url="$2"
-  if is_blacklisted "$source_url"; then
-    return 0
-  fi
+  # No blacklist gate here. Blacklisted domains still get a ledger
+  # so reads against them have a record. What blacklist gates is
+  # the spider (ledger_populate) and the picker (sources.md is the
+  # only source of weighted picks; destination ledgers are
+  # read-history only).
   if [ -f "$ledger" ]; then
     ledger_strip_trailing_blanks "$ledger"
     return 0
