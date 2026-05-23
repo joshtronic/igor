@@ -66,14 +66,55 @@ else
   RANGE_ARGS=(--arg cutoff "$CUTOFF")
 fi
 
+# Per-million-token pricing table (USD). Single source of truth.
+# Used to compute USD for ledger entries that don't carry one --
+# i.e. direct-API entries (the Messages API doesn't return a
+# precomputed cost). CLI entries already have an authoritative
+# .usd from total_cost_usd and pass through verbatim.
+#
+# Cache writes are +25% of input; cache reads are -90%. If you
+# pin a new model in .env, add a row here.
+#
+# Per-million-token pricing (USD). Single source of truth, applied
+# only to entries that don't carry an authoritative .usd (i.e. all
+# direct-API entries; CLI entries pass through total_cost_usd
+# verbatim). Cache writes are +25% of input; cache reads are -90%.
+# Add a row when you pin a new model in .env.
+PRICES='{
+  "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "cache_create": 3.75, "cache_read": 0.30},
+  "claude-opus-4-7":   {"input": 15.00, "output": 75.00, "cache_create": 18.75, "cache_read": 1.50},
+  "claude-haiku-4-5":  {"input": 1.00, "output": 5.00, "cache_create": 1.25, "cache_read": 0.10}
+}'
+
+# jq preamble shared by every aggregation:
+#   - price_for(model): looks up the price row by prefix match
+#   - row_usd: returns .usd if present, else derives from tokens
+JQ_PREAMBLE='
+  def price_for($m):
+    ( $prices | to_entries
+      | map(.key as $k | select($m | startswith($k)))
+      | first | .value )
+    // {input:0, output:0, cache_create:0, cache_read:0};
+  def row_usd:
+    if has("usd") and (.usd != null) then .usd
+    else
+      (price_for(.model)) as $p
+      | ( (.input_tokens // 0) * $p.input
+        + (.output_tokens // 0) * $p.output
+        + (.cache_creation_input_tokens // 0) * $p.cache_create
+        + (.cache_read_input_tokens // 0) * $p.cache_read ) / 1000000
+    end;
+'
+
 # jq aggregation: pick the bucket key, group, sum -- emit TSV
 # (key\tcalls\tusd) sorted by usd descending. awk just formats.
 _aggregate() {
-  local key_jq="$1"   # the jq expression for the bucket key
-  jq -r --slurp "${RANGE_ARGS[@]}" "
-    map($RANGE_FILTER)
+  local key_jq="$1"
+  jq -r --slurp --argjson prices "$PRICES" "${RANGE_ARGS[@]}" "
+    $JQ_PREAMBLE
+    map($RANGE_FILTER | . + {_u: row_usd})
     | group_by($key_jq)
-    | map({k: (.[0] | $key_jq), calls: length, usd: (map(.usd) | add)})
+    | map({k: (.[0] | $key_jq), calls: length, usd: (map(._u) | add)})
     | sort_by(-.usd)
     | .[] | [.k, .calls, .usd] | @tsv
   " "$LEDGER" 2>/dev/null
