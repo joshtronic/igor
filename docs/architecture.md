@@ -31,22 +31,22 @@ A timer fires `bin/tick.sh`. Per tick:
 7. **Work.** Make a worktree, invoke Claude with the project's `CLAUDE.md`
    plus the universal `AGENTS.md`, react to whatever Claude leaves behind.
 8. **Discretionary maintenance (tier 2).** If steps 4-7 found no
-   claimable work, fire one maintenance pass on a random eligible
-   repo. Gated by `AGENT_MAX_OPEN_PRS` (default 3) and per-repo
-   weekly cadence (one audit per repo per ISO week). Claude reads
-   the repo's `CLAUDE.md` Maintenance section, runs the declared
-   checks, writes findings to `.git/AGENT_MAINTENANCE_FINDINGS.md`.
-   Harness files an Agent-labeled issue with those findings if
-   non-empty, then updates the cooldown state at
+   claimable work and we're inside the Monday-morning maintenance
+   window, fire one maintenance pass on a random eligible repo.
+   Gated by per-repo weekly cadence (one audit per repo per ISO
+   week) and the open-onboarding-ticket check. Claude reads the
+   repo's `CLAUDE.md` Maintenance section, runs the declared checks,
+   writes findings to `.agent/AGENT_MAINTENANCE_FINDINGS.md`. Harness
+   files an Agent-labeled issue with those findings if non-empty,
+   then updates the last-run state at
    `~/.local/state/agent/discretionary-state.json`.
 9. **Discretionary self-directed work (tier 3).** If no maintenance
-   repos are eligible either, the agent does one freeform pass on his
-   own website. Same throttles apply (open-PR cap), plus the
-   one-PR-per-repo rule (skip if there's an open bot PR on the
-   website). Claude reads the website's `CLAUDE.md`, picks one
-   focused improvement (post, design, copy, layout), and opens a
-   PR with no `Closes #N` since there's no source issue. Branch
-   name pattern: `agent/discretionary-YYYY-MM-DD-HHMMSS`.
+   repos are eligible either, the agent does one freeform pass on
+   the bot's website (or a reading tick, or a post -- the cadence
+   assessor picks). One-PR-per-repo rule applies (skip site-work if
+   there's an open bot PR on the website). Pacing is the shift
+   window plus the once-per-local-day post cap; no rate gate.
+   Branch name pattern: `agent/discretionary-YYYY-MM-DD-HHMMSS`.
 
 | What Claude did                 | What the agent does                                                |
 |---------------------------------|---------------------------------------------------------------|
