@@ -3,7 +3,7 @@
 #
 # Picks a reading source via weighted sample from brain's
 # sources.md, runs source-type-appropriate discovery, picks a
-# URL Igor hasn't read yet, calls bin/agent-read.sh to fetch +
+# URL the agent hasn't read yet, calls bin/agent-read.sh to fetch +
 # journal it, then runs post-read reflection on the source's
 # weight + candidates + promotions.
 #
@@ -29,7 +29,7 @@
 #     domain is encountered, regardless of which source surfaced
 #     it. Empty Discovery line until the domain gets its sitemap
 #     fetched.
-#   - The sitemap fetch is LAZY: only after Igor actually reads
+#   - The sitemap fetch is LAZY: only after the agent actually reads
 #     a URL from the domain does the harness probe + fetch its
 #     sitemap and append the archive. Natural pacing -- we don't
 #     spawn 30 sitemap probes per HN ingest.
@@ -49,12 +49,12 @@
 
 set -uo pipefail
 
-IGOR_HOME="${IGOR_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
+AGENT_HOME="${AGENT_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
 
-if [ -f "$IGOR_HOME/.env" ]; then
+if [ -f "$AGENT_HOME/.env" ]; then
   set -a
   # shellcheck source=/dev/null
-  . "$IGOR_HOME/.env"
+  . "$AGENT_HOME/.env"
   set +a
 fi
 
@@ -64,11 +64,11 @@ if [ -z "$WORKTREE" ] || [ ! -d "$WORKTREE" ]; then
   exit 1
 fi
 
-BRAIN_PATH="${IGOR_BRAIN_PATH:-${IGOR_STATE_DIR:-$HOME/.local/state/igor}/repos/igor/brain}"
+BRAIN_PATH="${AGENT_BRAIN_PATH:-${AGENT_STATE_DIR:-$HOME/.local/state/agent}/repos/igor/brain}"
 SOURCES_FILE="$BRAIN_PATH/memories/reading/sources.md"
 LOG_FILE="$BRAIN_PATH/memories/reading/log.md"
-JOURNAL_FILE="$WORKTREE/.igor/IGOR_JOURNAL.md"
-UA="Mozilla/5.0 (compatible; Igor/1.0; +https://igor.bot)"
+JOURNAL_FILE="$WORKTREE/.agent/AGENT_JOURNAL.md"
+UA="Mozilla/5.0 (compatible; Agent/1.0)"
 
 if [ ! -f "$SOURCES_FILE" ]; then
   echo "discretionary-read: sources file not found at $SOURCES_FILE" >&2
@@ -180,7 +180,7 @@ sample_weighted() {
 #
 #   hn-rank N          highest position this URL reached on HN
 #                      (lowest number wins on update)
-#   hn-points N        peak upvote count Igor observed on HN
+#   hn-points N        peak upvote count the agent observed on HN
 #                      (highest number wins on update)
 #   hn-date YYYY-MM-DD HN submission date (set on first append,
 #                      immutable -- the date the story was posted)
@@ -386,7 +386,7 @@ ledger_update_rank() {
 }
 
 # Update (or add) the hn-points annotation. If the URL already
-# has points, keep the HIGHER number (peak upvotes Igor observed).
+# has points, keep the HIGHER number (peak upvotes the agent observed).
 ledger_update_points() {
   local ledger="$1" url="$2" new_points="$3"
   [ -f "$ledger" ] || return 0
@@ -575,7 +575,7 @@ discover_hn() {
 }
 
 # Convert a Unix epoch to YYYY-MM-DD. Tries GNU's `date -d @N`
-# first (Debian/Linux -- where Igor actually runs); falls back
+# first (Debian/Linux -- where the agent actually runs); falls back
 # to BSD's `date -r N` for local-dev portability. Empty string
 # if neither works (or the input is missing / zero).
 epoch_to_date() {
@@ -644,14 +644,14 @@ while [ "$attempts" -lt "$MAX_ATTEMPTS" ]; do
       hn)
         # HN flow: hn-rank / hn-points annotations live on HN's
         # OWN ledger (news.ycombinator.com.md) -- the master list
-        # of URLs Igor has ever seen on HN's front page. The
+        # of URLs the agent has ever seen on HN's front page. The
         # destination domain ledger (e.g. theverge.com.md, etc.)
         # records the URL too, but without HN-specific gunk -- so
         # foo.com's ledger stays focused on foo.com.
         #
         # Picker walks HN's ledger (sorted by points DESC, rank
         # ASC), filters out URLs marked read in EITHER ledger.
-        # That cross-source dedup catches the case where Igor
+        # That cross-source dedup catches the case where the agent
         # read a URL via HN and later the same URL turns up in
         # the destination's own sitemap (after promotion).
         discovered=$(discover_hn)
@@ -751,7 +751,7 @@ while [ "$attempts" -lt "$MAX_ATTEMPTS" ]; do
   # rag: collected N journal + M memory / rag: indexed ... entries`
   # output never surfaced on reading ticks because it was buried.
   err_file=$(mktemp)
-  if read_output=$("$IGOR_HOME/bin/agent-read.sh" "$URL" 2> >(tee "$err_file" >&2)); then
+  if read_output=$("$AGENT_HOME/bin/agent-read.sh" "$URL" 2> >(tee "$err_file" >&2)); then
     rm -f "$err_file"
     break
   fi
@@ -787,7 +787,7 @@ if [ "$PICKED_SOURCE_TYPE" = "hn" ]; then
   fi
 fi
 
-# Lazy sitemap fetch: NOW that Igor's actually read from this
+# Lazy sitemap fetch: NOW that the agent's actually read from this
 # domain, populate its ledger with the rest of the archive.
 # Idempotent -- no-op if already populated.
 ledger_populate "$TARGET_LEDGER" "$URL"
@@ -875,7 +875,7 @@ append_candidate() {
     {
       printf '\n## Candidates (auto-discovered)\n\n'
       printf 'Surfaced by post-read reflection. Weight 0 = listed\n'
-      printf 'but not sampled. Igor promotes them to weight 1 when\n'
+      printf 'but not sampled. the agent promotes them to weight 1 when\n'
       printf 'recent reads show enough signal -- no human bump needed.\n\n'
     } >> "$SOURCES_FILE"
   fi
@@ -897,7 +897,7 @@ promote_candidate() {
   ' "$SOURCES_FILE" > "$tmp" && mv "$tmp" "$SOURCES_FILE"
 }
 
-reflection=$("$IGOR_HOME/bin/agent-reflect-read.sh" \
+reflection=$("$AGENT_HOME/bin/agent-reflect-read.sh" \
   "$PICKED_SOURCE" "$URL" "$TITLE" "$JOURNAL_FILE" "$SOURCES_FILE" 2>/dev/null) || {
   echo "discretionary-read: reflection skipped (executor failed)" >&2
   reflection=""
@@ -956,8 +956,8 @@ fi
 # -- post-tick ideas reflection ----------------------------------
 
 IDEAS_FILE="$BRAIN_PATH/blog-ideas.md"
-if [ -x "$IGOR_HOME/bin/agent-reflect-ideas.py" ] && [ -f "$IDEAS_FILE" ]; then
-  python3 "$IGOR_HOME/bin/agent-reflect-ideas.py" \
+if [ -x "$AGENT_HOME/bin/agent-reflect-ideas.py" ] && [ -f "$IDEAS_FILE" ]; then
+  python3 "$AGENT_HOME/bin/agent-reflect-ideas.py" \
     "$JOURNAL_FILE" "$IDEAS_FILE" 2>&1 \
     | sed 's/^/discretionary-read: ideas-reflection: /' >&2 \
     || true

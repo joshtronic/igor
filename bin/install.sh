@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh -- One-time systemd setup for Igor on this host.
+# install.sh -- One-time systemd setup for the agent on this host.
 #
 # Symlinks the unit files into the user systemd dir (so `git pull`
 # updates them with a subsequent `systemctl --user daemon-reload`)
@@ -9,13 +9,13 @@
 # `bin/tick.sh` directly. install.sh is only for the systemd-managed
 # install.
 #
-# Adding a repo to Igor's care does NOT require running this -- add
-# the bot user as a collaborator on the repo and the next tick
+# Adding a repo to the agent's care does NOT require running this --
+# add the bot user as a collaborator on the repo and the next tick
 # discovers it (and onboards if needed).
 
 set -euo pipefail
 
-IGOR_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+AGENT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
 UNIT_DIR="$HOME/.config/systemd/user"
 
 # Pre-flight: harness depends on these being on PATH. Fail loudly here
@@ -90,7 +90,7 @@ fi
 # Pre-flight: bootstrap the RAG Python venv. Idempotent -- no-op
 # after first successful run (or when requirements.txt changes).
 # Done up front so first tick doesn't pay the install cost.
-if ! "$IGOR_HOME/bin/setup-rag.sh"; then
+if ! "$AGENT_HOME/bin/setup-rag.sh"; then
   echo "RAG venv setup failed. See output above." >&2
   exit 1
 fi
@@ -122,18 +122,18 @@ EOF
   fi
 fi
 
-if [ ! -f "$IGOR_HOME/.env" ]; then
-  echo "no $IGOR_HOME/.env -- run \`cp .env.example .env\`, edit it, then re-run install" >&2
+if [ ! -f "$AGENT_HOME/.env" ]; then
+  echo "no $AGENT_HOME/.env -- run \`cp .env.example .env\`, edit it, then re-run install" >&2
   exit 1
 fi
 
 mkdir -p "$UNIT_DIR"
-ln -sf "$IGOR_HOME/systemd/tick.service" "$UNIT_DIR/tick.service"
-ln -sf "$IGOR_HOME/systemd/tick.timer"   "$UNIT_DIR/tick.timer"
+ln -sf "$AGENT_HOME/systemd/agent.service" "$UNIT_DIR/agent.service"
+ln -sf "$AGENT_HOME/systemd/agent.timer"   "$UNIT_DIR/agent.timer"
 
 systemctl --user daemon-reload
-systemctl --user enable --now tick.timer
-systemctl --user list-timers tick.timer --no-pager || true
+systemctl --user enable --now agent.timer
+systemctl --user list-timers agent.timer --no-pager || true
 
 cat <<EOF
 

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# validate.sh -- Validate Igor's setup: env, library deps, Forgejo
+# validate.sh -- Validate the agent's setup: env, library deps, Forgejo
 # reachability, bot identity, and accessible repos. Exits non-zero on
 # any failure.
 
 set -uo pipefail
 
-IGOR_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+AGENT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
 FAIL=0
 
-if [ -f "$IGOR_HOME/.env" ]; then
+if [ -f "$AGENT_HOME/.env" ]; then
   set -a
   # shellcheck source=/dev/null
-  . "$IGOR_HOME/.env"
+  . "$AGENT_HOME/.env"
   set +a
 fi
 
@@ -51,11 +51,11 @@ echo "== env =="
 [ -n "${FORGEJO_URL:-}" ]       && pass "FORGEJO_URL set"       || fail "FORGEJO_URL set"       "missing from .env"
 [ -n "${FORGEJO_TOKEN:-}" ]     && pass "FORGEJO_TOKEN set"     || fail "FORGEJO_TOKEN set"     "missing from .env"
 [ -n "${ANTHROPIC_API_KEY:-}" ] && pass "ANTHROPIC_API_KEY set" || fail "ANTHROPIC_API_KEY set" "missing from .env"
-[ -n "${IGOR_MODEL:-}" ]        && pass "IGOR_MODEL set ($IGOR_MODEL)" || fail "IGOR_MODEL set" "missing from .env"
+[ -n "${AGENT_MODEL:-}" ]        && pass "AGENT_MODEL set ($AGENT_MODEL)" || fail "AGENT_MODEL set" "missing from .env"
 
-[ -f "$IGOR_HOME/agent-settings.json" ] && pass "agent-settings.json present" || fail "agent-settings.json present"
+[ -f "$AGENT_HOME/agent-settings.json" ] && pass "agent-settings.json present" || fail "agent-settings.json present"
 
-state_dir="${IGOR_STATE_DIR:-$HOME/.local/state/igor}"
+state_dir="${AGENT_STATE_DIR:-$HOME/.local/state/agent}"
 if mkdir -p "$state_dir/worktrees" "$state_dir/repos" 2>/dev/null \
    && [ -w "$state_dir/worktrees" ] && [ -w "$state_dir/repos" ]; then
   pass "state dir writable ($state_dir)"
@@ -107,7 +107,7 @@ if [ -z "${FORGEJO_URL:-}" ] || [ -z "${FORGEJO_TOKEN:-}" ]; then
 fi
 
 # shellcheck source=../lib/forgejo.sh
-. "$IGOR_HOME/lib/forgejo.sh"
+. "$AGENT_HOME/lib/forgejo.sh"
 
 bot=$(forgejo_whoami 2>/dev/null || echo "")
 if [ -n "$bot" ]; then
@@ -136,7 +136,7 @@ echo
 
 echo "== SSH =="
 
-SSH_TARGET="${FORGEJO_SSH_HOST:-$(echo "$FORGEJO_URL" | sed -E 's|^[a-z]+://([^/:]+).*|\1|')}"
+SSH_TARGET="${FORGEJO_HOST:-$(echo "$FORGEJO_URL" | sed -E 's|^[a-z]+://([^/:]+).*|\1|')}"
 SSH_HOST_ONLY="$SSH_TARGET"
 SSH_PORT_FLAG=()
 if [[ "$SSH_TARGET" == *:* ]]; then
@@ -150,7 +150,7 @@ ssh_out=$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 \
 
 if grep -qE 'Connection timed out|No route to host|Could not resolve hostname|Connection refused' <<<"$ssh_out"; then
   fail "Forgejo SSH endpoint reachable ($SSH_TARGET)" \
-       "endpoint unreachable. If Forgejo SSH is on a non-default port, set FORGEJO_SSH_HOST=host:port in .env, or add a Host entry to ~/.ssh/config"
+       "endpoint unreachable. If Forgejo SSH is on a non-default port, set FORGEJO_HOST=host:port in .env, or add a Host entry to ~/.ssh/config"
 elif grep -qE 'Permission denied \(publickey\)' <<<"$ssh_out"; then
   fail "Forgejo SSH authenticates as bot ($SSH_TARGET)" \
        "SSH key not recognized by Forgejo. ssh-keygen -t ed25519 if needed, then add the .pub to the bot user's Forgejo SSH keys"

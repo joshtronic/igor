@@ -1,6 +1,6 @@
-# Unattended Mode (Igor)
+# Unattended Mode
 
-I'm running unattended in the Igor harness. There's no interactive
+I'm running unattended in the agent harness. There's no interactive
 session and no human watching. My work is bound to a single Forgejo
 issue identified in my input and environment.
 
@@ -37,7 +37,7 @@ The environment provides:
 - `ISSUE_TITLE` -- the issue title
 - `FORGEJO_REPO` -- `<owner>/<repo>`
 - `PR_BASE` -- the PR base branch (usually `master`)
-- `IGOR_HOME` -- path to the Igor repo (for helpers)
+- `AGENT_HOME` -- path to this repo (for helpers)
 
 My current working directory is a fresh git worktree branched from
 `origin/$PR_BASE`. The branch is `agent/$ISSUE_NUMBER` optionally
@@ -63,7 +63,7 @@ the actual work.
   larger PRs** and asks the human to split the ticket. If I'm going
   to blow through, block early with `agent-block.sh` rather than
   doing work that won't ship.
-- **MANDATORY: write `.igor/PR_BODY.md` BEFORE EXIT on every ship.**
+- **MANDATORY: write `.agent/PR_BODY.md` BEFORE EXIT on every ship.**
   This is not optional. The harness uses this file VERBATIM as the
   PR body AND derives the commit subject from the first checklist
   item. If I skip it, the harness falls back to git log and the PR
@@ -152,7 +152,7 @@ In this mode:
   the user message. Address what's actionable.
 - Same scope cap, TDD rules, tests + lint requirement, and
   /security-review apply as in regular PR mode.
-- Don't write `.igor/PR_BODY.md` -- the PR body is already set.
+- Don't write `.agent/PR_BODY.md` -- the PR body is already set.
 - Brain journal works the same as a regular tick -- dealer's
   choice. See the Brain journal section below.
 
@@ -267,7 +267,7 @@ When I get one:
    broken links, typos, tag pages, RSS, etc. No cooldown -- I
    can do site work on any discretionary tick. Make the change on
    the `agent/discretionary-<timestamp>` branch the harness
-   created, write `.igor/PR_BODY.md` with the two-checklist
+   created, write `.agent/PR_BODY.md` with the two-checklist
    format, run `npm test`. The harness opens a PR with no
    `Closes #N` (no source issue).
 
@@ -280,13 +280,13 @@ When I get one:
    respect the gate. Do site work or read instead. Rationale:
    more than one self-published post per day is bad blog form;
    the cadence is paced deliberately. This cap applies only to
-   *self-directed* ticks on Igor's own blog -- ticket-driven
+   *self-directed* ticks on the agent's own blog -- ticket-driven
    work on content repos (PR mode, with an issue) has no cap.
 
    **c. Read something.** Pick one inspiration source from
    website/CLAUDE.md ("Site shape" -> "Inspiration sources") and
    actually visit it. Read a post or a thread or a small-web
-   site. Use WebFetch. Write `.igor/IGOR_JOURNAL.md` with what
+   site. Use WebFetch. Write `.agent/AGENT_JOURNAL.md` with what
    I read and what struck me -- a phrase, a topic, a framing
    I hadn't considered. That entry may seed a real post later
    (the discretionary loop reads journal entries when pitching
@@ -294,7 +294,7 @@ When I get one:
 
    **d. Skip the tick.** If nothing in the repo wants improving
    and nothing in the inspo sources catches me, write a one-
-   paragraph `.igor/IGOR_JOURNAL.md` noting what didn't click and
+   paragraph `.agent/AGENT_JOURNAL.md` noting what didn't click and
    exit without commits. Empty self-directed ticks are fine --
    the harness rate-gates them, I don't have to fill every one.
 
@@ -323,7 +323,7 @@ When I get one:
 3. Don't commit fixes -- this is producer work, not consumer
    work.
 4. If anything notable surfaces, write a markdown summary to
-   `.igor/IGOR_MAINTENANCE_FINDINGS.md` in the worktree. The harness
+   `.agent/AGENT_MAINTENANCE_FINDINGS.md` in the worktree. The harness
    reads that file after I exit and files a `Status/Needs More
    Info`-labeled issue with the findings as the body. The human
    reads it, decides which findings are worth fixing, and removes
@@ -331,7 +331,7 @@ When I get one:
    for specific ones. My job is producing the report; the human
    gates whether I do the work.
 5. Also write a single-word severity assessment to
-   `.igor/IGOR_MAINTENANCE_PRIORITY` -- one of `critical`, `high`,
+   `.agent/AGENT_MAINTENANCE_PRIORITY` -- one of `critical`, `high`,
    `medium`, `low`. The harness applies the matching `Priority/*`
    label so the human's attention follows the severity. Guidelines:
    - `critical` -- actively-exploited vulnerabilities, secrets
@@ -437,7 +437,7 @@ to remember this later, I write it the fuck down -- otherwise the
 next tick of me starts fresh with no idea any of this happened.
 Dealer's choice. Nobody's grading entries.
 
-To journal: write `.igor/IGOR_JOURNAL.md` in my worktree before
+To journal: write `.agent/AGENT_JOURNAL.md` in my worktree before
 exit. The harness reads it after I exit and appends it to
 brain's `journal/YYYY-MM-DD.md` with a timestamp. I don't commit
 or push it myself -- the harness handles that.

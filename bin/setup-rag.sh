@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 # setup-rag.sh -- idempotent Python venv setup for the RAG layer.
 #
-# Creates $IGOR_STATE_DIR/rag-venv if missing, installs requirements.
+# Creates $AGENT_STATE_DIR/rag-venv if missing, installs requirements.
 # Designed to be called at tick start by tick.sh -- no-op after the
 # first successful run.
 #
 # Run manually:  bin/setup-rag.sh
-# Force rebuild: rm -rf $IGOR_STATE_DIR/rag-venv && bin/setup-rag.sh
+# Force rebuild: rm -rf $AGENT_STATE_DIR/rag-venv && bin/setup-rag.sh
 
 set -euo pipefail
 
-IGOR_HOME="${IGOR_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
-IGOR_STATE_DIR="${IGOR_STATE_DIR:-$HOME/.local/state/igor}"
-VENV="$IGOR_STATE_DIR/rag-venv"
-REQS="$IGOR_HOME/requirements.txt"
+AGENT_HOME="${AGENT_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
+AGENT_STATE_DIR="${AGENT_STATE_DIR:-$HOME/.local/state/agent}"
+VENV="$AGENT_STATE_DIR/rag-venv"
+REQS="$AGENT_HOME/requirements.txt"
 STAMP="$VENV/.installed-from"
 
-mkdir -p "$IGOR_STATE_DIR"
+mkdir -p "$AGENT_STATE_DIR"
 
 # Idempotent fast-path: if venv exists AND requirements.txt hasn't
 # changed since last install, skip. Compare by content hash so a

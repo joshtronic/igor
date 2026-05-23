@@ -10,12 +10,12 @@
 #   bin/discretionary-post.sh <worktree-path>
 #
 # Reads:
-#   IGOR_BRAIN_PATH    path to local brain clone
+#   AGENT_BRAIN_PATH    path to local brain clone
 #   ANTHROPIC_API_KEY  (via agent-post.sh)
 #
 # Writes (inside the worktree):
 #   src/posts/YYYY/YYYY-MM-DD-<slug>.md   -- the post file
-#   .igor/PR_BODY.md                       -- two-checklist PR body
+#   .agent/PR_BODY.md                       -- two-checklist PR body
 #
 # Writes (in brain):
 #   blog-ideas.md  -- minus the used idea (so it won't reship)
@@ -29,12 +29,12 @@
 
 set -uo pipefail
 
-IGOR_HOME="${IGOR_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
+AGENT_HOME="${AGENT_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
 
-if [ -f "$IGOR_HOME/.env" ]; then
+if [ -f "$AGENT_HOME/.env" ]; then
   set -a
   # shellcheck source=/dev/null
-  . "$IGOR_HOME/.env"
+  . "$AGENT_HOME/.env"
   set +a
 fi
 
@@ -44,9 +44,9 @@ if [ -z "$WORKTREE" ] || [ ! -d "$WORKTREE" ]; then
   exit 1
 fi
 
-BRAIN_PATH="${IGOR_BRAIN_PATH:-${IGOR_STATE_DIR:-$HOME/.local/state/igor}/repos/igor/brain}"
+BRAIN_PATH="${AGENT_BRAIN_PATH:-${AGENT_STATE_DIR:-$HOME/.local/state/agent}/repos/igor/brain}"
 IDEAS_FILE="$BRAIN_PATH/blog-ideas.md"
-PR_BODY_FILE="$WORKTREE/.igor/PR_BODY.md"
+PR_BODY_FILE="$WORKTREE/.agent/PR_BODY.md"
 
 mkdir -p "$(dirname "$PR_BODY_FILE")"
 
@@ -198,7 +198,7 @@ echo "$IDEA_TEXT" | sed 's/^/  /' >&2
 
 # -- draft via agent-post -----------------------------------------
 
-draft=$("$IGOR_HOME/bin/agent-post.sh" "$IDEA_TEXT") || {
+draft=$("$AGENT_HOME/bin/agent-post.sh" "$IDEA_TEXT") || {
   echo "discretionary-post: agent-post failed" >&2
   exit 3
 }
@@ -270,14 +270,14 @@ echo "discretionary-post: removed used idea from blog-ideas.md" >&2
 
 # -- post-tick ideas reflection ----------------------------------
 #
-# What Igor just wrote shifts what feels timely. Hand the post
+# What the agent just wrote shifts what feels timely. Hand the post
 # body to the reflection helper; it asks Haiku whether any
 # remaining ideas should bubble up or sink down a slot. Bounded
 # (max 3 moves, 1 slot each). Failures are silent -- the post
 # already shipped.
 
-if [ -x "$IGOR_HOME/bin/agent-reflect-ideas.py" ]; then
-  python3 "$IGOR_HOME/bin/agent-reflect-ideas.py" \
+if [ -x "$AGENT_HOME/bin/agent-reflect-ideas.py" ]; then
+  python3 "$AGENT_HOME/bin/agent-reflect-ideas.py" \
     "$POST_FILE" "$IDEAS_FILE" 2>&1 \
     | sed 's/^/discretionary-post: ideas-reflection: /' >&2 \
     || true

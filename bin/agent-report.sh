@@ -11,7 +11,7 @@
 # Usage: agent-report.sh "<body>"
 #
 # Requires in environment (exported by tick.sh):
-#   ISSUE_NUMBER, FORGEJO_REPO, FORGEJO_URL, FORGEJO_TOKEN, IGOR_HOME
+#   ISSUE_NUMBER, FORGEJO_REPO, FORGEJO_URL, FORGEJO_TOKEN, AGENT_HOME
 
 set -euo pipefail
 
@@ -19,10 +19,10 @@ BODY="${1:?usage: agent-report.sh \"<body>\"}"
 
 : "${ISSUE_NUMBER:?ISSUE_NUMBER not set -- are you being run from a tick?}"
 : "${FORGEJO_REPO:?FORGEJO_REPO not set}"
-: "${IGOR_HOME:?IGOR_HOME not set}"
+: "${AGENT_HOME:?AGENT_HOME not set}"
 
 # shellcheck source=../lib/forgejo.sh
-. "$IGOR_HOME/lib/forgejo.sh"
+. "$AGENT_HOME/lib/forgejo.sh"
 
 forgejo_comment "$FORGEJO_REPO" "$ISSUE_NUMBER" "$BODY"
 

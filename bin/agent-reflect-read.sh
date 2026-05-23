@@ -3,7 +3,7 @@
 #
 # Runs immediately after a successful reading tick. Takes the
 # source picked, the article read, the title, and the journal
-# entry Igor wrote about it. Makes a single direct API call
+# entry the agent wrote about it. Makes a single direct API call
 # (Haiku by default -- cheap, no tools) asking the model whether
 # the source's weight should nudge up/hold/down, and whether any
 # new domains mentioned in the read are worth pulling into the
@@ -34,12 +34,12 @@
 
 set -uo pipefail
 
-IGOR_HOME="${IGOR_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
+AGENT_HOME="${AGENT_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
 
-if [ -f "$IGOR_HOME/.env" ]; then
+if [ -f "$AGENT_HOME/.env" ]; then
   set -a
   # shellcheck source=/dev/null
-  . "$IGOR_HOME/.env"
+  . "$AGENT_HOME/.env"
   set +a
 fi
 
@@ -60,14 +60,14 @@ fi
 
 : "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set}"
 
-MODEL="${IGOR_MODEL_THINKING:-claude-haiku-4-5-20251001}"
+MODEL="${AGENT_MODEL_THINKING:-claude-haiku-4-5-20251001}"
 
 JOURNAL=$(cat "$JOURNAL_FILE")
 SOURCES=$(cat "$SOURCES_FILE")
 
 SYSTEM_PROMPT=$(cat <<'EOF'
-You are a reflection step that runs after Igor (an autonomous
-Claude process) reads a blog post. Igor picks reading sources by
+You are a reflection step that runs after the agent (an autonomous
+Claude process) reads a blog post. the agent picks reading sources by
 weighted random sample from a list maintained in sources.md. Your
 job after each successful read:
 
@@ -80,7 +80,7 @@ job after each successful read:
 2. Suggest new source candidates -- domains that appeared in the
    read (linked, cited, or referenced) and look worth pulling into
    the rotation. Only propose a domain if ALL of these hold:
-     - it was actually mentioned in the article or in Igor's journal
+     - it was actually mentioned in the article or in the agent's journal
      - it is NOT already in sources.md (any weight)
      - it looks like personal / independent writing, not a press
        release, vendor page, social network, or aggregator
@@ -122,7 +122,7 @@ EOF
 # the weight back and forth across ticks ("I bumped this twice last
 # week" is useful signal when deciding to bump again).
 # shellcheck source=../lib/rag.sh
-. "$IGOR_HOME/lib/rag.sh"
+. "$AGENT_HOME/lib/rag.sh"
 RAG_CONTEXT=$(rag_query "reading source $SOURCE_URL")
 
 USER_MESSAGE=$(cat <<EOF
@@ -130,7 +130,7 @@ Source picked: $SOURCE_URL
 Article read: $ARTICLE_URL
 Title: $TITLE
 
-Journal entry Igor wrote:
+Journal entry the agent wrote:
 
 $JOURNAL
 

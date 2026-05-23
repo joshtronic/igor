@@ -1,10 +1,11 @@
-# Igor
+# Agent
 
-> "RIDING AROUND TOWN, THEY GON' FEEL THIS ONE"
+Unattended Claude Code runtime. One global tick fires on a timer, the agent
+sweeps every repo the bot can push to for `Agent`-labeled work, claims the
+oldest one, ships a PR (or a report, or a blocker).
 
-Unattended Claude Code in a pastel blue suit. One global tick fires on a
-timer, Igor sweeps every repo the bot can push to for `Agent`-labeled work,
-claims the oldest one, ships a PR (or a report, or a blocker).
+Generic harness. The personality / voice / project-specific judgment lives
+in the bot's `brain` repo (cloned at runtime); this repo is just the loop.
 
 ## Install
 
@@ -20,23 +21,23 @@ links.
 Then:
 
 ```sh
-git clone <forgejo-url>/igor ~/.local/share/igor
-cd ~/.local/share/igor
+git clone <forgejo-url>/<bot-user>/agent ~/.local/share/agent
+cd ~/.local/share/agent
 cp .env.example .env && chmod 600 .env
-$EDITOR .env                   # fill in tokens
+$EDITOR .env                   # fill in every var -- no defaults
 bin/install.sh                 # pre-flights deps, sets up venv + systemd
 bin/validate.sh                # confirm setup
 ```
 
 `install.sh` is the "clone and go" entry point. It pre-flights all
-prereqs, creates the Python venv for RAG and installs deps, and wires
-up the systemd timer. Idempotent; re-run after `git pull` to pick up
-unit file or requirements changes.
+prereqs, creates the Python venv for the recall layer and installs deps,
+and wires up the systemd timer. Idempotent; re-run after `git pull` to
+pick up unit file or requirements changes.
 
 ## Updating
 
 ```sh
-cd ~/.local/share/igor
+cd ~/.local/share/agent
 git pull
 bin/install.sh                 # re-reads units, daemon-reloads
 ```
@@ -44,18 +45,14 @@ bin/install.sh                 # re-reads units, daemon-reloads
 `install.sh` is idempotent. `.env` changes need no reload -- each tick
 re-sources it.
 
-For each repo Igor should work: add the bot user as a collaborator, set
-up labels (Forgejo's Advanced label template + a custom `Agent` label),
+For each repo the agent should work: add the bot user as a collaborator,
+set up labels (Forgejo's Advanced label template + a custom `Agent` label),
 and confirm via `bin/validate-repo.sh <owner>/<name>`. See
 [docs/onboarding-a-repo.md](docs/onboarding-a-repo.md) for the full
 readiness bar.
 
 ## Docs
 
-- [Architecture](docs/architecture.md) -- how Igor works, labels, layout, trade-offs
+- [Architecture](docs/architecture.md) -- how the runtime works, labels, layout, trade-offs
 - [Setup](docs/setup.md) -- auth, bot user, install, local dev, operating
 - [Onboarding a repo](docs/onboarding-a-repo.md) -- readiness bar, labels, validation
-
-## Status
-
-Pre-flight. Lint green. Igor hasn't punched in yet.

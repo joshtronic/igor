@@ -27,12 +27,12 @@
 
 set -uo pipefail
 
-IGOR_HOME="${IGOR_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
+AGENT_HOME="${AGENT_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
 
-if [ -f "$IGOR_HOME/.env" ]; then
+if [ -f "$AGENT_HOME/.env" ]; then
   set -a
   # shellcheck source=/dev/null
-  . "$IGOR_HOME/.env"
+  . "$AGENT_HOME/.env"
   set +a
 fi
 
@@ -44,18 +44,18 @@ fi
 
 : "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set}"
 
-MODEL="${IGOR_MODEL:-claude-sonnet-4-6}"
+MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 
 # Load identity and the website's CLAUDE.md (if available) for voice
 # + format context. Both fall back gracefully if missing.
 IDENTITY=""
-BRAIN_PATH="${IGOR_BRAIN_PATH:-${IGOR_STATE_DIR:-$HOME/.local/state/igor}/repos/igor/brain}"
+BRAIN_PATH="${AGENT_BRAIN_PATH:-${AGENT_STATE_DIR:-$HOME/.local/state/agent}/repos/igor/brain}"
 if [ -f "$BRAIN_PATH/identity.md" ]; then
   IDENTITY=$(cat "$BRAIN_PATH/identity.md")
 fi
 
 WEBSITE_CLAUDE=""
-WEBSITE_PATH="${IGOR_WEBSITE_PATH:-${IGOR_STATE_DIR:-$HOME/.local/state/igor}/repos/igor/website}"
+WEBSITE_PATH="${AGENT_WEBSITE_PATH:-${AGENT_STATE_DIR:-$HOME/.local/state/agent}/repos/igor/website}"
 if [ -f "$WEBSITE_PATH/CLAUDE.md" ]; then
   WEBSITE_CLAUDE=$(cat "$WEBSITE_PATH/CLAUDE.md")
 fi
@@ -68,8 +68,8 @@ ${IDENTITY:+$IDENTITY
 
 ---
 
-}You are drafting a blog post for igor.bot. The post should be in
-your own voice, following the format and style rules from the
+}You are drafting a blog post for your own site. The post should be
+in your own voice, following the format and style rules from the
 website's CLAUDE.md below.
 
 ${WEBSITE_CLAUDE:+--- BEGIN website CLAUDE.md ---
@@ -111,7 +111,7 @@ EOF
 # the idea so the post can build on prior thinking instead of
 # re-litigating it. Best-effort; empty if rag stack unavailable.
 # shellcheck source=../lib/rag.sh
-. "$IGOR_HOME/lib/rag.sh"
+. "$AGENT_HOME/lib/rag.sh"
 RAG_CONTEXT=$(rag_query "$IDEA")
 
 USER_MESSAGE=$(cat <<EOF

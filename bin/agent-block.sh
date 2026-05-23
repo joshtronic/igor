@@ -10,7 +10,7 @@
 # Usage: agent-block.sh "<reason>"
 #
 # Requires in environment (exported by tick.sh):
-#   ISSUE_NUMBER, FORGEJO_REPO, FORGEJO_URL, FORGEJO_TOKEN, IGOR_HOME
+#   ISSUE_NUMBER, FORGEJO_REPO, FORGEJO_URL, FORGEJO_TOKEN, AGENT_HOME
 
 set -euo pipefail
 
@@ -18,10 +18,10 @@ REASON="${1:?usage: agent-block.sh \"<reason>\"}"
 
 : "${ISSUE_NUMBER:?ISSUE_NUMBER not set -- are you being run from a tick?}"
 : "${FORGEJO_REPO:?FORGEJO_REPO not set}"
-: "${IGOR_HOME:?IGOR_HOME not set}"
+: "${AGENT_HOME:?AGENT_HOME not set}"
 
 # shellcheck source=../lib/forgejo.sh
-. "$IGOR_HOME/lib/forgejo.sh"
+. "$AGENT_HOME/lib/forgejo.sh"
 
 forgejo_comment    "$FORGEJO_REPO" "$ISSUE_NUMBER" "$REASON"
 forgejo_add_label  "$FORGEJO_REPO" "$ISSUE_NUMBER" "Status/Blocked"
@@ -31,10 +31,10 @@ forgejo_unassign_all "$FORGEJO_REPO" "$ISSUE_NUMBER"
 # issue to them. Without this, the block lands silently and the
 # operator has to spot the Status/Blocked label by checking.
 # Assignment fires a Forgejo notification. Skipped if
-# IGOR_REVIEWER isn't configured.
-if [ -n "${IGOR_REVIEWER:-}" ]; then
-  forgejo_assign "$FORGEJO_REPO" "$ISSUE_NUMBER" "$IGOR_REVIEWER" \
-    || echo "agent-block: warning: could not assign to $IGOR_REVIEWER" >&2
+# FORGEJO_REVIEWER isn't configured.
+if [ -n "${FORGEJO_REVIEWER:-}" ]; then
+  forgejo_assign "$FORGEJO_REPO" "$ISSUE_NUMBER" "$FORGEJO_REVIEWER" \
+    || echo "agent-block: warning: could not assign to $FORGEJO_REVIEWER" >&2
 fi
 
 echo "agent-block: issue #${ISSUE_NUMBER} marked Status/Blocked" >&2

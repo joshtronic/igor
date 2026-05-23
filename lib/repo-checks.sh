@@ -10,7 +10,7 @@
 # sourced into tick.sh, bash's dynamic function lookup picks up tick's
 # richer definition at call time.
 if ! declare -F log >/dev/null; then
-  log() { printf '[igor] %s\n' "$*"; }
+  log() { printf '[agent] %s\n' "$*"; }
 fi
 
 # -- Individual checks ------------------------------------------
@@ -107,7 +107,7 @@ check_ci_workflow() {
   return 1
 }
 
-# Returns 0 if all four labels Igor uses exist on the repo, 1 if any
+# Returns 0 if all four labels the agent uses exist on the repo, 1 if any
 # are missing. Prints a comma-separated list of missing labels to
 # stdout (empty on full pass), so the orchestrator can include the
 # specifics in the onboarding ticket.
@@ -180,7 +180,7 @@ validate_repo_via_api() {
 # reopened on re-validation failure. The marker keeps it auto-
 # discoverable across ticks without needing a title prefix.
 
-ONBOARDING_MARKER='<!-- igor:onboarding -->'
+ONBOARDING_MARKER='<!-- agent:onboarding -->'
 
 # handle_onboarding_failure <repo> <bot-user> <markdown-report>
 #
@@ -194,7 +194,7 @@ handle_onboarding_failure() {
   body=$(cat <<EOF
 ${ONBOARDING_MARKER}
 
-Igor refuses to clone this repo until it has the scaffolding to support
+The agent refuses to clone this repo until it has the scaffolding to support
 unattended work. Required checks:
 
 ${report}
@@ -202,7 +202,7 @@ ${report}
 Bring the repo to standard, then close this ticket -- the next tick will
 re-validate and either proceed or reopen this with what's still missing.
 
-This ticket is auto-managed by Igor. Do not edit the title or remove the
+This ticket is auto-managed by the agent. Do not edit the title or remove the
 HTML comment marker at the top of the body.
 EOF
 )
@@ -212,7 +212,7 @@ EOF
 
   if [ -z "$existing" ] || [ "$existing" = "null" ] || [ "$existing" = "empty" ]; then
     log "onboarding: filing fresh ticket on $repo"
-    num=$(forgejo_open_issue "$repo" "Repo not ready for Igor: missing scaffolding" "$body")
+    num=$(forgejo_open_issue "$repo" "Repo not ready for the agent: missing scaffolding" "$body")
     forgejo_add_label "$repo" "$num" "Status/Needs More Info" 2>/dev/null \
       || log "warning: could not apply 'Status/Needs More Info' on $repo (label missing?)"
     forgejo_add_label "$repo" "$num" "Priority/Critical" 2>/dev/null \

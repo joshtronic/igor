@@ -5,7 +5,7 @@
 # Usage: tick.sh
 #
 # Behavior:
-#   1. Acquire global flock -- only one Igor at a time.
+#   1. Acquire global flock -- only one tick at a time.
 #   2. Resolve bot identity from Forgejo (whoami).
 #   3. Recovery -- any open issue still assigned to the bot from a
 #      previous interrupted tick gets a comment and is unassigned so
@@ -21,70 +21,84 @@ set -euo pipefail
 
 # -- Paths ------------------------------------------------------
 
-IGOR_HOME="${IGOR_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
-IGOR_STATE_DIR="${IGOR_STATE_DIR:-$HOME/.local/state/igor}"
-IGOR_REPO_ROOT="$IGOR_STATE_DIR/repos"
+AGENT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+AGENT_STATE_DIR="$HOME/.local/state/agent"
+AGENT_REPO_ROOT="$AGENT_STATE_DIR/repos"
 
 # -- Self-update -----------------------------------------------
 #
 # Pull the harness's own latest code before doing anything else.
 # If it changed, exec the new tick.sh so we don't run a mixed-
 # version tick (old tick.sh body + new lib/* sourced below).
-# IGOR_RESPAWNED guards against infinite re-exec loops if the
+# AGENT_RESPAWNED guards against infinite re-exec loops if the
 # pull fails to advance HEAD for some reason.
 #
-# Skip via IGOR_SKIP_SELF_PULL=1 for local dev / interactive
+# Skip via AGENT_SKIP_SELF_PULL=1 for local dev / interactive
 # debugging where the operator wants to run a specific worktree
 # state without surprise updates.
 
-if [ -z "${IGOR_RESPAWNED:-}" ] && [ -z "${IGOR_SKIP_SELF_PULL:-}" ] \
-    && [ -d "$IGOR_HOME/.git" ]; then
-  PREV_HEAD=$(git -C "$IGOR_HOME" rev-parse HEAD 2>/dev/null || echo "")
-  git -C "$IGOR_HOME" pull --rebase --quiet --autostash origin master 2>/dev/null \
-    || echo "[igor] warning: harness self-pull failed; using on-disk code" >&2
-  NEW_HEAD=$(git -C "$IGOR_HOME" rev-parse HEAD 2>/dev/null || echo "")
+if [ -z "${AGENT_RESPAWNED:-}" ] && [ -z "${AGENT_SKIP_SELF_PULL:-}" ] \
+    && [ -d "$AGENT_HOME/.git" ]; then
+  PREV_HEAD=$(git -C "$AGENT_HOME" rev-parse HEAD 2>/dev/null || echo "")
+  git -C "$AGENT_HOME" pull --rebase --quiet --autostash origin master 2>/dev/null \
+    || echo "[agent] warning: harness self-pull failed; using on-disk code" >&2
+  NEW_HEAD=$(git -C "$AGENT_HOME" rev-parse HEAD 2>/dev/null || echo "")
   if [ -n "$PREV_HEAD" ] && [ -n "$NEW_HEAD" ] && [ "$PREV_HEAD" != "$NEW_HEAD" ]; then
-    echo "[igor] self-update: ${PREV_HEAD:0:7} -> ${NEW_HEAD:0:7}, re-execing" >&2
-    export IGOR_RESPAWNED=1
+    echo "[agent] self-update: ${PREV_HEAD:0:7} -> ${NEW_HEAD:0:7}, re-execing" >&2
+    export AGENT_RESPAWNED=1
     exec "$0" "$@"
   fi
 fi
 
 # -- Secrets ----------------------------------------------------
 
-if [ -f "$IGOR_HOME/.env" ]; then
-  set -a
-  # shellcheck source=/dev/null
-  . "$IGOR_HOME/.env"
-  set +a
+if [ ! -f "$AGENT_HOME/.env" ]; then
+  echo "agent: missing $AGENT_HOME/.env -- copy .env.example and fill it in" >&2
+  exit 2
 fi
-: "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set (via $IGOR_HOME/.env)}"
-: "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set (via $IGOR_HOME/.env)}"
-: "${FORGEJO_URL:?FORGEJO_URL must be set (via $IGOR_HOME/.env)}"
-: "${IGOR_MODEL:?IGOR_MODEL must be set (via $IGOR_HOME/.env)}"
-IGOR_TIMEOUT="${IGOR_TIMEOUT:-60m}"
-FORGEJO_SSH_HOST="${FORGEJO_SSH_HOST:-$(echo "$FORGEJO_URL" | sed -E 's|^[a-z]+://([^/:]+).*|\1|')}"
+set -a
+# shellcheck source=/dev/null
+. "$AGENT_HOME/.env"
+set +a
+
+# Every var in .env.example is required -- no defaults, fail fast if
+# anything is missing. The env_file_hint surfaces in the error so the
+# operator knows exactly where to fix it.
+env_file_hint="$AGENT_HOME/.env"
+: "${ANTHROPIC_API_KEY:?must be set in $env_file_hint}"
+: "${AGENT_MODEL:?must be set in $env_file_hint}"
+: "${AGENT_MODEL_THINKING:?must be set in $env_file_hint}"
+: "${FORGEJO_URL:?must be set in $env_file_hint}"
+: "${FORGEJO_TOKEN:?must be set in $env_file_hint}"
+: "${FORGEJO_HOST:?must be set in $env_file_hint}"
+: "${FORGEJO_REVIEWER:?must be set in $env_file_hint}"
+: "${REDIS_URL:?must be set in $env_file_hint}"
+: "${TICK_TIMEOUT:?must be set in $env_file_hint}"
+: "${AGENT_SHIFT_START:?must be set in $env_file_hint}"
+: "${AGENT_SHIFT_END:?must be set in $env_file_hint}"
+: "${AGENT_RECALL_DAYS:?must be set in $env_file_hint}"
+unset env_file_hint
 
 # -- Library ----------------------------------------------------
 
 # shellcheck source=lib/forgejo.sh
-. "$IGOR_HOME/lib/forgejo.sh"
+. "$AGENT_HOME/lib/forgejo.sh"
 # shellcheck source=lib/repo-checks.sh
-. "$IGOR_HOME/lib/repo-checks.sh"
+. "$AGENT_HOME/lib/repo-checks.sh"
 # shellcheck source=lib/rag.sh
-. "$IGOR_HOME/lib/rag.sh"
+. "$AGENT_HOME/lib/rag.sh"
 
 # Children (discretionary executors, agent-* scripts) re-source
-# lib/rag.sh and share our per-tick build marker via $IGOR_TICK_PID.
+# lib/rag.sh and share our per-tick build marker via $TICK_PID.
 # Without this, each child would think it owns the build and either
 # duplicate the ~25s flush+rebuild or fail to find the marker.
-export IGOR_TICK_PID=$$
+export TICK_PID=$$
 
 # -- Resolve bot identity --------------------------------------
 
 BOT_USER=$(forgejo_whoami)
 [ -n "$BOT_USER" ] || {
-  echo "igor: failed to resolve bot user from $FORGEJO_URL/api/v1/user" >&2
+  echo "agent: failed to resolve bot user from $FORGEJO_URL/api/v1/user" >&2
   exit 3
 }
 
@@ -92,8 +106,8 @@ BOT_USER=$(forgejo_whoami)
 # agent-block.sh, agent-report.sh) called by Claude from any tick
 # shape can find them.
 export BOT_USER
-export IGOR_REVIEWER="${IGOR_REVIEWER:-}"
-export IGOR_HOME
+export FORGEJO_REVIEWER
+export AGENT_HOME
 
 # Put the harness's bin dir on PATH for every Claude invocation in
 # this script. Without this, Claude can't call agent-enqueue.sh /
@@ -102,19 +116,19 @@ export IGOR_HOME
 # static analysis around command substitution) or shells out via a
 # temp script as a workaround. Allowlist already permits these by
 # name in agent-settings.json; PATH just needs to find them.
-export PATH="$IGOR_HOME/bin:$PATH"
+export PATH="$AGENT_HOME/bin:$PATH"
 
 # -- Global lock (one tick at a time) --------------------------
 
-mkdir -p "$IGOR_STATE_DIR"
-LOCK="$IGOR_STATE_DIR/lock"
+mkdir -p "$AGENT_STATE_DIR"
+LOCK="$AGENT_STATE_DIR/lock"
 exec 200>"$LOCK"
 if ! flock -n 200; then
-  echo "igor: another tick is running -- exiting" >&2
+  echo "agent: another tick is running -- exiting" >&2
   exit 0
 fi
 
-log() { printf '[igor] %s\n' "$*"; }
+log() { printf '[agent] %s\n' "$*"; }
 
 # Title -> branch-safe slug. ASCII alphanumerics survive; everything
 # else collapses to '-'. Capped at 50 chars, preferring to cut on a
@@ -147,33 +161,33 @@ cleanup_agent_branches() {
 # Lives in state (not in ~/Code) because these are harness-managed
 # working copies, distinct from any interactive clones the operator
 # keeps in their own workspace.
-repo_path_for() { echo "$IGOR_REPO_ROOT/$1"; }
+repo_path_for() { echo "$AGENT_REPO_ROOT/$1"; }
 
 # Build the SSH clone URL for a given <owner>/<name>. Handles
-# FORGEJO_SSH_HOST in "host" form (default port 22) or "host:port"
+# FORGEJO_HOST in "host" form (default port 22) or "host:port"
 # form (non-default port via ssh:// URL syntax). The shorthand
 # git@host:path syntax can't express ports; ssh:// can.
 ssh_clone_url() {
   local repo="$1"
-  if [[ "$FORGEJO_SSH_HOST" == *:* ]]; then
-    echo "ssh://git@${FORGEJO_SSH_HOST}/${repo}.git"
+  if [[ "$FORGEJO_HOST" == *:* ]]; then
+    echo "ssh://git@${FORGEJO_HOST}/${repo}.git"
   else
-    echo "git@${FORGEJO_SSH_HOST}:${repo}.git"
+    echo "git@${FORGEJO_HOST}:${repo}.git"
   fi
 }
 
-# Create the .igor/ scratch dir inside a worktree and drop a local
-# gitignore so its contents (PR_BODY.md, IGOR_JOURNAL.md, claude-
-# output.log, IGOR_MAINTENANCE_*) never get picked up by `git add .`
-# or `git add -A`. Also untrack any .igor/* files that base happens
+# Create the .agent/ scratch dir inside a worktree and drop a local
+# gitignore so its contents (PR_BODY.md, AGENT_JOURNAL.md, claude-
+# output.log, AGENT_MAINTENANCE_*) never get picked up by `git add .`
+# or `git add -A`. Also untrack any .agent/* files that base happens
 # to have tracked -- gitignore only blocks NEW additions, but
 # modifications to already-tracked files still get staged. Untracking
 # at worktree creation flips them so the gitignore actually applies.
 init_igor_scratch() {
   local worktree="$1"
-  mkdir -p "$worktree/.igor"
-  printf '*\n' > "$worktree/.igor/.gitignore"
-  (cd "$worktree" && git rm --cached -r --quiet --ignore-unmatch .igor/ 2>/dev/null) || true
+  mkdir -p "$worktree/.agent"
+  printf '*\n' > "$worktree/.agent/.gitignore"
+  (cd "$worktree" && git rm --cached -r --quiet --ignore-unmatch .agent/ 2>/dev/null) || true
 }
 
 # Build the full system prompt for a Claude invocation. Ordered
@@ -201,7 +215,7 @@ init_igor_scratch() {
 # supplies the per-tick user message separately.
 brain_system_prompt() {
   local brain="$1"
-  local files=("$IGOR_HOME/AGENTS.md")
+  local files=("$AGENT_HOME/AGENTS.md")
   [ -f "$brain/identity.md" ]         && files+=("$brain/identity.md")
   [ -f "$brain/memories/MEMORY.md" ]  && files+=("$brain/memories/MEMORY.md")
   cat "${files[@]}"
@@ -239,7 +253,7 @@ normalize_unicode_dashes_in_file() {
   sed -e 's/–/--/g' -e 's/—/--/g' "$path" > "$tmp" && mv "$tmp" "$path"
 }
 
-# Sweep the well-known Claude-output files in a worktree's .igor/
+# Sweep the well-known Claude-output files in a worktree's .agent/
 # scratch dir. Idempotent and silent on missing files. Called once
 # after each Claude invocation returns; catches PR_BODY.md / journal
 # / maintenance findings before any downstream step reads them.
@@ -247,17 +261,17 @@ normalize_worktree_dashes() {
   local worktree="$1"
   [ -n "$worktree" ] || return 0
   local f
-  for f in PR_BODY.md IGOR_JOURNAL.md IGOR_MAINTENANCE_FINDINGS.md; do
-    normalize_unicode_dashes_in_file "$worktree/.igor/$f"
+  for f in PR_BODY.md AGENT_JOURNAL.md AGENT_MAINTENANCE_FINDINGS.md; do
+    normalize_unicode_dashes_in_file "$worktree/.agent/$f"
   done
 }
 
 # Model defaults to Haiku (cheap, fast, good enough for short
-# completions). Override via IGOR_MODEL_THINKING. Returns the text
+# completions). Override via AGENT_MODEL_THINKING. Returns the text
 # of the response on stdout; empty on failure.
 claude_complete() {
   local system_prompt="$1" user_msg="$2"
-  local model="${IGOR_MODEL_THINKING:-claude-haiku-4-5-20251001}"
+  local model="${AGENT_MODEL_THINKING:-claude-haiku-4-5-20251001}"
   local max_tokens="${3:-256}"
   local response
   response=$(curl -sf -X POST https://api.anthropic.com/v1/messages \
@@ -373,7 +387,7 @@ derive_commit_subject() {
 }
 
 # Derive a full PR body (two-checklist Markdown) from the diff. Used
-# as a fallback when Claude exited without writing .igor/PR_BODY.md
+# as a fallback when Claude exited without writing .agent/PR_BODY.md
 # this tick -- AGENTS.md says it's mandatory but compliance is
 # probabilistic, and a thin git-log-derived body wastes the
 # reviewer's time. Better to spend a cent on Haiku to synth a real
@@ -477,7 +491,7 @@ journal_is_duplicate() {
 
 # Idempotent clone-if-missing, pull-if-present. Creates the owner
 # subdir as needed. Pulls existing clones so brain identity changes
-# and website content updates propagate to Igor on every tick.
+# and website content updates propagate to the agent on every tick.
 #
 # Self-healing for dirty trees: a crashed tick (W_LOG-style unbound
 # var, OOM, timeout, etc.) can mutate working-tree files but never
@@ -537,10 +551,10 @@ ensure_repo_local() {
 #
 # Tracks per-repo "last maintained" timestamps so we don't run
 # maintenance on the same repo every empty tick. Lives at
-# $IGOR_STATE_DIR/discretionary-state.json. Regenerable -- losing
+# $AGENT_STATE_DIR/discretionary-state.json. Regenerable -- losing
 # it just makes every repo eligible again.
 
-discretionary_state_file() { echo "$IGOR_STATE_DIR/discretionary-state.json"; }
+discretionary_state_file() { echo "$AGENT_STATE_DIR/discretionary-state.json"; }
 
 maintenance_last_run() {
   local repo="$1" state_file
@@ -566,7 +580,7 @@ maintenance_mark_done() {
 #
 # Skips:
 # - Bot-owned repos (brain, website, anything else under <bot>/). These
-#   are Igor's internal infrastructure, not target code. Auditing your
+#   are the agent's internal infrastructure, not target code. Auditing your
 #   own notes repo for npm audit findings is busywork.
 # - Repos with an open onboarding ticket. Issue-work refused to clone
 #   them for cause; maintenance shouldn't sneak around that gate.
@@ -614,7 +628,7 @@ in_maintenance_window() {
 # when not in the window or no repos are eligible this week (so
 # the caller falls through to PR review / issues / discretionary).
 #
-# Findings flow: Claude writes .igor/IGOR_MAINTENANCE_FINDINGS.md,
+# Findings flow: Claude writes .agent/AGENT_MAINTENANCE_FINDINGS.md,
 # harness files a Status/Needs More Info issue for human triage.
 do_maintenance_tick() {
   in_maintenance_window || return 1
@@ -646,8 +660,8 @@ do_maintenance_tick() {
   # findings to a known path that the harness reads after exit.
   target_base=$(cd "$target_path" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
   target_base="${target_base:-master}"
-  local m_worktree="$IGOR_STATE_DIR/worktrees/maintenance-${target//\//_}-$$"
-  mkdir -p "$IGOR_STATE_DIR/worktrees"
+  local m_worktree="$AGENT_STATE_DIR/worktrees/maintenance-${target//\//_}-$$"
+  mkdir -p "$AGENT_STATE_DIR/worktrees"
   (cd "$target_path" && git fetch --prune origin)
   (cd "$target_path" && git worktree add --detach "$m_worktree" "origin/${target_base}")
   init_igor_scratch "$m_worktree"
@@ -660,13 +674,13 @@ do_maintenance_tick() {
 
   cd "$m_worktree"
 
-  local m_brain="$IGOR_REPO_ROOT/${BOT_USER}/brain"
+  local m_brain="$AGENT_REPO_ROOT/${BOT_USER}/brain"
 
   # RAG context: prior maintenance findings, related commits, any
   # journal entries about this repo. Helps catch repeat-offender
   # findings vs the first-time surface.
   local m_rag_context
-  m_rag_context=$(IGOR_BRAIN_PATH="$m_brain" rag_query "maintenance pass on $target")
+  m_rag_context=$(AGENT_BRAIN_PATH="$m_brain" rag_query "maintenance pass on $target")
   [ -n "$m_rag_context" ] && log "rag: surfaced past context for maintenance"
 
   local m_user_msg
@@ -690,7 +704,7 @@ No human is waiting on you. Your job:
      listed above.
   3. If anything notable surfaces -- vulnerabilities, outdated
      deps, broken links, regressions -- write a markdown summary
-     to .igor/IGOR_MAINTENANCE_FINDINGS.md. The harness will file
+     to .agent/AGENT_MAINTENANCE_FINDINGS.md. The harness will file
      an issue with that content for human triage.
   4. If nothing notable, skip the findings file and exit cleanly.
 
@@ -709,16 +723,16 @@ EOF
   local m_system_prompt
   m_system_prompt=$(brain_system_prompt "$m_brain")
 
-  log "invoking claude for maintenance (timeout ${IGOR_TIMEOUT})"
-  local m_log="$m_worktree/.igor/claude-output.log"
+  log "invoking claude for maintenance (timeout ${TICK_TIMEOUT})"
+  local m_log="$m_worktree/.agent/claude-output.log"
   local m_start; m_start=$(date +%s)
   local m_exit
   set +e
-  timeout --kill-after=30s "$IGOR_TIMEOUT" \
+  timeout --kill-after=30s "$TICK_TIMEOUT" \
     claude \
-      --model "$IGOR_MODEL" \
+      --model "$AGENT_MODEL" \
       --append-system-prompt "$m_system_prompt" \
-      --settings "$IGOR_HOME/agent-settings.json" \
+      --settings "$AGENT_HOME/agent-settings.json" \
       --max-turns 50 \
       --print "$m_user_msg" 2>&1 | tee "$m_log"
   m_exit=${PIPESTATUS[0]}
@@ -727,7 +741,7 @@ EOF
 
   normalize_worktree_dashes "$m_worktree"
 
-  local findings="$m_worktree/.igor/IGOR_MAINTENANCE_FINDINGS.md"
+  local findings="$m_worktree/.agent/AGENT_MAINTENANCE_FINDINGS.md"
   if [ -s "$findings" ]; then
     local m_title m_body m_num
     m_title="Maintenance pass $(date +%Y-%m-%d): findings"
@@ -736,7 +750,7 @@ EOF
     forgejo_add_label "$target" "$m_num" "Status/Needs More Info" 2>/dev/null \
       || log "warning: could not apply 'Status/Needs More Info' on #$m_num ($target)"
 
-    local m_priority_file="$m_worktree/.igor/IGOR_MAINTENANCE_PRIORITY"
+    local m_priority_file="$m_worktree/.agent/AGENT_MAINTENANCE_PRIORITY"
     if [ -s "$m_priority_file" ]; then
       local m_priority m_pri_label=""
       m_priority=$(tr -d '[:space:]' < "$m_priority_file" | tr '[:upper:]' '[:lower:]')
@@ -761,7 +775,7 @@ EOF
   exit 0
 }
 
-# Post cooldown. One post per local calendar day on Igor's own blog.
+# Post cooldown. One post per local calendar day on the agent's own blog.
 # Calendar-day semantics (not rolling 24h) so "once a day" matches
 # what a human means -- the day ticks over at local midnight.
 #
@@ -770,7 +784,7 @@ EOF
 #   (a) origin/master tree contains a post file whose filename
 #       begins with today's date (src/posts/YYYY/YYYY-MM-DD-...)
 #       -> already shipped today, cooldown fires.
-#   (b) Open Igor PRs adding a post file whose filename begins
+#   (b) open bot PRs adding a post file whose filename begins
 #       with today's date (checked by the caller as
 #       W_INFLIGHT_POST, NOT by this function) -> today's slot
 #       is in flight, cooldown fires.
@@ -809,7 +823,7 @@ posts_cooldown_clear() {
   # filename starts with today's date. The earlier version of this
   # check looked at git log --since/--until (commit date), which
   # confused backdated commits and same-day reverts. The filename
-  # date is what matters -- "did Igor publish a post FOR today?"
+  # date is what matters -- "did the agent publish a post FOR today?"
   # -- and that's recoverable from a tree listing without ambiguity.
   local today_re="^src/posts/[0-9]{4}/${today}-.+\\.md$"
   local today_count
@@ -836,7 +850,7 @@ posts_mark_shipped() {
 # commits with the given subject if anything is staged, and pushes.
 #
 # Called unconditionally at end-of-tick. The previous design gated
-# the entire commit block on "Claude wrote an IGOR_JOURNAL.md this
+# the entire commit block on "Claude wrote an AGENT_JOURNAL.md this
 # tick" -- which left dedupe edits, reflection swaps, source-weight
 # adjustments, and any other harness-side brain mutations orphaned
 # in the working tree. The recovery-commit step at next tick start
@@ -920,10 +934,10 @@ discretionary_assess_cadence() {
 
   # Today's commits across cloned repos. No author filter: Josh's
   # commits to brain (manual edits) also count as "stuff happened
-  # today" from Igor's perspective.
+  # today" from the agent's perspective.
   commits_today=0
-  if [ -d "${IGOR_REPO_ROOT:-}/${BOT_USER}" ]; then
-    for repo_dir in "$IGOR_REPO_ROOT/${BOT_USER}"/*; do
+  if [ -d "${AGENT_REPO_ROOT:-}/${BOT_USER}" ]; then
+    for repo_dir in "$AGENT_REPO_ROOT/${BOT_USER}"/*; do
       [ -d "$repo_dir/.git" ] || continue
       count=$(cd "$repo_dir" \
         && git log --since="$today 00:00:00" --until="$today 23:59:59" \
@@ -932,9 +946,9 @@ discretionary_assess_cadence() {
     done
   fi
 
-  # PRs Igor authored TODAY across the website repo, regardless of
+  # PRs the agent authored TODAY across the website repo, regardless of
   # current state. Open + merged + closed-without-merge all count
-  # as "Igor shipped work today" -- the cadence is asking whether
+  # as "The agent shipped work today" -- the cadence is asking whether
   # the day's been productive, not whether the queue is reviewed.
   # state=all + user.login filter + created_at-startswith-today.
   prs_opened_today=0
@@ -947,9 +961,9 @@ discretionary_assess_cadence() {
 
   # Did a post land on website master today?
   post_today=0
-  if [ -d "${IGOR_REPO_ROOT:-}/${BOT_USER}/website/.git" ]; then
+  if [ -d "${AGENT_REPO_ROOT:-}/${BOT_USER}/website/.git" ]; then
     local merged_count
-    merged_count=$(cd "$IGOR_REPO_ROOT/${BOT_USER}/website" \
+    merged_count=$(cd "$AGENT_REPO_ROOT/${BOT_USER}/website" \
       && git log --since="$today 00:00:00" --until="$today 23:59:59" \
           origin/master --diff-filter=A --name-only --pretty=format: \
           -- 'src/posts/*' 2>/dev/null \
@@ -971,15 +985,15 @@ discretionary_assess_cadence() {
 Today is $today.
 
 Your activity since local midnight:
-- Open Igor PRs in the queue: $open_prs
-- Igor PRs opened today (any state): $prs_opened_today
+- open bot PRs in the queue: $open_prs
+- bot PRs opened today (any state): $prs_opened_today
 - Tick reflections logged today: $reflections_today
 - Commits authored today (all repos): $commits_today
 - Post landed today: $([ "$post_today" = "1" ] && echo "yes" || echo "no")
 - Posting eligible this tick: $posting_label
 
-"Igor PRs opened today" is the most direct "did I ship work today?"
-signal -- it counts the new PRs Igor authored regardless of whether
+"bot PRs opened today" is the most direct "did I ship work today?"
+signal -- it counts the new PRs the agent authored regardless of whether
 they're still open, merged, or closed without merge. "Tick reflections"
 is how many ticks logged a journal entry; it's a measure of activity,
 not output.
@@ -993,11 +1007,11 @@ EOF
 
   local response choice reason
   response=$(claude_complete \
-    "You are deciding how Igor (an autonomous Claude process) should spend the next discretionary tick.
+    "You are deciding how the agent (an autonomous Claude process) should spend the next discretionary tick.
 
 Think like a human's end-of-day check-in. \"Did I put in a solid day's work?\" If yes, take a break to read -- reading is cheap, forward-investment, and surfaces ideas. If no -- especially if the queue is light or nothing's shipped yet -- more work is the right call.
 
-A heavy queue (many open Igor PRs not yet reviewed by the human) is a strong signal to read instead of ship. Piling on more PRs when the human is behind on review just buries the work. Even when posting is allowed, choose \"read\" if the queue is already deep -- the post can ship tomorrow.
+A heavy queue (many open bot PRs not yet reviewed by the human) is a strong signal to read instead of ship. Piling on more PRs when the human is behind on review just buries the work. Even when posting is allowed, choose \"read\" if the queue is already deep -- the post can ship tomorrow.
 
 Don't grind for grinding's sake. Don't slack off when there's clear work to do. The goal is the natural rhythm of a human workday, not a rigid threshold.
 
@@ -1027,10 +1041,10 @@ Schema:
 }
 
 # Shift window. Returns 0 if a configured shift is active OR no shift
-# is configured (testing / always-on). When IGOR_SHIFT_START + _END
+# is configured (testing / always-on). When AGENT_SHIFT_START + _END
 # are both set, only fire ticks during [START, END) local hours.
 in_shift_window() {
-  local start="${IGOR_SHIFT_START:-}" end="${IGOR_SHIFT_END:-}" hour
+  local start="${AGENT_SHIFT_START:-}" end="${AGENT_SHIFT_END:-}" hour
   [ -z "$start" ] && return 0
   [ -z "$end" ] && return 0
   hour=$(date +%H)
@@ -1065,28 +1079,28 @@ build_deps_section() {
 
 # -- Shift gate ------------------------------------------------
 #
-# If IGOR_SHIFT_START + _END are configured, exit early when the
+# If AGENT_SHIFT_START + _END are configured, exit early when the
 # current local hour is outside the shift window. Lets the systemd
-# timer fire 24/7 while Igor only "works" his configured shift.
+# timer fire 24/7 while the agent only "works" his configured shift.
 # Default (unconfigured) is always-on.
 
 if ! in_shift_window; then
-  log "outside shift window (${IGOR_SHIFT_START:-unset}-${IGOR_SHIFT_END:-unset}), current hour $(date +%H) -- skipping tick"
+  log "outside shift window (${AGENT_SHIFT_START:-unset}-${AGENT_SHIFT_END:-unset}), current hour $(date +%H) -- skipping tick"
   exit 0
 fi
 
-# -- Bootstrap: ensure Igor's own repos are cloned -------------
+# -- Bootstrap: ensure the agent's own repos are cloned -------------
 #
 # Brain is hard-required: identity.md is foundational, every system
 # prompt loads it. If the bot doesn't own a brain repo, halt loudly
 # rather than running ticks with generic-Claude voice.
 #
-# Website is soft: warn if absent but proceed -- Igor can still work
+# Website is soft: warn if absent but proceed -- the agent can still work
 # other repos. The website is just one of his target repos, not
 # essential infrastructure.
 
 if ! forgejo_repo_exists "${BOT_USER}/brain"; then
-  echo "igor: bootstrap failed -- ${BOT_USER}/brain does not exist or bot lacks access" >&2
+  echo "agent: bootstrap failed -- ${BOT_USER}/brain does not exist or bot lacks access" >&2
   echo "  create the repo (see docs/setup.md) and try again." >&2
   exit 4
 fi
@@ -1100,7 +1114,7 @@ fi
 
 # -- Recovery: clear orphaned bot assignments ------------------
 #
-# Invariant: we hold the global flock, so no other Igor is
+# Invariant: we hold the global flock, so no other tick is
 # currently running. Any open issue assigned to the bot right
 # now is in one of two states:
 #
@@ -1145,7 +1159,7 @@ if [ "$ORPHAN_COUNT" -gt 0 ]; then
     forgejo_unassign_all "$O_REPO" "$O_NUM"
 
     O_LOCAL=$(repo_path_for "$O_REPO")
-    O_WT="$IGOR_STATE_DIR/worktrees/$(worktree_key "$O_REPO" "$O_NUM")"
+    O_WT="$AGENT_STATE_DIR/worktrees/$(worktree_key "$O_REPO" "$O_NUM")"
     if [ -d "$O_LOCAL/.git" ]; then
       if [ -d "$O_WT" ]; then
         (cd "$O_LOCAL" && git worktree remove "$O_WT" --force) 2>/dev/null || rm -rf "$O_WT"
@@ -1175,18 +1189,18 @@ do_maintenance_tick || true
 #    dance needed.
 #
 # 2. The "assignment dance" (legacy/manual override): reviewer
-#    reassigns the PR back to Igor. Next tick finds it here and
+#    reassigns the PR back to the agent. Next tick finds it here and
 #    reopens the work.
 #
-# Disabled when IGOR_REVIEWER is unset (testing / solo runs without
+# Disabled when FORGEJO_REVIEWER is unset (testing / solo runs without
 # a reviewer configured).
 
 REVIEW_PR=""
 REVIEW_PR_TRIGGER=""
 
-# Signal 1: scan all bot-accessible repos for open Igor PRs where
+# Signal 1: scan all bot-accessible repos for open bot PRs where
 # the latest non-bot review on the CURRENT HEAD is REQUEST_CHANGES.
-# The HEAD check is important -- if Igor already pushed follow-up
+# The HEAD check is important -- if the agent already pushed follow-up
 # commits, the old REQUEST_CHANGES no longer applies and we
 # shouldn't re-pickup until the reviewer reviews again.
 RC_REPOS=$(forgejo_list_bot_repos 2>/dev/null || echo '[]')
@@ -1215,7 +1229,7 @@ while read -r repo_full; do
 done < <(jq -r '.[].full_name' <<<"$RC_REPOS" 2>/dev/null)
 
 # Signal 2: assignment dance (only if no request-changes signal fired)
-if [ -z "$REVIEW_PR" ] && [ -n "${IGOR_REVIEWER:-}" ]; then
+if [ -z "$REVIEW_PR" ] && [ -n "${FORGEJO_REVIEWER:-}" ]; then
   REVIEW_PRS=$(forgejo_my_assigned_prs 2>/dev/null || echo '[]')
   REVIEW_COUNT=$(jq 'length' <<<"$REVIEW_PRS")
   if [ "$REVIEW_COUNT" -gt 0 ]; then
@@ -1246,7 +1260,7 @@ if [ -n "$REVIEW_PR" ]; then
 
     (cd "$PR_REPO_PATH" && git fetch origin --prune)
 
-    PR_WORKTREE="$IGOR_STATE_DIR/worktrees/$(worktree_key "$PR_REPO" "pr${PR_NUMBER}")"
+    PR_WORKTREE="$AGENT_STATE_DIR/worktrees/$(worktree_key "$PR_REPO" "pr${PR_NUMBER}")"
     if [ -e "$PR_WORKTREE" ]; then
       (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || rm -rf "$PR_WORKTREE"
     fi
@@ -1347,7 +1361,7 @@ the comment directly addresses.
 Examples of the right and wrong shape:
 
 - Reviewer corrects "the NUC runs everything" -> "actually
-  Forgejo is on a separate VPS, the NUC is just for Igor + base
+  Forgejo is on a separate VPS, the NUC is just for the agent + base
   Linux."
 
   RIGHT: change the paragraph to describe the actual layout
@@ -1381,19 +1395,19 @@ ${PR_RAG_CONTEXT:-(no past context retrieved this tick)}
 EOF
 )
 
-    PR_BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
+    PR_BRAIN_PATH="$AGENT_REPO_ROOT/${BOT_USER}/brain"
     PR_SYSTEM_PROMPT=$(brain_system_prompt "$PR_BRAIN_PATH")
 
     cd "$PR_WORKTREE"
-    log "invoking claude for PR review (timeout ${IGOR_TIMEOUT})"
-    PR_LOG="$PR_WORKTREE/.igor/claude-output.log"
+    log "invoking claude for PR review (timeout ${TICK_TIMEOUT})"
+    PR_LOG="$PR_WORKTREE/.agent/claude-output.log"
     PR_START=$(date +%s)
     set +e
-    timeout --kill-after=30s "$IGOR_TIMEOUT" \
+    timeout --kill-after=30s "$TICK_TIMEOUT" \
       claude \
-        --model "$IGOR_MODEL" \
+        --model "$AGENT_MODEL" \
         --append-system-prompt "$PR_SYSTEM_PROMPT" \
-        --settings "$IGOR_HOME/agent-settings.json" \
+        --settings "$AGENT_HOME/agent-settings.json" \
         --max-turns 50 \
         --print "$PR_USER_MSG" 2>&1 | tee "$PR_LOG"
     PR_EXIT=${PIPESTATUS[0]}
@@ -1411,15 +1425,15 @@ EOF
     # Same pattern as issue-work: harness owns the procedural step,
     # Claude owns the content step.
     #
-    # Excludes .igor/ (per-tick scratch, never committed).
+    # Excludes .agent/ (per-tick scratch, never committed).
     PR_DIRTY=$(git status --porcelain 2>/dev/null \
-      | grep -vE '^.. \.igor/' \
+      | grep -vE '^.. \.agent/' \
       | head -c 1)
     if [ -n "$PR_DIRTY" ]; then
       log "PR-review: claude left dirty files in the worktree without committing -- harness committing"
-      (cd "$PR_WORKTREE" && git add -A -- ':!.igor' 2>/dev/null) || true
+      (cd "$PR_WORKTREE" && git add -A -- ':!.agent' 2>/dev/null) || true
       PR_AUTO_SUBJECT=$(derive_commit_subject \
-        "$PR_WORKTREE/.igor/PR_BODY.md" \
+        "$PR_WORKTREE/.agent/PR_BODY.md" \
         "$PR_WORKTREE" \
         "chore: PR-review revisions for ${PR_REPO}#${PR_NUMBER}")
       log "PR-review: harness-commit subject: $PR_AUTO_SUBJECT"
@@ -1434,36 +1448,36 @@ EOF
       # touched even in a review round-trip.
       PR_OFFLIMITS=$(list_offlimits_violations "$PR_HEAD")
       if [ -n "$PR_OFFLIMITS" ]; then
-        log "PR-review: off-limits files modified, refusing push and bouncing back to $IGOR_REVIEWER"
+        log "PR-review: off-limits files modified, refusing push and bouncing back to $FORGEJO_REVIEWER"
         log "off-limits paths touched: $(echo "$PR_OFFLIMITS" | tr '\n' ' ')"
         forgejo_comment "$PR_REPO" "$PR_NUMBER" \
-          "Igor refused to push revisions: the new commits modify CI workflow files, which are off-limits. Paths touched:
+          "The agent refused to push revisions: the new commits modify CI workflow files, which are off-limits. Paths touched:
 
 $(echo "$PR_OFFLIMITS" | sed 's/^/  - /')
 
 Reassigning back so a human can review/discard." 2>/dev/null \
           || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
         forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
-        forgejo_assign "$PR_REPO" "$PR_NUMBER" "$IGOR_REVIEWER" 2>/dev/null || true
+        forgejo_assign "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
         (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || true
         exit 0
       fi
 
-      log "PR-review: pushing $PR_NEW new commits and reassigning to $IGOR_REVIEWER"
+      log "PR-review: pushing $PR_NEW new commits and reassigning to $FORGEJO_REVIEWER"
       git push origin "$PR_HEAD" || log "warning: push failed on $PR_HEAD"
       forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
         || log "warning: unassign failed on ${PR_REPO}#${PR_NUMBER}"
-      forgejo_assign "$PR_REPO" "$PR_NUMBER" "$IGOR_REVIEWER" 2>/dev/null \
-        || log "warning: assign-to-${IGOR_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
+      forgejo_assign "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null \
+        || log "warning: assign-to-${FORGEJO_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
     else
-      log "PR-review: no commits made -- reassigning to $IGOR_REVIEWER with a note"
+      log "PR-review: no commits made -- reassigning to $FORGEJO_REVIEWER with a note"
       forgejo_comment "$PR_REPO" "$PR_NUMBER" \
-        "Igor reopened this PR after reassignment but didn't make any new commits. Either the feedback was answerable without code changes, or Igor couldn't act on it. Reassigning back so a human can close the loop." 2>/dev/null \
+        "The agent reopened this PR after reassignment but didn't make any new commits. Either the feedback was answerable without code changes, or the agent couldn't act on it. Reassigning back so a human can close the loop." 2>/dev/null \
         || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
       forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
         || log "warning: unassign failed on ${PR_REPO}#${PR_NUMBER}"
-      forgejo_assign "$PR_REPO" "$PR_NUMBER" "$IGOR_REVIEWER" 2>/dev/null \
-        || log "warning: assign-to-${IGOR_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
+      forgejo_assign "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null \
+        || log "warning: assign-to-${FORGEJO_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
     fi
 
     forgejo_log_time "$PR_REPO" "$PR_NUMBER" "$PR_ELAPSED" \
@@ -1526,12 +1540,12 @@ while read -r repo_line; do
       log "skipping ${R_NAME}#${C_NUM} -- ${C_REJECTED} rejected bot PRs, applying Status/Blocked"
       forgejo_add_label "$R_NAME" "$C_NUM" "Status/Blocked" 2>/dev/null \
         || log "warning: could not apply Status/Blocked on ${R_NAME}#${C_NUM}"
-      if [ -n "${IGOR_REVIEWER:-}" ]; then
-        forgejo_assign "$R_NAME" "$C_NUM" "$IGOR_REVIEWER" 2>/dev/null \
-          || log "warning: could not assign ${R_NAME}#${C_NUM} to $IGOR_REVIEWER"
+      if [ -n "${FORGEJO_REVIEWER:-}" ]; then
+        forgejo_assign "$R_NAME" "$C_NUM" "$FORGEJO_REVIEWER" 2>/dev/null \
+          || log "warning: could not assign ${R_NAME}#${C_NUM} to $FORGEJO_REVIEWER"
       fi
       forgejo_comment "$R_NAME" "$C_NUM" \
-        "Igor opened ${C_REJECTED} PRs for this issue, all closed without merging. Probably needs a different approach or more context. Status/Blocked applied; investigate and remove the label to re-queue." 2>/dev/null \
+        "The agent opened ${C_REJECTED} PRs for this issue, all closed without merging. Probably needs a different approach or more context. Status/Blocked applied; investigate and remove the label to re-queue." 2>/dev/null \
         || log "warning: could not comment on ${R_NAME}#${C_NUM}"
       continue
     fi
@@ -1560,13 +1574,13 @@ if [ -z "$WINNER" ]; then
   # a website and has no open PR on it, optionally do one freeform
   # pass on the site.
   #
-  # IGOR_DISCRETIONARY_RATE (default 0) gates whether we attempt
+  # AGENT_DISCRETIONARY_RATE (default 0) gates whether we attempt
   # this on an empty tick. Natural pacing comes from the scope cap
   # (400 lines / 10 commits) and the once-per-local-day post cap;
   # multiple concurrent PRs on the same repo are fine -- the human
   # handles merge order in Forgejo like any multi-PR project.
 
-  DISCRETIONARY_RATE="${IGOR_DISCRETIONARY_RATE:-0}"
+  DISCRETIONARY_RATE="${AGENT_DISCRETIONARY_RATE:-0}"
   RATE_X1000=$(awk "BEGIN { printf \"%d\", $DISCRETIONARY_RATE * 1000 }")
   ROLL=$(( RANDOM % 1000 ))
   if [ "$ROLL" -ge "$RATE_X1000" ]; then
@@ -1576,7 +1590,7 @@ if [ -z "$WINNER" ]; then
 
   W_REPO="${BOT_USER}/website"
   W_PATH=$(repo_path_for "$W_REPO")
-  BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
+  BRAIN_PATH="$AGENT_REPO_ROOT/${BOT_USER}/brain"
 
   # Determine the discretionary mode by deterministic priority, not
   # by dice-roll. Earlier the harness sampled a weighted split from
@@ -1625,7 +1639,7 @@ if [ -z "$WINNER" ]; then
 
   if [ "$W_INFLIGHT_POST" -eq 1 ]; then
     W_POSTING_ALLOWED=0
-    W_POST_RULE="An open Igor PR on this repo already contains a new post for today (not yet merged). Do NOT publish another post -- one post per day is the rule and today's slot is already taken. Site work, follow-ups, or a read+journal tick are still fair game."
+    W_POST_RULE="An open bot PR on this repo already contains a new post for today (not yet merged). Do NOT publish another post -- one post per day is the rule and today's slot is already taken. Site work, follow-ups, or a read+journal tick are still fair game."
   elif posts_cooldown_clear; then
     W_POSTING_ALLOWED=1
     W_POST_RULE="You MAY publish a new post this tick if that's the right call."
@@ -1641,9 +1655,9 @@ if [ -z "$WINNER" ]; then
   # of cadence's inputs (so it knows what "work" actually does this
   # tick), not a separate code branch.
   #
-  # Earlier versions hard-capped site-work at IGOR_DISCRETIONARY_
-  # PR_CAP and exempted post mode entirely. Wrong shape: post is
-  # the heaviest PR Igor opens (real content, real review burden),
+  # Earlier versions hard-capped site-work at a fixed PR threshold
+  # and exempted post mode entirely. Wrong shape: post is the
+  # heaviest PR the agent opens (real content, real review burden),
   # so exempting it from queue pressure made the worst case worse.
   # Now: judgment over thresholds, applied uniformly.
   W_CADENCE=$(discretionary_assess_cadence "$W_OPEN_PRS_COUNT" "$W_POSTING_ALLOWED")
@@ -1664,20 +1678,20 @@ if [ -z "$WINNER" ]; then
   log "discretionary: routing (posting_allowed=$W_POSTING_ALLOWED, open_prs=$W_OPEN_PRS_COUNT) -> $W_SPLIT_ORDER"
 
   # Reading mode short-circuit: it doesn't touch the website. Use a
-  # scratch dir for the .igor/IGOR_JOURNAL.md output, run the
+  # scratch dir for the .agent/AGENT_JOURNAL.md output, run the
   # executor, append the journal to brain, exit. No website worktree
   # is set up; no website context computed.
   if [ "$W_PICKED_MODE" = "reading" ]; then
-    W_SCRATCH="$IGOR_STATE_DIR/scratch-reading-$$"
-    mkdir -p "$W_SCRATCH/.igor"
+    W_SCRATCH="$AGENT_STATE_DIR/scratch-reading-$$"
+    mkdir -p "$W_SCRATCH/.agent"
     R_CLEANUP() {
       rm -rf "$W_SCRATCH" 2>/dev/null || true
       rag_cleanup_marker
     }
     trap R_CLEANUP EXIT
     W_START=$(date +%s)
-    if IGOR_BRAIN_PATH="$BRAIN_PATH" \
-       "$IGOR_HOME/bin/discretionary-read.sh" "$W_SCRATCH" 2>&1; then
+    if AGENT_BRAIN_PATH="$BRAIN_PATH" \
+       "$AGENT_HOME/bin/discretionary-read.sh" "$W_SCRATCH" 2>&1; then
       W_ELAPSED=$(( $(date +%s) - W_START ))
       log "discretionary: reading mode succeeded in ${W_ELAPSED}s"
 
@@ -1686,7 +1700,7 @@ if [ -z "$WINNER" ]; then
       # updates memories/reading/log.md, sources.md weight tweaks,
       # and blog-ideas.md (post-tick ideas reflection) -- all of
       # which need to land even if no journal was produced.
-      R_JOURNAL_SRC="$W_SCRATCH/.igor/IGOR_JOURNAL.md"
+      R_JOURNAL_SRC="$W_SCRATCH/.agent/AGENT_JOURNAL.md"
       R_JDATE=$(date +%Y-%m-%d)
       R_JFILE="$BRAIN_PATH/journal/${R_JDATE}.md"
       if [ -s "$R_JOURNAL_SRC" ]; then
@@ -1735,7 +1749,7 @@ if [ -z "$WINNER" ]; then
       forgejo_pr_files "$W_REPO" "$pr_number" 2>/dev/null \
         | jq -r '.[] | .filename' 2>/dev/null
     done < <(jq -r '.[].number' <<<"$W_OPEN_PRS_JSON" 2>/dev/null) \
-      | grep -v '^\.igor/' \
+      | grep -v '^\.agent/' \
       | sort -u \
       | sed 's/^/  - /' > /tmp/igor_inflight_files.$$
     W_INFLIGHT_FILES=$(cat /tmp/igor_inflight_files.$$)
@@ -1755,7 +1769,7 @@ idea or do a read+journal tick instead."
       W_FILES_NOTE=""
     fi
 
-    W_IN_FLIGHT="There are ${W_OPEN_PRS_COUNT} open Igor PR(s) on this repo already, awaiting human review:
+    W_IN_FLIGHT="There are ${W_OPEN_PRS_COUNT} open bot PR(s) on this repo already, awaiting human review:
 
 ${W_OPEN_PRS_LIST}
 
@@ -1763,7 +1777,7 @@ Do NOT duplicate any of these. Pick something different. If
 nothing else is calling you, this is a fine tick to spend reading
 (shape c) instead of shipping another overlapping PR.${W_FILES_NOTE}"
   else
-    W_IN_FLIGHT="No open Igor PRs on this repo right now -- you're working from a clean slate."
+    W_IN_FLIGHT="No open bot PRs on this repo right now -- you're working from a clean slate."
   fi
 
   log "discretionary: self-directed work on $W_REPO (posting=$W_POSTING_ALLOWED, in_flight=$W_OPEN_PRS_COUNT, inflight_post=$W_INFLIGHT_POST)"
@@ -1772,8 +1786,8 @@ nothing else is calling you, this is a fine tick to spend reading
   W_BASE="${W_BASE:-master}"
   W_TS=$(date +%Y%m%d-%H%M%S)
   W_BRANCH="agent/discretionary-${W_TS}"
-  W_WORKTREE="$IGOR_STATE_DIR/worktrees/website-discretionary-${W_TS}"
-  mkdir -p "$IGOR_STATE_DIR/worktrees"
+  W_WORKTREE="$AGENT_STATE_DIR/worktrees/website-discretionary-${W_TS}"
+  mkdir -p "$AGENT_STATE_DIR/worktrees"
   (cd "$W_PATH" && git fetch --prune origin)
   (cd "$W_PATH" && git worktree add -b "$W_BRANCH" "$W_WORKTREE" "origin/${W_BASE}")
   init_igor_scratch "$W_WORKTREE"
@@ -1799,8 +1813,8 @@ nothing else is calling you, this is a fine tick to spend reading
     case "$mode" in
       reading)
         W_START=$(date +%s)
-        if IGOR_BRAIN_PATH="$BRAIN_PATH" \
-           "$IGOR_HOME/bin/discretionary-read.sh" "$W_WORKTREE" 2>&1; then
+        if AGENT_BRAIN_PATH="$BRAIN_PATH" \
+           "$AGENT_HOME/bin/discretionary-read.sh" "$W_WORKTREE" 2>&1; then
           USED_HARNESS_MODE="reading"
           W_EXIT=0
           W_ELAPSED=$(( $(date +%s) - W_START ))
@@ -1817,8 +1831,8 @@ nothing else is calling you, this is a fine tick to spend reading
           continue
         fi
         W_START=$(date +%s)
-        if IGOR_BRAIN_PATH="$BRAIN_PATH" IGOR_WEBSITE_PATH="$W_PATH" \
-           "$IGOR_HOME/bin/discretionary-post.sh" "$W_WORKTREE" 2>&1; then
+        if AGENT_BRAIN_PATH="$BRAIN_PATH" AGENT_WEBSITE_PATH="$W_PATH" \
+           "$AGENT_HOME/bin/discretionary-post.sh" "$W_WORKTREE" 2>&1; then
           USED_HARNESS_MODE="post"
           W_EXIT=0
           W_ELAPSED=$(( $(date +%s) - W_START ))
@@ -1866,7 +1880,7 @@ if [ "$USED_HARNESS_MODE" = "site-work-claude" ] || [ -z "$USED_HARNESS_MODE" ];
 
   # RAG: pull relevant past entries to inject into the user message.
   # Build happens lazily on first rag_query in the tick (other Claude
-  # paths share the build via $IGOR_TICK_PID). Best-effort -- failures
+  # paths share the build via $TICK_PID). Best-effort -- failures
   # log a warning and return empty.
   W_RAG_CONTEXT=$(rag_query "$W_IN_FLIGHT")
   [ -n "$W_RAG_CONTEXT" ] && log "rag: surfaced past context for discretionary tick"
@@ -1904,10 +1918,10 @@ What to do:
      agent-enqueue.sh $W_REPO "title" "body"
 
      # Multi-line body (RECOMMENDED for real specs):
-     #   1. Write the body to a scratch file in .igor/ (gitignored).
+     #   1. Write the body to a scratch file in .agent/ (gitignored).
      #   2. Pass the file path -- no command substitution needed,
      #      static-analyzable, no permission-hook fights.
-     agent-enqueue.sh $W_REPO "title" --body-file .igor/issue-body.md
+     agent-enqueue.sh $W_REPO "title" --body-file .agent/issue-body.md
 
    - Title: short, imperative, conventional-commit-style
      ("fix: footer links wrap on narrow viewports").
@@ -1955,15 +1969,15 @@ EOF
   # (so the READING_LOG load earlier can use it).
   W_SYSTEM_PROMPT=$(brain_system_prompt "$BRAIN_PATH")
 
-  log "invoking claude for website work (timeout ${IGOR_TIMEOUT})"
-  W_LOG="$W_WORKTREE/.igor/claude-output.log"
+  log "invoking claude for website work (timeout ${TICK_TIMEOUT})"
+  W_LOG="$W_WORKTREE/.agent/claude-output.log"
   W_START=$(date +%s)
   set +e
-  timeout --kill-after=30s "$IGOR_TIMEOUT" \
+  timeout --kill-after=30s "$TICK_TIMEOUT" \
     claude \
-      --model "$IGOR_MODEL" \
+      --model "$AGENT_MODEL" \
       --append-system-prompt "$W_SYSTEM_PROMPT" \
-      --settings "$IGOR_HOME/agent-settings.json" \
+      --settings "$AGENT_HOME/agent-settings.json" \
       --max-turns 50 \
       --print "$W_USER_MSG" 2>&1 | tee "$W_LOG"
   W_EXIT=${PIPESTATUS[0]}
@@ -1983,7 +1997,7 @@ fi  # end if-claude-code-site-work
   # W_JOURNAL_APPENDED tracks whether the journal actually made it
   # into brain (vs being skipped as a duplicate) so the outcome log
   # message downstream doesn't lie.
-  W_JOURNAL_SRC="$W_WORKTREE/.igor/IGOR_JOURNAL.md"
+  W_JOURNAL_SRC="$W_WORKTREE/.agent/AGENT_JOURNAL.md"
   W_JOURNAL_APPENDED=0
   W_JDATE=$(date +%Y-%m-%d)
   W_JFILE="$BRAIN_PATH/journal/${W_JDATE}.md"
@@ -2004,14 +2018,14 @@ fi  # end if-claude-code-site-work
   commit_brain_changes "$BRAIN_PATH" "journal: discretionary on $W_REPO"
 
   # Harness-owned commits: Claude doesn't run git commit; the harness
-  # commits anything dirty (outside .igor/) at end of tick. Subject is
-  # derived from .igor/PR_BODY.md's first checklist item; falls back
+  # commits anything dirty (outside .agent/) at end of tick. Subject is
+  # derived from .agent/PR_BODY.md's first checklist item; falls back
   # to a generic message. Claude's `git add` and commit instructions
   # were removed from his prompt -- saves tool calls and eliminates
   # the "forgot to commit" failure mode structurally.
   cd "$W_WORKTREE"
   W_DIRTY_PATHS=$(git status --porcelain 2>/dev/null \
-    | awk '$2 !~ /^\.igor\// { print $2 }')
+    | awk '$2 !~ /^\.agent\// { print $2 }')
   if [ -n "$W_DIRTY_PATHS" ]; then
     W_DIRTY_COUNT=$(echo "$W_DIRTY_PATHS" | wc -l | tr -d ' ')
     # Stage first so derive_commit_subject can use `git diff
@@ -2020,7 +2034,7 @@ fi  # end if-claude-code-site-work
     # API-tier diff, and the API responds conversationally to an
     # empty input ("I'm ready to generate...").
     git add -A
-    W_SUBJECT=$(derive_commit_subject "$W_WORKTREE/.igor/PR_BODY.md" "$W_WORKTREE" "chore: discretionary website tick")
+    W_SUBJECT=$(derive_commit_subject "$W_WORKTREE/.agent/PR_BODY.md" "$W_WORKTREE" "chore: discretionary website tick")
     log "harness-commit: $W_DIRTY_COUNT file(s), subject: $W_SUBJECT"
     git commit --quiet -m "$W_SUBJECT" || log "warning: harness commit failed"
   fi
@@ -2030,10 +2044,10 @@ fi  # end if-claude-code-site-work
 
   if [ "$W_COMMITS" -eq 0 ]; then
     # If site-work mode filed an issue via agent-enqueue.sh, the
-    # marker file is in the worktree. Log Igor's examination time
+    # marker file is in the worktree. Log the agent's examination time
     # on that issue -- his work this tick produced the spec, the
     # time belongs there.
-    W_FILED_MARKER="$W_WORKTREE/.igor/IGOR_FILED_ISSUE"
+    W_FILED_MARKER="$W_WORKTREE/.agent/AGENT_FILED_ISSUE"
     if [ -f "$W_FILED_MARKER" ]; then
       W_FILED_REF=$(head -1 "$W_FILED_MARKER" | tr -d '[:space:]')
       W_FILED_REPO="${W_FILED_REF%#*}"
@@ -2120,8 +2134,8 @@ fi  # end if-claude-code-site-work
     W_NEW_PR_NUMBER="$W_EXISTING_PR"
   else
     W_PR_TITLE=$(git log -1 --pretty=%s)
-    if [ -f .igor/PR_BODY.md ]; then
-      W_PR_BODY=$(cat .igor/PR_BODY.md)
+    if [ -f .agent/PR_BODY.md ]; then
+      W_PR_BODY=$(cat .agent/PR_BODY.md)
     else
       log "WARNING: PR_BODY.md was NOT written by claude this tick. AGENTS.md requires it on every ship; this is not optional. Attempting harness-side fallback via Haiku."
       W_PR_BODY=$(derive_pr_body "$W_WORKTREE" "$W_BASE")
@@ -2133,7 +2147,7 @@ fi  # end if-claude-code-site-work
       fi
     fi
     W_PR_BODY+=$(build_deps_section "$W_BASE")
-    W_NEW_PR_NUMBER=$(forgejo_open_pr "$W_REPO" "$W_BRANCH" "$W_BASE" "$W_PR_TITLE" "$W_PR_BODY" "${IGOR_REVIEWER:-}")
+    W_NEW_PR_NUMBER=$(forgejo_open_pr "$W_REPO" "$W_BRANCH" "$W_BASE" "$W_PR_TITLE" "$W_PR_BODY" "${FORGEJO_REVIEWER:-}")
     log "discretionary: PR opened on $W_REPO${W_NEW_PR_NUMBER:+ (#$W_NEW_PR_NUMBER)}"
   fi
 
@@ -2168,7 +2182,7 @@ log "claiming ${FORGEJO_REPO}#${ISSUE_NUMBER}: ${ISSUE_TITLE}"
 log "branch: ${BRANCH}"
 
 # Export the tier-1 issue context so agent-block.sh / agent-report.sh
-# can find the current issue. BOT_USER and IGOR_REVIEWER are
+# can find the current issue. BOT_USER and FORGEJO_REVIEWER are
 # exported earlier (right after bot-identity resolution) so they're
 # available to agent-ask.sh from any tick shape (tier-1, tier-3,
 # PR-review, maintenance). PATH is set at the top of the script so
@@ -2205,7 +2219,7 @@ if [ ! -d "$REPO_PATH/.git" ]; then
   mkdir -p "$(dirname "$REPO_PATH")"
   if ! git clone "$CLONE_URL" "$REPO_PATH"; then
     log "clone failed, blocking"
-    agent-block.sh "Igor could not clone \`$CLONE_URL\`. Verify the bot user has SSH access to this repo and try again."
+    agent-block.sh "The agent could not clone \`$CLONE_URL\`. Verify the bot user has SSH access to this repo and try again."
     exit 0
   fi
 fi
@@ -2214,23 +2228,23 @@ fi
 
 if [ ! -f "$REPO_PATH/CLAUDE.md" ]; then
   log "preflight: missing CLAUDE.md, blocking"
-  agent-block.sh "Igor cannot work this repo: \`CLAUDE.md\` is missing at the repo root.
+  agent-block.sh "The agent cannot work this repo: \`CLAUDE.md\` is missing at the repo root.
 
-Igor relies on \`CLAUDE.md\` for project conventions (test commands, code style, gotchas). Add one, remove \`Status/Blocked\`, and the next tick will re-claim this issue."
+The agent relies on \`CLAUDE.md\` for project conventions (test commands, code style, gotchas). Add one, remove \`Status/Blocked\`, and the next tick will re-claim this issue."
   exit 0
 fi
 
 # -- Worktree --------------------------------------------------
 
-mkdir -p "$IGOR_STATE_DIR/worktrees"
-WORKTREE="$IGOR_STATE_DIR/worktrees/$(worktree_key "$FORGEJO_REPO" "$ISSUE_NUMBER")"
+mkdir -p "$AGENT_STATE_DIR/worktrees"
+WORKTREE="$AGENT_STATE_DIR/worktrees/$(worktree_key "$FORGEJO_REPO" "$ISSUE_NUMBER")"
 
 # Recovery should have cleared any stale path; this is a belt-and-braces check.
 if [ -e "$WORKTREE" ]; then
   log "stale worktree at $WORKTREE -- aborting"
   forgejo_unassign_all "$FORGEJO_REPO" "$ISSUE_NUMBER"
   forgejo_comment "$FORGEJO_REPO" "$ISSUE_NUMBER" \
-    "Igor aborted: stale worktree from a previous run was present at \`$WORKTREE\`. Investigate and clear before retrying."
+    "The agent aborted: stale worktree from a previous run was present at \`$WORKTREE\`. Investigate and clear before retrying."
   WORKTREE=""
   exit 4
 fi
@@ -2248,15 +2262,15 @@ cd "$WORKTREE"
 # files in cache-friendly order. Brain files are bootstrap-required;
 # log a warning if identity.md is missing rather than crashing the
 # tick (brain_system_prompt handles the missing case by skipping).
-BRAIN_PATH="$IGOR_REPO_ROOT/${BOT_USER}/brain"
+BRAIN_PATH="$AGENT_REPO_ROOT/${BOT_USER}/brain"
 [ -f "$BRAIN_PATH/identity.md" ] \
   || log "warning: brain identity.md missing at $BRAIN_PATH"
 SYSTEM_PROMPT=$(brain_system_prompt "$BRAIN_PATH")
 
 # RAG context: the issue title + body is the most concrete signal of
-# what Igor is about to work on. Pulls past journal entries, related
+# what the agent is about to work on. Pulls past journal entries, related
 # commits, and prior reviews touching the same area.
-TIER1_RAG_CONTEXT=$(IGOR_BRAIN_PATH="$BRAIN_PATH" rag_query "${ISSUE_TITLE}
+TIER1_RAG_CONTEXT=$(AGENT_BRAIN_PATH="$BRAIN_PATH" rag_query "${ISSUE_TITLE}
 ${ISSUE_BODY}")
 [ -n "$TIER1_RAG_CONTEXT" ] && log "rag: surfaced past context for tier-1 issue work"
 
@@ -2277,15 +2291,15 @@ ${TIER1_RAG_CONTEXT:-(no past context retrieved this tick)}
 EOF
 )
 
-log "invoking claude (timeout ${IGOR_TIMEOUT})"
-CLAUDE_LOG="$WORKTREE/.igor/claude-output.log"
+log "invoking claude (timeout ${TICK_TIMEOUT})"
+CLAUDE_LOG="$WORKTREE/.agent/claude-output.log"
 START_TS=$(date +%s)
 set +e
-timeout --kill-after=30s "$IGOR_TIMEOUT" \
+timeout --kill-after=30s "$TICK_TIMEOUT" \
   claude \
-    --model "$IGOR_MODEL" \
+    --model "$AGENT_MODEL" \
     --append-system-prompt "$SYSTEM_PROMPT" \
-    --settings "$IGOR_HOME/agent-settings.json" \
+    --settings "$AGENT_HOME/agent-settings.json" \
     --max-turns 50 \
     --print "$USER_MSG" 2>&1 | tee "$CLAUDE_LOG"
 CLAUDE_EXIT=${PIPESTATUS[0]}
@@ -2296,31 +2310,31 @@ log "claude exited $CLAUDE_EXIT (elapsed ${ELAPSED}s)"
 normalize_worktree_dashes "$WORKTREE"
 
 # Harness-owned commits: see derive_commit_subject + tier-3 comment.
-# Auto-commit anything dirty outside .igor/ so Claude doesn't have
+# Auto-commit anything dirty outside .agent/ so Claude doesn't have
 # to run git himself.
 cd "$WORKTREE"
 DIRTY_PATHS=$(git status --porcelain 2>/dev/null \
-  | awk '$2 !~ /^\.igor\// { print $2 }')
+  | awk '$2 !~ /^\.agent\// { print $2 }')
 if [ -n "$DIRTY_PATHS" ]; then
   DIRTY_COUNT=$(echo "$DIRTY_PATHS" | wc -l | tr -d ' ')
   # Stage first so derive_commit_subject can see new files via
   # `git diff --cached`. See tier-3 comment for the failure mode
   # without this.
   git add -A
-  COMMIT_SUBJECT=$(derive_commit_subject "$WORKTREE/.igor/PR_BODY.md" "$WORKTREE" "chore: issue #${ISSUE_NUMBER} -- ${ISSUE_TITLE}")
+  COMMIT_SUBJECT=$(derive_commit_subject "$WORKTREE/.agent/PR_BODY.md" "$WORKTREE" "chore: issue #${ISSUE_NUMBER} -- ${ISSUE_TITLE}")
   log "harness-commit: $DIRTY_COUNT file(s), subject: $COMMIT_SUBJECT"
   git commit --quiet -m "$COMMIT_SUBJECT" || log "warning: harness commit failed"
 fi
 
 # -- Brain journal: append Claude's reflection if present ------
 #
-# Claude optionally writes .igor/IGOR_JOURNAL.md before exit. The
+# Claude optionally writes .agent/AGENT_JOURNAL.md before exit. The
 # harness owns the brain commit -- Claude's worktree never reaches
 # across to brain. Best-effort: if pull/push fails, log it but
 # don't fail the tick over a journal entry.
 
-JOURNAL_SRC="$WORKTREE/.igor/IGOR_JOURNAL.md"
-BRAIN_LOCAL="$IGOR_REPO_ROOT/${BOT_USER}/brain"
+JOURNAL_SRC="$WORKTREE/.agent/AGENT_JOURNAL.md"
+BRAIN_LOCAL="$AGENT_REPO_ROOT/${BOT_USER}/brain"
 JOURNAL_DATE=$(date +%Y-%m-%d)
 JOURNAL_FILE="$BRAIN_LOCAL/journal/${JOURNAL_DATE}.md"
 
@@ -2366,7 +2380,7 @@ elif [ "$COMMITS" -gt 0 ]; then
   if [ "$ACTUAL_BRANCH" != "$BRANCH" ]; then
     # OUTCOME: blocked
     log "outcome: blocked (HEAD on $ACTUAL_BRANCH, expected $BRANCH)"
-    agent-block.sh "Igor refused to push: HEAD ended up on \`$ACTUAL_BRANCH\` instead of \`$BRANCH\`. Something went sideways during the work -- investigate before re-queueing."
+    agent-block.sh "The agent refused to push: HEAD ended up on \`$ACTUAL_BRANCH\` instead of \`$BRANCH\`. Something went sideways during the work -- investigate before re-queueing."
     exit 0
   fi
 
@@ -2393,11 +2407,11 @@ Split this into smaller issues, then remove \`Status/Blocked\` and the next tick
   if [ -n "$OFFLIMITS" ]; then
     # OUTCOME: blocked
     log "outcome: blocked (off-limits files touched)"
-    agent-block.sh "Igor refused to push: this PR modifies CI workflow files, which are operator-managed and off-limits to ticks. Paths touched:
+    agent-block.sh "The agent refused to push: this PR modifies CI workflow files, which are operator-managed and off-limits to ticks. Paths touched:
 
 $(echo "$OFFLIMITS" | sed 's/^/  - /')
 
-Revert those changes (or do them yourself outside Igor) and remove \`Status/Blocked\` to re-queue. If a workflow change is genuinely needed, file a separate issue for the human to handle."
+Revert those changes (or do them yourself outside the agent) and remove \`Status/Blocked\` to re-queue. If a workflow change is genuinely needed, file a separate issue for the human to handle."
     exit 0
   fi
 
@@ -2428,8 +2442,8 @@ Revert those changes (or do them yourself outside Igor) and remove \`Status/Bloc
     NEW_PR_NUMBER="$EXISTING_PR"
   else
     PR_TITLE=$(git log -1 --pretty=%s)
-    if [ -f .igor/PR_BODY.md ]; then
-      PR_BODY=$(cat .igor/PR_BODY.md)
+    if [ -f .agent/PR_BODY.md ]; then
+      PR_BODY=$(cat .agent/PR_BODY.md)
     else
       log "WARNING: PR_BODY.md was NOT written by claude this tick. AGENTS.md requires it on every ship; this is not optional. Attempting harness-side fallback via Haiku."
       PR_BODY=$(derive_pr_body "$WORKTREE" "$PR_BASE")
@@ -2443,12 +2457,12 @@ Revert those changes (or do them yourself outside Igor) and remove \`Status/Bloc
     PR_BODY+=$(build_deps_section "$PR_BASE")
     PR_BODY+=$'\n\nCloses #'"$ISSUE_NUMBER"
 
-    NEW_PR_NUMBER=$(forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$PR_TITLE" "$PR_BODY" "${IGOR_REVIEWER:-}")
+    NEW_PR_NUMBER=$(forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$PR_TITLE" "$PR_BODY" "${FORGEJO_REVIEWER:-}")
     log "PR opened${NEW_PR_NUMBER:+ (#$NEW_PR_NUMBER)}"
   fi
 
   # Record Claude's wall-clock on the ISSUE (Forgejo time tracking).
-  # Split rationale: Igor's coding time belongs on the issue (his
+  # Split rationale: the agent's coding time belongs on the issue (his
   # work); reviewer time belongs on the PR (the human's work during
   # review). PR-review ticks log on the PR. Discretionary ticks (no
   # issue) log on the PR they create. Best-effort; never fail the
@@ -2469,18 +2483,18 @@ else
   # Noop-loop guard. If the bot already left a "no work produced"
   # comment on this issue, this is the second attempt -- block rather
   # than burn another tick on it.
-  NOOP_PREFIX="Igor completed with no work produced"
+  NOOP_PREFIX="The agent completed with no work produced"
   PRIOR_NOOPS=$(forgejo_count_bot_comments_matching \
     "$FORGEJO_REPO" "$ISSUE_NUMBER" "$BOT_USER" "$NOOP_PREFIX")
   if [ "${PRIOR_NOOPS:-0}" -ge 1 ]; then
     # OUTCOME: blocked
     log "outcome: blocked (repeated noop, prior count: $PRIOR_NOOPS)"
-    agent-block.sh "Igor produced no work on this issue twice. The issue is probably unclear, requires context Claude can't reach, or has a setup problem. Investigate, then remove \`Status/Blocked\` to re-queue."
+    agent-block.sh "The agent produced no work on this issue twice. The issue is probably unclear, requires context Claude can't reach, or has a setup problem. Investigate, then remove \`Status/Blocked\` to re-queue."
     exit 0
   fi
 
   # OUTCOME: noop
-  # Harness-commits flow: any dirty non-.igor files would already
+  # Harness-commits flow: any dirty non-.agent files would already
   # be auto-committed by the block right after Claude exits, so a
   # 0-commits outcome here means Claude truly did nothing
   # commit-worthy. No "forgot to commit" path remains.
