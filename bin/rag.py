@@ -187,13 +187,24 @@ def collect_journal_entries(brain_path: Path):
 # -- memory collector -----------------------------------------------------
 
 def collect_memory_entries(brain_path: Path):
-    """Yield row dicts for each memory file (one entry per file)."""
+    """Yield row dicts for each memory file (one entry per file).
+
+    Skips:
+      - MEMORY.md and README.md (indexes/intros, not content)
+      - memories/reading/sources/*.md (per-domain URL ledgers --
+        bookkeeping checkbox lists, not semantic memory; they grow
+        unboundedly as new domains are discovered and they make
+        retrievals noisier rather than richer)
+    """
     mem_dir = brain_path / "memories"
     if not mem_dir.is_dir():
         return
     skip_names = {"MEMORY.md", "README.md"}
+    skip_subtrees = {mem_dir / "reading" / "sources"}
     for mf in sorted(mem_dir.rglob("*.md")):
         if mf.name in skip_names:
+            continue
+        if any(skip in mf.parents for skip in skip_subtrees):
             continue
         try:
             content = mf.read_text(encoding="utf-8").strip()
