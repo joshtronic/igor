@@ -14,7 +14,7 @@ A timer fires `bin/tick.sh`. Per tick:
 4. **Discovery.** List every repo the bot has push access to (one API call).
    For each:
    - If we haven't cloned it yet, run onboarding validation via the Forgejo
-     API. Repos that fail get an auto-filed `Status/Needs More Info` ticket
+     API. Repos that fail get an auto-filed `Status/Need More Info` ticket
      listing what's missing (or a reopen on the existing one), and are
      excluded from discovery until the human closes the ticket.
    - If there's an open bot-authored PR, skip -- one PR at a time per repo
@@ -63,7 +63,7 @@ label and the agent picks it up.
 
 Two labels carry the state machine for agent-work tickets. `Status/Blocked`
 comes from Forgejo's Advanced label template; `Agent` is custom (created
-per-repo). Onboarding-failure tickets also use `Status/Needs More Info` and
+per-repo). Onboarding-failure tickets also use `Status/Need More Info` and
 `Priority/Critical`, both from the Advanced template. See
 [onboarding-a-repo.md](onboarding-a-repo.md) for how to set them up.
 
@@ -84,7 +84,7 @@ Useful queries:
 - In flight: `is:open label:Agent assignee:<bot user>`
 - Stuck: `is:open label:Status/Blocked`
 
-The agent also files `Status/Needs More Info` + `Priority/Critical` tickets for repos
+The agent also files `Status/Need More Info` + `Priority/Critical` tickets for repos
 that fail onboarding validation. See [onboarding-a-repo.md](onboarding-a-repo.md).
 
 ## Pieces

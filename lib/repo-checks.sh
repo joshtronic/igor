@@ -113,7 +113,7 @@ check_ci_workflow() {
 # specifics in the onboarding ticket.
 check_labels() {
   local repo="$1" name missing=""
-  for name in "Agent" "Status/Blocked" "Status/Needs More Info" "Priority/Critical"; do
+  for name in "Agent" "Status/Blocked" "Status/Need More Info" "Priority/Critical"; do
     if ! forgejo_repo_has_label "$repo" "$name"; then
       missing="${missing:+$missing, }\`$name\`"
     fi
@@ -165,7 +165,7 @@ validate_repo_via_api() {
   local labels_missing
   labels_missing=$(check_labels "$repo")
   if [ -z "$labels_missing" ]; then
-    _emit 0 "Required labels present (Agent, Status/Blocked, Status/Needs More Info, Priority/Critical)" ""
+    _emit 0 "Required labels present (Agent, Status/Blocked, Status/Need More Info, Priority/Critical)" ""
   else
     _emit 1 "Required labels present" \
       "create missing label(s): ${labels_missing} -- the Status/* and Priority/* labels come from Forgejo's Advanced label template (Settings -> Labels -> load template); the \`Agent\` label is custom"
@@ -213,8 +213,8 @@ EOF
   if [ -z "$existing" ] || [ "$existing" = "null" ] || [ "$existing" = "empty" ]; then
     log "onboarding: filing fresh ticket on $repo"
     num=$(forgejo_open_issue "$repo" "Repo not ready for the agent: missing scaffolding" "$body")
-    forgejo_add_label "$repo" "$num" "Status/Needs More Info" 2>/dev/null \
-      || log "warning: could not apply 'Status/Needs More Info' on $repo (label missing?)"
+    forgejo_add_label "$repo" "$num" "Status/Need More Info" 2>/dev/null \
+      || log "warning: could not apply 'Status/Need More Info' on $repo (label missing?)"
     forgejo_add_label "$repo" "$num" "Priority/Critical" 2>/dev/null \
       || log "warning: could not apply 'Priority/Critical' on $repo (label missing?)"
     return

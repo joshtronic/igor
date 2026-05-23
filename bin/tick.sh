@@ -629,7 +629,7 @@ in_maintenance_window() {
 # the caller falls through to PR review / issues / discretionary).
 #
 # Findings flow: Claude writes .agent/AGENT_MAINTENANCE_FINDINGS.md,
-# harness files a Status/Needs More Info issue for human triage.
+# harness files a Status/Need More Info issue for human triage.
 do_maintenance_tick() {
   in_maintenance_window || return 1
 
@@ -747,8 +747,8 @@ EOF
     m_title="Maintenance pass $(date +%Y-%m-%d): findings"
     m_body=$(cat "$findings")
     m_num=$(forgejo_open_issue "$target" "$m_title" "$m_body")
-    forgejo_add_label "$target" "$m_num" "Status/Needs More Info" 2>/dev/null \
-      || log "warning: could not apply 'Status/Needs More Info' on #$m_num ($target)"
+    forgejo_add_label "$target" "$m_num" "Status/Need More Info" 2>/dev/null \
+      || log "warning: could not apply 'Status/Need More Info' on #$m_num ($target)"
 
     local m_priority_file="$m_worktree/.agent/AGENT_MAINTENANCE_PRIORITY"
     if [ -s "$m_priority_file" ]; then
@@ -1937,7 +1937,7 @@ What to do:
 
      agent-ask.sh igor/brain "harness gap: <short summary>" "<details>"
 
-   This puts a Status/Needs More Info issue on Josh's dashboard so
+   This puts a Status/Need More Info issue on Josh's dashboard so
    the gap is visible without him scrolling journalctl. Journal
    entries are private and easy to miss; issues are not.
 
