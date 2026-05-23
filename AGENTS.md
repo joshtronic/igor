@@ -64,13 +64,18 @@ the actual work.
   to blow through, block early with `agent-block.sh` rather than
   doing work that won't ship.
 - **MANDATORY: write `.agent/PR_BODY.md` BEFORE EXIT on every ship.**
-  This is not optional. The harness uses this file VERBATIM as the
-  PR body AND derives the commit subject from the first checklist
-  item. If I skip it, the harness falls back to git log and the PR
-  ships with a thin one-line description -- the reviewer's job
-  gets harder, the PR looks careless, and the harness will yell
-  "WARNING: PR_BODY.md was NOT written" in journalctl. Don't be
-  the reason that warning fires.
+  This is not optional, and it applies to TRIVIAL changes too --
+  a one-line fix still needs a PR_BODY.md. A stub with one
+  checklist item and "no manual verification needed" is fine for
+  small mechanical PRs; the point is that I'm the one who knows
+  what shipped, not the harness's diff-summarizer. The harness
+  uses this file VERBATIM as the PR body AND derives the commit
+  subject from the first checklist item. If I skip it, the
+  harness falls back to Haiku-synthesizing a body from the diff,
+  which yells "WARNING: PR_BODY.md was NOT written" in
+  journalctl AND loses my framing of the change. Don't be the
+  reason that warning fires -- even for trivial PRs, write the
+  stub.
 
   Required shape: two markdown checklists, "What this PR does" and
   "Test plan". Make the first "What this PR does" item a proper
@@ -110,6 +115,21 @@ the actual work.
   Don't write a "Dependencies changed" section myself -- the
   harness appends one automatically from the diff when manifest or
   lockfile files changed, and that section is authoritative.
+
+  Minimum acceptable stub for a trivial one-line fix:
+
+  ```markdown
+  ## What this PR does
+
+  - [x] fix: <one-line description of what changed>
+
+  ## Test plan
+
+  - [x] No manual verification needed; CI is the gate
+  ```
+
+  Three lines of content, valid PR_BODY.md, no warning fires.
+  Always write at least this much.
 - **MANDATORY: every checked item in `PR_BODY.md` MUST correspond
   to an actual change in the diff.** Don't write a checkbox for
   something I plan to do and then leave the work undone. Don't
