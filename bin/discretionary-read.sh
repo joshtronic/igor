@@ -257,15 +257,18 @@ parse_blacklist() {
 is_blacklisted() {
   local url="$1"
   is_blacklist_exempt "$url" && return 1
-  local host
+  local host entry
   host=$(url_host "$url")
-  # Compare hosts (not raw URLs) so http vs https, trailing slash,
-  # www. differences don't cause false negatives. url_host already
-  # strips the www. prefix.
-  parse_blacklist | while IFS= read -r entry; do
+  # Process substitution + early-return loop. The previous shape
+  # (parse_blacklist | while ... | grep -q MATCH) tripped SIGPIPE:
+  # grep -q closes stdin on first match and the upstream printf
+  # writes to a dead pipe. Tiny error but spammed journalctl on
+  # every is_blacklisted call.
+  while IFS= read -r entry; do
     [ -z "$entry" ] && continue
-    [ "$(url_host "$entry")" = "$host" ] && printf 'MATCH\n'
-  done | grep -q MATCH
+    [ "$(url_host "$entry")" = "$host" ] && return 0
+  done < <(parse_blacklist)
+  return 1
 }
 
 # Create a ledger with just the header. No sitemap fetch.
