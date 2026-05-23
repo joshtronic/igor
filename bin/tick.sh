@@ -566,6 +566,50 @@ journal_is_duplicate() {
   [[ "$target_content" == *"$new_content"* ]]
 }
 
+# Append a journal entry to today's brain journal. ALWAYS writes
+# the "## TS -- <mode-suffix>" header so the recent_modes signal
+# in discretionary_assess_cadence reflects every tick that actually
+# fired, regardless of whether Claude voluntarily wrote a body.
+# Header = existence proof of the tick. Body = Claude's reflection,
+# if any.
+#
+# Args:
+#   $1 -- mode-suffix (free-form text after the "-- " in the header).
+#         The cadence parser keys off this:
+#           "discretionary reading"   -> read mode
+#           "discretionary on <repo>" -> work mode
+#           "<owner>/<repo>#<num>"    -> work mode (tier-1 issue)
+#   $2 -- (optional) path to a body source file. When present and
+#         non-empty and not a byte-identical duplicate of today's
+#         existing content, the file contents land under the header.
+#         Otherwise a short placeholder body lands so the heading
+#         isn't orphan.
+append_journal_entry() {
+  local mode_suffix="$1" body_src="${2:-}"
+  local brain="${AGENT_BRAIN_PATH:-${BRAIN_PATH:-$AGENT_REPO_ROOT/${BOT_USER}/brain}}"
+  local journal_date journal_file journal_ts body
+  journal_date=$(date +%Y-%m-%d)
+  journal_file="$brain/journal/${journal_date}.md"
+  journal_ts=$(date +%Y-%m-%dT%H:%M:%S%z)
+  mkdir -p "$(dirname "$journal_file")"
+
+  body="(no body -- tick completed without a journal entry)"
+  if [ -n "$body_src" ] && [ -s "$body_src" ]; then
+    if journal_is_duplicate "$body_src" "$journal_file"; then
+      log "journal: body duplicates an earlier entry today -- header only"
+      body="(no body -- duplicate of an earlier entry today)"
+    else
+      body=$(cat "$body_src")
+    fi
+  fi
+
+  {
+    printf '\n## %s -- %s\n\n' "$journal_ts" "$mode_suffix"
+    printf '%s\n' "$body"
+  } >> "$journal_file"
+  log "journal: appended (${mode_suffix})"
+}
+
 # Idempotent clone-if-missing, pull-if-present. Creates the owner
 # subdir as needed. Pulls existing clones so brain identity changes
 # and website content updates propagate to the agent on every tick.
@@ -1170,15 +1214,18 @@ Schema:
       ;;
   esac
 
-  # Hard consecutive-read cap. If the model picks read AND the last 3
-  # entries in recent_modes are all "read", override to work. The
-  # model can rationalize anything; this is the floor.
-  if [ "$choice" = "read" ]; then
+  # Hard consecutive-read cap, conditional on capacity. The cap is
+  # meant to break smoke-break streaks when there's actual room to
+  # ship -- NOT to pile on PRs when the human is already swamped.
+  # Fires only when the active queue is small (< 2 active PRs). If
+  # active_prs is high, the model's "keep reading" judgment stands;
+  # the bot keeps reading until the human catches up.
+  if [ "$choice" = "read" ] && [ "${active_prs:-0}" -lt 2 ]; then
     local tail3
     tail3=$(printf '%s' "$recent_modes" | tr ',' '\n' | tail -3 | tr '\n' ',')
     if [ "$tail3" = "read,read,read," ]; then
       choice="work"
-      reason="consecutive-read cap: last 3 ticks were all reading, forcing work"
+      reason="consecutive-read cap: last 3 ticks were all reading and queue is light, forcing work"
     fi
   fi
 
@@ -1844,30 +1891,13 @@ if [ -z "$WINNER" ]; then
       W_ELAPSED=$(( $(date +%s) - W_START ))
       log "discretionary: reading mode succeeded in ${W_ELAPSED}s"
 
-      # Append journal entry (if Claude wrote one), then commit
-      # any brain mutations regardless. The reading executor also
-      # updates memories/reading/log.md, sources.md weight tweaks,
-      # and blog-ideas.md (post-tick ideas reflection) -- all of
-      # which need to land even if no journal was produced.
-      R_JOURNAL_SRC="$W_SCRATCH/.agent/AGENT_JOURNAL.md"
-      R_JDATE=$(date +%Y-%m-%d)
-      R_JFILE="$BRAIN_PATH/journal/${R_JDATE}.md"
-      if [ -s "$R_JOURNAL_SRC" ]; then
-        R_JTS=$(date +%Y-%m-%dT%H:%M:%S%z)
-        if journal_is_duplicate "$R_JOURNAL_SRC" "$R_JFILE"; then
-          log "journal: reading entry duplicates an earlier entry today -- skipping append"
-        else
-          log "journal: appending reading-mode tick"
-          mkdir -p "$BRAIN_PATH/journal"
-          {
-            printf '\n## %s -- discretionary reading\n\n' "$R_JTS"
-            cat "$R_JOURNAL_SRC"
-          } >> "$R_JFILE"
-        fi
-      else
-        log "discretionary: reading mode produced no journal entry"
-      fi
-      commit_brain_changes "$BRAIN_PATH" "journal: discretionary reading on ${R_JDATE}"
+      # Always log the tick to brain journal (header guaranteed
+      # so recent_modes reflects activity). The reading executor
+      # also updates memories/reading/log.md, sources.md weight
+      # tweaks, and blog-ideas.md (post-tick ideas reflection) --
+      # all of which need to land regardless.
+      append_journal_entry "discretionary reading" "$W_SCRATCH/.agent/AGENT_JOURNAL.md"
+      commit_brain_changes "$BRAIN_PATH" "journal: discretionary reading on $(date +%Y-%m-%d)"
     else
       log "warning: reading mode failed -- this mode does not fall through to other modes (no website worktree set up)"
     fi
@@ -2137,32 +2167,13 @@ EOF
 
 fi  # end if-claude-code-site-work
 
-  # Journal append (best-effort; gated on Claude/executor having
-  # written a journal source). Brain commit happens after, regardless
-  # -- the harness-side executors (discretionary-post.sh's dedupe,
-  # the ideas reflection, source-weight tweaks) mutate brain without
-  # writing a journal, and those changes need to land too.
-  # W_JOURNAL_APPENDED tracks whether the journal actually made it
-  # into brain (vs being skipped as a duplicate) so the outcome log
-  # message downstream doesn't lie.
+  # Always log the tick. Header is guaranteed (so recent_modes
+  # reflects activity) and Claude's body lands if he wrote one.
+  # Brain commit happens after regardless -- the harness-side
+  # executors (discretionary-post.sh's dedupe, ideas reflection,
+  # source-weight tweaks) also mutate brain.
   W_JOURNAL_SRC="$W_WORKTREE/.agent/AGENT_JOURNAL.md"
-  W_JOURNAL_APPENDED=0
-  W_JDATE=$(date +%Y-%m-%d)
-  W_JFILE="$BRAIN_PATH/journal/${W_JDATE}.md"
-  if [ -s "$W_JOURNAL_SRC" ]; then
-    W_JTS=$(date +%Y-%m-%dT%H:%M:%S%z)
-    if journal_is_duplicate "$W_JOURNAL_SRC" "$W_JFILE"; then
-      log "journal: discretionary entry duplicates an earlier entry today -- skipping append"
-    else
-      log "journal: appending discretionary website tick"
-      mkdir -p "$BRAIN_PATH/journal"
-      {
-        printf '\n## %s -- discretionary on %s\n\n' "$W_JTS" "$W_REPO"
-        cat "$W_JOURNAL_SRC"
-      } >> "$W_JFILE"
-      W_JOURNAL_APPENDED=1
-    fi
-  fi
+  append_journal_entry "discretionary on $W_REPO" "$W_JOURNAL_SRC"
   commit_brain_changes "$BRAIN_PATH" "journal: discretionary on $W_REPO"
 
   # Harness-owned commits: Claude doesn't run git commit; the harness
@@ -2206,13 +2217,8 @@ fi  # end if-claude-code-site-work
           || log "warning: could not log time on ${W_FILED_REPO}#${W_FILED_NUM}"
       fi
       log "discretionary: site-work tick filed ${W_FILED_REF}"
-    elif [ -s "$W_JOURNAL_SRC" ] && [ "$W_JOURNAL_APPENDED" -eq 1 ]; then
-      # Reading tick: journal recorded, no PR expected. Not a noop.
-      log "discretionary: reading tick complete on $W_REPO -- journal recorded, no PR"
     elif [ -s "$W_JOURNAL_SRC" ]; then
-      # Reading tick BUT journal got dedup-skipped -- we paid for the
-      # work and dropped it. Flag loudly so this shows up in journalctl.
-      log "discretionary: reading tick complete on $W_REPO -- journal SKIPPED as duplicate, content lost (dedup may need loosening)"
+      log "discretionary: reading tick complete on $W_REPO -- journal recorded, no PR"
     else
       log "discretionary: no work produced on $W_REPO"
     fi
@@ -2482,22 +2488,7 @@ fi
 
 JOURNAL_SRC="$WORKTREE/.agent/AGENT_JOURNAL.md"
 BRAIN_LOCAL="$AGENT_REPO_ROOT/${BOT_USER}/brain"
-JOURNAL_DATE=$(date +%Y-%m-%d)
-JOURNAL_FILE="$BRAIN_LOCAL/journal/${JOURNAL_DATE}.md"
-
-if [ -s "$JOURNAL_SRC" ]; then
-  JOURNAL_TS=$(date +%Y-%m-%dT%H:%M:%S%z)
-  if journal_is_duplicate "$JOURNAL_SRC" "$JOURNAL_FILE"; then
-    log "journal: entry duplicates an earlier entry today -- skipping append"
-  else
-    log "journal: appending tick reflection to brain/journal/${JOURNAL_DATE}.md"
-    mkdir -p "$BRAIN_LOCAL/journal"
-    {
-      printf '\n## %s -- %s#%s\n\n' "$JOURNAL_TS" "$FORGEJO_REPO" "$ISSUE_NUMBER"
-      cat "$JOURNAL_SRC"
-    } >> "$JOURNAL_FILE"
-  fi
-fi
+append_journal_entry "${FORGEJO_REPO}#${ISSUE_NUMBER}" "$JOURNAL_SRC"
 commit_brain_changes "$BRAIN_LOCAL" "journal: ${FORGEJO_REPO}#${ISSUE_NUMBER}"
 
 # -- Determine outcome -----------------------------------------
