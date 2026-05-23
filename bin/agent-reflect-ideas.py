@@ -33,10 +33,66 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 MAX_MOVES = 3
 SECTION_OPEN = "## Open ideas"
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+
+# Per-million-token pricing (USD). Mirrored from lib/cost.sh -- keep
+# in sync. Unknown models fall through to zero (tokens still logged,
+# missing $ shows up loud in cost-report).
+_PRICES = {
+    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "cache_create": 3.75, "cache_read": 0.30},
+    "claude-opus-4-7":   {"input": 15.00, "output": 75.00, "cache_create": 18.75, "cache_read": 1.50},
+    "claude-haiku-4-5":  {"input": 1.00, "output": 5.00, "cache_create": 1.25, "cache_read": 0.10},
+}
+
+
+def _prices_for(model: str) -> dict:
+    if model in _PRICES:
+        return _PRICES[model]
+    for prefix, p in _PRICES.items():
+        if model.startswith(prefix):
+            return p
+    return {}
+
+
+def record_cost(call_site: str, model: str, response: dict) -> None:
+    """Best-effort cost ledger record. Silent on any failure --
+    the ledger must never break a tick."""
+    try:
+        state_dir = os.environ.get("AGENT_STATE_DIR") or os.path.expanduser("~/.local/state/agent")
+        ledger = os.path.join(state_dir, "cost-ledger.jsonl")
+        usage = response.get("usage") or {}
+        input_t = int(usage.get("input_tokens", 0))
+        output_t = int(usage.get("output_tokens", 0))
+        cc = int(usage.get("cache_creation_input_tokens", 0))
+        cr = int(usage.get("cache_read_input_tokens", 0))
+        if input_t == 0 and output_t == 0:
+            return
+        prices = _prices_for(model)
+        usd = (input_t * prices.get("input", 0)
+               + output_t * prices.get("output", 0)
+               + cc * prices.get("cache_create", 0)
+               + cr * prices.get("cache_read", 0)) / 1_000_000
+        line = {
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "tick_pid": os.environ.get("TICK_PID", str(os.getpid())),
+            "call_site": call_site,
+            "model": model,
+            "input_tokens": input_t,
+            "output_tokens": output_t,
+            "cache_creation_input_tokens": cc,
+            "cache_read_input_tokens": cr,
+            "usd": round(usd, 6),
+            "source": "api",
+        }
+        os.makedirs(os.path.dirname(ledger), exist_ok=True)
+        with open(ledger, "a") as f:
+            f.write(json.dumps(line) + "\n")
+    except Exception:
+        pass
 
 
 def rag_query(query: str) -> str:
@@ -242,6 +298,8 @@ def call_haiku(
     except json.JSONDecodeError as e:
         log(f"API response not JSON: {e}")
         return None
+
+    record_cost("agent-reflect-ideas", model, body)
 
     try:
         text = body["content"][0]["text"]
