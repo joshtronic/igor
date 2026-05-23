@@ -1067,6 +1067,7 @@ repo_lint_passes() {
 discretionary_assess_cadence() {
   local active_prs="$1"
   local posting_allowed="$2"
+  local open_prs="${3:-$active_prs}"  # total open count; defaults to active if not passed
   local today work_reflections_today commits_today repo_dir count post_today prs_opened_today recent_modes
   today=$(date +%Y-%m-%d)
 
@@ -1150,7 +1151,8 @@ discretionary_assess_cadence() {
 Today is $today.
 
 Your activity since local midnight:
-- ACTIVE bot PRs in the queue (opened or with activity in last 8h): $active_prs
+- TOTAL open bot PRs in the queue: $open_prs
+- ACTIVE bot PRs (open AND with activity in last 8h): $active_prs
 - bot PRs opened today (any state): $prs_opened_today
 - Work reflections logged today (excludes reading ticks): $work_reflections_today
 - Commits authored today (all repos): $commits_today
@@ -1158,10 +1160,18 @@ Your activity since local midnight:
 - Posting eligible this tick: $posting_label
 - Recent tick modes (oldest -> newest): $recent_modes
 
-"ACTIVE bot PRs" filters out stale PRs the human hasn't touched recently.
-A high count means there's real queue pressure -- review-burden lives in
-that number. A low count means the human has been processing the queue
-and there's CAPACITY TO SHIP MORE, not permission to coast.
+Two queue signals matter, and they answer different questions:
+
+"ACTIVE bot PRs" = is the human engaging right now? High = they're processing
+the queue, capacity exists. Low = quiet from their side.
+
+"TOTAL open bot PRs" = how deep is the pile they have to come back to? High
+total + low active means PRs are stacking up while the human is offline or
+busy elsewhere. Piling more on top makes their next review session worse,
+even though they're not actively reviewing now.
+
+When TOTAL is high (say >= 4) regardless of ACTIVE, lean read. Don't
+out-ship the human's review velocity.
 
 If the decision is "work", the tick will: $work_label.
 If the decision is "read", the tick will: read an article + journal-reflect.
@@ -1176,20 +1186,25 @@ EOF
 
 Default bias is WORK. Reading is the opt-in break, taken when shipping more would be counterproductive.
 
-Choose \"read\" only when:
-  - Active queue is heavy (many open bot PRs with recent activity, indicating the human is still processing them)
-  - OR multiple posts already shipped today AND the queue is at least somewhat full
-  - OR the recent-modes list shows mostly work (the bot HAS been shipping; a short break is fine)
+Choose \"read\" when ANY of these hold:
+  - TOTAL open bot PRs is >= 4 (pile is deep -- don't make it worse)
+  - Active queue is heavy (open bot PRs with recent reviewer activity)
+  - Multiple posts shipped today AND queue is at least somewhat full
+  - Recent-modes list shows mostly work (a short break is fine)
 
-Choose \"work\" when:
-  - Active queue is light (room to ship -- this is NOT permission to coast)
-  - OR no PRs shipped today yet
-  - OR recent-modes shows mostly read (the bot has been on break too long; get back to it)
+Choose \"work\" when ALL of these hold:
+  - TOTAL open queue is shallow (under ~4) -- room exists in the pile
+  - Active queue is light (no current human pressure)
+  - Recent-modes shows mostly read OR no work today yet
 
 Don't congratulate yourself on a productive day if recent ticks have been
 reading. Reading ticks are NOT work output -- they're consumption. The
 recent-modes list reveals whether shipping happened recently or whether
 the bot has been coasting.
+
+CRITICAL: a low \"active\" count does NOT mean low queue pressure when
+TOTAL is high. It means the human is offline or busy elsewhere; the
+pile is still waiting for them. Don't out-ship review velocity.
 
 Output STRICT JSON. No code fences, no preamble.
 
@@ -1856,10 +1871,22 @@ if [ -z "$WINNER" ]; then
   # heaviest PR the agent opens (real content, real review burden),
   # so exempting it from queue pressure made the worst case worse.
   # Now: judgment over thresholds, applied uniformly.
-  W_CADENCE=$(discretionary_assess_cadence "$W_ACTIVE_PRS_COUNT" "$W_POSTING_ALLOWED")
+  W_CADENCE=$(discretionary_assess_cadence "$W_ACTIVE_PRS_COUNT" "$W_POSTING_ALLOWED" "$W_OPEN_PRS_COUNT")
   W_CADENCE_CHOICE=${W_CADENCE%%|*}
   W_CADENCE_REASON=${W_CADENCE#*|}
   log "discretionary: cadence -> $W_CADENCE_CHOICE ($W_CADENCE_REASON)"
+
+  # Hard cap on shipping. If the open queue is already deep, no more
+  # PRs this tick regardless of what cadence decided -- the bot can
+  # rationalize endless work tickets; this is the floor. Reading
+  # still runs (it's cheap, and the journal entry shifts the
+  # recent_modes signal for the next cadence call).
+  W_OPEN_PR_SHIP_CAP=4
+  if [ "$W_CADENCE_CHOICE" = "work" ] && [ "${W_OPEN_PRS_COUNT:-0}" -ge "$W_OPEN_PR_SHIP_CAP" ]; then
+    log "discretionary: ship-cap hit ($W_OPEN_PRS_COUNT open PRs >= $W_OPEN_PR_SHIP_CAP) -- forcing read"
+    W_CADENCE_CHOICE="read"
+    W_CADENCE_REASON="ship-cap: $W_OPEN_PRS_COUNT open PRs awaiting review, don't out-ship human review velocity"
+  fi
 
   if [ "$W_CADENCE_CHOICE" = "read" ]; then
     W_PICKED_MODE="reading"
