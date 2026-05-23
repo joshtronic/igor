@@ -222,8 +222,15 @@ ledger_strip_trailing_blanks() {
 # Create a ledger with just the header. No sitemap fetch.
 # Idempotent: if the file already exists, strip trailing blanks
 # (auto-heal of older format) and return.
+#
+# Intake gate: refuse to create a ledger for a blacklisted domain.
+# An HN read that lands on vpsshowdown should not spawn a
+# vpsshowdown.com.md ledger if vpsshowdown is blacklisted.
 ledger_init_minimal() {
   local ledger="$1" source_url="$2"
+  if is_blacklisted "$source_url"; then
+    return 0
+  fi
   if [ -f "$ledger" ]; then
     ledger_strip_trailing_blanks "$ledger"
     return 0
@@ -545,8 +552,15 @@ parse_rss() {
 # not yet known) and appending all discovered URLs. Idempotent:
 # once the ledger has a non-pending method cached, this is a fast
 # refresh (probe URL is known, just re-fetch + append).
+#
+# Intake gate: skip entirely for blacklisted domains, so a fresh
+# blacklist entry takes effect even if the ledger file somehow
+# already existed.
 ledger_populate() {
   local ledger="$1" source_url="$2"
+  if is_blacklisted "$source_url"; then
+    return 0
+  fi
   [ -f "$ledger" ] || return 0
   local method discovery_url
   method=$(ledger_get_method "$ledger")
@@ -883,6 +897,11 @@ apply_weight_delta() {
 append_candidate() {
   local cand_url="$1"
   local cand_label="$2"
+  # Intake gate: don't list a blacklisted domain as a candidate.
+  if is_blacklisted "$cand_url"; then
+    echo "discretionary-read: candidate SKIPPED for $cand_url (blacklisted)" >&2
+    return
+  fi
   if awk -v url="$cand_url" '
        $1 == "-" && $2 ~ /^[0-9]+$/ && $3 == "--" && $4 == url { found=1; exit }
        END { exit !found }
@@ -915,8 +934,106 @@ promote_candidate() {
   ' "$SOURCES_FILE" > "$tmp" && mv "$tmp" "$SOURCES_FILE"
 }
 
+# -- blacklist ---------------------------------------------------
+#
+# The blacklist section of sources.md holds domains the bot has
+# judged as NOT small-web. Once blacklisted:
+#   - the per-domain ledger is deleted (brain cleanup)
+#   - future ledger creation / population for the domain is
+#     skipped (intake gate)
+#   - the domain can't be added as a candidate or promoted
+#   - already-weighted sources can be moved here via demote
+#
+# Aggregators (news.ycombinator.com, kagi.com) are never
+# blacklist-able regardless of what the reflection says.
+#
+# Section header is exact ("## Blacklist") so the parser is simple.
+
+is_blacklist_exempt() {
+  local url="$1"
+  case "$url" in
+    *://news.ycombinator.com*|news.ycombinator.com|*://kagi.com*|kagi.com)
+      return 0 ;;
+  esac
+  return 1
+}
+
+# Read blacklist entries (URLs only) from sources.md. The blacklist
+# section is "## Blacklist" through end-of-file or next "## " header.
+parse_blacklist() {
+  awk '
+    /^## Blacklist/ { in_bl=1; next }
+    in_bl && /^## / { in_bl=0 }
+    in_bl && /^- / {
+      # match "- <url> --" or "- <url>"
+      for (i=2; i<=NF; i++) {
+        if ($i ~ /^https?:\/\//) { print $i; break }
+      }
+    }
+  ' "$SOURCES_FILE"
+}
+
+is_blacklisted() {
+  local url="$1"
+  is_blacklist_exempt "$url" && return 1
+  local host
+  host=$(url_host "$url")
+  # Compare hosts (not raw URLs) so http vs https, trailing slash,
+  # www. differences don't cause false negatives. url_host already
+  # strips the www. prefix.
+  parse_blacklist | while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    [ "$(url_host "$entry")" = "$host" ] && printf 'MATCH\n'
+  done | grep -q MATCH
+}
+
+append_blacklist() {
+  local url="$1" reason="$2"
+  is_blacklist_exempt "$url" && return 0
+  # Idempotent: if already present, skip.
+  if is_blacklisted "$url"; then
+    return 0
+  fi
+  if ! grep -qE '^## Blacklist' "$SOURCES_FILE"; then
+    {
+      printf '\n## Blacklist (not worth long-term rotation)\n\n'
+      printf 'Written by post-read reflection when a domain reads as\n'
+      printf 'non-small-web (programmatic, marketing, abandoned, etc.).\n'
+      printf 'Future reads still allowed (HN/Kagi can route there) but\n'
+      printf 'the domain cannot enter rotation, accumulate a ledger, or\n'
+      printf 'be added as a candidate.\n\n'
+    } >> "$SOURCES_FILE"
+  fi
+  printf '%s\n' "- $url -- $reason" >> "$SOURCES_FILE"
+}
+
+# Remove a weighted source from the active rotation. Used by
+# demote -- the source is removed AND added to blacklist with the
+# same reason in the caller.
+remove_source() {
+  local target_url="$1"
+  local tmp
+  tmp=$(mktemp)
+  awk -v url="$target_url" '
+    $1 == "-" && $2 ~ /^[0-9]+$/ && $3 == "--" && $4 == url { next }
+    { print }
+  ' "$SOURCES_FILE" > "$tmp" && mv "$tmp" "$SOURCES_FILE"
+}
+
+# Delete the per-domain ledger for a newly-blacklisted/demoted
+# domain. Best-effort: missing ledger is fine.
+delete_domain_ledger() {
+  local url="$1"
+  local ledger
+  ledger=$(ledger_path "$url")
+  if [ -f "$ledger" ]; then
+    rm -f "$ledger"
+    echo "discretionary-read: deleted per-domain ledger $(basename "$ledger")" >&2
+  fi
+}
+
 reflection=$("$AGENT_HOME/bin/agent-reflect-read.sh" \
-  "$PICKED_SOURCE" "$URL" "$TITLE" "$JOURNAL_FILE" "$SOURCES_FILE" 2>/dev/null) || {
+  "$PICKED_SOURCE" "$URL" "$TITLE" "$JOURNAL_FILE" "$SOURCES_FILE" "$PICKED_SOURCE_TYPE" 2>/dev/null) || {
   echo "discretionary-read: reflection skipped (executor failed)" >&2
   reflection=""
 }
@@ -965,10 +1082,47 @@ if [ -n "$reflection" ]; then
     prom_url=$(jq -r '.url // ""' <<<"$promotion" 2>/dev/null || echo "")
     prom_reason=$(jq -r '.reason // ""' <<<"$promotion" 2>/dev/null || echo "")
     [ -z "$prom_url" ] && continue
+    # Intake gate: don't promote a blacklisted domain.
+    if is_blacklisted "$prom_url"; then
+      echo "discretionary-read: promotion SKIPPED for $prom_url (blacklisted)" >&2
+      continue
+    fi
     promote_candidate "$prom_url"
     echo "discretionary-read: promoted candidate $prom_url (0 -> 1) -- $prom_reason" >&2
   done < "$prom_tmp"
   rm -f "$prom_tmp"
+
+  # Blacklist action: a (typically aggregator-routed) destination
+  # domain doesn't belong in rotation. Append to sources.md's
+  # blacklist section, delete the per-domain ledger to free brain
+  # bloat.
+  bl_url=$(jq -r '.blacklist.url // ""' <<<"$reflection" 2>/dev/null || echo "")
+  bl_reason=$(jq -r '.blacklist.reason // ""' <<<"$reflection" 2>/dev/null || echo "")
+  if [ -n "$bl_url" ] && [ "$bl_url" != "null" ]; then
+    if is_blacklist_exempt "$bl_url"; then
+      echo "discretionary-read: blacklist SKIPPED for $bl_url (aggregator -- exempt)" >&2
+    else
+      append_blacklist "$bl_url" "$bl_reason"
+      delete_domain_ledger "$bl_url"
+      echo "discretionary-read: blacklisted $bl_url -- $bl_reason" >&2
+    fi
+  fi
+
+  # Demote action: an existing weighted source has drifted off
+  # small-web. Remove from weighted list AND add to blacklist with
+  # the same reason. Delete the per-domain ledger.
+  dm_url=$(jq -r '.demote.url // ""' <<<"$reflection" 2>/dev/null || echo "")
+  dm_reason=$(jq -r '.demote.reason // ""' <<<"$reflection" 2>/dev/null || echo "")
+  if [ -n "$dm_url" ] && [ "$dm_url" != "null" ]; then
+    if is_blacklist_exempt "$dm_url"; then
+      echo "discretionary-read: demote SKIPPED for $dm_url (aggregator -- exempt)" >&2
+    else
+      remove_source "$dm_url"
+      append_blacklist "$dm_url" "$dm_reason"
+      delete_domain_ledger "$dm_url"
+      echo "discretionary-read: demoted $dm_url (removed from rotation, blacklisted) -- $dm_reason" >&2
+    fi
+  fi
 fi
 
 # -- post-tick ideas reflection ----------------------------------
