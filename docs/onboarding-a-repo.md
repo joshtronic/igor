@@ -24,33 +24,22 @@ There is no per-project config. To put a repo under the agent's care:
      `.gitea/workflows/`) that runs the lint + test commands
 4. Optionally, run `bin/validate-repo.sh <owner>/<name>` from your agent
    install to confirm the readiness bar before the first tick.
-5. Optional: add a `## Maintenance` section to the repo's `CLAUDE.md`
-   only if you want to override the defaults. Without it, the agent
-   auto-detects the stack and runs the standard audit + dep-freshness
-   tools for the ecosystem (`npm audit`, `cargo audit`, `pip-audit`,
-   `govulncheck`, `bundle audit`, etc.). Use the override when you
-   want stricter thresholds, additional checks (link audit, SEO
-   scan, performance benchmarks), or a non-standard tool. Example:
 
-   ```markdown
-   ## Maintenance
+That's it. Every tick re-validates every bot-accessible repo via the
+Forgejo API. If any checks fail, the agent files a `Status/Need More Info`
+ticket listing what's missing and excludes the repo from this tick's
+work -- no maintenance, no PR review, no issue pickup. Fix the gaps,
+close the ticket, and the next tick re-validates and resumes (or reopens
+the ticket with what's still wrong).
 
-   When asked to do a maintenance pass, run:
-
-   - `npm audit --production --audit-level=moderate` -- file issues
-     for unresolved vulnerabilities.
-   - `npx lychee --offline 'src/**/*.md'` -- file an issue if any
-     links resolve as broken.
-   - `npm outdated` -- summarize anything > 6 months behind.
-
-   If everything's clean, exit silently.
-   ```
-
-That's it. The next tick validates the repo via the Forgejo API. If any
-checks fail, the agent files a `Status/Need More Info` ticket listing what's
-missing and skips the repo. Fix the gaps, close the ticket, and the next
-tick re-validates and clones if ready (or reopens the ticket with what's
-still wrong).
+The weekly maintenance pass (dep freshness + security audit) is
+generic and runs automatically -- the harness detects the stack
+from manifests (`package.json`, `Cargo.toml`, `pyproject.toml` /
+`requirements.txt`, `go.mod`, `Gemfile`) and runs the standard
+audit tools. No per-repo configuration. If you need project-specific
+scheduled work (link audits, SEO sweeps, deployment checks), wire
+that as a Forgejo workflow in the repo itself; the agent's weekly
+pass is intentionally narrow.
 
 The readiness bar is the same for every repo -- a one-page blog and a
 production service both need lint + tests + CI. Static sites can satisfy

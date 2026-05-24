@@ -11,42 +11,52 @@ A timer fires `bin/tick.sh`. Per tick:
    previous interrupted run gets a "previous tick was interrupted --
    re-queueing" comment and is unassigned. Nothing slips through a midnight
    crash.
-4. **Discovery.** List every repo the bot has push access to (one API call).
-   For each:
-   - If we haven't cloned it yet, run onboarding validation via the Forgejo
-     API. Repos that fail get an auto-filed `Status/Need More Info` ticket
-     listing what's missing (or a reopen on the existing one), and are
-     excluded from discovery until the human closes the ticket.
-   - If there's an open bot-authored PR, skip -- one PR at a time per repo
-     so the human can review without a backlog forming behind them.
-   - Otherwise, query for the oldest claimable issue (`Agent`-labeled, no
-     assignee, not `Status/Blocked`).
-
-   Pick the globally oldest across all eligible repos.
-5. **Claim and clone.** Assign the issue to the bot. If the repo isn't cloned
+4. **Validation sweep.** Every bot-accessible repo runs through
+   onboarding validation via the Forgejo API on every tick. Repos
+   that fail get an auto-filed `Status/Need More Info` ticket
+   (or a reopen on the existing one) and are excluded from this
+   tick's work entirely -- no maintenance, no PR review, no
+   issue pickup. The validated set is what downstream steps
+   iterate over. Local clones are NOT purged on failure; when
+   the human closes the onboarding ticket and validation passes
+   again, the clone is still there.
+5. **Scheduled maintenance (priority 1).** Iterate validated repos
+   for one not yet audited this ISO week (weeks start Monday). If
+   found, fire a maintenance pass on a random eligible one. The
+   harness runs the stack-detection audit tools itself
+   (`npm audit`, `cargo audit`, `pip-audit`, `govulncheck`,
+   `bundle audit`, plus their outdated counterparts) via
+   `lib/maintenance-checks.sh`. Clean week -> templated journal
+   entry, no LLM, no issue. No recognized stack -> same. Findings
+   -> invoke Claude to triage the raw audit output into
+   `.agent/AGENT_MAINTENANCE_FINDINGS.md` + severity; harness files
+   a `Status/Need More Info` issue with the matching `Priority/*`
+   label and appends the journal entry. Last-run state at
+   `~/.local/state/agent/discretionary-state.json`.
+6. **PR-review pickup.** Scan validated repos for open bot PRs
+   where the latest non-bot review on the current HEAD is
+   `REQUEST_CHANGES`, or for PRs reassigned back to the bot.
+   First hit wins; reopen the work.
+7. **Discovery.** For each validated repo, query for the oldest
+   claimable issue (`Agent`-labeled, no assignee, not
+   `Status/Blocked`). Skip repos with an open bot-authored PR --
+   one PR at a time per repo so the human can review without a
+   backlog forming behind them. Pick the globally oldest across
+   all eligible repos.
+8. **Claim and clone.** Assign the issue to the bot. If the repo isn't cloned
    locally yet, clone it to `~/.local/state/agent/repos/<owner>/<repo>/` via SSH.
-6. **Preflight.** Verify `CLAUDE.md` exists at the repo root. If not, block
+9. **Preflight.** Verify `CLAUDE.md` exists at the repo root. If not, block
    the issue with a clear comment and bail. (Same code path as Claude calling
    `agent-block.sh` from inside the worktree.)
-7. **Work.** Make a worktree, invoke Claude with the project's `CLAUDE.md`
-   plus the universal `AGENTS.md`, react to whatever Claude leaves behind.
-8. **Discretionary maintenance (tier 2).** If steps 4-7 found no
-   claimable work and we're inside the Monday-morning maintenance
-   window, fire one maintenance pass on a random eligible repo.
-   Gated by per-repo weekly cadence (one audit per repo per ISO
-   week) and the open-onboarding-ticket check. Claude reads the
-   repo's `CLAUDE.md` Maintenance section, runs the declared checks,
-   writes findings to `.agent/AGENT_MAINTENANCE_FINDINGS.md`. Harness
-   files an Agent-labeled issue with those findings if non-empty,
-   then updates the last-run state at
-   `~/.local/state/agent/discretionary-state.json`.
-9. **Discretionary self-directed work (tier 3).** If no maintenance
-   repos are eligible either, the agent does one freeform pass on
-   the bot's website (or a reading tick, or a post -- the cadence
-   assessor picks). One-PR-per-repo rule applies (skip site-work if
-   there's an open bot PR on the website). Pacing is the shift
-   window plus the once-per-local-day post cap; no rate gate.
-   Branch name pattern: `agent/discretionary-YYYY-MM-DD-HHMMSS`.
+10. **Work.** Make a worktree, invoke Claude with the project's `CLAUDE.md`
+    plus the universal `AGENTS.md`, react to whatever Claude leaves behind.
+11. **Discretionary self-directed work.** If steps 5-10 found no
+    work, the agent does one freeform pass on the bot's website
+    (or a reading tick, or a post -- the cadence assessor picks).
+    One-PR-per-repo rule applies (skip site-work if there's an
+    open bot PR on the website). Pacing is the shift window plus
+    the once-per-local-day post cap; no rate gate. Branch name
+    pattern: `agent/discretionary-YYYY-MM-DD-HHMMSS`.
 
 | What Claude did                 | What the agent does                                                |
 |---------------------------------|---------------------------------------------------------------|
@@ -104,7 +114,8 @@ bin/
 
 lib/
 |-- forgejo.sh               # Forgejo API helpers
-`-- repo-checks.sh           # repo-readiness checks + onboarding ticket lifecycle
+|-- repo-checks.sh           # repo-readiness checks + onboarding ticket lifecycle
+`-- maintenance-checks.sh    # stack detection + audit tool dispatch for the weekly maintenance pass
 
 systemd/                     # user units (no @ instance)
 |-- agent.service

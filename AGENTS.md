@@ -332,38 +332,40 @@ Reading ticks are how I keep the voice fed; shipping every
 tick is how the voice goes stale; the post cadence cap is how
 the site stays readable.
 
-## Maintenance ticks (scheduled)
+## Maintenance triage ticks
 
-Some ticks are scheduled maintenance, not driven by any specific
-issue. The harness runs these at the top of priority during the
-Monday-morning shift window -- one repo per tick, weekly cap per
-repo. The user message will say `"You are doing a scheduled
-maintenance pass on <repo>."` rather than naming an issue.
+Some ticks ask me to triage the output of a scheduled maintenance
+audit. The harness has already run the audit tools (`npm audit`,
+`cargo audit`, `pip-audit`, `govulncheck`, `bundle audit`, plus
+their outdated-package counterparts) and dropped the raw output in
+`.agent/audit-output/`. The user message will say `"You are
+triaging the output of a scheduled maintenance audit on <repo>."`
+rather than naming an issue.
+
+I only get one of these when the harness detected findings.
+Clean-week audits and stack-less repos are handled entirely by
+the harness with a templated journal entry -- no LLM call, no
+ticket.
 
 When I get one:
 
-1. Read the repo's `CLAUDE.md`. If it has a `Maintenance` section,
-   follow it -- that's the repo author overriding defaults with
-   custom checks.
-2. Otherwise, auto-detect the stack and run the standard audit
-   plus dep-freshness commands for the ecosystem (`npm audit`,
-   `cargo audit`, `pip-audit`, `govulncheck`, `bundle audit`,
-   etc., plus the equivalent outdated-package check). Install the
-   tool within the session if missing.
-3. Don't commit fixes -- this is producer work, not consumer
-   work.
-4. If anything notable surfaces, write a markdown summary to
-   `.agent/AGENT_MAINTENANCE_FINDINGS.md` in the worktree. The harness
-   reads that file after I exit and files a `Status/Needs More
-   Info`-labeled issue with the findings as the body. The human
-   reads it, decides which findings are worth fixing, and removes
-   `Status/Need More Info` + adds `Agent` to enter the work queue
-   for specific ones. My job is producing the report; the human
-   gates whether I do the work.
-5. Also write a single-word severity assessment to
+1. Read `.agent/audit-output/AUDIT_SUMMARY.txt` for the at-a-glance
+   status. Each line is `<tool>:<status>` where status is `clean`,
+   `findings`, or `skipped`.
+2. Open the individual output files for any tool marked `findings`.
+   Skip the `clean` and `skipped` entries unless context warrants
+   a look. Use the repo source as needed to judge whether a CVE is
+   actually reachable, whether an outdated dep is blocking
+   something, etc.
+3. Write `.agent/AGENT_MAINTENANCE_FINDINGS.md` with a triaged
+   summary -- lead with what matters, bury what's noise. The
+   harness files this as a `Status/Need More Info` Forgejo issue
+   for the human to triage. They remove the label and add `Agent`
+   when something's worth working.
+4. Write a single-word severity to
    `.agent/AGENT_MAINTENANCE_PRIORITY` -- one of `critical`, `high`,
    `medium`, `low`. The harness applies the matching `Priority/*`
-   label so the human's attention follows the severity. Guidelines:
+   label:
    - `critical` -- actively-exploited vulnerabilities, secrets
      leaked into deps, anything that warrants stopping other work
    - `high` -- unfixed CVEs of moderate-or-worse severity, deps with
@@ -371,12 +373,12 @@ When I get one:
    - `medium` -- outdated-but-functional, low-severity advisories
    - `low` -- minor version bumps, nice-to-have updates, nothing
      security-relevant
-   Skip the file if there are no findings; the harness only reads
-   it when findings exist.
-5. If nothing notable, skip the findings file. Exit cleanly.
+5. Write `.agent/AGENT_JOURNAL.md` with what I observed -- severity
+   summary, patterns across the audit, whether RAG surfaced repeat
+   issues from prior weeks. Brief is fine.
 
-Same content rules apply. Maintenance findings get published in an
-issue, so they're public-facing.
+I'm triaging, not fixing. Don't commit, don't open PRs. Same
+content rules apply -- the findings issue is public-facing.
 
 ## Memories
 
