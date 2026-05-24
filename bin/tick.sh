@@ -581,13 +581,23 @@ journal_is_duplicate() {
 #           "discretionary reading"   -> read mode
 #           "discretionary on <repo>" -> work mode
 #           "<owner>/<repo>#<num>"    -> work mode (tier-1 issue)
-#   $2 -- (optional) path to a body source file. When present and
-#         non-empty and not a byte-identical duplicate of today's
-#         existing content, the file contents land under the header.
-#         Otherwise a short placeholder body lands so the heading
-#         isn't orphan.
+#   $2 -- (optional) path to a body source file written by Claude.
+#         When present and non-empty and not a byte-identical
+#         duplicate of today's existing content, the file contents
+#         land under the header.
+#   $3 -- (optional) fallback body string. Used when $2 is missing
+#         or empty. Lets callers pre-build a fact stub (commit
+#         subject, files touched, etc.) so brain always has a
+#         meaningful entry, not just a placeholder. When $2 is a
+#         duplicate, $3 is also used (the harness stub is preferable
+#         to a "no body -- duplicate" placeholder).
+#
+# Rule: every tick gets a journal entry. If $2 is missing and $3
+# is empty, the function logs a loud warning and skips the entry
+# rather than writing an orphan header -- but the always-journal
+# contract in AGENTS.md is what should keep this from happening.
 append_journal_entry() {
-  local mode_suffix="$1" body_src="${2:-}"
+  local mode_suffix="$1" body_src="${2:-}" fallback_body="${3:-}"
   local brain="${AGENT_BRAIN_PATH:-${BRAIN_PATH:-$AGENT_REPO_ROOT/${BOT_USER}/brain}}"
   local journal_date journal_file journal_ts body
   journal_date=$(date +%Y-%m-%d)
@@ -595,14 +605,22 @@ append_journal_entry() {
   journal_ts=$(date +%Y-%m-%dT%H:%M:%S%z)
   mkdir -p "$(dirname "$journal_file")"
 
-  body="(no body -- tick completed without a journal entry)"
+  body=""
   if [ -n "$body_src" ] && [ -s "$body_src" ]; then
     if journal_is_duplicate "$body_src" "$journal_file"; then
-      log "journal: body duplicates an earlier entry today -- header only"
-      body="(no body -- duplicate of an earlier entry today)"
+      log "journal: body duplicates an earlier entry today -- using fallback stub"
+      body="$fallback_body"
     else
       body=$(cat "$body_src")
     fi
+  elif [ -n "$fallback_body" ]; then
+    log "journal: no AGENT_JOURNAL.md from ${mode_suffix} -- using harness fact stub"
+    body="$fallback_body"
+  fi
+
+  if [ -z "$body" ]; then
+    log "WARNING: journal: no body and no fallback for ${mode_suffix} -- skipping entry (always-journal contract violated upstream)"
+    return 0
   fi
 
   {
@@ -1925,7 +1943,14 @@ if [ -z "$WINNER" ]; then
       # also updates memories/reading/log.md, sources.md weight
       # tweaks, and blog-ideas.md (post-tick ideas reflection) --
       # all of which need to land regardless.
-      append_journal_entry "discretionary reading" "$W_SCRATCH/.agent/AGENT_JOURNAL.md"
+      R_FALLBACK=$(cat <<EOF
+(reading executor ran for ${W_ELAPSED}s but no AGENT_JOURNAL.md was produced)
+
+- Mode: discretionary reading
+- Duration: ${W_ELAPSED}s
+EOF
+)
+      append_journal_entry "discretionary reading" "$W_SCRATCH/.agent/AGENT_JOURNAL.md" "$R_FALLBACK"
       commit_brain_changes "$BRAIN_PATH" "journal: discretionary reading on $(date +%Y-%m-%d)"
     else
       log "warning: reading mode failed -- this mode does not fall through to other modes (no website worktree set up)"
@@ -1949,7 +1974,14 @@ if [ -z "$WINNER" ]; then
        "$AGENT_HOME/bin/discretionary-reflect.sh" "$W_SCRATCH" 2>&1; then
       W_ELAPSED=$(( $(date +%s) - W_START ))
       log "discretionary: reflect mode succeeded in ${W_ELAPSED}s"
-      append_journal_entry "discretionary reflection" "$W_SCRATCH/.agent/AGENT_JOURNAL.md"
+      F_FALLBACK=$(cat <<EOF
+(reflect executor ran for ${W_ELAPSED}s but no AGENT_JOURNAL.md was produced)
+
+- Mode: discretionary reflection
+- Duration: ${W_ELAPSED}s
+EOF
+)
+      append_journal_entry "discretionary reflection" "$W_SCRATCH/.agent/AGENT_JOURNAL.md" "$F_FALLBACK"
       commit_brain_changes "$BRAIN_PATH" "journal: discretionary reflection on $(date +%Y-%m-%d)"
     else
       log "warning: reflect mode failed"
@@ -2220,24 +2252,21 @@ EOF
 
 fi  # end if-claude-code-site-work
 
-  # Always log the tick. Header is guaranteed (so recent_modes
-  # reflects activity) and Claude's body lands if he wrote one.
-  # Brain commit happens after regardless -- the harness-side
-  # executors (discretionary-post.sh's dedupe, ideas reflection,
-  # source-weight tweaks) also mutate brain.
-  W_JOURNAL_SRC="$W_WORKTREE/.agent/AGENT_JOURNAL.md"
-  append_journal_entry "discretionary on $W_REPO" "$W_JOURNAL_SRC"
-  commit_brain_changes "$BRAIN_PATH" "journal: discretionary on $W_REPO"
-
   # Harness-owned commits: Claude doesn't run git commit; the harness
   # commits anything dirty (outside .agent/) at end of tick. Subject is
   # derived from .agent/PR_BODY.md's first checklist item; falls back
   # to a generic message. Claude's `git add` and commit instructions
   # were removed from his prompt -- saves tool calls and eliminates
   # the "forgot to commit" failure mode structurally.
+  #
+  # Done BEFORE the brain journal append so the harness fact-stub
+  # fallback (used when Claude forgot to write AGENT_JOURNAL.md) can
+  # include the commit subject and file count.
   cd "$W_WORKTREE"
   W_DIRTY_PATHS=$(git status --porcelain 2>/dev/null \
     | awk '$2 !~ /^\.agent\// { print $2 }')
+  W_DIRTY_COUNT=0
+  W_SUBJECT=""
   if [ -n "$W_DIRTY_PATHS" ]; then
     W_DIRTY_COUNT=$(echo "$W_DIRTY_PATHS" | wc -l | tr -d ' ')
     # Stage first so derive_commit_subject can use `git diff
@@ -2250,6 +2279,24 @@ fi  # end if-claude-code-site-work
     log "harness-commit: $W_DIRTY_COUNT file(s), subject: $W_SUBJECT"
     git commit --quiet -m "$W_SUBJECT" || log "warning: harness commit failed"
   fi
+
+  # Brain journal: Claude's body if he wrote one, harness fact stub
+  # otherwise. AGENTS.md mandates an entry every tick; the fallback
+  # is the safety net for when he forgets. Brain commit happens
+  # regardless -- the harness-side executors (discretionary-post.sh's
+  # dedupe, ideas reflection, source-weight tweaks) also mutate brain.
+  W_JOURNAL_SRC="$W_WORKTREE/.agent/AGENT_JOURNAL.md"
+  W_JOURNAL_FALLBACK=$(cat <<EOF
+(no reflection from Claude this tick -- harness recorded the facts below)
+
+- Mode: discretionary on ${W_REPO}
+- Commit subject: ${W_SUBJECT:-(no commit this tick)}
+- Files changed: ${W_DIRTY_COUNT}
+- Elapsed: ${W_ELAPSED}s
+EOF
+)
+  append_journal_entry "discretionary on $W_REPO" "$W_JOURNAL_SRC" "$W_JOURNAL_FALLBACK"
+  commit_brain_changes "$BRAIN_PATH" "journal: discretionary on $W_REPO"
 
   # Outcome classification
   W_COMMITS=$(git rev-list --count "origin/${W_BASE}..HEAD" 2>/dev/null || echo 0)
@@ -2532,16 +2579,27 @@ if [ -n "$DIRTY_PATHS" ]; then
   git commit --quiet -m "$COMMIT_SUBJECT" || log "warning: harness commit failed"
 fi
 
-# -- Brain journal: append Claude's reflection if present ------
+# -- Brain journal: append Claude's reflection (or harness stub) ------
 #
-# Claude optionally writes .agent/AGENT_JOURNAL.md before exit. The
-# harness owns the brain commit -- Claude's worktree never reaches
-# across to brain. Best-effort: if pull/push fails, log it but
-# don't fail the tick over a journal entry.
+# AGENTS.md mandates a journal entry every tick. Claude writes
+# .agent/AGENT_JOURNAL.md before exit; if he forgets, the harness
+# falls back to a fact stub built from what it knows here. Brain
+# always gets an entry. The harness owns the brain commit -- Claude's
+# worktree never reaches across to brain. Best-effort: if pull/push
+# fails, log it but don't fail the tick over a journal entry.
 
 JOURNAL_SRC="$WORKTREE/.agent/AGENT_JOURNAL.md"
 BRAIN_LOCAL="$AGENT_REPO_ROOT/${BOT_USER}/brain"
-append_journal_entry "${FORGEJO_REPO}#${ISSUE_NUMBER}" "$JOURNAL_SRC"
+JOURNAL_FALLBACK=$(cat <<EOF
+(no reflection from Claude this tick -- harness recorded the facts below)
+
+- Issue: ${FORGEJO_REPO}#${ISSUE_NUMBER} -- ${ISSUE_TITLE}
+- Commit subject: ${COMMIT_SUBJECT:-(no commit this tick)}
+- Files changed: ${DIRTY_COUNT:-0}
+- Elapsed: ${ELAPSED}s
+EOF
+)
+append_journal_entry "${FORGEJO_REPO}#${ISSUE_NUMBER}" "$JOURNAL_SRC" "$JOURNAL_FALLBACK"
 commit_brain_changes "$BRAIN_LOCAL" "journal: ${FORGEJO_REPO}#${ISSUE_NUMBER}"
 
 # -- Determine outcome -----------------------------------------
