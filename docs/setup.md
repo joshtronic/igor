@@ -51,7 +51,7 @@ missing.
 
 **Ecosystem toolchains for repos the agent will actually work:**
 
-Tier 2 maintenance auto-detects the stack and runs standard audit tools (`npm audit`, `cargo audit`, `pip-audit`, `govulncheck`, `bundle audit`, etc.). Claude will `cargo install cargo-audit` or `pip install pip-audit` within his session as needed, but the base toolchain must be on the host:
+The weekly maintenance pass auto-detects the stack and runs standard audit tools (`npm audit`, `cargo audit`, `pip-audit`, `govulncheck`, `bundle audit`, etc.) from the harness directly. Missing audit binaries (`cargo-audit`, `pip-audit`, `govulncheck`, `bundler-audit`) are installed on demand into user-writable paths -- no sudo. But the base language toolchain must already be on the host:
 
 - Node projects (including the agent's own website) → `sudo apt-get install -y nodejs npm`
 - Python projects → `sudo apt-get install -y python3 python3-pip python3-venv`

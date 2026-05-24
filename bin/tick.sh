@@ -85,6 +85,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/forgejo.sh"
 # shellcheck source=lib/repo-checks.sh
 . "$AGENT_HOME/lib/repo-checks.sh"
+# shellcheck source=lib/maintenance-checks.sh
+. "$AGENT_HOME/lib/maintenance-checks.sh"
 # shellcheck source=lib/rag.sh
 . "$AGENT_HOME/lib/rag.sh"
 # shellcheck source=lib/cost.sh
@@ -701,20 +703,16 @@ maintenance_mark_done() {
   mv "$tmp" "$state_file"
 }
 
-# Eligible if not run this local calendar week. Weekly cadence aligns
-# with the Monday-morning maintenance shift -- one audit per repo per
-# week, biased to Mondays. Same-week re-runs are blocked.
+# Eligible if not run this ISO week (weeks start Monday, local time).
+# Any tick all week can pick up an eligible repo -- no shift-window
+# gate. Resilient to Monday-tick failures and to new repos added
+# mid-week.
 #
 # Skips:
-# - Repos with an open onboarding ticket. Issue-work refused to clone
-#   them for cause; maintenance shouldn't sneak around that gate.
-#
-# Bot-owned repos (brain, website, the agent itself) are NOT excluded
-# -- they have real audit surface (website has npm deps, agent has
-# requirements.txt) and security findings matter there too. Repos
-# with no detectable stack (brain is just markdown) naturally no-op
-# under the auto-detection branch of the maintenance prompt -- one
-# wasted Claude call per week per such repo, acceptable cost.
+# - Repos with an open onboarding ticket. The validation gate
+#   already excludes these from VALIDATED_REPOS_JSON, but this is
+#   belt-and-suspenders against any future caller that bypasses
+#   the validated set.
 maintenance_eligible() {
   local repo="$1" last last_week this_week existing
 
@@ -735,55 +733,50 @@ maintenance_eligible() {
   [ "$last_week" != "$this_week" ]
 }
 
-# Are we in the configured Monday-morning maintenance window?
-# True when: today is Monday AND we're inside the configured shift.
-# When shift is unconfigured, this returns false (no scheduled
-# maintenance). Maintenance is a scheduled chore that runs once per
-# week per repo at the top of priority on Monday morning; the rest
-# of the week has no maintenance work.
-in_maintenance_window() {
-  local dow
-  dow=$(date +%u)  # 1=Mon, 7=Sun
-  [ "$dow" = "1" ] || return 1
-  in_shift_window
-}
-
 # Scheduled maintenance pass -- priority 1 in the work cascade.
-# Runs during the Monday-morning shift window. One repo per tick,
-# weekly cap per repo. Exits 0 if maintenance fires; returns 1
-# when not in the window or no repos are eligible this week (so
-# the caller falls through to PR review / issues / discretionary).
+# Iterates VALIDATED_REPOS_JSON (set by the validation sweep); fires
+# on a random repo eligible this ISO week. Exits 0 if maintenance
+# fires; returns 1 when no validated repo is eligible this week.
 #
-# Findings flow: Claude writes .agent/AGENT_MAINTENANCE_FINDINGS.md,
-# harness files a Status/Need More Info issue for human triage.
+# Hybrid execution:
+#   - Harness runs the audit tools itself via lib/maintenance-checks.sh
+#     (npm audit + outdated, cargo audit + outdated, pip-audit + pip
+#     list --outdated, govulncheck + go list -m -u all, bundle-audit
+#     + bundle outdated).
+#   - Clean week -> templated journal entry, no LLM, no issue.
+#   - No recognized stack -> templated "nothing to audit" journal
+#     entry, no LLM, no issue.
+#   - Findings -> invoke Claude to triage; harness files the
+#     Status/Need More Info issue with the triaged report and
+#     appends the journal entry.
 do_maintenance_tick() {
-  in_maintenance_window || return 1
-
-  local repos r_name target target_path target_base
+  local target=""
   local ELIGIBLE=()
-  repos=$(forgejo_list_bot_repos)
-  while read -r repo_line; do
+  local repo_line r_name
+  while IFS= read -r repo_line; do
     [ -z "$repo_line" ] && continue
     r_name=$(jq -r '.full_name' <<<"$repo_line")
     if maintenance_eligible "$r_name"; then
       ELIGIBLE+=("$r_name")
     fi
-  done < <(jq -c '.[]' <<<"$repos")
+  done <<<"$VALIDATED_REPOS_JSON"
 
   if [ "${#ELIGIBLE[@]}" -eq 0 ]; then
-    log "scheduled: no repos eligible for maintenance this week -- continuing"
+    log "maintenance: no validated repos eligible this week -- continuing"
     return 1
   fi
 
   target="${ELIGIBLE[RANDOM % ${#ELIGIBLE[@]}]}"
-  log "scheduled: maintenance pass on $target"
+  log "maintenance: pass on $target"
 
   ensure_repo_local "$target"
+  local target_path target_base
   target_path=$(repo_path_for "$target")
 
   # Detached-HEAD worktree on the repo's current default branch.
   # No feature branch -- maintenance doesn't commit; it writes
-  # findings to a known path that the harness reads after exit.
+  # raw audit output to .agent/audit-output/ for either templated
+  # or LLM-triaged downstream handling.
   target_base=$(cd "$target_path" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
   target_base="${target_base:-master}"
   local m_worktree="$AGENT_STATE_DIR/worktrees/maintenance-${target//\//_}-$$"
@@ -792,8 +785,8 @@ do_maintenance_tick() {
   (cd "$target_path" && git worktree add --detach "$m_worktree" "origin/${target_base}")
   init_igor_scratch "$m_worktree"
 
-  # Worktree cleanup at script exit. Variables M_WT_PATH/M_TGT_PATH
-  # need global scope so the trap can see them.
+  # Worktree cleanup at script exit. M_WT_PATH/M_TGT_PATH need
+  # global scope so the trap can see them.
   M_WT_PATH="$m_worktree"
   M_TGT_PATH="$target_path"
   trap '[ -d "$M_WT_PATH" ] && (cd "$M_TGT_PATH" && git worktree remove --force "$M_WT_PATH") 2>/dev/null || true; rag_cleanup_marker' EXIT
@@ -801,42 +794,90 @@ do_maintenance_tick() {
   cd "$m_worktree"
 
   local m_brain="$AGENT_REPO_ROOT/${BOT_USER}/brain"
+  local audit_dir="$m_worktree/.agent/audit-output"
+  mkdir -p "$audit_dir"
 
-  # RAG context: prior maintenance findings, related commits, any
-  # journal entries about this repo. Helps catch repeat-offender
-  # findings vs the first-time surface.
+  log "maintenance: running audit tools on $target"
+  local audit_rc=0
+  set +e
+  maintenance_audit_repo "$m_worktree" "$audit_dir"
+  audit_rc=$?
+  set -e
+
+  # rc==2: no recognized stack manifests. Templated "no audit
+  # surface" journal entry. Still mark done so we don't try again
+  # this week.
+  if [ "$audit_rc" -eq 2 ]; then
+    log "maintenance: no recognized stack at $target -- nothing to audit"
+    local jbody="$m_worktree/.agent/AGENT_JOURNAL.md"
+    {
+      printf 'Scheduled maintenance pass on %s.\n\n' "$target"
+      printf 'No recognized stack manifests (package.json / Cargo.toml / pyproject.toml / requirements.txt / go.mod / Gemfile). Nothing to audit.\n'
+    } > "$jbody"
+    AGENT_BRAIN_PATH="$m_brain" append_journal_entry "maintenance on $target (no stack)" "$jbody"
+    maintenance_mark_done "$target"
+    exit 0
+  fi
+
+  # rc==0: every audit/outdated check came back clean. Templated
+  # journal entry, no LLM, no Forgejo issue. The "X weeks clean"
+  # baseline accumulates via these entries.
+  if [ "$audit_rc" -eq 0 ]; then
+    log "maintenance: all checks clean on $target"
+    local jbody="$m_worktree/.agent/AGENT_JOURNAL.md"
+    {
+      printf 'Scheduled maintenance pass on %s.\n\n' "$target"
+      printf 'All checks clean.\n\n'
+      printf 'Tools run:\n'
+      sed 's/^/- /' "$audit_dir/AUDIT_SUMMARY.txt"
+    } > "$jbody"
+    AGENT_BRAIN_PATH="$m_brain" append_journal_entry "maintenance on $target (clean)" "$jbody"
+    maintenance_mark_done "$target"
+    exit 0
+  fi
+
+  # rc==1: findings present in at least one tool's output. Invoke
+  # Claude to triage. The raw output files are in
+  # .agent/audit-output/ for him to read.
+  log "maintenance: findings detected on $target, invoking claude for triage"
+
   local m_rag_context
   m_rag_context=$(AGENT_BRAIN_PATH="$m_brain" rag_query "maintenance pass on $target")
   [ -n "$m_rag_context" ] && log "rag: surfaced past context for maintenance"
 
   local m_user_msg
   m_user_msg=$(cat <<EOF
-You are doing a scheduled maintenance pass on $target.
+You are triaging the output of a scheduled maintenance audit on $target.
 
-No human is waiting on you. Your job:
+The harness already ran the audit tools. Their raw output is in
+.agent/audit-output/ -- one file per tool, plus AUDIT_SUMMARY.txt
+listing clean/findings/skipped per check.
 
-  1. Read this repo's CLAUDE.md. If it has a "Maintenance" section,
-     follow it -- that's the repo author declaring exactly what
-     maintenance means here.
-  2. Otherwise, auto-detect the stack and run the standard audit
-     plus dep-freshness commands for the ecosystem:
-       - package.json     -> npm audit + npm outdated
-       - Cargo.toml       -> cargo audit + cargo outdated
-       - pyproject.toml/requirements.txt -> pip-audit + pip list --outdated
-       - go.mod           -> govulncheck + go list -m -u all
-       - Gemfile          -> bundle audit + bundle outdated
-     If a tool isn't installed, install it within this session
-     (cargo install cargo-audit, etc.). Use judgment for stacks not
-     listed above.
-  3. If anything notable surfaces -- vulnerabilities, outdated
-     deps, broken links, regressions -- write a markdown summary
-     to .agent/AGENT_MAINTENANCE_FINDINGS.md. The harness will file
-     an issue with that content for human triage.
-  4. If nothing notable, skip the findings file and exit cleanly.
+Your job:
 
-Don't commit fixes during a maintenance pass -- file findings and
-let normal work flow address them on a future tick. Same content
-rules as always: identity guardrails apply.
+  1. Read .agent/audit-output/AUDIT_SUMMARY.txt for the at-a-glance
+     status, then read the individual files for any check marked
+     "findings". Skip the "clean" and "skipped" entries unless
+     context warrants a look.
+  2. Apply judgment: which findings actually matter for THIS repo?
+     Are CVEs reachable in the code? Are outdated deps blocking
+     something or just trivia? Read the source as needed.
+  3. Write .agent/AGENT_MAINTENANCE_FINDINGS.md with a triaged
+     summary -- lead with what matters, bury what's noise. The
+     harness files this as a Forgejo issue for human triage.
+  4. Write a single-word severity to
+     .agent/AGENT_MAINTENANCE_PRIORITY: critical, high, medium, or
+     low. Guidelines:
+       - critical: actively-exploited vulns, leaked secrets in deps
+       - high:     unfixed CVEs of moderate-or-worse severity
+       - medium:   outdated-but-functional, low-severity advisories
+       - low:      minor version bumps, nice-to-haves
+  5. Write .agent/AGENT_JOURNAL.md with what you observed (severity
+     summary, patterns across the audit, whether RAG surfaced
+     repeat issues from prior weeks). Brief is fine.
+
+You're triaging, not fixing. Don't commit, don't open PRs. The
+harness files the issue + appends the journal.
 
 ---
 
@@ -849,7 +890,7 @@ EOF
   local m_system_prompt
   m_system_prompt=$(brain_system_prompt "$m_brain")
 
-  log "invoking claude for maintenance (timeout ${TICK_TIMEOUT})"
+  log "invoking claude for maintenance triage (timeout ${TICK_TIMEOUT})"
   local m_log="$m_worktree/.agent/claude-output.log"
   local m_start; m_start=$(date +%s)
   local m_exit
@@ -893,8 +934,21 @@ EOF
 
     log "maintenance: filed #$m_num on $target (awaiting human triage)"
   else
-    log "maintenance: no findings on $target"
+    log "maintenance: claude exited without findings file -- nothing to file"
   fi
+
+  # Journal append: prefer Claude's entry, fall back to a stub if
+  # he didn't write one.
+  local jbody="$m_worktree/.agent/AGENT_JOURNAL.md"
+  if [ ! -s "$jbody" ]; then
+    {
+      printf 'Scheduled maintenance pass on %s.\n\n' "$target"
+      printf 'Findings detected (see Forgejo issue if filed).\n\n'
+      printf 'Audit summary:\n'
+      sed 's/^/- /' "$audit_dir/AUDIT_SUMMARY.txt"
+    } > "$jbody"
+  fi
+  AGENT_BRAIN_PATH="$m_brain" append_journal_entry "maintenance on $target (findings)" "$jbody"
 
   maintenance_mark_done "$target"
   exit 0
@@ -1297,13 +1351,57 @@ if [ "$ORPHAN_COUNT" -gt 0 ]; then
   done < <(jq -c '.[] | {repo: .repository.full_name, num: .number}' <<<"$ORPHANS")
 fi
 
+# -- Validation sweep ------------------------------------------
+#
+# Per-tick pre-flight. Every bot-accessible repo runs through
+# repo-checks.sh before any downstream step (maintenance, PR
+# review, claimable discovery) is allowed to touch it. Repos that
+# fail get the onboarding-ticket treatment (idempotent file/reopen
+# via handle_onboarding_failure). Local clones are NOT purged on
+# failure -- the failure handler is already idempotent, and a
+# transient validation hiccup shouldn't cost a re-clone.
+#
+# Builds VALIDATED_REPOS_JSON: newline-separated JSON lines, one
+# per passing repo, same shape that `jq -c '.[]' <<<$(forgejo_list_bot_repos)`
+# would produce. Downstream loops iterate this set instead of the
+# raw API response.
+
+log "validation sweep ($BOT_USER)"
+ALL_REPOS=$(forgejo_list_bot_repos)
+VALIDATED_REPOS_JSON=""
+VAL_PASS=0
+VAL_FAIL=0
+while IFS= read -r repo_line; do
+  [ -z "$repo_line" ] && continue
+  R_NAME=$(jq -r '.full_name' <<<"$repo_line")
+  set +e
+  V_REPORT=$(validate_repo_via_api "$R_NAME")
+  V_RC=$?
+  set -e
+  if [ "$V_RC" -eq 0 ]; then
+    VALIDATED_REPOS_JSON+="${repo_line}"$'\n'
+    VAL_PASS=$((VAL_PASS + 1))
+  else
+    log "validation: $R_NAME failed -- filing/reopening onboarding ticket"
+    handle_onboarding_failure "$R_NAME" "$BOT_USER" "$V_REPORT" \
+      || log "warning: onboarding handler failed on $R_NAME (token scope or repo perms); continuing"
+    VAL_FAIL=$((VAL_FAIL + 1))
+  fi
+done < <(jq -c '.[]' <<<"$ALL_REPOS")
+log "validation: ${VAL_PASS} pass, ${VAL_FAIL} fail"
+
+if [ -z "$VALIDATED_REPOS_JSON" ]; then
+  log "validation: no repos passed -- nothing to do this tick"
+  exit 0
+fi
+
 # -- Scheduled maintenance (priority 1) ------------------------
 #
-# Monday-morning maintenance is a chore, not discretionary work.
-# Runs at the top of the cascade so it always beats PR-review,
-# claimable issues, and discretionary website work. One repo per
-# tick, weekly cap per repo. Off-Monday or outside the shift this
-# is a no-op and we proceed.
+# Weekly dep-freshness + security audit. Runs at the top of the
+# cascade so it always beats PR-review, claimable issues, and
+# discretionary website work. One repo per tick, weekly cap per
+# repo (ISO week, starts Monday). No shift-window gate -- any tick
+# all week can pick up an eligible repo.
 
 do_maintenance_tick || true
 
@@ -1326,15 +1424,18 @@ do_maintenance_tick || true
 REVIEW_PR=""
 REVIEW_PR_TRIGGER=""
 
-# Signal 1: scan all bot-accessible repos for open bot PRs where
-# the latest non-bot review on the CURRENT HEAD is REQUEST_CHANGES.
+# Signal 1: scan all validated repos for open bot PRs where the
+# latest non-bot review on the CURRENT HEAD is REQUEST_CHANGES.
 # The HEAD check is important -- if the agent already pushed follow-up
 # commits, the old REQUEST_CHANGES no longer applies and we
-# shouldn't re-pickup until the reviewer reviews again.
-RC_REPOS=$(forgejo_list_bot_repos 2>/dev/null || echo '[]')
-while read -r repo_full; do
+# shouldn't re-pickup until the reviewer reviews again. Repos that
+# failed the validation sweep are excluded -- if the repo isn't
+# safe to do new work in, it isn't safe to push follow-up commits
+# to either.
+while IFS= read -r repo_line; do
   [ -n "$REVIEW_PR" ] && break
-  [ -z "$repo_full" ] && continue
+  [ -z "$repo_line" ] && continue
+  repo_full=$(jq -r '.full_name' <<<"$repo_line")
   rc_open_prs=$(forgejo_list_open_bot_prs "$repo_full" "$BOT_USER" 2>/dev/null || echo '[]')
   while read -r pr_num; do
     [ -n "$REVIEW_PR" ] && break
@@ -1354,7 +1455,7 @@ while read -r repo_full; do
       REVIEW_PR_TRIGGER="REQUEST_CHANGES review on current HEAD"
     fi
   done < <(jq -r '.[].number' <<<"$rc_open_prs" 2>/dev/null)
-done < <(jq -r '.[].full_name' <<<"$RC_REPOS" 2>/dev/null)
+done <<<"$VALIDATED_REPOS_JSON"
 
 # Signal 2: assignment dance (only if no request-changes signal fired)
 if [ -z "$REVIEW_PR" ] && [ -n "${FORGEJO_REVIEWER:-}" ]; then
@@ -1617,35 +1718,24 @@ Reassigning back so a human can review/discard." 2>/dev/null \
 fi
 
 # -- Discovery: find globally oldest claimable -----------------
+#
+# Iterates VALIDATED_REPOS_JSON (built by the validation sweep at
+# the top of the cascade). Repos that failed validation are already
+# excluded; no need to re-validate here.
 
-REPOS=$(forgejo_list_bot_repos)
-REPO_COUNT=$(jq 'length' <<<"$REPOS")
-log "scanning $REPO_COUNT repo(s) for claimable work"
+REPO_COUNT=$(grep -c '^{' <<<"$VALIDATED_REPOS_JSON" || true)
+log "scanning $REPO_COUNT validated repo(s) for claimable work"
 
 WINNER=""
 WINNER_REPO=""
 WINNER_PR_BASE=""
 WINNER_CREATED=""
 
-while read -r repo_line; do
+while IFS= read -r repo_line; do
   [ -z "$repo_line" ] && continue
   R_NAME=$(jq -r '.full_name' <<<"$repo_line")
   R_BASE=$(jq -r '.default_branch' <<<"$repo_line")
   R_PATH=$(repo_path_for "$R_NAME")
-
-  # Onboarding gate: for repos we haven't cloned yet, validate via API
-  # before we look at any issues there. Failing repos get an auto-filed
-  # ticket (or a reopen on the existing one) and are excluded from
-  # discovery until the human closes the ticket.
-  if [ ! -d "$R_PATH/.git" ]; then
-    if ! R_REPORT=$(validate_repo_via_api "$R_NAME"); then
-      log "onboarding check failed on $R_NAME"
-      handle_onboarding_failure "$R_NAME" "$BOT_USER" "$R_REPORT" \
-        || log "warning: onboarding handler failed on $R_NAME (likely token scope or repo perms); continuing"
-      continue
-    fi
-    log "onboarding check passed on $R_NAME"
-  fi
 
   # Iterate candidate issues for this repo (oldest first). The first
   # one that's actually claimable (not in flight, not over the
@@ -1689,7 +1779,7 @@ while read -r repo_line; do
     WINNER_PR_BASE="$R_BASE"
     WINNER_CREATED="$CREATED"
   fi
-done < <(jq -c '.[]' <<<"$REPOS")
+done <<<"$VALIDATED_REPOS_JSON"
 
 if [ -z "$WINNER" ]; then
   log "no claimable work across any repo"
