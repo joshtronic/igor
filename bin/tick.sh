@@ -828,7 +828,7 @@ do_maintenance_tick() {
     {
       printf 'Scheduled maintenance pass on %s.\n\n' "$target"
       printf 'All checks clean.\n\n'
-      printf 'Tools run:\n'
+      printf 'Tools run:\n\n'
       sed 's/^/- /' "$audit_dir/AUDIT_SUMMARY.txt"
     } > "$jbody"
     AGENT_BRAIN_PATH="$m_brain" append_journal_entry "maintenance on $target (clean)" "$jbody"
@@ -944,7 +944,7 @@ EOF
     {
       printf 'Scheduled maintenance pass on %s.\n\n' "$target"
       printf 'Findings detected (see Forgejo issue if filed).\n\n'
-      printf 'Audit summary:\n'
+      printf 'Audit summary:\n\n'
       sed 's/^/- /' "$audit_dir/AUDIT_SUMMARY.txt"
     } > "$jbody"
   fi
