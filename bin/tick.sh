@@ -1461,14 +1461,16 @@ do_maintenance_tick || true
 REVIEW_PR=""
 REVIEW_PR_TRIGGER=""
 
-# Signal 1: scan all validated repos for open bot PRs where the
-# latest non-bot review on the CURRENT HEAD is REQUEST_CHANGES.
-# The HEAD check is important -- if the agent already pushed follow-up
-# commits, the old REQUEST_CHANGES no longer applies and we
-# shouldn't re-pickup until the reviewer reviews again. Repos that
-# failed the validation sweep are excluded -- if the repo isn't
-# safe to do new work in, it isn't safe to push follow-up commits
-# to either.
+# Signal 1: scan all validated repos for open bot PRs whose latest
+# non-bot review is an unaddressed REQUEST_CHANGES. We trust
+# Forgejo's own `stale` and `dismissed` flags instead of doing a
+# manual review.commit_id == pr.head.sha comparison -- the sha
+# comparison was stricter than Forgejo's own staleness tracking
+# and tripped on benign things like merging master into the PR
+# branch (which advances HEAD without invalidating the review).
+# Repos that failed the validation sweep are excluded -- if the
+# repo isn't safe to do new work in, it isn't safe to push
+# follow-up commits to either.
 while IFS= read -r repo_line; do
   [ -n "$REVIEW_PR" ] && break
   [ -z "$repo_line" ] && continue
@@ -1478,18 +1480,20 @@ while IFS= read -r repo_line; do
     [ -n "$REVIEW_PR" ] && break
     [ -z "$pr_num" ] && continue
     pr_details_json=$(forgejo_get_pr "$repo_full" "$pr_num" 2>/dev/null || echo '{}')
-    pr_head_sha=$(jq -r '.head.sha // ""' <<<"$pr_details_json")
-    [ -z "$pr_head_sha" ] && continue
+    [ "$(jq -r '.number // ""' <<<"$pr_details_json")" = "" ] && continue
     latest_review=$(forgejo_pr_non_bot_reviews "$repo_full" "$pr_num" "$BOT_USER" 2>/dev/null \
       | jq -c '.[-1] // empty')
     [ -z "$latest_review" ] && continue
     review_state=$(jq -r '.state // ""' <<<"$latest_review")
-    review_commit=$(jq -r '.commit_id // ""' <<<"$latest_review")
-    if [ "$review_state" = "REQUEST_CHANGES" ] && [ "$review_commit" = "$pr_head_sha" ]; then
+    review_stale=$(jq -r '.stale // false' <<<"$latest_review")
+    review_dismissed=$(jq -r '.dismissed // false' <<<"$latest_review")
+    if [ "$review_state" = "REQUEST_CHANGES" ] \
+        && [ "$review_stale" = "false" ] \
+        && [ "$review_dismissed" = "false" ]; then
       # Synthesize the PR record into the same shape forgejo_my_assigned_prs
       # returns so the downstream flow can consume it uniformly.
       REVIEW_PR=$(jq -c --arg r "$repo_full" '. + {repository: {full_name: $r}}' <<<"$pr_details_json")
-      REVIEW_PR_TRIGGER="REQUEST_CHANGES review on current HEAD"
+      REVIEW_PR_TRIGGER="REQUEST_CHANGES review (not stale, not dismissed)"
     fi
   done < <(jq -r '.[].number' <<<"$rc_open_prs" 2>/dev/null)
 done <<<"$VALIDATED_REPOS_JSON"
