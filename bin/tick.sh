@@ -768,6 +768,10 @@ maintenance_eligible() {
 #     Status/Need More Info issue with the triaged report and
 #     appends the journal entry.
 do_maintenance_tick() {
+  # Maintenance is Igor-driven (scheduled chore, not human-triggered),
+  # so it only fires inside the shift window.
+  in_shift_window || return 1
+
   local target=""
   local ELIGIBLE=()
   local repo_line r_name
@@ -1277,16 +1281,31 @@ build_deps_section() {
   done <<<"$files"
 }
 
-# -- Shift gate ------------------------------------------------
+# -- Shift gate (split: human-driven vs Igor-driven) -----------
 #
-# If AGENT_SHIFT_START + _END are configured, exit early when the
-# current local hour is outside the shift window. Lets the systemd
-# timer fire 24/7 while the agent only "works" his configured shift.
-# Default (unconfigured) is always-on.
+# The shift used to be a hard tick gate -- outside hours, the whole
+# tick exited. That made the agent unresponsive to human signals
+# (reviewer requested changes, human filed a new issue) for the
+# 16 off-shift hours.
+#
+# New model: the tick always runs to completion. The shift gates
+# only Igor-driven work:
+#   - Scheduled maintenance (do_maintenance_tick)
+#   - Discretionary website work / reading / reflection
+#   - Tier-1 issue work where the issue author IS the bot (issues
+#     Igor filed himself via agent-enqueue.sh during site-work)
+#
+# Human-driven work runs around the clock:
+#   - Validation sweep
+#   - Recovery sweep
+#   - PR-review pickup (REQUEST_CHANGES, reassignment)
+#   - Tier-1 issue work where the author is NOT the bot
+#
+# in_shift_window is consulted per-step below instead of gating
+# at the top.
 
 if ! in_shift_window; then
-  log "outside shift window (${AGENT_SHIFT_START:-unset}-${AGENT_SHIFT_END:-unset}), current hour $(date +%H) -- skipping tick"
-  exit 0
+  log "outside shift window (${AGENT_SHIFT_START:-unset}-${AGENT_SHIFT_END:-unset}), current hour $(date +%H) -- human-driven work only this tick"
 fi
 
 # -- Bootstrap: ensure the agent's own repos are cloned -------------
@@ -1764,6 +1783,19 @@ while IFS= read -r repo_line; do
   while read -r candidate; do
     [ -z "$candidate" ] && continue
     C_NUM=$(jq -r .number <<<"$candidate")
+
+    # Outside shift, only human-filed tickets are eligible. Tickets
+    # the bot filed himself (via agent-enqueue.sh during discretionary
+    # site-work) are Igor's own queue and respect the shift gate the
+    # same way discretionary work does.
+    if ! in_shift_window; then
+      C_AUTHOR=$(jq -r '.user.login // ""' <<<"$candidate")
+      if [ "$C_AUTHOR" = "$BOT_USER" ]; then
+        log "skipping ${R_NAME}#${C_NUM} -- bot-filed and outside shift"
+        continue
+      fi
+    fi
+
     C_HISTORY=$(forgejo_bot_prs_for_issue "$R_NAME" "$C_NUM" "$BOT_USER" 2>/dev/null || echo '[]')
     C_OPEN=$(jq '[.[] | select(.state == "open")] | length' <<<"$C_HISTORY")
     if [ "$C_OPEN" -gt 0 ]; then
@@ -1809,13 +1841,14 @@ if [ -z "$WINNER" ]; then
   # a website, do one freeform pass on the site (or reading, or a
   # post -- the cadence assessor below picks).
   #
-  # Always fires on empty ticks. The operator dials back activity
-  # by shortening the shift window (AGENT_SHIFT_START/END), not by
-  # rate-gating individual ticks. Natural pacing comes from the
-  # scope cap (400 lines / 10 commits) and the once-per-local-day
-  # post cap; multiple concurrent PRs on the same repo are fine --
-  # the human handles merge order in Forgejo like any multi-PR
-  # project.
+  # Igor-driven, so shift-gated. Outside shift the tick exits cleanly
+  # here -- human-driven steps above (validation, PR-review, claimable
+  # discovery filtered to non-Igor-filed) have already run.
+
+  if ! in_shift_window; then
+    log "outside shift window -- skipping discretionary, ending tick"
+    exit 0
+  fi
 
   W_REPO="${BOT_USER}/website"
   W_PATH=$(repo_path_for "$W_REPO")

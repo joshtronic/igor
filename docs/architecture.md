@@ -54,9 +54,18 @@ A timer fires `bin/tick.sh`. Per tick:
     work, the agent does one freeform pass on the bot's website
     (or a reading tick, or a post -- the cadence assessor picks).
     One-PR-per-repo rule applies (skip site-work if there's an
-    open bot PR on the website). Pacing is the shift window plus
-    the once-per-local-day post cap; no rate gate. Branch name
-    pattern: `agent/discretionary-YYYY-MM-DD-HHMMSS`.
+    open bot PR on the website). Shift-gated -- outside the
+    configured shift window, the tick ends here. Pacing is the
+    shift window plus the once-per-local-day post cap; no rate
+    gate. Branch name pattern: `agent/discretionary-YYYY-MM-DD-HHMMSS`.
+
+The shift window (`AGENT_SHIFT_START` / `_END`) gates Igor-driven
+work only -- maintenance, discretionary, and tier-1 work on
+issues Igor filed himself. Human-driven signals (validation,
+recovery, PR-review pickup for `REQUEST_CHANGES`/reassignment,
+tier-1 work on issues filed by someone other than the bot) run
+on every tick around the clock. The systemd timer fires
+continuously; the shift just shapes what's eligible to fire.
 
 | What Claude did                 | What the agent does                                                |
 |---------------------------------|---------------------------------------------------------------|
