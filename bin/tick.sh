@@ -1408,9 +1408,24 @@ ALL_REPOS=$(forgejo_list_bot_repos)
 VALIDATED_REPOS_JSON=""
 VAL_PASS=0
 VAL_FAIL=0
+VAL_SKIPPED=0
 while IFS= read -r repo_line; do
   [ -z "$repo_line" ] && continue
   R_NAME=$(jq -r '.full_name' <<<"$repo_line")
+
+  # Short-circuit: open onboarding ticket means "this repo is
+  # known-broken and the user hasn't told us it's fixed." Skip the
+  # ~6-call validation pass and treat as failed. Closing the ticket
+  # is the user's signal to re-validate.
+  EXISTING=$(forgejo_find_marked_issue "$R_NAME" "$BOT_USER" "$ONBOARDING_MARKER" 2>/dev/null)
+  if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ] && [ "$EXISTING" != "empty" ] \
+      && [ "$(jq -r '.state' <<<"$EXISTING" 2>/dev/null)" = "open" ]; then
+    EXISTING_NUM=$(jq -r '.number' <<<"$EXISTING" 2>/dev/null)
+    log "validation: $R_NAME skipped -- open onboarding ticket #${EXISTING_NUM} (close ticket to re-validate)"
+    VAL_SKIPPED=$((VAL_SKIPPED + 1))
+    continue
+  fi
+
   set +e
   V_REPORT=$(validate_repo_via_api "$R_NAME")
   V_RC=$?
@@ -1425,7 +1440,7 @@ while IFS= read -r repo_line; do
     VAL_FAIL=$((VAL_FAIL + 1))
   fi
 done < <(jq -c '.[]' <<<"$ALL_REPOS")
-log "validation: ${VAL_PASS} pass, ${VAL_FAIL} fail"
+log "validation: ${VAL_PASS} pass, ${VAL_FAIL} fail, ${VAL_SKIPPED} skipped (open onboarding ticket)"
 
 if [ -z "$VALIDATED_REPOS_JSON" ]; then
   log "validation: no repos passed -- nothing to do this tick"
