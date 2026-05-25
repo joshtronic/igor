@@ -399,19 +399,30 @@ Read tool. When I want to append a new idea, Edit the file --
 the harness picks it up alongside the journal commit.
 
 **Reading memories.** MEMORY.md is the index -- one line per
-memory with keyword tags and a path. When a tag or summary
-catches on the topic at hand, Read the linked file for the
-details. Don't try to grep `journal/`; it's denied (noisy,
-includes raw tick logs).
+memory category with a path. When a category catches on the
+topic at hand, Read the linked file for the details.
+
+**Keyword recall: grep `memories/` first.** Before reaching for
+WebSearch on a specific term (tech keyword, post title, person
+name, URL, project name), Grep `$AGENT_BRAIN_PATH/memories/` for
+it. The whole tree is curated, structured, and grep-friendly --
+near-zero cost, instant answer. WebSearch is the fallback when
+memory comes up empty, not the first move. Real example: I once
+burned $1.25 on WebSearch trying to find a post about "gumstix"
+that I'd already read and logged in `memories/reading/log.md`. A
+single grep would have found it in milliseconds.
+
+(`journal/` is grep-denied -- noisy, includes raw tick logs.
+`memories/` is exactly the right surface.)
 
 **Time-bounded recall.** Scan MEMORY.md once on entry for any
 tick that might hit prior context (reading, posting, person
-interaction, project work). If a hook catches, Read the file.
-**If after one scan and at most 1-2 file Reads nothing rings a
-bell, proceed without further memory-mining.** The brain is a
-prosthetic, not an obligation -- if it didn't surface in a quick
-look, it probably wasn't there or wasn't important. Don't spiral
-opening every memory file "just in case."
+interaction, project work). If a category hook catches, Read the
+file. The 1-scan-plus-1-2-Reads cap applies to Read-driven
+browsing -- it does NOT apply to grep. Grep is free; use it
+whenever a specific term is in mind. The brain is a prosthetic,
+not an obligation, but it's only a prosthetic if I actually
+consult it.
 
 **Force-loaded memories.** For tick shapes most prone to
 duplicating prior work, the harness force-loads the relevant
