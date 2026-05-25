@@ -1925,6 +1925,46 @@ if [ -z "$WINNER" ]; then
     W_POST_RULE="You already shipped a post today (local calendar day). Do NOT publish another post this tick -- max one post per day is a hard rule. Other site work (about page, layout, copy, links, tag pages, CSS) and read+journal ticks are still fair game."
   fi
 
+  # -- Daily caps on discretionary output -----------------------
+  #
+  # Once a mode hits its daily cap, it's exhausted for the day.
+  # If the cadence picker chooses a capped mode, we reroute below.
+  # If all modes are exhausted, the tick ends here.
+  #
+  # Posts: 1/day -- gated above via W_POSTING_ALLOWED.
+  # Site-work: 3/day -- counted here from journal entries.
+  # Reading: 3/day -- counted here from journal entries.
+  # Reflect: 1/day -- already gated inside discretionary_assess_cadence
+  #          via reflected_today; counted here for the all-caps check.
+  DAILY_WORK_CAP=3
+  DAILY_READ_CAP=3
+  D_JOURNAL="${BRAIN_PATH}/journal/$(date +%Y-%m-%d).md"
+  # `grep -c` exits 1 (not 0) when there are zero matches but still
+  # prints "0" to stdout. Naive `|| echo 0` would concatenate two
+  # zeros and break the arithmetic comparison below. Pattern used
+  # here: capture grep's stdout, then `|| VAR=0` swaps in a clean
+  # zero only if grep failed catastrophically (missing file, etc.).
+  WORK_TODAY=0
+  READ_TODAY=0
+  REFLECT_TODAY=0
+  if [ -f "$D_JOURNAL" ]; then
+    WORK_TODAY=$(grep -cE '^## [0-9-]+T[0-9:+-]+ -- discretionary on ' "$D_JOURNAL" 2>/dev/null) || WORK_TODAY=0
+    READ_TODAY=$(grep -cE '^## [0-9-]+T[0-9:+-]+ -- discretionary reading$' "$D_JOURNAL" 2>/dev/null) || READ_TODAY=0
+    REFLECT_TODAY=$(grep -cE '^## [0-9-]+T[0-9:+-]+ -- discretionary reflection$' "$D_JOURNAL" 2>/dev/null) || REFLECT_TODAY=0
+  fi
+  WORK_CAPPED=0; [ "$WORK_TODAY" -ge "$DAILY_WORK_CAP" ] && WORK_CAPPED=1
+  READ_CAPPED=0; [ "$READ_TODAY" -ge "$DAILY_READ_CAP" ] && READ_CAPPED=1
+  REFLECT_CAPPED=0; [ "$REFLECT_TODAY" -ge 1 ] && REFLECT_CAPPED=1
+  log "discretionary: today's output -- post=$([ "$W_POSTING_ALLOWED" = "1" ] && echo open || echo capped) work=$WORK_TODAY/$DAILY_WORK_CAP read=$READ_TODAY/$DAILY_READ_CAP reflect=$REFLECT_TODAY/1"
+
+  if [ "$W_POSTING_ALLOWED" = "0" ] \
+      && [ "$WORK_CAPPED" = "1" ] \
+      && [ "$READ_CAPPED" = "1" ] \
+      && [ "$REFLECT_CAPPED" = "1" ]; then
+    log "discretionary: all caps reached today -- ending tick"
+    exit 0
+  fi
+
   # Routing: cadence assessment fires FIRST, on every discretionary
   # tick. It gates both post and site-work -- a heavy queue can
   # overrule an open posting slot just as easily as it can short-
@@ -1956,6 +1996,28 @@ if [ -z "$WINNER" ]; then
     W_SPLIT_ORDER="site-work reading"
   fi
   log "discretionary: routing (posting_allowed=$W_POSTING_ALLOWED, open_prs=$W_OPEN_PRS_COUNT, active_prs=$W_ACTIVE_PRS_COUNT) -> $W_SPLIT_ORDER"
+
+  # Cap enforcement: if the picked mode is capped, reroute to
+  # reflect (the cheapest fallback). If reflect is also capped,
+  # end the tick. Post and reflect can't reach here capped (their
+  # gates upstream already ruled them out), so we only check
+  # reading and site-work.
+  W_REROUTE_REASON=""
+  if [ "$W_PICKED_MODE" = "reading" ] && [ "$READ_CAPPED" = "1" ]; then
+    W_REROUTE_REASON="reading cap reached (${READ_TODAY}/${DAILY_READ_CAP})"
+  elif [ "$W_PICKED_MODE" = "site-work" ] && [ "$WORK_CAPPED" = "1" ]; then
+    W_REROUTE_REASON="site-work cap reached (${WORK_TODAY}/${DAILY_WORK_CAP})"
+  fi
+  if [ -n "$W_REROUTE_REASON" ]; then
+    if [ "$REFLECT_CAPPED" = "0" ]; then
+      log "discretionary: $W_REROUTE_REASON -- rerouting to reflect"
+      W_PICKED_MODE="reflect"
+      W_SPLIT_ORDER="reflect"
+    else
+      log "discretionary: $W_REROUTE_REASON and reflect already done today -- ending tick"
+      exit 0
+    fi
+  fi
 
   # Reading mode short-circuit: it doesn't touch the website. Use a
   # scratch dir for the .agent/AGENT_JOURNAL.md output, run the
