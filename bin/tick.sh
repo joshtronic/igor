@@ -2399,18 +2399,30 @@ fi  # end if-claude-code-site-work
   # is the safety net for when he forgets. Brain commit happens
   # regardless -- the harness-side executors (discretionary-post.sh's
   # dedupe, ideas reflection, source-weight tweaks) also mutate brain.
+  #
+  # Suffix encodes mode: posts get "discretionary post on <repo>",
+  # site-work gets "discretionary on <repo>". The daily site-work
+  # cap counter (WORK_TODAY) greps for `'-- discretionary on '`
+  # specifically, so posts -- which have `post` between
+  # `discretionary` and `on` -- don't get miscounted as site-work.
+  # Posts are still capped via W_POSTING_ALLOWED (1/day binary).
+  if [ "$W_PICKED_MODE" = "post" ]; then
+    W_MODE_SUFFIX="discretionary post on $W_REPO"
+  else
+    W_MODE_SUFFIX="discretionary on $W_REPO"
+  fi
   W_JOURNAL_SRC="$W_WORKTREE/.agent/AGENT_JOURNAL.md"
   W_JOURNAL_FALLBACK=$(cat <<EOF
 (no reflection from Claude this tick -- harness recorded the facts below)
 
-- Mode: discretionary on ${W_REPO}
+- Mode: ${W_MODE_SUFFIX}
 - Commit subject: ${W_SUBJECT:-(no commit this tick)}
 - Files changed: ${W_DIRTY_COUNT}
 - Elapsed: ${W_ELAPSED}s
 EOF
 )
-  append_journal_entry "discretionary on $W_REPO" "$W_JOURNAL_SRC" "$W_JOURNAL_FALLBACK"
-  commit_brain_changes "$BRAIN_PATH" "journal: discretionary on $W_REPO"
+  append_journal_entry "$W_MODE_SUFFIX" "$W_JOURNAL_SRC" "$W_JOURNAL_FALLBACK"
+  commit_brain_changes "$BRAIN_PATH" "journal: $W_MODE_SUFFIX"
 
   # Outcome classification
   W_COMMITS=$(git rev-list --count "origin/${W_BASE}..HEAD" 2>/dev/null || echo 0)
