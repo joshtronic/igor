@@ -623,6 +623,16 @@ append_journal_entry() {
     return 0
   fi
 
+  # Sanitize body before commit so brain's markdownlint doesn't
+  # reject it. Claude occasionally ends a line with a stray space
+  # (MD009) and brain's CI fails on push. Sed strips trailing
+  # whitespace from every line in the body -- both Claude's
+  # AGENT_JOURNAL.md content and any harness-built fallback_body
+  # land here. Bash command substitution drops the trailing
+  # newline, and the printf '%s\n' below adds one back, so MD047
+  # (single trailing newline) stays correct.
+  body=$(printf '%s' "$body" | sed 's/[[:space:]]*$//')
+
   {
     printf '\n## %s -- %s\n\n' "$journal_ts" "$mode_suffix"
     printf '%s\n' "$body"
