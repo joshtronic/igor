@@ -731,6 +731,33 @@ maintenance_mark_done() {
   mv "$tmp" "$state_file"
 }
 
+# -- HN snapshot cooldown (1 hour) ------------------------------
+#
+# The HN snapshot is around-the-clock, runs every tick regardless
+# of shift, but capped to once per hour so we're not pounding the
+# Algolia API every 10 minutes. State key: hn_snapshot_last_run
+# (Unix epoch seconds, integer).
+
+hn_snapshot_due() {
+  local state_file last now
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || return 0
+  last=$(jq -r '.hn_snapshot_last_run // 0' "$state_file" 2>/dev/null)
+  [ -z "$last" ] || [ "$last" = "null" ] && last=0
+  now=$(date +%s)
+  [ $((now - last)) -ge 3600 ]
+}
+
+hn_snapshot_mark_done() {
+  local state_file tmp now
+  now=$(date +%s)
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --argjson t "$now" '.hn_snapshot_last_run = $t' "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
 # Eligible if not run this ISO week (weeks start Monday, local time).
 # Any tick all week can pick up an eligible repo -- no shift-window
 # gate. Resilient to Monday-tick failures and to new repos added
@@ -1451,6 +1478,32 @@ while IFS= read -r repo_line; do
   fi
 done < <(jq -c '.[]' <<<"$ALL_REPOS")
 log "validation: ${VAL_PASS} pass, ${VAL_FAIL} fail, ${VAL_SKIPPED} skipped (open onboarding ticket)"
+
+# -- HN snapshot (around-the-clock) ----------------------------
+#
+# Ingest HN's front page into brain's HN ledger. Pure harness
+# work -- no Claude, no article fetching. Runs regardless of
+# shift window because backlog snapshots are most valuable when
+# they capture HN at many points across the day. Gated by a
+# 1-hour cooldown so we don't pound the Algolia API on every
+# tick. Fires before the "no validated repos" exit so a tick
+# with no work-eligible repos still keeps the backlog fresh.
+
+if hn_snapshot_due; then
+  H_BRAIN="$AGENT_REPO_ROOT/${BOT_USER}/brain"
+  if [ -d "$H_BRAIN/.git" ]; then
+    H_BODY=$(mktemp)
+    if "$AGENT_HOME/bin/hn-snapshot.sh" "$H_BRAIN" "$H_BODY" 2>&1; then
+      AGENT_BRAIN_PATH="$H_BRAIN" append_journal_entry "hn snapshot" "$H_BODY"
+      commit_brain_changes "$H_BRAIN" "journal: hn snapshot" \
+        || log "warning: brain commit failed after hn snapshot"
+      hn_snapshot_mark_done
+    else
+      log "warning: hn snapshot failed (Algolia unreachable or ledger error)"
+    fi
+    rm -f "$H_BODY"
+  fi
+fi
 
 if [ -z "$VALIDATED_REPOS_JSON" ]; then
   log "validation: no repos passed -- nothing to do this tick"
