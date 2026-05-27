@@ -94,8 +94,8 @@ fi
 : "${BOT_USER:?BOT_USER must be set (resolved from token in tick.sh; export it before calling)}"
 
 # WEBSITE_REPO is opt-in. Without a target repo the pipeline has
-# nowhere to ship posts, and reflection-only mode pollutes brain
-# with reading entries that have no downstream consumer. Exit
+# nowhere to ship posts, and reflection-only mode would just
+# accumulate sqlite rows that no downstream consumer reads. Exit
 # clean (rc 0) so the harness doesn't treat the no-website case
 # as an error.
 if [ -z "${WEBSITE_REPO:-}" ]; then

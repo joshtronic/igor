@@ -182,9 +182,6 @@ In this mode:
 - Same scope cap, TDD rules, tests + lint requirement, and
   /security-review apply as in regular PR mode.
 - Don't write `.agent/PR_BODY.md` -- the PR body is already set.
-- No journal write expected. PR-review ticks are reactive and
-  the harness handles the brain commit if anything ends up
-  changing brain.
 
 If the feedback is unanswerable in code (questions, ambiguity, "ship
 it" with no requested changes), exit without commits. The harness

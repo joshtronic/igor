@@ -1,20 +1,26 @@
 # agent -- Igor's harness
 
 The unattended worker. Wakes on a timer, claims one piece of work,
-ships it, sleeps. The brain is at `igor/brain`; the website at
-`igor/website`; this repo is everything that makes the cron beat
-real.
+ships it, sleeps. The reading-pipeline + site-work block (opt-in
+via `WEBSITE_REPO`) run during the shift window when no claimable
+issue is found; durable state for those lives in
+`~/.local/state/agent/brain.sqlite`. This repo is everything that
+makes the cron beat real.
 
 ## What's where
 
 - `bin/tick.sh` -- the single per-tick orchestrator. Read this
   first; everything else hangs off it.
+- `bin/reading-pipeline.sh`, `bin/site-work-block.sh` -- the
+  website-side ticks (opt-in via `WEBSITE_REPO`).
 - `bin/*.sh` -- helpers Claude or the operator can invoke
-  (`agent-block.sh`, `agent-enqueue.sh`, `validate-repo.sh`, etc.).
-- `lib/*.sh` -- sourced libraries (Forgejo API, repo checks,
-  maintenance checks, RAG, cost tracking).
-- `AGENTS.md` -- the universal agent rules appended to every
-  Claude system prompt. The harness reads this every tick.
+  (`agent-block.sh`, `agent-ask.sh`, `validate-repo.sh`, etc.).
+- `bin/lib/` -- shared voice anchor + task directives loaded into
+  Claude's system prompt per surface.
+- `lib/*.sh` -- sourced shell libraries (Forgejo API, repo checks,
+  maintenance checks, cost tracking).
+- `AGENTS.md` -- the universal agent rules appended to Claude's
+  system prompt for issue work and PR review.
 - `agent-settings.json` -- Claude's tool permission profile.
 - `systemd/agent.{service,timer}` -- the production deploy units.
 - `docs/` -- operator-facing notes (architecture, onboarding,
@@ -57,16 +63,18 @@ respective tools on the host; install or skip.
   Repos with an open onboarding ticket short-circuit the full
   check; closing the ticket re-enables it.
 - The shift window (`AGENT_SHIFT_START`/`_END`) gates Igor-driven
-  work only -- scheduled maintenance, discretionary website work,
-  and bot-filed tier-1 tickets. Human-driven work (validation,
-  recovery, PR-review pickup, human-filed tier-1) runs around the
-  clock.
-- AGENTS.md is appended to Claude's system prompt every tick.
-  Treat changes to it the way you would a deploy.
-- Brain-side lint failures (markdownlint on journal entries Igor
-  writes) cascade into recovery loops. When changing the format
-  of any harness-templated brain content, lint the templated
-  output against `brain/.markdownlint.json` before pushing.
+  work only -- scheduled maintenance, reading pipeline, site-work
+  block, and bot-filed tier-1 tickets. Human-driven work
+  (validation, recovery, PR-review pickup, human-filed tier-1)
+  runs around the clock.
+- `AGENTS.md` is appended to Claude's system prompt for issue
+  work and PR review. Other surfaces (maintenance triage, reading
+  pipeline, site-work) use task-specific directives from
+  `bin/lib/`. Treat changes to any of these the way you would a
+  deploy.
+- Website work is opt-in via `WEBSITE_REPO`. With it unset the
+  reading pipeline and site-work block both no-op cleanly; the
+  rest of the tick (issues, maintenance, PR review) still runs.
 
 ## Off-limits
 

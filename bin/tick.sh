@@ -72,7 +72,6 @@ env_file_hint="$AGENT_HOME/.env"
 : "${FORGEJO_TOKEN:?must be set in $env_file_hint}"
 : "${FORGEJO_HOST:?must be set in $env_file_hint}"
 : "${FORGEJO_REVIEWER:?must be set in $env_file_hint}"
-: "${REDIS_URL:?must be set in $env_file_hint}"
 : "${TICK_TIMEOUT:?must be set in $env_file_hint}"
 : "${AGENT_SHIFT_START:?must be set in $env_file_hint}"
 : "${AGENT_SHIFT_END:?must be set in $env_file_hint}"
@@ -552,21 +551,18 @@ list_offlimits_violations() {
 
 
 # Idempotent clone-if-missing, pull-if-present. Creates the owner
-# subdir as needed. Pulls existing clones so brain identity changes
-# and website content updates propagate to the agent on every tick.
+# subdir as needed. Pulls existing clones so upstream changes
+# propagate to the agent on every tick.
 #
-# Self-healing for dirty trees: a crashed tick (W_LOG-style unbound
-# var, OOM, timeout, etc.) can mutate working-tree files but never
-# reach the commit step, leaving the repo in a state where every
-# subsequent `git pull --rebase` refuses to run. The warning was
-# the only signal and the silent rot meant brain stopped getting
-# new commits for hours at a time.
+# Self-healing for dirty trees: a crashed tick (OOM, timeout,
+# unbound var, etc.) can mutate working-tree files but never reach
+# the commit step, leaving the repo in a state where every
+# subsequent `git pull --rebase` refuses to run.
 #
 # Fix: at tick start, if any tracked file is dirty, auto-commit
 # the leftover state with a `recovery:` subject and try to push.
-# The commit captures whatever the previous tick was writing (likely
-# blog-ideas.md edits, journal appends, sources weight adjustments)
-# instead of leaving them orphaned in the working tree. Pull then
+# The commit captures whatever the previous tick was writing
+# instead of leaving it orphaned in the working tree. Pull then
 # succeeds against either the just-pushed origin or a clean local
 # tree.
 ensure_repo_local() {
@@ -592,10 +588,10 @@ ensure_repo_local() {
       [ -n "$line" ] && log "  $line"
     done <<<"$dirty_summary"
     (cd "$local_path" && git add -A 2>/dev/null) || true
-    # Pre-commit lint gate (no-op for non-brain repos -- see
-    # repo_lint_passes). If brain's dirty state itself is what's
-    # breaking lint, don't push more broken content. Leave dirty
-    # and surface; a future tick or human can untangle.
+    # Pre-commit lint gate (see repo_lint_passes). If the dirty
+    # state itself is what's breaking lint, don't push more broken
+    # content. Leave dirty and surface; a future tick or human can
+    # untangle.
     if ! repo_lint_passes "$local_path"; then
       log "  warning: $repo lint failed on dirty state; refusing recovery commit. Inspect: (cd $local_path && npm test)"
     elif (cd "$local_path" \
@@ -715,21 +711,20 @@ do_maintenance_tick() {
 }
 
 # Per-repo maintenance executor. Audits ONE repo via
-# lib/maintenance-checks.sh, journals the outcome to brain, and
-# (for findings) invokes Claude to triage into a Forgejo issue.
-# Worktree is created here and cleaned via a RETURN trap so we
-# don't leak when the function unwinds.
+# lib/maintenance-checks.sh and (for findings) invokes Claude to
+# triage into a Forgejo issue. Worktree is created here and
+# cleaned via a RETURN trap so we don't leak when the function
+# unwinds.
 #
 # Hybrid execution:
 #   - Harness runs the audit tools (npm audit + outdated, cargo
 #     audit + outdated, pip-audit + pip list --outdated,
 #     govulncheck + go list -m -u all, bundle-audit + bundle
 #     outdated).
-#   - Clean week -> templated journal entry, no LLM, no issue.
-#   - No recognized stack -> templated "nothing to audit" entry.
+#   - Clean week -> no LLM, no issue.
+#   - No recognized stack -> same.
 #   - Findings -> invoke Claude to triage; harness files the
-#     Status/Need More Info issue with the triaged report and
-#     appends the journal entry.
+#     Status/Need More Info issue with the triaged report.
 do_maintenance_for_repo() {
   local target="$1"
 
@@ -882,9 +877,9 @@ EOF
 # Returns 0 if the repo passes its declared lint, OR if no lint
 # is configured. Best-effort: missing toolchain (no package.json,
 # no node_modules, no npm) is treated as "no lint" (pass) so
-# non-brain repos and unconfigured hosts no-op cleanly. Currently
-# scoped to npm-based lint -- extend per stack as other repos
-# start needing pre-commit gating.
+# unconfigured repos and hosts no-op cleanly. Currently scoped to
+# npm-based lint -- extend per stack as other repos start needing
+# pre-commit gating.
 repo_lint_passes() {
   local repo_path="$1"
   [ -f "$repo_path/package.json" ] || return 0
