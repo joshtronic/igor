@@ -17,9 +17,9 @@
 #      new `agent/site-work-<ts>` branch.
 #
 #   3. Invoke Claude Code in that worktree with:
-#        - The voice anchor (bin/lib/voice.txt)
-#        - The appropriate directive (site-work-directives.txt OR
-#          play-tick-directive.txt)
+#        - The voice anchor (bin/lib/voice.md)
+#        - The appropriate directive (site-work-directives.md OR
+#          play-tick-directive.md)
 #        - The repo's CLAUDE.md
 #      No AGENTS.md -- Phase 5 retires it for non-issue-work
 #      surfaces; this block is one such surface from the start.
@@ -122,9 +122,9 @@ fi
 
 # -- load voice anchor + directive -----------------------------
 
-VOICE_FILE="$AGENT_HOME/bin/lib/voice.txt"
-DIRECTIVE_FILE="$AGENT_HOME/bin/lib/site-work-directives.txt"
-[ "$PLAY_TICK" = "1" ] && DIRECTIVE_FILE="$AGENT_HOME/bin/lib/play-tick-directive.txt"
+VOICE_FILE="$AGENT_HOME/bin/lib/voice.md"
+DIRECTIVE_FILE="$AGENT_HOME/bin/lib/site-work-directives.md"
+[ "$PLAY_TICK" = "1" ] && DIRECTIVE_FILE="$AGENT_HOME/bin/lib/play-tick-directive.md"
 
 if [ ! -f "$VOICE_FILE" ];     then log "voice anchor not found: $VOICE_FILE"; exit 2; fi
 if [ ! -f "$DIRECTIVE_FILE" ]; then log "directive not found: $DIRECTIVE_FILE"; exit 2; fi

@@ -63,7 +63,7 @@ AGENT_HOME="${AGENT_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
 AGENT_STATE_DIR="${AGENT_STATE_DIR:-$HOME/.local/state/agent}"
 
 BRAIN_DB="$AGENT_STATE_DIR/brain.sqlite"
-VOICE_ANCHOR="$AGENT_HOME/bin/lib/voice.txt"
+VOICE_ANCHOR="$AGENT_HOME/bin/lib/voice.md"
 WEBSITE_PATH=""  # default computed below once we know BOT_USER
 LIVE=0
 
