@@ -99,14 +99,15 @@ if [ -n "${AGENT_RECALL_DAYS:-}" ] && ! [[ "$AGENT_RECALL_DAYS" =~ ^[1-9][0-9]*$
   fail "AGENT_RECALL_DAYS format" "expected positive integer -- got '$AGENT_RECALL_DAYS'"
 fi
 
-# Optional: WEBSITE_REPO overrides the default ${BOT_USER}/website
-# (used for the planned post-refactor rename to joshtronic/igor.bot).
-# Not required -- tick.sh defaults to the bot's own /website. Show
-# explicitly which one will resolve so operators can confirm.
+# WEBSITE_REPO is opt-in -- unset = no website work at all. The
+# rest of the agent (issues, maintenance, PR-review) still runs
+# on any repo the bot has access to. With WEBSITE_REPO set, the
+# bootstrap clones the website, the reading pipeline can ship
+# posts to it, and the site-work block fires inside the shift.
 if [ -n "${WEBSITE_REPO:-}" ]; then
-  pass "WEBSITE_REPO set (${WEBSITE_REPO}) -- override active"
+  pass "WEBSITE_REPO set (${WEBSITE_REPO}) -- website work enabled"
 else
-  warn "WEBSITE_REPO unset -- will default to \${BOT_USER}/website at tick start"
+  warn "WEBSITE_REPO unset -- website work DISABLED (set in .env to enable reading pipeline + site-work block)"
 fi
 
 [ -f "$AGENT_HOME/agent-settings.json" ] && pass "agent-settings.json present" || fail "agent-settings.json present"

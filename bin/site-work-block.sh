@@ -48,7 +48,9 @@
 #   AGENT_STATE_DIR   -- default ~/.local/state/agent
 #   AGENT_HOME        -- default <script-parent-dir>
 #   AGENT_REPO_ROOT   -- default $AGENT_STATE_DIR/repos
-#   WEBSITE_REPO      -- default $BOT_USER/website (Forgejo repo)
+#   WEBSITE_REPO      -- REQUIRED. Forgejo repo path (e.g.
+#                        joshtronic/igor.bot). Unset = no website
+#                        work; the block exits clean.
 #   TICK_TIMEOUT      -- default 30m (Claude wall-clock cap)
 #   PLAY_TICK         -- 0 or 1; if set, overrides the dice roll
 #   FORGEJO_REVIEWER  -- optional, assignee on opened PR
@@ -74,9 +76,16 @@ fi
 : "${FORGEJO_HOST:?FORGEJO_HOST must be set}"
 : "${BOT_USER:?BOT_USER must be set (resolved from token in tick.sh; export it before calling)}"
 
+# WEBSITE_REPO is opt-in. The site-work block has no purpose
+# without a target repo. Exit clean so the harness doesn't treat
+# the no-website case as an error.
+if [ -z "${WEBSITE_REPO:-}" ]; then
+  echo "site-work-block: WEBSITE_REPO unset -- nothing to do (set it in .env to opt in)" >&2
+  exit 0
+fi
+
 MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 TICK_TIMEOUT="${TICK_TIMEOUT:-30m}"
-WEBSITE_REPO="${WEBSITE_REPO:-${BOT_USER}/website}"
 WEBSITE_PATH=""
 LIVE=0
 PLAY_TICK_OVERRIDE="${PLAY_TICK:-}"

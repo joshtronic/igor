@@ -93,9 +93,18 @@ fi
 : "${FORGEJO_HOST:?FORGEJO_HOST must be set}"
 : "${BOT_USER:?BOT_USER must be set (resolved from token in tick.sh; export it before calling)}"
 
+# WEBSITE_REPO is opt-in. Without a target repo the pipeline has
+# nowhere to ship posts, and reflection-only mode pollutes brain
+# with reading entries that have no downstream consumer. Exit
+# clean (rc 0) so the harness doesn't treat the no-website case
+# as an error.
+if [ -z "${WEBSITE_REPO:-}" ]; then
+  echo "reading-pipeline: WEBSITE_REPO unset -- nothing to do (set it in .env to opt in)" >&2
+  exit 0
+fi
+
 MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 THINKING_MODEL="${AGENT_MODEL_THINKING:-claude-haiku-4-5-20251001}"
-WEBSITE_REPO="${WEBSITE_REPO:-${BOT_USER}/website}"
 WEBSITE_PATH="${WEBSITE_PATH:-$AGENT_STATE_DIR/repos/${WEBSITE_REPO}}"
 
 # -- libs -------------------------------------------------------

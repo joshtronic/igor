@@ -113,23 +113,22 @@ export BOT_USER
 export FORGEJO_REVIEWER
 export AGENT_HOME
 
-# Brain + website paths derived from the bot user / repo config.
-# Exported so every Claude Code invocation (tier-1, PR-review,
-# maintenance, site-work) can resolve absolute paths into the
-# bot's own repos -- e.g. writing memory files to
-# $AGENT_BRAIN_PATH/memories/projects/X.md from inside a
-# worktree that's on a different repo. Without these exported,
-# AGENTS.md's instruction to "use $AGENT_BRAIN_PATH" is a dead
-# reference.
-#
-# WEBSITE_REPO override: the bot's website lives at
-# ${BOT_USER}/website by default. After the planned post-refactor
-# rename (igor/website -> joshtronic/igor.bot), point at the new
-# Forgejo path via the WEBSITE_REPO env var. The harness reads
-# this once here and propagates everywhere.
+# Brain path: always derived from the bot user. Brain is the
+# agent's own memory store; every Claude Code invocation needs
+# absolute access to it.
 export AGENT_BRAIN_PATH="$AGENT_REPO_ROOT/${BOT_USER}/brain"
-export WEBSITE_REPO="${WEBSITE_REPO:-${BOT_USER}/website}"
-export AGENT_WEBSITE_PATH="$AGENT_REPO_ROOT/${WEBSITE_REPO}"
+
+# Website is OPT-IN via WEBSITE_REPO. If set, name the Forgejo
+# repo path (e.g. "joshtronic/igor.bot") and the harness will
+# bootstrap + run the reading pipeline + run the site-work block
+# against it. If unset, ALL website work is disabled: no clone,
+# no reading-pipeline post drafting, no site-work block. The
+# agent still works issues + maintenance + PR-review on any
+# other repo it has access to.
+export WEBSITE_REPO="${WEBSITE_REPO:-}"
+if [ -n "$WEBSITE_REPO" ]; then
+  export AGENT_WEBSITE_PATH="$AGENT_REPO_ROOT/${WEBSITE_REPO}"
+fi
 
 # Put the harness's bin dir on PATH for every Claude invocation in
 # this script. Without this, Claude can't call agent-enqueue.sh /
@@ -1173,10 +1172,14 @@ if ! forgejo_repo_exists "${BOT_USER}/brain"; then
 fi
 ensure_repo_local "${BOT_USER}/brain"
 
-if forgejo_repo_exists "${WEBSITE_REPO}"; then
-  ensure_repo_local "${WEBSITE_REPO}"
+if [ -n "$WEBSITE_REPO" ]; then
+  if forgejo_repo_exists "${WEBSITE_REPO}"; then
+    ensure_repo_local "${WEBSITE_REPO}"
+  else
+    log "warning: WEBSITE_REPO=${WEBSITE_REPO} does not exist or bot lacks access -- website work disabled this tick"
+  fi
 else
-  log "warning: ${WEBSITE_REPO} does not exist -- website work disabled"
+  log "WEBSITE_REPO unset -- website work disabled (set in .env to enable)"
 fi
 
 # -- Recovery: clear orphaned bot assignments ------------------
@@ -1715,7 +1718,11 @@ done <<<"$VALIDATED_REPOS_JSON"
 if [ -z "$WINNER" ]; then
   log "no claimable work across any repo"
 
-  if in_shift_window; then
+  if [ -z "$WEBSITE_REPO" ]; then
+    log "WEBSITE_REPO unset -- skipping reading pipeline + site-work block"
+  elif ! in_shift_window; then
+    log "outside shift window -- skipping reading pipeline + site-work block"
+  else
     log "running reading pipeline"
     "$AGENT_HOME/bin/reading-pipeline.sh" --live \
       || log "warning: reading-pipeline exited rc=$?"
@@ -1723,8 +1730,6 @@ if [ -z "$WINNER" ]; then
     log "running site-work block"
     "$AGENT_HOME/bin/site-work-block.sh" --live \
       || log "warning: site-work-block exited rc=$?"
-  else
-    log "outside shift window -- skipping reading + site-work"
   fi
 
   exit 0
