@@ -760,46 +760,67 @@ maintenance_eligible() {
   [ "$last_week" != "$this_week" ]
 }
 
-# Scheduled maintenance pass -- priority 1 in the work cascade.
-# Iterates VALIDATED_REPOS_JSON (set by the validation sweep); fires
-# on a random repo eligible this ISO week. Exits 0 if maintenance
-# fires; returns 1 when no validated repo is eligible this week.
+# Scheduled maintenance pass -- top of the work cascade.
+# Loops EVERY validated repo eligible this ISO week (per Phase 4
+# of ~/Notes/igor-refactor-plan.md -- was random-one-per-tick
+# before). Returns 0 if any maintenance ran, 1 if nothing was
+# eligible this week.
 #
-# Hybrid execution:
-#   - Harness runs the audit tools itself via lib/maintenance-checks.sh
-#     (npm audit + outdated, cargo audit + outdated, pip-audit + pip
-#     list --outdated, govulncheck + go list -m -u all, bundle-audit
-#     + bundle outdated).
-#   - Clean week -> templated journal entry, no LLM, no issue.
-#   - No recognized stack -> templated "nothing to audit" journal
-#     entry, no LLM, no issue.
-#   - Findings -> invoke Claude to triage; harness files the
-#     Status/Need More Info issue with the triaged report and
-#     appends the journal entry.
+# Each repo's maintenance is its own self-contained pass in
+# do_maintenance_for_repo, with its own worktree + cleanup. The
+# previous "one repo, exit 0 when done" shape became a per-repo
+# return so the loop continues. maintenance_mark_done stamps each
+# repo so re-runs within the same ISO week skip already-audited
+# repos (resilience if a tick crashes mid-loop).
+#
+# Igor-driven (scheduled chore) -- gated to the shift window.
 do_maintenance_tick() {
-  # Maintenance is Igor-driven (scheduled chore, not human-triggered),
-  # so it only fires inside the shift window.
   in_shift_window || return 1
 
-  local target=""
-  local ELIGIBLE=()
   local repo_line r_name
+  local eligible=()
   while IFS= read -r repo_line; do
     [ -z "$repo_line" ] && continue
     r_name=$(jq -r '.full_name' <<<"$repo_line")
     if maintenance_eligible "$r_name"; then
-      ELIGIBLE+=("$r_name")
+      eligible+=("$r_name")
     fi
   done <<<"$VALIDATED_REPOS_JSON"
 
-  if [ "${#ELIGIBLE[@]}" -eq 0 ]; then
+  if [ "${#eligible[@]}" -eq 0 ]; then
     log "maintenance: no validated repos eligible this week -- continuing"
     return 1
   fi
 
-  target="${ELIGIBLE[RANDOM % ${#ELIGIBLE[@]}]}"
-  log "maintenance: pass on $target"
+  log "maintenance: ${#eligible[@]} repo(s) eligible this week"
+  local target
+  for target in "${eligible[@]}"; do
+    do_maintenance_for_repo "$target" \
+      || log "warning: maintenance for $target returned non-zero (continuing)"
+  done
+  return 0
+}
 
+# Per-repo maintenance executor. Audits ONE repo via
+# lib/maintenance-checks.sh, journals the outcome to brain, and
+# (for findings) invokes Claude to triage into a Forgejo issue.
+# Worktree is created here and cleaned via a RETURN trap so we
+# don't leak when the function unwinds.
+#
+# Hybrid execution:
+#   - Harness runs the audit tools (npm audit + outdated, cargo
+#     audit + outdated, pip-audit + pip list --outdated,
+#     govulncheck + go list -m -u all, bundle-audit + bundle
+#     outdated).
+#   - Clean week -> templated journal entry, no LLM, no issue.
+#   - No recognized stack -> templated "nothing to audit" entry.
+#   - Findings -> invoke Claude to triage; harness files the
+#     Status/Need More Info issue with the triaged report and
+#     appends the journal entry.
+do_maintenance_for_repo() {
+  local target="$1"
+
+  log "maintenance: pass on $target"
   ensure_repo_local "$target"
   local target_path target_base
   target_path=$(repo_path_for "$target")
@@ -812,15 +833,14 @@ do_maintenance_tick() {
   target_base="${target_base:-master}"
   local m_worktree="$AGENT_STATE_DIR/worktrees/maintenance-${target//\//_}-$$"
   mkdir -p "$AGENT_STATE_DIR/worktrees"
-  (cd "$target_path" && git fetch --prune origin)
-  (cd "$target_path" && git worktree add --detach "$m_worktree" "origin/${target_base}")
+  (cd "$target_path" && git fetch --prune origin) || return 1
+  (cd "$target_path" && git worktree add --detach "$m_worktree" "origin/${target_base}") || return 1
   init_igor_scratch "$m_worktree"
 
-  # Worktree cleanup at script exit. M_WT_PATH/M_TGT_PATH need
-  # global scope so the trap can see them.
-  M_WT_PATH="$m_worktree"
-  M_TGT_PATH="$target_path"
-  trap '[ -d "$M_WT_PATH" ] && (cd "$M_TGT_PATH" && git worktree remove --force "$M_WT_PATH") 2>/dev/null || true; rag_cleanup_marker' EXIT
+  # Cleanup on ANY return path. Restore cwd to a known-safe place
+  # too so the outer loop doesn't sit in a removed directory.
+  # shellcheck disable=SC2064
+  trap "cd '$AGENT_HOME' 2>/dev/null; (cd '$target_path' && git worktree remove --force '$m_worktree') 2>/dev/null || true" RETURN
 
   cd "$m_worktree"
 
@@ -847,7 +867,7 @@ do_maintenance_tick() {
     } > "$jbody"
     AGENT_BRAIN_PATH="$m_brain" append_journal_entry "maintenance on $target (no stack)" "$jbody"
     maintenance_mark_done "$target"
-    exit 0
+    return 0
   fi
 
   # rc==0: every audit/outdated check came back clean. Templated
@@ -864,7 +884,7 @@ do_maintenance_tick() {
     } > "$jbody"
     AGENT_BRAIN_PATH="$m_brain" append_journal_entry "maintenance on $target (clean)" "$jbody"
     maintenance_mark_done "$target"
-    exit 0
+    return 0
   fi
 
   # rc==1: findings present in at least one tool's output. Invoke
@@ -982,7 +1002,7 @@ EOF
   AGENT_BRAIN_PATH="$m_brain" append_journal_entry "maintenance on $target (findings)" "$jbody"
 
   maintenance_mark_done "$target"
-  exit 0
+  return 0
 }
 
 
