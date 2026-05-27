@@ -19,6 +19,7 @@ fi
 
 pass() { printf '  \033[32m+\033[0m %s\n' "$1"; }
 fail() { printf '  \033[31mx\033[0m %s%s\n' "$1" "${2:+ -- $2}"; FAIL=1; }
+warn() { printf '  \033[33m!\033[0m %s%s\n' "$1" "${2:+ -- $2}"; }
 
 # -- Required commands on PATH ----------------------------------
 
@@ -96,6 +97,16 @@ for shift_var in AGENT_SHIFT_START AGENT_SHIFT_END; do
 done
 if [ -n "${AGENT_RECALL_DAYS:-}" ] && ! [[ "$AGENT_RECALL_DAYS" =~ ^[1-9][0-9]*$ ]]; then
   fail "AGENT_RECALL_DAYS format" "expected positive integer -- got '$AGENT_RECALL_DAYS'"
+fi
+
+# Optional: WEBSITE_REPO overrides the default ${BOT_USER}/website
+# (used for the planned post-refactor rename to joshtronic/igor.bot).
+# Not required -- tick.sh defaults to the bot's own /website. Show
+# explicitly which one will resolve so operators can confirm.
+if [ -n "${WEBSITE_REPO:-}" ]; then
+  pass "WEBSITE_REPO set (${WEBSITE_REPO}) -- override active"
+else
+  warn "WEBSITE_REPO unset -- will default to \${BOT_USER}/website at tick start"
 fi
 
 [ -f "$AGENT_HOME/agent-settings.json" ] && pass "agent-settings.json present" || fail "agent-settings.json present"
