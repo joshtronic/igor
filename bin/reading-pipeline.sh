@@ -512,10 +512,27 @@ $bundle"
 
 # -- post drafting ---------------------------------------------
 
+# List recent post filenames from the website worktree. Used as
+# dedup signal at draft time -- prevents drafting a post on
+# something just shipped a few days ago. Empty list if the
+# website worktree isn't mounted (then dedup is the model's job
+# from reflection content alone).
+recent_post_titles() {
+  local year prev_year
+  year=$(date +%Y)
+  prev_year=$((year - 1))
+  for y in "$year" "$prev_year"; do
+    [ -d "$WEBSITE_PATH/src/posts/$y" ] || continue
+    ls -1t "$WEBSITE_PATH/src/posts/$y" 2>/dev/null | head -10
+  done
+}
+
 draft_post_body() {
   local angle="$1" slug="$2"
-  local bundle system user raw
+  local bundle posts system user raw
   bundle=$(recent_reflections_bundle)
+  posts=$(recent_post_titles)
+  [ -z "$posts" ] && posts="(none -- no website worktree or no recent posts)"
   system=$(cat <<EOF
 ${VOICE_BODY}
 
@@ -534,6 +551,10 @@ Rules:
 - Closer: one line. No "thanks for reading."
 - Don't put a \`# Title\` heading at the top of the body. The
   layout renders the frontmatter \`title\` as the page's h1.
+- Dedup: scan the recent post list. If the proposed angle is
+  close to something already shipped in the last few weeks,
+  bail by returning {"title": "", "body": ""} -- the harness
+  treats empty title/body as a no-op.
 
 Output STRICT JSON. No code fences. Schema:
 
@@ -545,8 +566,20 @@ Output STRICT JSON. No code fences. Schema:
 }
 EOF
 )
-  user=$(printf 'Angle (post one claim):\n%s\n\nProposed slug: %s\n\nRecent reflections (newest first):\n\n%s' \
-          "$angle" "$slug" "$bundle")
+  user=$(cat <<EOF
+Angle (post's one claim):
+$angle
+
+Proposed slug: $slug
+
+Recent posts on igor.bot (dedup signal -- don't draft something close):
+$posts
+
+Recent reading reflections (newest first):
+
+$bundle
+EOF
+)
   raw=$(anthropic_call "$MODEL" "reading-pipeline-postbody" 4000 \
           "$system" "$user") || return 1
   printf '%s\n' "$raw"
