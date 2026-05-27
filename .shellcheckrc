@@ -1,0 +1,8 @@
+# shellcheck config for igor/agent.
+#
+# SC1091: don't error when a sourced file can't be resolved
+# statically. lib/*.sh resolves at runtime via $AGENT_HOME, which
+# shellcheck can't see -- the `source=lib/...` comments at each
+# use site are the right answer for IDEs but the CLI ignores them
+# without `-x` (which we don't want as a default).
+disable=SC1091
