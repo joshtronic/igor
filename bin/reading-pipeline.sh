@@ -96,7 +96,7 @@ fi
 MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 THINKING_MODEL="${AGENT_MODEL_THINKING:-claude-haiku-4-5-20251001}"
 WEBSITE_REPO="${WEBSITE_REPO:-${BOT_USER}/website}"
-WEBSITE_PATH="${WEBSITE_PATH:-$AGENT_STATE_DIR/repos/${BOT_USER}/website}"
+WEBSITE_PATH="${WEBSITE_PATH:-$AGENT_STATE_DIR/repos/${WEBSITE_REPO}}"
 
 # -- libs -------------------------------------------------------
 

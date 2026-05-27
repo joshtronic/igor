@@ -99,7 +99,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-WEBSITE_PATH="${WEBSITE_PATH:-$AGENT_REPO_ROOT/${BOT_USER}/website}"
+WEBSITE_PATH="${WEBSITE_PATH:-$AGENT_REPO_ROOT/${WEBSITE_REPO}}"
 
 # -- logging ---------------------------------------------------
 
