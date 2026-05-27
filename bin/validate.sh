@@ -19,6 +19,7 @@ fi
 
 pass() { printf '  \033[32m+\033[0m %s\n' "$1"; }
 fail() { printf '  \033[31mx\033[0m %s%s\n' "$1" "${2:+ -- $2}"; FAIL=1; }
+warn() { printf '  \033[33m!\033[0m %s%s\n' "$1" "${2:+ -- $2}"; }
 
 # -- Required commands on PATH ----------------------------------
 
@@ -96,6 +97,17 @@ for shift_var in AGENT_SHIFT_START AGENT_SHIFT_END; do
 done
 if [ -n "${AGENT_RECALL_DAYS:-}" ] && ! [[ "$AGENT_RECALL_DAYS" =~ ^[1-9][0-9]*$ ]]; then
   fail "AGENT_RECALL_DAYS format" "expected positive integer -- got '$AGENT_RECALL_DAYS'"
+fi
+
+# WEBSITE_REPO is opt-in -- unset = no website work at all. The
+# rest of the agent (issues, maintenance, PR-review) still runs
+# on any repo the bot has access to. With WEBSITE_REPO set, the
+# bootstrap clones the website, the reading pipeline can ship
+# posts to it, and the site-work block fires inside the shift.
+if [ -n "${WEBSITE_REPO:-}" ]; then
+  pass "WEBSITE_REPO set (${WEBSITE_REPO}) -- website work enabled"
+else
+  warn "WEBSITE_REPO unset -- website work DISABLED (set in .env to enable reading pipeline + site-work block)"
 fi
 
 [ -f "$AGENT_HOME/agent-settings.json" ] && pass "agent-settings.json present" || fail "agent-settings.json present"
