@@ -211,35 +211,37 @@ init_igor_scratch() {
   (cd "$worktree" && git rm --cached -r --quiet --ignore-unmatch .agent/ 2>/dev/null) || true
 }
 
-# Build the full system prompt for a Claude invocation. Ordered
-# for prompt-cache stability: most-stable first, volatile last so
-# changes to a downstream file don't invalidate the upstream
-# cached prefix.
+# Build the full system prompt for issue-work Claude invocations.
 #
-# Order (and why):
-#   AGENTS.md           -- protocol/rules, changes by PR only
-#   identity.md         -- who I am, changes by PR only
-#   memories/MEMORY.md  -- memory index, edited by Claude OCCASIONALLY
-#                          (when he adds a new memory file)
+# Two pieces, in order:
+#   bin/lib/voice.md  -- shared voice anchor (2 paragraphs)
+#   AGENTS.md         -- slim, issue-work-specific protocol/rules
 #
-# Files Claude edits FREQUENTLY mid-tick (notably blog-ideas.md)
-# are intentionally NOT loaded here. Loading them in-prompt
-# guarantees cache invalidation every time he writes -- the cost
-# of always-loaded blog-ideas exceeds the benefit. AGENTS.md
-# documents that Claude reads brain/blog-ideas.md on demand
-# (via the Read tool) when shipping/considering a post.
+# Per-repo CLAUDE.md is NOT concatenated here; Claude Code auto-
+# loads it from the worktree root when invoked there. The legacy
+# pattern of catting identity.md + memories/MEMORY.md + blog-ideas
+# is retired in Phase 5 of the refactor: brain has been replaced
+# by ~/.local/state/agent/brain.sqlite, and persona/voice now
+# lives in voice.md.
 #
-# Args:
-#   $1 -- path to local brain clone
-#
-# Each file is optional -- missing files are skipped. Caller
-# supplies the per-tick user message separately.
+# Used by issue work (tier-1) and PR-review pickup. Maintenance
+# triage uses a task-specific inline prompt (no voice anchor --
+# classification work); the reading pipeline and site-work block
+# each compose their own prompts inside their executor scripts.
+issue_system_prompt() {
+  local voice="$AGENT_HOME/bin/lib/voice.md"
+  if [ -f "$voice" ]; then
+    cat "$voice" "$AGENT_HOME/AGENTS.md"
+  else
+    cat "$AGENT_HOME/AGENTS.md"
+  fi
+}
+
+# Backwards-compat shim. The previous function name baked "brain"
+# into call sites; new name is issue_system_prompt. Remove this
+# shim in Phase 6 when no callers reference brain_system_prompt.
 brain_system_prompt() {
-  local brain="$1"
-  local files=("$AGENT_HOME/AGENTS.md")
-  [ -f "$brain/identity.md" ]         && files+=("$brain/identity.md")
-  [ -f "$brain/memories/MEMORY.md" ]  && files+=("$brain/memories/MEMORY.md")
-  cat "${files[@]}"
+  issue_system_prompt
 }
 
 # Single-shot completion via the Anthropic Messages API. No tool
@@ -945,9 +947,11 @@ ${m_rag_context:-(no past context retrieved this tick)}
 EOF
 )
 
-  local m_system_prompt
-  m_system_prompt=$(brain_system_prompt "$m_brain")
-
+  # Maintenance triage is classification work, not agent work.
+  # Phase 5 of the refactor explicitly: no voice anchor, no
+  # AGENTS.md -- the user message is self-contained instructions.
+  # Claude Code's built-in system prompt is fine for the
+  # task; we just don't append our own.
   log "invoking claude for maintenance triage (timeout ${TICK_TIMEOUT})"
   local m_log="$m_worktree/.agent/claude-output.log"
   local m_start; m_start=$(date +%s)
@@ -955,7 +959,6 @@ EOF
   set +e
   claude_run_with_cost "maintenance" "$m_log" "$TICK_TIMEOUT" \
     --model "$AGENT_MODEL" \
-    --append-system-prompt "$m_system_prompt" \
     --settings "$AGENT_HOME/agent-settings.json" \
     --max-turns 50 \
     --print "$m_user_msg"
@@ -1157,13 +1160,16 @@ fi
 
 # -- Bootstrap: ensure the agent's own repos are cloned -------------
 #
-# Brain is hard-required: identity.md is foundational, every system
-# prompt loads it. If the bot doesn't own a brain repo, halt loudly
-# rather than running ticks with generic-Claude voice.
+# Brain is still required: the harness commits journal entries to
+# brain/journal/ every tick (existence proof + reflection content
+# when present). If the bot doesn't own a brain repo, halt loudly.
+# (Phase 5 stopped loading brain content into system prompts; the
+# journal write side is still active until brain gets archived in
+# Phase 6.)
 #
-# Website is soft: warn if absent but proceed -- the agent can still work
-# other repos. The website is just one of his target repos, not
-# essential infrastructure.
+# Website is opt-in via WEBSITE_REPO -- absence is a legitimate
+# configuration, the reading pipeline + site-work block just don't
+# fire when WEBSITE_REPO is unset.
 
 if ! forgejo_repo_exists "${BOT_USER}/brain"; then
   echo "agent: bootstrap failed -- ${BOT_USER}/brain does not exist or bot lacks access" >&2
@@ -1532,7 +1538,7 @@ EOF
 )
 
     PR_BRAIN_PATH="$AGENT_REPO_ROOT/${BOT_USER}/brain"
-    PR_SYSTEM_PROMPT=$(brain_system_prompt "$PR_BRAIN_PATH")
+    PR_SYSTEM_PROMPT=$(issue_system_prompt)
 
     cd "$PR_WORKTREE"
     log "invoking claude for PR review (timeout ${TICK_TIMEOUT})"
@@ -1831,14 +1837,12 @@ init_igor_scratch "$WORKTREE"
 
 cd "$WORKTREE"
 
-# System prompt: brain_system_prompt assembles AGENTS.md + brain
-# files in cache-friendly order. Brain files are bootstrap-required;
-# log a warning if identity.md is missing rather than crashing the
-# tick (brain_system_prompt handles the missing case by skipping).
+# System prompt: voice anchor + slim AGENTS.md (issue-work-
+# specific). Brain identity.md / MEMORY.md are no longer loaded
+# (Phase 5). Per-repo CLAUDE.md gets loaded by Claude Code from
+# the worktree root automatically.
 BRAIN_PATH="$AGENT_REPO_ROOT/${BOT_USER}/brain"
-[ -f "$BRAIN_PATH/identity.md" ] \
-  || log "warning: brain identity.md missing at $BRAIN_PATH"
-SYSTEM_PROMPT=$(brain_system_prompt "$BRAIN_PATH")
+SYSTEM_PROMPT=$(issue_system_prompt)
 
 # RAG context: the issue title + body is the most concrete signal of
 # what the agent is about to work on. Pulls past journal entries, related
