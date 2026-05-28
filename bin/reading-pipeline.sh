@@ -135,8 +135,29 @@ sqlite_quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
 }
 
-if [ ! -f "$BRAIN_DB" ]; then
-  log "brain db not found: $BRAIN_DB. Run bin/migrate-brain-to-sqlite.py first."
+# Lazy-init the brain db with schema if missing. Fresh installs
+# start with an empty store; subsequent ticks populate it. CREATE
+# IF NOT EXISTS makes this idempotent every tick.
+sqlite3 "$BRAIN_DB" >/dev/null 2>&1 <<'SQL'
+CREATE TABLE IF NOT EXISTS seen_urls (
+    url        TEXT PRIMARY KEY,
+    source     TEXT,
+    domain     TEXT,
+    first_seen TEXT,
+    read_at    TEXT,
+    notes      TEXT
+);
+CREATE TABLE IF NOT EXISTS reflections (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    source_url    TEXT,
+    post_drafted  INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_reflections_ts ON reflections(ts);
+SQL
+if [ $? -ne 0 ]; then
+  log "failed to ensure brain db schema at $BRAIN_DB"
   exit 2
 fi
 

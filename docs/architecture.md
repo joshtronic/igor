@@ -144,7 +144,6 @@ bin/
 |-- validate-repo.sh         # audit a single repo (or --all) for readiness
 |-- install.sh               # one-time: install systemd units + enable timer
 |-- uninstall.sh             # stop, disable, remove units
-|-- migrate-brain-to-sqlite.py  # one-shot legacy migration
 `-- lib/
     |-- voice.md             # shared voice anchor for every Claude invocation
     |-- site-work-directives.md
@@ -185,9 +184,10 @@ collisions across different owners.
 
 The sqlite store (`brain.sqlite`) is the durable state behind the
 reading pipeline -- seen URLs (so we don't re-read the same article
-across ticks), source slate metadata, and reflections from prior
-reads. No Redis, no vector index, no Python venv. Tables:
-`seen_urls`, `sources`, `reflections`.
+across ticks) and reflections from prior reads. The harness is
+pure bash + standard CLI tools; no Python, no Redis, no vector
+index. Tables: `seen_urls`, `reflections`. Schema is lazy-created
+by `reading-pipeline.sh` on first run.
 
 ## Scope and trade-offs
 
