@@ -1,11 +1,13 @@
 # agent -- Igor's harness
 
 The unattended worker. Wakes on a timer, claims one piece of work,
-ships it, sleeps. The reading-pipeline + site-work block (opt-in
-via `WEBSITE_REPO`) run during the shift window when no claimable
-issue is found; durable state for those lives in
-`~/.local/state/agent/brain.sqlite`. This repo is everything that
-makes the cron beat real.
+ships it, sleeps. When no claimable issue is found, the tick fires
+ONE discretionary slot (opt-in via `WEBSITE_REPO`): reading,
+feature, or design -- one per tick, each once per local day. The
+reading pipeline's durable state lives in
+`~/.local/state/agent/brain.sqlite`; the per-day slot slate in
+`~/.local/state/agent/discretionary-state.json`. This repo is
+everything that makes the cron beat real.
 
 ## What's where
 
@@ -63,18 +65,23 @@ respective tools on the host; install or skip.
   Repos with an open onboarding ticket short-circuit the full
   check; closing the ticket re-enables it.
 - The shift window (`AGENT_SHIFT_START`/`_END`) gates Igor-driven
-  work only -- scheduled maintenance, reading pipeline, site-work
-  block, and bot-filed tier-1 tickets. Human-driven work
-  (validation, recovery, PR-review pickup, human-filed tier-1)
-  runs around the clock.
+  work only -- scheduled maintenance, the discretionary slots
+  (reading/feature/design), and bot-filed tier-1 tickets.
+  Human-driven work (validation, recovery, PR-review pickup,
+  human-filed tier-1) runs around the clock.
+- Discretionary work is slotted: one slot per tick, each slot once
+  per local calendar day, priority reading -> feature -> design.
+  The per-day slate lives in `discretionary-state.json` and rolls
+  over at midnight. This is a deliberate throttle -- don't add
+  paths that let multiple discretionary PRs land in one tick.
 - `AGENTS.md` is appended to Claude's system prompt for issue
   work and PR review. Other surfaces (maintenance triage, reading
   pipeline, site-work) use task-specific directives from
   `bin/lib/`. Treat changes to any of these the way you would a
   deploy.
 - Website work is opt-in via `WEBSITE_REPO`. With it unset the
-  reading pipeline and site-work block both no-op cleanly; the
-  rest of the tick (issues, maintenance, PR review) still runs.
+  discretionary slots no-op cleanly; the rest of the tick (issues,
+  maintenance, PR review) still runs.
 
 ## Off-limits
 
