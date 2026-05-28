@@ -9,14 +9,14 @@
 # Usage: agent-ask.sh <owner/repo> "<title>" "<body>"
 #
 # Examples:
-#   agent-ask.sh igor/brain "should i be reading more often?" "right now ~30% of ticks are reading. is that the right ratio? open to a different cadence."
+#   agent-ask.sh igor/agent "should i be reading more often?" "right now ~30% of ticks are reading. is that the right ratio? open to a different cadence."
 #   agent-ask.sh igor/website "fold /now into about, or keep separate?" "the /now page is short. could be a section on about. but separation lets it update without touching the bio. preferences?"
 #
 # Throttle: one open bot-authored question per repo at a time. If
 # the bot already has an open question on this repo (marker in
 # body, no Agent label yet), this call refuses with exit 2 and a
 # message telling Claude to comment on the existing thread or
-# save the thought to journal/blog-ideas instead.
+# drop the thought.
 #
 # Requires in environment (exported by tick.sh):
 #   BOT_USER, FORGEJO_URL, FORGEJO_TOKEN, AGENT_HOME

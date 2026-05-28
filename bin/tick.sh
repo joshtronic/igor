@@ -72,7 +72,6 @@ env_file_hint="$AGENT_HOME/.env"
 : "${FORGEJO_TOKEN:?must be set in $env_file_hint}"
 : "${FORGEJO_HOST:?must be set in $env_file_hint}"
 : "${FORGEJO_REVIEWER:?must be set in $env_file_hint}"
-: "${REDIS_URL:?must be set in $env_file_hint}"
 : "${TICK_TIMEOUT:?must be set in $env_file_hint}"
 : "${AGENT_SHIFT_START:?must be set in $env_file_hint}"
 : "${AGENT_SHIFT_END:?must be set in $env_file_hint}"
@@ -87,15 +86,12 @@ unset env_file_hint
 . "$AGENT_HOME/lib/repo-checks.sh"
 # shellcheck source=lib/maintenance-checks.sh
 . "$AGENT_HOME/lib/maintenance-checks.sh"
-# shellcheck source=lib/rag.sh
-. "$AGENT_HOME/lib/rag.sh"
 # shellcheck source=lib/cost.sh
 . "$AGENT_HOME/lib/cost.sh"
 
-# Children (discretionary executors, agent-* scripts) re-source
-# lib/rag.sh and share our per-tick build marker via $TICK_PID.
-# Without this, each child would think it owns the build and either
-# duplicate the ~25s flush+rebuild or fail to find the marker.
+# Children invocations (agent-* helper scripts) share our tick id
+# so cost-ledger entries from child processes group with the
+# parent tick's entries.
 export TICK_PID=$$
 
 # -- Resolve bot identity --------------------------------------
@@ -113,10 +109,9 @@ export BOT_USER
 export FORGEJO_REVIEWER
 export AGENT_HOME
 
-# Brain path: always derived from the bot user. Brain is the
-# agent's own memory store; every Claude Code invocation needs
-# absolute access to it.
-export AGENT_BRAIN_PATH="$AGENT_REPO_ROOT/${BOT_USER}/brain"
+# (Phase 6 of the refactor retired AGENT_BRAIN_PATH and the brain
+# repo bootstrap. The agent's memory now lives in
+# ~/.local/state/agent/brain.sqlite; no markdown repo to clone.)
 
 # Website is OPT-IN via WEBSITE_REPO. If set, name the Forgejo
 # repo path (e.g. "joshtronic/igor.bot") and the harness will
@@ -237,12 +232,6 @@ issue_system_prompt() {
   fi
 }
 
-# Backwards-compat shim. The previous function name baked "brain"
-# into call sites; new name is issue_system_prompt. Remove this
-# shim in Phase 6 when no callers reference brain_system_prompt.
-brain_system_prompt() {
-  issue_system_prompt
-}
 
 # Single-shot completion via the Anthropic Messages API. No tool
 # use, no agentic loop -- just send a prompt, get text back. Used
@@ -559,110 +548,21 @@ list_offlimits_violations() {
     | grep -E '^\.(forgejo|github)/workflows/' || true
 }
 
-# Returns 0 (is duplicate) if the source journal's entire content
-# appears verbatim as a substring of the target journal file. Strict
-# match -- only true byte-for-byte copies are skipped. Previous
-# implementation used a 200-char prefix probe which false-positived
-# on entries that shared an opening structure ("Read X today.
-# Took Y..."), eating legitimately new entries. The strict match
-# trades some occasional duplicate-let-through for never losing real
-# content.
-journal_is_duplicate() {
-  local source_file="$1" target_file="$2"
-  [ -f "$target_file" ] || return 1
-  [ -s "$source_file" ] || return 1
-  local new_content target_content
-  new_content=$(cat "$source_file")
-  target_content=$(cat "$target_file")
-  [[ "$target_content" == *"$new_content"* ]]
-}
 
-# Append a journal entry to today's brain journal. ALWAYS writes
-# the "## TS -- <mode-suffix>" header so brain has an existence-
-# proof of the tick even when Claude didn't write a reflection.
-# Header = existence proof. Body = Claude's reflection, if any.
-#
-# Args:
-#   $1 -- mode-suffix (free-form text after the "-- " in the header).
-#         Mode suffixes the refactor recognizes:
-#           "discretionary reading"   -> read mode
-#           "discretionary on <repo>" -> work mode
-#           "<owner>/<repo>#<num>"    -> work mode (tier-1 issue)
-#   $2 -- (optional) path to a body source file written by Claude.
-#         When present and non-empty and not a byte-identical
-#         duplicate of today's existing content, the file contents
-#         land under the header.
-#   $3 -- (optional) fallback body string. Used when $2 is missing
-#         or empty. Lets callers pre-build a fact stub (commit
-#         subject, files touched, etc.) so brain always has a
-#         meaningful entry, not just a placeholder. When $2 is a
-#         duplicate, $3 is also used (the harness stub is preferable
-#         to a "no body -- duplicate" placeholder).
-#
-# Rule: every tick gets a journal entry. If $2 is missing and $3
-# is empty, the function logs a loud warning and skips the entry
-# rather than writing an orphan header -- but the always-journal
-# contract in AGENTS.md is what should keep this from happening.
-append_journal_entry() {
-  local mode_suffix="$1" body_src="${2:-}" fallback_body="${3:-}"
-  local brain="${AGENT_BRAIN_PATH:-${BRAIN_PATH:-$AGENT_REPO_ROOT/${BOT_USER}/brain}}"
-  local journal_date journal_file journal_ts body
-  journal_date=$(date +%Y-%m-%d)
-  journal_file="$brain/journal/${journal_date}.md"
-  journal_ts=$(date +%Y-%m-%dT%H:%M:%S%z)
-  mkdir -p "$(dirname "$journal_file")"
-
-  body=""
-  if [ -n "$body_src" ] && [ -s "$body_src" ]; then
-    if journal_is_duplicate "$body_src" "$journal_file"; then
-      log "journal: body duplicates an earlier entry today -- using fallback stub"
-      body="$fallback_body"
-    else
-      body=$(cat "$body_src")
-    fi
-  elif [ -n "$fallback_body" ]; then
-    log "journal: no AGENT_JOURNAL.md from ${mode_suffix} -- using harness fact stub"
-    body="$fallback_body"
-  fi
-
-  if [ -z "$body" ]; then
-    log "WARNING: journal: no body and no fallback for ${mode_suffix} -- skipping entry (always-journal contract violated upstream)"
-    return 0
-  fi
-
-  # Sanitize body before commit so brain's markdownlint doesn't
-  # reject it. Claude occasionally ends a line with a stray space
-  # (MD009) and brain's CI fails on push. Sed strips trailing
-  # whitespace from every line in the body -- both Claude's
-  # AGENT_JOURNAL.md content and any harness-built fallback_body
-  # land here. Bash command substitution drops the trailing
-  # newline, and the printf '%s\n' below adds one back, so MD047
-  # (single trailing newline) stays correct.
-  body=$(printf '%s' "$body" | sed 's/[[:space:]]*$//')
-
-  {
-    printf '\n## %s -- %s\n\n' "$journal_ts" "$mode_suffix"
-    printf '%s\n' "$body"
-  } >> "$journal_file"
-  log "journal: appended (${mode_suffix})"
-}
 
 # Idempotent clone-if-missing, pull-if-present. Creates the owner
-# subdir as needed. Pulls existing clones so brain identity changes
-# and website content updates propagate to the agent on every tick.
+# subdir as needed. Pulls existing clones so upstream changes
+# propagate to the agent on every tick.
 #
-# Self-healing for dirty trees: a crashed tick (W_LOG-style unbound
-# var, OOM, timeout, etc.) can mutate working-tree files but never
-# reach the commit step, leaving the repo in a state where every
-# subsequent `git pull --rebase` refuses to run. The warning was
-# the only signal and the silent rot meant brain stopped getting
-# new commits for hours at a time.
+# Self-healing for dirty trees: a crashed tick (OOM, timeout,
+# unbound var, etc.) can mutate working-tree files but never reach
+# the commit step, leaving the repo in a state where every
+# subsequent `git pull --rebase` refuses to run.
 #
 # Fix: at tick start, if any tracked file is dirty, auto-commit
 # the leftover state with a `recovery:` subject and try to push.
-# The commit captures whatever the previous tick was writing (likely
-# blog-ideas.md edits, journal appends, sources weight adjustments)
-# instead of leaving them orphaned in the working tree. Pull then
+# The commit captures whatever the previous tick was writing
+# instead of leaving it orphaned in the working tree. Pull then
 # succeeds against either the just-pushed origin or a clean local
 # tree.
 ensure_repo_local() {
@@ -688,10 +588,10 @@ ensure_repo_local() {
       [ -n "$line" ] && log "  $line"
     done <<<"$dirty_summary"
     (cd "$local_path" && git add -A 2>/dev/null) || true
-    # Pre-commit lint gate (no-op for non-brain repos -- see
-    # repo_lint_passes). If brain's dirty state itself is what's
-    # breaking lint, don't push more broken content. Leave dirty
-    # and surface; a future tick or human can untangle.
+    # Pre-commit lint gate (see repo_lint_passes). If the dirty
+    # state itself is what's breaking lint, don't push more broken
+    # content. Leave dirty and surface; a future tick or human can
+    # untangle.
     if ! repo_lint_passes "$local_path"; then
       log "  warning: $repo lint failed on dirty state; refusing recovery commit. Inspect: (cd $local_path && npm test)"
     elif (cd "$local_path" \
@@ -811,21 +711,20 @@ do_maintenance_tick() {
 }
 
 # Per-repo maintenance executor. Audits ONE repo via
-# lib/maintenance-checks.sh, journals the outcome to brain, and
-# (for findings) invokes Claude to triage into a Forgejo issue.
-# Worktree is created here and cleaned via a RETURN trap so we
-# don't leak when the function unwinds.
+# lib/maintenance-checks.sh and (for findings) invokes Claude to
+# triage into a Forgejo issue. Worktree is created here and
+# cleaned via a RETURN trap so we don't leak when the function
+# unwinds.
 #
 # Hybrid execution:
 #   - Harness runs the audit tools (npm audit + outdated, cargo
 #     audit + outdated, pip-audit + pip list --outdated,
 #     govulncheck + go list -m -u all, bundle-audit + bundle
 #     outdated).
-#   - Clean week -> templated journal entry, no LLM, no issue.
-#   - No recognized stack -> templated "nothing to audit" entry.
+#   - Clean week -> no LLM, no issue.
+#   - No recognized stack -> same.
 #   - Findings -> invoke Claude to triage; harness files the
-#     Status/Need More Info issue with the triaged report and
-#     appends the journal entry.
+#     Status/Need More Info issue with the triaged report.
 do_maintenance_for_repo() {
   local target="$1"
 
@@ -853,7 +752,6 @@ do_maintenance_for_repo() {
 
   cd "$m_worktree"
 
-  local m_brain="$AGENT_REPO_ROOT/${BOT_USER}/brain"
   local audit_dir="$m_worktree/.agent/audit-output"
   mkdir -p "$audit_dir"
 
@@ -865,33 +763,18 @@ do_maintenance_for_repo() {
   set -e
 
   # rc==2: no recognized stack manifests. Templated "no audit
-  # surface" journal entry. Still mark done so we don't try again
+  # surface" outcome. Still mark done so we don't try again
   # this week.
   if [ "$audit_rc" -eq 2 ]; then
     log "maintenance: no recognized stack at $target -- nothing to audit"
-    local jbody="$m_worktree/.agent/AGENT_JOURNAL.md"
-    {
-      printf 'Scheduled maintenance pass on %s.\n\n' "$target"
-      printf 'No recognized stack manifests (package.json / Cargo.toml / pyproject.toml / requirements.txt / go.mod / Gemfile). Nothing to audit.\n'
-    } > "$jbody"
-    AGENT_BRAIN_PATH="$m_brain" append_journal_entry "maintenance on $target (no stack)" "$jbody"
     maintenance_mark_done "$target"
     return 0
   fi
 
-  # rc==0: every audit/outdated check came back clean. Templated
-  # journal entry, no LLM, no Forgejo issue. The "X weeks clean"
-  # baseline accumulates via these entries.
+  # rc==0: every audit/outdated check came back clean. No LLM,
+  # no Forgejo issue. Just mark done.
   if [ "$audit_rc" -eq 0 ]; then
     log "maintenance: all checks clean on $target"
-    local jbody="$m_worktree/.agent/AGENT_JOURNAL.md"
-    {
-      printf 'Scheduled maintenance pass on %s.\n\n' "$target"
-      printf 'All checks clean.\n\n'
-      printf 'Tools run:\n\n'
-      sed 's/^/- /' "$audit_dir/AUDIT_SUMMARY.txt"
-    } > "$jbody"
-    AGENT_BRAIN_PATH="$m_brain" append_journal_entry "maintenance on $target (clean)" "$jbody"
     maintenance_mark_done "$target"
     return 0
   fi
@@ -900,10 +783,6 @@ do_maintenance_for_repo() {
   # Claude to triage. The raw output files are in
   # .agent/audit-output/ for him to read.
   log "maintenance: findings detected on $target, invoking claude for triage"
-
-  local m_rag_context
-  m_rag_context=$(AGENT_BRAIN_PATH="$m_brain" rag_query "maintenance pass on $target")
-  [ -n "$m_rag_context" ] && log "rag: surfaced past context for maintenance"
 
   local m_user_msg
   m_user_msg=$(cat <<EOF
@@ -932,18 +811,9 @@ Your job:
        - high:     unfixed CVEs of moderate-or-worse severity
        - medium:   outdated-but-functional, low-severity advisories
        - low:      minor version bumps, nice-to-haves
-  5. Write .agent/AGENT_JOURNAL.md with what you observed (severity
-     summary, patterns across the audit, whether RAG surfaced
-     repeat issues from prior weeks). Brief is fine.
 
 You're triaging, not fixing. Don't commit, don't open PRs. The
-harness files the issue + appends the journal.
-
----
-
-## Past context (RAG)
-
-${m_rag_context:-(no past context retrieved this tick)}
+harness files the issue.
 EOF
 )
 
@@ -998,93 +868,18 @@ EOF
     log "maintenance: claude exited without findings file -- nothing to file"
   fi
 
-  # Journal append: prefer Claude's entry, fall back to a stub if
-  # he didn't write one.
-  local jbody="$m_worktree/.agent/AGENT_JOURNAL.md"
-  if [ ! -s "$jbody" ]; then
-    {
-      printf 'Scheduled maintenance pass on %s.\n\n' "$target"
-      printf 'Findings detected (see Forgejo issue if filed).\n\n'
-      printf 'Audit summary:\n\n'
-      sed 's/^/- /' "$audit_dir/AUDIT_SUMMARY.txt"
-    } > "$jbody"
-  fi
-  AGENT_BRAIN_PATH="$m_brain" append_journal_entry "maintenance on $target (findings)" "$jbody"
-
   maintenance_mark_done "$target"
   return 0
 }
 
 
 
-# Commit any pending mutations to the brain repo. Stages the three
-# harness-writable surfaces (journal/, memories/, blog-ideas.md),
-# commits with the given subject if anything is staged, and pushes.
-#
-# Called unconditionally at end-of-tick. The previous design gated
-# the entire commit block on "Claude wrote an AGENT_JOURNAL.md this
-# tick" -- which left dedupe edits, reflection swaps, source-weight
-# adjustments, and any other harness-side brain mutations orphaned
-# in the working tree. The recovery-commit step at next tick start
-# eventually picked them up, but that masked the bug: every tick
-# was leaving brain dirty and relying on the next tick to clean up.
-#
-# Now: journal append is one step (still gated on journal source
-# existing); commit-brain-changes is a separate step that ALWAYS
-# runs and is a no-op when there's truly nothing staged.
-commit_brain_changes() {
-  local brain="$1" subject="$2"
-  [ -d "$brain/.git" ] || return 0
-
-  # No pre-commit pull. The earlier version did `git pull --rebase`
-  # here as belt-and-suspenders, but by the time we reach this
-  # function the tick has already mutated brain (journal appended,
-  # ledgers updated, weights tweaked). The dirty tree blocks the
-  # rebase and the warning "brain pull failed before commit" fired
-  # on every tick that touched brain -- a confusing false alarm,
-  # because the subsequent commit + push almost always succeeded.
-  # ensure_repo_local at tick start handles the legitimate sync;
-  # if origin moved during our tick, the push below will fail
-  # loudly with non-fast-forward and the NEXT tick's ensure_repo_local
-  # reconciles.
-
-  # Stage everything the harness writes. -A within each pathspec
-  # captures adds / mods / deletes uniformly.
-  (cd "$brain" && git add -A journal/ memories/ blog-ideas.md 2>/dev/null) || true
-
-  # No-op if nothing is staged -- the common case for ticks that
-  # didn't touch brain at all.
-  if (cd "$brain" && git diff --cached --quiet 2>/dev/null); then
-    return 0
-  fi
-
-  # Pre-commit lint gate. If brain has `npm test` configured and it
-  # fails on the staged content, refuse to commit -- pushing broken
-  # content would just fail brain's CI on every commit until a human
-  # cleans it up. Better to leave brain dirty locally so the
-  # divergence is visible and a future tick can fix the lint issue
-  # before piling on more.
-  if ! repo_lint_passes "$brain"; then
-    log "warning: brain lint failed -- refusing to commit. Brain stays dirty locally. Run: (cd $brain && npm test) to see why."
-    (cd "$brain" && git reset --quiet HEAD -- journal/ memories/ blog-ideas.md 2>/dev/null) || true
-    return 1
-  fi
-
-  if (cd "$brain" && git commit --quiet -m "$subject" 2>/dev/null); then
-    if ! (cd "$brain" && git push --quiet origin master 2>/dev/null); then
-      log "warning: brain push failed for: $subject (commit is local; next tick will reconcile via ensure_repo_local)"
-    fi
-  else
-    log "warning: brain commit failed for: $subject"
-  fi
-}
-
 # Returns 0 if the repo passes its declared lint, OR if no lint
 # is configured. Best-effort: missing toolchain (no package.json,
 # no node_modules, no npm) is treated as "no lint" (pass) so
-# non-brain repos and unconfigured hosts no-op cleanly. Currently
-# scoped to npm-based lint -- extend per stack as other repos
-# start needing pre-commit gating.
+# unconfigured repos and hosts no-op cleanly. Currently scoped to
+# npm-based lint -- extend per stack as other repos start needing
+# pre-commit gating.
 repo_lint_passes() {
   local repo_path="$1"
   [ -f "$repo_path/package.json" ] || return 0
@@ -1158,25 +953,13 @@ if ! in_shift_window; then
   log "outside shift window (${AGENT_SHIFT_START:-unset}-${AGENT_SHIFT_END:-unset}), current hour $(date +%H) -- human-driven work only this tick"
 fi
 
-# -- Bootstrap: ensure the agent's own repos are cloned -------------
+# -- Bootstrap: ensure the website is cloned (if opt-in) ----------
 #
-# Brain is still required: the harness commits journal entries to
-# brain/journal/ every tick (existence proof + reflection content
-# when present). If the bot doesn't own a brain repo, halt loudly.
-# (Phase 5 stopped loading brain content into system prompts; the
-# journal write side is still active until brain gets archived in
-# Phase 6.)
-#
-# Website is opt-in via WEBSITE_REPO -- absence is a legitimate
-# configuration, the reading pipeline + site-work block just don't
-# fire when WEBSITE_REPO is unset.
-
-if ! forgejo_repo_exists "${BOT_USER}/brain"; then
-  echo "agent: bootstrap failed -- ${BOT_USER}/brain does not exist or bot lacks access" >&2
-  echo "  create the repo (see docs/setup.md) and try again." >&2
-  exit 4
-fi
-ensure_repo_local "${BOT_USER}/brain"
+# Brain repo bootstrap was retired in Phase 6 -- the agent's
+# memory lives in ~/.local/state/agent/brain.sqlite now and the
+# brain repo is archived on Forgejo. The website is the only
+# repo the harness still proactively clones, and only when
+# WEBSITE_REPO is set.
 
 if [ -n "$WEBSITE_REPO" ]; then
   if forgejo_repo_exists "${WEBSITE_REPO}"; then
@@ -1447,13 +1230,6 @@ if [ -n "$REVIEW_PR" ]; then
 
     log "PR-review: ${#PR_ISSUE_COMMENTS} chars of issue comments, ${#PR_INLINE_COMMENTS} chars of inline review, ${#PR_REVIEW_BODIES} chars of review bodies"
 
-    # RAG context for the review pickup: the PR title + body is the
-    # most concrete signal of what this PR's about. Helps surface
-    # past discussions of the same code area / topic.
-    PR_RAG_CONTEXT=$(rag_query "${PR_TITLE}
-${PR_BODY}")
-    [ -n "$PR_RAG_CONTEXT" ] && log "rag: surfaced past context for PR review"
-
     PR_USER_MSG=$(cat <<EOF
 You opened PR ${PR_REPO}#${PR_NUMBER}: ${PR_TITLE}
 
@@ -1528,16 +1304,9 @@ Same rules as PR mode (AGENTS.md): TDD where the repo supports it,
 project tests + lint must pass before exit, /security-review on your
 diff. Stay on this branch. Do not open a new PR -- this one already
 exists.
-
----
-
-## Past context (RAG)
-
-${PR_RAG_CONTEXT:-(no past context retrieved this tick)}
 EOF
 )
 
-    PR_BRAIN_PATH="$AGENT_REPO_ROOT/${BOT_USER}/brain"
     PR_SYSTEM_PROMPT=$(issue_system_prompt)
 
     cd "$PR_WORKTREE"
@@ -1781,7 +1550,6 @@ cleanup() {
   if [ -n "${ISSUE_NUMBER:-}" ] && [ -d "$REPO_PATH/.git" ]; then
     cleanup_agent_branches "$ISSUE_NUMBER" "$REPO_PATH"
   fi
-  rag_cleanup_marker
   exit "$rc"
 }
 trap cleanup EXIT
@@ -1838,18 +1606,9 @@ init_igor_scratch "$WORKTREE"
 cd "$WORKTREE"
 
 # System prompt: voice anchor + slim AGENTS.md (issue-work-
-# specific). Brain identity.md / MEMORY.md are no longer loaded
-# (Phase 5). Per-repo CLAUDE.md gets loaded by Claude Code from
-# the worktree root automatically.
-BRAIN_PATH="$AGENT_REPO_ROOT/${BOT_USER}/brain"
+# specific). Per-repo CLAUDE.md is auto-loaded by Claude Code
+# from the worktree root.
 SYSTEM_PROMPT=$(issue_system_prompt)
-
-# RAG context: the issue title + body is the most concrete signal of
-# what the agent is about to work on. Pulls past journal entries, related
-# commits, and prior reviews touching the same area.
-TIER1_RAG_CONTEXT=$(AGENT_BRAIN_PATH="$BRAIN_PATH" rag_query "${ISSUE_TITLE}
-${ISSUE_BODY}")
-[ -n "$TIER1_RAG_CONTEXT" ] && log "rag: surfaced past context for tier-1 issue work"
 
 USER_MSG=$(cat <<EOF
 You are working Forgejo issue #${ISSUE_NUMBER} in ${FORGEJO_REPO}.
@@ -1859,12 +1618,6 @@ Labels: ${ISSUE_LABELS}
 
 Body:
 ${ISSUE_BODY}
-
----
-
-## Past context (RAG)
-
-${TIER1_RAG_CONTEXT:-(no past context retrieved this tick)}
 EOF
 )
 
@@ -1901,29 +1654,6 @@ if [ -n "$DIRTY_PATHS" ]; then
   log "harness-commit: $DIRTY_COUNT file(s), subject: $COMMIT_SUBJECT"
   git commit --quiet -m "$COMMIT_SUBJECT" || log "warning: harness commit failed"
 fi
-
-# -- Brain journal: append Claude's reflection (or harness stub) ------
-#
-# AGENTS.md mandates a journal entry every tick. Claude writes
-# .agent/AGENT_JOURNAL.md before exit; if he forgets, the harness
-# falls back to a fact stub built from what it knows here. Brain
-# always gets an entry. The harness owns the brain commit -- Claude's
-# worktree never reaches across to brain. Best-effort: if pull/push
-# fails, log it but don't fail the tick over a journal entry.
-
-JOURNAL_SRC="$WORKTREE/.agent/AGENT_JOURNAL.md"
-BRAIN_LOCAL="$AGENT_REPO_ROOT/${BOT_USER}/brain"
-JOURNAL_FALLBACK=$(cat <<EOF
-(no reflection from Claude this tick -- harness recorded the facts below)
-
-- Issue: ${FORGEJO_REPO}#${ISSUE_NUMBER} -- ${ISSUE_TITLE}
-- Commit subject: ${COMMIT_SUBJECT:-(no commit this tick)}
-- Files changed: ${DIRTY_COUNT:-0}
-- Elapsed: ${ELAPSED}s
-EOF
-)
-append_journal_entry "${FORGEJO_REPO}#${ISSUE_NUMBER}" "$JOURNAL_SRC" "$JOURNAL_FALLBACK"
-commit_brain_changes "$BRAIN_LOCAL" "journal: ${FORGEJO_REPO}#${ISSUE_NUMBER}"
 
 # -- Determine outcome -----------------------------------------
 

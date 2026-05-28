@@ -312,9 +312,8 @@ forgejo_my_assigned() {
 }
 
 # Returns 0 if the repo exists and the bot can access it, 1 otherwise.
-# Used by the bootstrap step to verify the agent's required repos
-# (<bot>/brain, optionally <bot>/website) are present before the
-# discovery loop runs.
+# Used by the bootstrap step to verify WEBSITE_REPO (when set) is
+# accessible before the website-side ticks try to clone it.
 forgejo_repo_exists() {
   _fj GET "/repos/$1" >/dev/null 2>&1
 }

@@ -4,16 +4,15 @@ Unattended Claude Code runtime. One global tick fires on a timer, the agent
 sweeps every repo the bot can push to for `Agent`-labeled work, claims the
 oldest one, ships a PR (or a report, or a blocker).
 
-Generic harness. The personality / voice / project-specific judgment lives
-in the bot's `brain` repo (cloned at runtime); this repo is just the loop.
+Generic harness. Project conventions live in each repo's `CLAUDE.md`; this
+repo is just the loop.
 
 ## Install
 
 **Server prerequisites** (one-time on the host before cloning):
 
-- `jq curl git util-linux coreutils python3 python3-venv` via apt
+- `jq curl git util-linux coreutils sqlite3` via apt
 - `claude` CLI via Anthropic's installer
-- Redis 8+ via Redis's official apt repo (`redis-server` package, NOT Debian's older one)
 
 See [docs/setup.md](docs/setup.md) for the full prereq picture and
 links.
@@ -25,14 +24,13 @@ git clone <forgejo-url>/<bot-user>/agent ~/.local/share/agent
 cd ~/.local/share/agent
 cp .env.example .env && chmod 600 .env
 $EDITOR .env                   # fill in every var -- no defaults
-bin/install.sh                 # pre-flights deps, sets up venv + systemd
+bin/install.sh                 # pre-flights deps, wires systemd
 bin/validate.sh                # confirm setup
 ```
 
 `install.sh` is the "clone and go" entry point. It pre-flights all
-prereqs, creates the Python venv for the recall layer and installs deps,
-and wires up the systemd timer. Idempotent; re-run after `git pull` to
-pick up unit file or requirements changes.
+prereqs and wires up the systemd timer. Idempotent; re-run after
+`git pull` to pick up unit file changes.
 
 ## Updating
 

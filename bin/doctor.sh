@@ -11,8 +11,8 @@
 # Sections:
 #   - Environment / config
 #   - Forgejo connectivity + bot identity
-#   - Brain + website clone freshness
-#   - State files (cooldowns, last runs)
+#   - Website clone freshness (if WEBSITE_REPO set)
+#   - State files
 #   - Worktrees on disk
 #   - Stale local agent branches
 #   - Open PRs across bot repos
@@ -73,19 +73,21 @@ fi
 # ----- Clones ---------------------------------------------------
 
 section "Local clones"
-for repo in brain website; do
-  CLONE="$AGENT_REPO_ROOT/${BOT_USER}/$repo"
+if [ -n "${WEBSITE_REPO:-}" ]; then
+  CLONE="$AGENT_REPO_ROOT/$WEBSITE_REPO"
   if [ -d "$CLONE/.git" ]; then
     AHEAD=$(cd "$CLONE" && git rev-list --count HEAD..@{u} 2>/dev/null || echo "?")
     BEHIND=$(cd "$CLONE" && git rev-list --count @{u}..HEAD 2>/dev/null || echo "?")
     LAST=$(cd "$CLONE" && git log -1 --pretty=format:'%h %s (%cr)' 2>/dev/null)
-    ok "$repo: $LAST"
+    ok "$WEBSITE_REPO: $LAST"
     [ "$AHEAD" != "0" ] && [ "$AHEAD" != "?" ] && warn "  behind remote by $AHEAD commit(s) -- pull pending"
     [ "$BEHIND" != "0" ] && [ "$BEHIND" != "?" ] && warn "  ahead of remote by $BEHIND commit(s) -- uncommitted push?"
   else
-    warn "$repo: not cloned at $CLONE"
+    warn "$WEBSITE_REPO: not cloned at $CLONE"
   fi
-done
+else
+  info "WEBSITE_REPO unset -- website work disabled"
+fi
 
 # ----- State files ----------------------------------------------
 
@@ -94,13 +96,20 @@ STATE_FILE="$AGENT_STATE_DIR/discretionary-state.json"
 if [ -f "$STATE_FILE" ]; then
   ok "discretionary-state.json present"
   if command -v jq >/dev/null 2>&1; then
-    POST_DAY=$(jq -r '.tier3.website_last_day // "(never)"' "$STATE_FILE" 2>/dev/null)
-    info "  last post day: $POST_DAY"
     MAINT_COUNT=$(jq -r '.maintenance // {} | length' "$STATE_FILE" 2>/dev/null)
     info "  maintenance entries: $MAINT_COUNT"
   fi
 else
   info "discretionary-state.json not yet created"
+fi
+
+BRAIN_DB="$AGENT_STATE_DIR/brain.sqlite"
+if [ -f "$BRAIN_DB" ] && command -v sqlite3 >/dev/null 2>&1; then
+  SEEN=$(sqlite3 "$BRAIN_DB" 'SELECT COUNT(*) FROM seen_urls' 2>/dev/null || echo "?")
+  REFL=$(sqlite3 "$BRAIN_DB" 'SELECT COUNT(*) FROM reflections' 2>/dev/null || echo "?")
+  ok "brain.sqlite: $SEEN seen_urls, $REFL reflections"
+else
+  info "brain.sqlite not yet created"
 fi
 
 LOCK_FILE="$AGENT_STATE_DIR/lock"
