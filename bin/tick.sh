@@ -310,7 +310,7 @@ claude_run_with_cost() {
   set +e
   set -o pipefail
   timeout --kill-after=30s "$timeout_spec" \
-    claude --output-format stream-json --verbose --include-partial-messages "$@" 2>&1 \
+    claude --output-format stream-json --verbose "$@" 2>&1 \
     | tee "$stream_log" \
     | jq -r --unbuffered '
         if (try .type catch null) == "assistant" then
