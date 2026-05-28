@@ -640,8 +640,9 @@ maintenance_mark_done() {
 
 # -- Daily site-work slots --------------------------------------
 #
-# Three discretionary slots, at most one fired per tick, each at
-# most once per local calendar day: reading, feature, design.
+# Four discretionary slots, at most one fired per tick, each at
+# most once per local calendar day: reading, ideation, feature,
+# design.
 # State lives in the same discretionary-state.json under a "slots"
 # object: { "date": "YYYY-MM-DD", "reading": "done", ... }.
 # Regenerable -- losing it just re-opens today's slots, and the
@@ -1529,20 +1530,21 @@ done <<<"$VALIDATED_REPOS_JSON"
 # -- Discretionary daily slots (no claimable work) ------------
 #
 # When discovery came up empty, run ONE discretionary slot inside
-# the shift window. Three slots, prioritized: reading -> feature
-# -> design. At most one fires per tick; each at most once per
-# local calendar day (slot_* helpers + discretionary-state.json).
-# All three done for the day -> nothing fires until tomorrow.
+# the shift window. Four slots, prioritized: reading -> ideation
+# -> feature -> design. At most one fires per tick; each at most
+# once per local calendar day (slot_* helpers +
+# discretionary-state.json). All four done for the day -> nothing
+# fires until tomorrow.
 #
 # This is the throttle that stops Igor opening a stack of
-# discretionary PRs overnight: one slot per tick, three slots per
+# discretionary PRs overnight: one slot per tick, four slots per
 # day, full stop.
 #
 # Mark-done policy differs by slot, on purpose:
-#   - reading: marked done after the pass runs, period. The
-#     pipeline is best-effort and self-throttles double-posts via
-#     its own daily refrain; we just want exactly one reading pass
-#     per day even when it ships nothing.
+#   - reading/ideation: marked done after the pass runs, period.
+#     Both are best-effort; ideation self-throttles double-posts
+#     via its own daily refrain. We just want exactly one of each
+#     pass per day even when it ships nothing.
 #   - feature/design: marked done only when site-work-block exits
 #     0 (shipped a PR, or cleanly decided there was nothing to do).
 #     A non-zero exit means a setup or push/PR-open error where
@@ -1563,6 +1565,11 @@ if [ -z "$WINNER" ]; then
       "$AGENT_HOME/bin/reading-pipeline.sh" --live \
         || log "warning: reading-pipeline exited rc=$?"
       slot_mark_done reading
+    elif ! slot_is_done ideation; then
+      log "slot: ideation"
+      "$AGENT_HOME/bin/ideation-pipeline.sh" --live \
+        || log "warning: ideation-pipeline exited rc=$?"
+      slot_mark_done ideation
     elif ! slot_is_done feature; then
       log "slot: feature"
       if "$AGENT_HOME/bin/site-work-block.sh" --directive feature --live; then
