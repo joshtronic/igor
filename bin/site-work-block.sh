@@ -203,7 +203,7 @@ cd "$WORKTREE"
 set +e
 set -o pipefail
 timeout --kill-after=30s "$TICK_TIMEOUT" \
-  claude --output-format stream-json --verbose --include-partial-messages \
+  claude --output-format stream-json --verbose \
     --model "$MODEL" \
     --append-system-prompt "$SYSTEM_PROMPT" \
     --settings "$AGENT_HOME/agent-settings.json" \
