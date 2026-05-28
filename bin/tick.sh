@@ -440,21 +440,18 @@ list_offlimits_violations() {
 
 
 
-# Idempotent clone-if-missing, pull-if-present. Creates the owner
-# subdir as needed. Pulls existing clones so upstream changes
-# propagate to the agent on every tick.
+# Idempotent clone-if-missing + ref refresh. Creates the owner subdir
+# as needed.
 #
-# Self-healing for dirty trees: a crashed tick (OOM, timeout,
-# unbound var, etc.) can mutate working-tree files but never reach
-# the commit step, leaving the repo in a state where every
-# subsequent `git pull --rebase` refuses to run.
-#
-# Fix: at tick start, if any tracked file is dirty, auto-commit
-# the leftover state with a `recovery:` subject and try to push.
-# The commit captures whatever the previous tick was writing
-# instead of leaving it orphaned in the working tree. Pull then
-# succeeds against either the just-pushed origin or a clean local
-# tree.
+# The clone is an ANCHOR, not a workspace: every surface (issue work,
+# maintenance, PR review, site-work) carves a disposable `git worktree`
+# off `origin/<ref>` and runs its own `git fetch` first, so nothing
+# reads this clone's own working tree. We only keep its refs current --
+# `git fetch`, never a working-tree-mutating `git pull --rebase`. That
+# is also why a stray dirty or untracked file here (e.g. a build
+# remnant) can't wedge the tick the way the old pull could: fetch never
+# touches the working tree, so there is nothing to conflict and no
+# recovery dance to run.
 ensure_repo_local() {
   local repo="$1" local_path
   local_path=$(repo_path_for "$repo")
@@ -465,40 +462,8 @@ ensure_repo_local() {
     return
   fi
 
-  # Detect uncommitted changes (staged or unstaged, tracked files
-  # only). Untracked files aren't counted -- they don't block
-  # git pull --rebase and we don't want to sweep them up blindly.
-  if ! (cd "$local_path" \
-        && git diff --quiet HEAD 2>/dev/null \
-        && git diff --cached --quiet 2>/dev/null); then
-    local dirty_summary
-    dirty_summary=$(cd "$local_path" && git status --short 2>/dev/null | head -10)
-    log "warning: $repo has uncommitted changes from a prior tick:"
-    while IFS= read -r line; do
-      [ -n "$line" ] && log "  $line"
-    done <<<"$dirty_summary"
-    (cd "$local_path" && git add -A 2>/dev/null) || true
-    # Pre-commit lint gate (see repo_lint_passes). If the dirty
-    # state itself is what's breaking lint, don't push more broken
-    # content. Leave dirty and surface; a future tick or human can
-    # untangle.
-    if ! repo_lint_passes "$local_path"; then
-      log "  warning: $repo lint failed on dirty state; refusing recovery commit. Inspect: (cd $local_path && npm test)"
-    elif (cd "$local_path" \
-          && git commit --quiet -m "recovery: auto-commit leftover changes from prior tick" 2>/dev/null); then
-      log "  recovery commit created in $repo"
-      if (cd "$local_path" && git push --quiet origin 2>/dev/null); then
-        log "  recovery commit pushed"
-      else
-        log "  warning: push of recovery commit failed; will retry next tick"
-      fi
-    else
-      log "  warning: recovery commit failed; pull will likely still fail"
-    fi
-  fi
-
-  (cd "$local_path" && git pull --rebase --quiet origin 2>/dev/null) \
-    || log "warning: pull of $repo failed; using stale local copy"
+  (cd "$local_path" && git fetch --prune --quiet origin 2>/dev/null) \
+    || log "warning: fetch of $repo failed; worktrees fall back to last-fetched refs"
 }
 
 # -- Discretionary-work state (maintenance + post cooldowns) ----
@@ -811,22 +776,6 @@ EOF
 
   maintenance_mark_done "$target"
   return 0
-}
-
-
-
-# Returns 0 if the repo passes its declared lint, OR if no lint
-# is configured. Best-effort: missing toolchain (no package.json,
-# no node_modules, no npm) is treated as "no lint" (pass) so
-# unconfigured repos and hosts no-op cleanly. Currently scoped to
-# npm-based lint -- extend per stack as other repos start needing
-# pre-commit gating.
-repo_lint_passes() {
-  local repo_path="$1"
-  [ -f "$repo_path/package.json" ] || return 0
-  [ -d "$repo_path/node_modules" ] || return 0
-  command -v npm >/dev/null 2>&1 || return 0
-  (cd "$repo_path" && npm test --silent >/dev/null 2>&1)
 }
 
 
