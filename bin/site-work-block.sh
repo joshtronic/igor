@@ -94,6 +94,8 @@ DIRECTIVE=""
 . "$AGENT_HOME/lib/forgejo.sh"
 # shellcheck source=../lib/cost.sh
 . "$AGENT_HOME/lib/cost.sh"
+# shellcheck source=../lib/claude.sh
+. "$AGENT_HOME/lib/claude.sh"
 
 # -- args ------------------------------------------------------
 
@@ -189,48 +191,24 @@ way; don't force a change.
 EOF
 )
 
-# -- invoke Claude (mirror claude_run_with_cost pattern) -------
+# -- invoke Claude --------------------------------------------
 
-STREAM_LOG="$WORKTREE/.agent/claude-stream.jsonl"
 DISPLAY_LOG="$WORKTREE/.agent/claude-output.log"
-: > "$STREAM_LOG"; : > "$DISPLAY_LOG"
-
 call_site="site-work-${DIRECTIVE}"
 
 log "invoking Claude (call_site=$call_site, timeout=$TICK_TIMEOUT, model=$MODEL)"
 cd "$WORKTREE"
 
 set +e
-set -o pipefail
-timeout --kill-after=30s "$TICK_TIMEOUT" \
-  claude --output-format stream-json --verbose \
-    --model "$MODEL" \
-    --append-system-prompt "$SYSTEM_PROMPT" \
-    --settings "$AGENT_HOME/agent-settings.json" \
-    --max-turns 50 \
-    --print "$USER_MSG" 2>&1 \
-  | tee "$STREAM_LOG" \
-  | jq -r --unbuffered '
-      if (try .type catch null) == "assistant" then
-        (.message.content // [])[]
-        | if .type == "text" then .text
-          elif .type == "tool_use" then "[tool: \(.name)]"
-          else empty
-          end
-      elif (try .type catch null) == "user" then
-        (.message.content // [])[]
-        | if .type == "tool_result" then "[tool_result]"
-          else empty
-          end
-      else empty
-      end
-    ' 2>/dev/null \
-  | tee "$DISPLAY_LOG"
-CLAUDE_EXIT=${PIPESTATUS[0]}
-set +o pipefail
+claude_run_with_cost "$call_site" "$DISPLAY_LOG" "$TICK_TIMEOUT" \
+  --model "$MODEL" \
+  --append-system-prompt "$SYSTEM_PROMPT" \
+  --settings "$AGENT_HOME/agent-settings.json" \
+  --max-turns 50 \
+  --print "$USER_MSG"
+CLAUDE_EXIT=$?
 set -e
 
-cost_record_cli "$call_site" "$STREAM_LOG"
 log "claude exited $CLAUDE_EXIT"
 
 # -- process outcome ------------------------------------------
@@ -263,19 +241,11 @@ fi
 # Runs regardless of whether Claude committed directly or left
 # dirty files, so PR_TITLE is always set. Falls back to a safe
 # default if the item is missing or unparseable.
-COMMIT_SUBJECT=$(awk '
-  /^## What this PR does/ { in_section = 1; next }
-  /^## / && in_section { exit }
-  in_section && /^- \[[x ]\] / {
-    sub(/^- \[[x ]\] /, "")
-    print
-    exit
-  }
-' "$PR_BODY_FILE")
+COMMIT_SUBJECT=$(pr_body_first_item "$PR_BODY_FILE")
 if [ -z "$COMMIT_SUBJECT" ]; then
   log "warning: PR_BODY.md missing '## What this PR does' first item -- using fallback subject"
   COMMIT_SUBJECT="chore: site-work ${DIRECTIVE} slot"
-elif ! [[ "$COMMIT_SUBJECT" =~ ^(feat|fix|chore|docs|style|refactor|test|perf|build|ci|revert):[[:space:]]+.+ ]]; then
+elif ! looks_like_conventional_commit "$COMMIT_SUBJECT"; then
   log "warning: PR_BODY.md first item missing conventional-commit prefix -- prepending 'chore: '"
   COMMIT_SUBJECT="chore: $COMMIT_SUBJECT"
 fi

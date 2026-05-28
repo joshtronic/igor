@@ -88,6 +88,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/maintenance-checks.sh"
 # shellcheck source=lib/cost.sh
 . "$AGENT_HOME/lib/cost.sh"
+# shellcheck source=lib/claude.sh
+. "$AGENT_HOME/lib/claude.sh"
 
 # Children invocations (agent-* helper scripts) share our tick id
 # so cost-ledger entries from child processes group with the
@@ -248,14 +250,9 @@ issue_system_prompt() {
 # Replace both with the ASCII "--" we use in prose anyway. Safe
 # for code, since en/em dashes are never load-bearing in code.
 #
-# Two flavors: pipe form (stdin -> stdout) and in-place file form.
+# Two flavors: arg form (text -> stdout) and in-place file form.
 normalize_unicode_dashes() {
-  # If args given, treat as input text; otherwise read stdin.
-  if [ "$#" -gt 0 ]; then
-    printf '%s' "$*" | sed -e 's/–/--/g' -e 's/—/--/g'
-  else
-    sed -e 's/–/--/g' -e 's/—/--/g'
-  fi
+  printf '%s' "$*" | sed -e 's/–/--/g' -e 's/—/--/g'
 }
 
 normalize_unicode_dashes_in_file() {
@@ -278,112 +275,11 @@ normalize_worktree_dashes() {
   done
 }
 
-# Run `claude --print` with stream-json output so the tick keeps live
-# progress in journalctl AND we can extract the precomputed
-# total_cost_usd from the final result event for the ledger.
-#
-# Pipeline shape:
-#   claude (stream-json) -> tee raw-stream-log -> jq display-text -> tee display-log
-#
-# Raw stream log holds every event (one JSON object per line) for
-# post-run cost extraction + debugging. Display log + journalctl get
-# the same readable text the old plain --print mode produced.
-#
-# Args: <call_site> <display_log_path> <timeout_spec> <claude_args...>
-# Returns: claude's exit code (PIPESTATUS[0] captured into $?)
-#
-# Sets globals (read by the caller after return):
-#   CLAUDE_RUN_STREAM_LOG -- path to the raw stream-json file
-claude_run_with_cost() {
-  local call_site="$1" display_log="$2" timeout_spec="$3"
-  shift 3
-  local scratch
-  scratch=$(dirname "$display_log")
-  local stream_log="$scratch/claude-stream.jsonl"
-  CLAUDE_RUN_STREAM_LOG="$stream_log"
-  : > "$stream_log"
-  : > "$display_log"
-  # stderr inline with stdout (old behavior); jq filter drops
-  # non-JSON lines so stray stderr doesn't break the pipeline.
-  # --verbose is required by Claude Code when using stream-json
-  # with --print (it refuses without it).
-  set +e
-  set -o pipefail
-  timeout --kill-after=30s "$timeout_spec" \
-    claude --output-format stream-json --verbose "$@" 2>&1 \
-    | tee "$stream_log" \
-    | jq -r --unbuffered '
-        if (try .type catch null) == "assistant" then
-          (.message.content // [])[]
-          | if .type == "text" then .text
-            elif .type == "tool_use" then "[tool: \(.name)]"
-            else empty
-            end
-        elif (try .type catch null) == "user" then
-          (.message.content // [])[]
-          | if .type == "tool_result" then "[tool_result]"
-            else empty
-            end
-        else empty
-        end
-      ' 2>/dev/null \
-    | tee "$display_log"
-  local rc=${PIPESTATUS[0]}
-  set +o pipefail
-  set -e
-  cost_record_cli "$call_site" "$stream_log"
-  return "$rc"
-}
-
-# Model defaults to Haiku (cheap, fast, good enough for short
-# completions). Override via AGENT_MODEL_THINKING. Returns the text
-# of the response on stdout; empty on failure.
-#
-# Optional 4th arg: a call-site tag for the cost ledger. If unset,
-# the call is logged as "claude-complete" (still tracked, but the
-# caller could be more specific -- "commit-subject", "cadence", etc).
-claude_complete() {
-  local system_prompt="$1" user_msg="$2"
-  local model="${AGENT_MODEL_THINKING:-claude-haiku-4-5-20251001}"
-  local max_tokens="${3:-256}"
-  local call_site="${4:-claude-complete}"
-  local response
-  response=$(curl -sf -X POST https://api.anthropic.com/v1/messages \
-    -H "x-api-key: $ANTHROPIC_API_KEY" \
-    -H "anthropic-version: 2023-06-01" \
-    -H "Content-Type: application/json" \
-    --max-time 30 \
-    -d "$(jq -n \
-      --arg m "$model" \
-      --argjson mt "$max_tokens" \
-      --arg s "$system_prompt" \
-      --arg u "$user_msg" \
-      '{model: $m, max_tokens: $mt, system: $s, messages: [{role: "user", content: $u}]}')" \
-    2>/dev/null) || return 1
-  cost_record_api "$call_site" "$model" "$response"
-  jq -r '.content[0].text // ""' <<<"$response" 2>/dev/null
-}
-
-# Return 0 if the subject looks like a conventional commit
-# ("type: description" with a known type). Used to reject API
-# responses that are conversational rather than subject-shaped.
-looks_like_conventional_commit() {
-  local s="$1"
-  [[ "$s" =~ ^(feat|fix|chore|docs|style|refactor|test|perf|build|ci|revert):[[:space:]]+.+ ]]
-}
-
-# Ensure a conventional-commit prefix. If the subject already has
-# one (feat:/fix:/chore:/etc.), return unchanged. Otherwise prepend
-# `chore: ` as a safe default so the PR title isn't bare imperative
-# prose like "Update X" with no type marker.
-normalize_subject() {
-  local s="$1"
-  if looks_like_conventional_commit "$s"; then
-    printf '%s' "$s"
-  else
-    printf 'chore: %s' "$s"
-  fi
-}
+# The Claude/Anthropic invocation primitives -- claude_run_with_cost
+# (agentic CLI runner), anthropic_call (one-shot Messages API), and the
+# PR-subject text helpers (looks_like_conventional_commit /
+# normalize_subject / pr_body_first_item) -- now live in lib/claude.sh,
+# sourced above.
 
 # Derive a commit subject for the harness commit. Three tiers,
 # tried in order:
@@ -409,15 +305,7 @@ derive_commit_subject() {
   # Tier 1: PR_BODY.md first item
   if [ -f "$pr_body" ]; then
     local subject
-    subject=$(awk '
-      /^## What this PR does/ { in_section = 1; next }
-      /^## / && in_section { exit }
-      in_section && /^- \[[x ]\] / {
-        sub(/^- \[[x ]\] /, "")
-        print
-        exit
-      }
-    ' "$pr_body")
+    subject=$(pr_body_first_item "$pr_body")
     if [ -n "$subject" ]; then
       normalize_subject "$subject"
       return 0
@@ -439,11 +327,12 @@ derive_commit_subject() {
     # without it isn't worth burning an API call on.
     if printf '%s' "$diff_summary" | grep -q "files\? changed"; then
       local api_subject
-      api_subject=$(claude_complete \
-        "You generate ONE single-line conventional-commit subject. Output ONLY the subject line -- no quotes, no preamble, no explanation, no questions. Format: 'type: description' where type is one of feat/fix/chore/docs/style/refactor/test. Under 72 chars. Imperative mood ('Add X' not 'Added X'). Be specific about what changed. If the input is empty or you cannot tell what changed, output exactly: chore: tick work" \
-        "$diff_summary" \
+      api_subject=$(anthropic_call \
+        "${AGENT_MODEL_THINKING:-claude-haiku-4-5-20251001}" \
+        "commit-subject" \
         80 \
-        "commit-subject")
+        "You generate ONE single-line conventional-commit subject. Output ONLY the subject line -- no quotes, no preamble, no explanation, no questions. Format: 'type: description' where type is one of feat/fix/chore/docs/style/refactor/test. Under 72 chars. Imperative mood ('Add X' not 'Added X'). Be specific about what changed. If the input is empty or you cannot tell what changed, output exactly: chore: tick work" \
+        "$diff_summary")
       # Strip surrounding whitespace and any stray quotes
       api_subject=$(printf '%s' "$api_subject" \
         | head -1 \
@@ -493,7 +382,10 @@ derive_pr_body() {
   printf '%s' "$diff_summary" | grep -q "files\? changed" || return 1
 
   local body
-  body=$(claude_complete \
+  body=$(anthropic_call \
+    "${AGENT_MODEL_THINKING:-claude-haiku-4-5-20251001}" \
+    "pr-body-fallback" \
+    800 \
     "You generate Forgejo PR bodies from git diffs. Output EXACTLY this format and nothing else -- no preamble, no explanation, no fenced code blocks around the output:
 
 ## What this PR does
@@ -512,9 +404,7 @@ Rules:
 - Leave unchecked ([ ]) for steps that need a human (manual UI checks, comparing against external systems).
 - If the diff is purely doc/refactor with no manual testing needed, Test plan can be just '- [x] No manual verification needed; CI is the gate'.
 - Be terse and accurate. Don't invent context not in the diff." \
-    "$diff_summary" \
-    800 \
-    "pr-body-fallback")
+    "$diff_summary")
 
   # Strip leading/trailing whitespace and any fenced-code wrappers
   # Haiku occasionally adds despite instructions.

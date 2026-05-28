@@ -65,28 +65,6 @@ forgejo_pr_non_bot_reviews() {
       '
 }
 
-# All open issues on a repo, regardless of label/assignee. Used to
-# brief Claude on the current queue so discretionary site-work
-# ticks don't file duplicates of issues already queued.
-# Returns a JSON array (possibly empty).
-forgejo_list_open_issues() {
-  local repo="$1"
-  _fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50"
-}
-
-# All open issues currently assigned to a given user.
-# Returns a JSON array (possibly empty). Filters client-side so this
-# works the same across Forgejo versions.
-forgejo_find_assigned() {
-  local repo="$1" user="$2"
-  _fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" \
-    | jq -c --arg u "$user" '
-        map(select(
-          (.assignees // []) | map(.login) | index($u) != null
-        ))
-      '
-}
-
 forgejo_assign() {
   local repo="$1" number="$2" user="$3"
   _fj PATCH "/repos/${repo}/issues/${number}" \
@@ -250,19 +228,6 @@ forgejo_add_label() {
   [ -n "$id" ] || { echo "label not found: $name" >&2; return 1; }
   _fj POST "/repos/${repo}/issues/${number}/labels" \
     "$(jq -n --argjson id "$id" '{labels: [$id]}')" >/dev/null
-}
-
-# Remove a label by name. Parallel to forgejo_add_label; resolves
-# name -> id then DELETEs from /labels/{id}. Used (rarely) when the
-# harness needs to clear a label it applied earlier.
-forgejo_remove_label() {
-  local repo="$1" number="$2" name="$3"
-  local id
-  id=$(_fj GET "/repos/${repo}/labels" \
-       | jq -r --arg n "$name" '.[] | select(.name == $n) | .id' \
-       | head -1)
-  [ -n "$id" ] || { echo "label not found: $name" >&2; return 1; }
-  _fj DELETE "/repos/${repo}/issues/${number}/labels/${id}" >/dev/null
 }
 
 # Bot-authored PRs on this repo that reference this issue via
