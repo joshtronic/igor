@@ -25,6 +25,21 @@ Empty site-work blocks are fine -- better than make-work. If
 nothing on this list reads as actually-out-of-sync or
 actually-broken, exit clean and let the next block fire later.
 
-When you do ship, write `.agent/PR_BODY.md` with what changed and
-why. Standard two-checklist format (what changed, scope). The
-harness picks up the body and uses it as the PR body verbatim.
+When you do ship, write `.agent/PR_BODY.md` with this exact shape:
+
+    ## What this PR does
+
+    - [x] <conventional-commit-prefixed first line>
+    - [x] <other changes if any>
+
+    ## Test plan
+
+    - [x] <verified steps>
+    - [ ] <manual steps if any>
+
+The first checklist item under "What this PR does" MUST start
+with a conventional-commit prefix (`feat:`, `fix:`, `chore:`,
+`docs:`, `style:`, `refactor:`). Example:
+`- [x] fix: stop syncing post counts on /now`. The harness uses
+that first item verbatim as the commit subject AND PR title --
+wrong heading or missing prefix produces a garbage subject.
