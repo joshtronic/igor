@@ -1,40 +1,39 @@
-PLACEHOLDER -- Josh will iterate on this directive over time.
-
-This file is the directive for the FEATURE slot: one piece of
-non-trivial site work per day. Bug fix, new feature, content
-restructure, accessibility fix, real breakage. NOT design
-polish (that's the design slot).
-
-The goal of the block is to pick ONE substantive thing and ship
-it, or exit clean. No make-work.
+This is the directive for the FEATURE slot: at most one
+substantive piece of site work per day. The bar is high. Most
+days there's nothing that genuinely needs doing, and that's the
+expected outcome -- exit clean. A forced change is worse than no
+change.
 
 ---
 
-Pick ONE of these and ship it, or exit if nothing fits today:
+Pick ONE thing only if it's clearly broken or clearly missing.
+In scope:
 
-- A real bug somewhere on the site (broken link, broken layout
-  in a specific browser, RSS validation failure, build warning
-  you can trace to a root cause).
-- A new small feature (a footer link the site should have, a
-  data attribute that improves something downstream, a script
-  hook that makes future ticks cheaper).
-- A content restructure that needs more than a paragraph
-  rewrite -- e.g. splitting a sprawling page, consolidating
-  duplicated copy across pages.
-- A meaningful theme drift in /about: if a section that frames
-  "what I write about" is genuinely out of date with the last
-  month of posts, reshape it. (Don't enumerate posts.)
+- A real bug: broken link, layout that breaks in a specific
+  browser, RSS/sitemap that fails validation, a build warning you
+  can trace to a root cause.
+- A small feature the site genuinely lacks: a missing footer
+  link, a meta tag that's actually absent, a script hook that
+  makes future work cheaper.
+- A content or copy restructure that needs more than a one-line
+  fix: splitting a page that's grown unwieldy, consolidating copy
+  that's duplicated across pages (but NOT the locked pages below).
 
-NOT in scope here (those are the design slot or a separate
-ticket entirely):
+Out of scope (leave these alone):
 
-- Cosmetic CSS tweaks, color swaps, font experiments
-- Hover states, micro-animations, layout polish
-- The /now or /colophon pages -- those are locked stable pages
-  (see CLAUDE.md)
+- Cosmetic polish -- color, spacing, type, hover states. That's
+  the design slot.
+- The locked stable pages: /now, /about, /colophon. Hard
+  boundary, no exceptions (see CLAUDE.md). If one of them reads
+  stale, that's a ticket for the human to file, not a change to
+  make autonomously.
+- CI workflow files under .forgejo/ or .github/. Never.
+- Anything that needs a new dependency unless it's clearly
+  warranted and you note why.
 
-If nothing on this list reads as a genuinely needed change,
-exit clean. The design slot still fires later today.
+The test for shipping: would a careful maintainer agree this
+needed doing today? If you're reaching, you have your answer --
+exit clean and let the design slot fire later.
 
 When you do ship, write `.agent/PR_BODY.md` with this exact
 shape:
@@ -51,8 +50,7 @@ shape:
 
 The first checklist item under "What this PR does" MUST start
 with a conventional-commit prefix (`feat:`, `fix:`, `chore:`,
-`docs:`, `style:`, `refactor:`). Example:
-`- [x] fix: broken RSS validation on the feed root`. The
-harness uses that first item verbatim as the commit subject AND
-PR title -- wrong heading or missing prefix produces a garbage
-subject.
+`docs:`, `refactor:`). Example:
+`- [x] fix: broken RSS validation on the feed root`. The harness
+uses that first item verbatim as the commit subject AND PR title
+-- wrong heading or missing prefix produces a garbage subject.
