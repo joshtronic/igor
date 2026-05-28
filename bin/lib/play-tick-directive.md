@@ -23,6 +23,19 @@ changes, new pages, new dependencies.
 If nothing playful occurs to you, exit clean. The point is play,
 not obligation.
 
-When you do ship, write `.agent/PR_BODY.md` describing the change
-in one paragraph. The harness will prepend a "this was a play
-tick" note before opening the PR.
+When you do ship, write `.agent/PR_BODY.md` with this exact shape:
+
+    ## What this PR does
+
+    - [x] <conventional-commit-prefixed first line>
+
+    ## Test plan
+
+    - [x] <verified steps>
+
+The first checklist item under "What this PR does" MUST start
+with a conventional-commit prefix (`style:` or `chore:` usually
+fit play ticks). Example: `- [x] style: warmer footer accent`.
+The harness uses that first item verbatim as the commit subject
+AND PR title, then prepends a "this was a play tick" note to the
+PR body before opening.
