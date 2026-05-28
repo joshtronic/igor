@@ -1,40 +1,32 @@
 #!/usr/bin/env bash
-# site-work-block.sh -- the new directed-list-or-exit site-work
-# executor.
+# site-work-block.sh -- one slot of daily site work.
 #
-# Replaces the discretionary site-work branch in tick.sh. STANDALONE
-# -- not wired in yet; Phase 4 does that. Old discretionary paths
-# stay live in tick.sh until then.
+# Invoked by tick.sh's discretionary slot loop. Each call runs
+# ONE slot's worth of work: either the FEATURE slot (substantive
+# bug/feature/restructure) or the DESIGN slot (small playful CSS
+# polish). The caller picks which via --directive.
 #
 # Per invocation:
 #
-#   1. Roll a 10-sided die. 1-in-10 -> PLAY_TICK=1 (loose
-#      "play" directive). Otherwise 0 (directed-list directive).
-#      Forceable via the --play-tick / --no-play-tick flags or
-#      the PLAY_TICK env var for testing.
+#   1. Make a fresh worktree from the website's origin/master on
+#      a new `agent/site-work-<ts>` branch.
 #
-#   2. Make a fresh worktree from the website's origin/master on a
-#      new `agent/site-work-<ts>` branch.
-#
-#   3. Invoke Claude Code in that worktree with:
+#   2. Invoke Claude Code in that worktree with:
 #        - The voice anchor (bin/lib/voice.md)
-#        - The appropriate directive (site-work-directives.md OR
-#          play-tick-directive.md)
+#        - The slot's directive (feature-directive.md or
+#          design-directive.md)
 #        - The repo's CLAUDE.md
-#      No AGENTS.md -- Phase 5 retires it for non-issue-work
-#      surfaces; this block is one such surface from the start.
+#      No AGENTS.md -- non-issue-work surface.
 #
-#   4. After Claude exits: if commits landed AND .agent/PR_BODY.md
-#      exists, push the branch + open a PR. On a play tick,
-#      prepend the "this was a play tick" note to PR_BODY.md
-#      before opening.
+#   3. After Claude exits: if commits landed AND .agent/PR_BODY.md
+#      exists, push the branch + open a PR.
 #
-# Defaults to --dry-run: invokes Claude, observes what Claude does,
-# but does NOT push or open a PR. Pass --live to opt in.
+# Defaults to --dry-run: invokes Claude, observes what Claude
+# does, but does NOT push or open a PR. Pass --live to opt in.
 #
 # Usage:
-#   bin/site-work-block.sh [--website-path PATH] [--play-tick |
-#     --no-play-tick] [--live]
+#   bin/site-work-block.sh --directive {feature|design}
+#                          [--website-path PATH] [--live]
 #
 # Required env:
 #   ANTHROPIC_API_KEY  -- for Claude invocation
@@ -52,8 +44,16 @@
 #                        joshtronic/igor.bot). Unset = no website
 #                        work; the block exits clean.
 #   TICK_TIMEOUT      -- default 30m (Claude wall-clock cap)
-#   PLAY_TICK         -- 0 or 1; if set, overrides the dice roll
 #   FORGEJO_REVIEWER  -- optional, assignee on opened PR
+#
+# Exit codes (the caller uses these to decide whether to mark the
+# slot done for the day):
+#   0  slot handled -- PR opened, OR Claude cleanly decided there
+#      was nothing to do. Either way the slot is "spent" for today.
+#   1  runtime error after Claude ran (commit/push/PR-open failed).
+#      Work may be lost; caller should NOT mark the slot done.
+#   2  setup error (bad args, missing files, bad worktree path).
+#      Caller should NOT mark the slot done.
 
 set -uo pipefail
 
@@ -88,7 +88,7 @@ MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 TICK_TIMEOUT="${TICK_TIMEOUT:-30m}"
 WEBSITE_PATH=""
 LIVE=0
-PLAY_TICK_OVERRIDE="${PLAY_TICK:-}"
+DIRECTIVE=""
 
 # shellcheck source=../lib/forgejo.sh
 . "$AGENT_HOME/lib/forgejo.sh"
@@ -99,14 +99,19 @@ PLAY_TICK_OVERRIDE="${PLAY_TICK:-}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --directive)     DIRECTIVE="$2"; shift 2 ;;
     --website-path)  WEBSITE_PATH="$2"; shift 2 ;;
     --live)          LIVE=1; shift ;;
-    --play-tick)     PLAY_TICK_OVERRIDE=1; shift ;;
-    --no-play-tick)  PLAY_TICK_OVERRIDE=0; shift ;;
     -h|--help)       sed -n '2,/^$/p' "$0" | sed 's/^# //; s/^#//'; exit 0 ;;
-    *)               echo "unknown arg: $1" >&2; exit 1 ;;
+    *)               echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+case "$DIRECTIVE" in
+  feature|design) ;;
+  "")  echo "site-work-block: --directive {feature|design} is required" >&2; exit 2 ;;
+  *)   echo "site-work-block: unknown directive '$DIRECTIVE' (want feature|design)" >&2; exit 2 ;;
+esac
 
 WEBSITE_PATH="${WEBSITE_PATH:-$AGENT_REPO_ROOT/${WEBSITE_REPO}}"
 
@@ -114,26 +119,10 @@ WEBSITE_PATH="${WEBSITE_PATH:-$AGENT_REPO_ROOT/${WEBSITE_REPO}}"
 
 log() { printf 'site-work-block: %s\n' "$*" >&2; }
 
-# -- resolve play-tick -----------------------------------------
-
-if [ -n "$PLAY_TICK_OVERRIDE" ]; then
-  PLAY_TICK="$PLAY_TICK_OVERRIDE"
-  log "PLAY_TICK forced to $PLAY_TICK via override"
-else
-  # 10-sided die: 1-in-10 chance of play
-  if [ "$((RANDOM % 10))" -eq 0 ]; then
-    PLAY_TICK=1
-  else
-    PLAY_TICK=0
-  fi
-  log "rolled PLAY_TICK=$PLAY_TICK"
-fi
-
 # -- load voice anchor + directive -----------------------------
 
 VOICE_FILE="$AGENT_HOME/bin/lib/voice.md"
-DIRECTIVE_FILE="$AGENT_HOME/bin/lib/site-work-directives.md"
-[ "$PLAY_TICK" = "1" ] && DIRECTIVE_FILE="$AGENT_HOME/bin/lib/play-tick-directive.md"
+DIRECTIVE_FILE="$AGENT_HOME/bin/lib/${DIRECTIVE}-directive.md"
 
 if [ ! -f "$VOICE_FILE" ];     then log "voice anchor not found: $VOICE_FILE"; exit 2; fi
 if [ ! -f "$DIRECTIVE_FILE" ]; then log "directive not found: $DIRECTIVE_FILE"; exit 2; fi
@@ -183,20 +172,20 @@ EOF
 
 # User message: the directive + a context paragraph.
 USER_MSG=$(cat <<EOF
-You're doing a site-work block on ${WEBSITE_REPO}. Working
-directory: this worktree, branched fresh from origin/master.
+You're doing the ${DIRECTIVE} slot of today's site work on
+${WEBSITE_REPO}. Working directory: this worktree, branched
+fresh from origin/master.
 
 ${DIRECTIVE_BODY}
 
 ---
 
-When you ship, write a one-or-two-paragraph .agent/PR_BODY.md
-describing what changed and why. The harness commits any dirty
-files outside .agent/ after you exit and uses your PR_BODY as
-the PR body verbatim.
+The harness commits any dirty files outside .agent/ after you
+exit and uses your PR_BODY as the PR body verbatim.
 
 If nothing on the directive applies today, exit clean -- write
-nothing, change nothing. The next block fires later.
+nothing, change nothing. This slot is done for the day either
+way; don't force a change.
 EOF
 )
 
@@ -206,8 +195,7 @@ STREAM_LOG="$WORKTREE/.agent/claude-stream.jsonl"
 DISPLAY_LOG="$WORKTREE/.agent/claude-output.log"
 : > "$STREAM_LOG"; : > "$DISPLAY_LOG"
 
-call_site="site-work"
-[ "$PLAY_TICK" = "1" ] && call_site="site-work-play"
+call_site="site-work-${DIRECTIVE}"
 
 log "invoking Claude (call_site=$call_site, timeout=$TICK_TIMEOUT, model=$MODEL)"
 cd "$WORKTREE"
@@ -270,48 +258,40 @@ if [ ! -s "$PR_BODY_FILE" ]; then
   exit 0
 fi
 
-# Auto-commit any dirty paths outside .agent/, mirroring the
-# harness pattern. Subject is the first "What this PR does"
-# checklist item from PR_BODY.md (the directive requires this
-# shape). Falls back to a safe default if the item is missing
-# or unparseable.
+# Derive the commit subject / PR title from the first "What this
+# PR does" checklist item (the directive requires this shape).
+# Runs regardless of whether Claude committed directly or left
+# dirty files, so PR_TITLE is always set. Falls back to a safe
+# default if the item is missing or unparseable.
+COMMIT_SUBJECT=$(awk '
+  /^## What this PR does/ { in_section = 1; next }
+  /^## / && in_section { exit }
+  in_section && /^- \[[x ]\] / {
+    sub(/^- \[[x ]\] /, "")
+    print
+    exit
+  }
+' "$PR_BODY_FILE")
+if [ -z "$COMMIT_SUBJECT" ]; then
+  log "warning: PR_BODY.md missing '## What this PR does' first item -- using fallback subject"
+  COMMIT_SUBJECT="chore: site-work ${DIRECTIVE} slot"
+elif ! [[ "$COMMIT_SUBJECT" =~ ^(feat|fix|chore|docs|style|refactor|test|perf|build|ci|revert):[[:space:]]+.+ ]]; then
+  log "warning: PR_BODY.md first item missing conventional-commit prefix -- prepending 'chore: '"
+  COMMIT_SUBJECT="chore: $COMMIT_SUBJECT"
+fi
+COMMIT_SUBJECT=$(printf '%s' "$COMMIT_SUBJECT" | head -c 72)
+PR_TITLE="$COMMIT_SUBJECT"
+
+# Auto-commit any dirty paths outside .agent/ (Claude may have
+# left changes uncommitted). If Claude already committed
+# directly, DIRTY_PATHS is empty and this is a no-op.
 if [ -n "$DIRTY_PATHS" ]; then
   git add -A
-  COMMIT_SUBJECT=$(awk '
-    /^## What this PR does/ { in_section = 1; next }
-    /^## / && in_section { exit }
-    in_section && /^- \[[x ]\] / {
-      sub(/^- \[[x ]\] /, "")
-      print
-      exit
-    }
-  ' "$PR_BODY_FILE")
-  if [ -z "$COMMIT_SUBJECT" ]; then
-    log "warning: PR_BODY.md missing '## What this PR does' first item -- using fallback subject"
-    COMMIT_SUBJECT="chore: site-work block"
-  elif ! [[ "$COMMIT_SUBJECT" =~ ^(feat|fix|chore|docs|style|refactor|test|perf|build|ci|revert):[[:space:]]+.+ ]]; then
-    log "warning: PR_BODY.md first item missing conventional-commit prefix -- prepending 'chore: '"
-    COMMIT_SUBJECT="chore: $COMMIT_SUBJECT"
-  fi
-  COMMIT_SUBJECT=$(printf '%s' "$COMMIT_SUBJECT" | head -c 72)
   git commit --quiet -m "$COMMIT_SUBJECT" || {
     log "harness-commit failed"
     exit 1
   }
   log "harness-commit: $COMMIT_SUBJECT"
-fi
-
-# PR title mirrors the commit subject (already derived above
-# from the canonical first item, BEFORE any play-tick prepend).
-PR_TITLE="$COMMIT_SUBJECT"
-
-# Prepend the play-tick note to PR_BODY.md.
-if [ "$PLAY_TICK" = "1" ]; then
-  tmp=$(mktemp)
-  printf '**This was a play tick.** Reject without prejudice if the vibe is off.\n\n' > "$tmp"
-  cat "$PR_BODY_FILE" >> "$tmp"
-  mv "$tmp" "$PR_BODY_FILE"
-  log "prepended play-tick note to PR_BODY.md"
 fi
 
 # -- push + open PR --------------------------------------------
