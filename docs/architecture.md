@@ -51,19 +51,26 @@ A timer fires `bin/tick.sh`. Per tick:
 10. **Work.** Make a worktree, invoke Claude with `bin/lib/voice.md`
     plus `AGENTS.md` (the project's `CLAUDE.md` is auto-loaded by
     Claude Code), react to whatever Claude leaves behind.
-11. **Reading pipeline + site-work block.** If steps 5-10 found no
-    work and `WEBSITE_REPO` is set, the tick fires the reading
-    pipeline (read one source, reflect, draft a post if the daily
-    refrain hasn't already shipped one) and the site-work block (a
-    fresh Claude pass against the website worktree, with a 1-in-10
-    chance of being a play tick). Both are shift-gated -- outside
-    `AGENT_SHIFT_START`/`_END` the tick ends after step 10. If
-    `WEBSITE_REPO` is unset, the tick exits cleanly with no website
-    work attempted.
+11. **Discretionary daily slots.** If steps 5-10 found no work and
+    `WEBSITE_REPO` is set, the tick fires ONE discretionary slot,
+    prioritized: **reading** (run the reading pipeline -- read a
+    source, reflect, draft a post if material clusters), then
+    **feature** (one substantive site-work PR via
+    `site-work-block.sh --directive feature`), then **design** (one
+    small playful site-work PR via `--directive design`). At most
+    one slot fires per tick, and each slot fires at most once per
+    local calendar day -- state lives in `discretionary-state.json`
+    under a `slots` object that rolls over at midnight. Once all
+    three are done, nothing fires until tomorrow. This is the
+    throttle that prevents a stack of overnight discretionary PRs.
+    Shift-gated -- outside `AGENT_SHIFT_START`/`_END` no slot fires.
+    If `WEBSITE_REPO` is unset, the tick exits cleanly with no
+    website work attempted.
 
 The shift window (`AGENT_SHIFT_START` / `_END`) gates Igor-driven
-work only -- maintenance, reading pipeline, site-work, and tier-1
-work on issues Igor filed himself. Human-driven signals
+work only -- maintenance, the discretionary slots (reading,
+feature, design), and tier-1 work on issues Igor filed himself.
+Human-driven signals
 (validation, recovery, PR-review pickup for
 `REQUEST_CHANGES`/reassignment, tier-1 work on issues filed by
 someone other than the bot) run on every tick around the clock.
@@ -91,7 +98,7 @@ prompts -- not one kitchen-sink prompt for everything. The split:
 | Issue work, PR review           | `bin/lib/voice.md` + `AGENTS.md` (repo's `CLAUDE.md` is auto-loaded)       |
 | Maintenance triage              | (none -- the user message is self-contained classification)                |
 | Reading pipeline (reflect, post drafting, post-shape decision) | `bin/lib/voice.md` + a task-specific directive      |
-| Site-work block                 | `bin/lib/voice.md` + `bin/lib/site-work-directives.md` (or play-tick directive) |
+| Site-work (feature/design slot) | `bin/lib/voice.md` + `bin/lib/{feature,design}-directive.md` |
 
 `voice.md` is the shared voice anchor; the task directives carry
 surface-specific framing. The slim `AGENTS.md` is only what
@@ -146,8 +153,8 @@ bin/
 |-- uninstall.sh             # stop, disable, remove units
 `-- lib/
     |-- voice.md             # shared voice anchor for every Claude invocation
-    |-- site-work-directives.md
-    `-- play-tick-directive.md
+    |-- feature-directive.md # site-work feature slot directive
+    `-- design-directive.md  # site-work design slot directive
 
 lib/
 |-- forgejo.sh               # Forgejo API helpers

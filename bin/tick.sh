@@ -638,6 +638,56 @@ maintenance_mark_done() {
   mv "$tmp" "$state_file"
 }
 
+# -- Daily site-work slots --------------------------------------
+#
+# Three discretionary slots, at most one fired per tick, each at
+# most once per local calendar day: reading, feature, design.
+# State lives in the same discretionary-state.json under a "slots"
+# object: { "date": "YYYY-MM-DD", "reading": "done", ... }.
+# Regenerable -- losing it just re-opens today's slots, and the
+# work gets re-attempted (acceptable; one wasted pass at worst).
+#
+# A slot is marked done once ATTEMPTED, whether or not it shipped
+# a PR. That's deliberate: a clean "nothing to do" is a valid
+# answer for the day, and marking done prevents a retry storm of
+# LLM calls across the rest of the shift.
+
+slot_today() { date +%Y-%m-%d; }
+
+# Reset the slot slate when the local date rolls over. Idempotent;
+# call at the top of the discretionary cascade every tick.
+slot_rollover() {
+  local state_file tmp today stored
+  state_file=$(discretionary_state_file)
+  today=$(slot_today)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  stored=$(jq -r '.slots.date // ""' "$state_file" 2>/dev/null || echo "")
+  if [ "$stored" != "$today" ]; then
+    tmp=$(mktemp)
+    jq --arg d "$today" '.slots = {date: $d}' "$state_file" > "$tmp"
+    mv "$tmp" "$state_file"
+  fi
+}
+
+# 0 if the named slot is already done today, 1 otherwise.
+slot_is_done() {
+  local slot="$1" state_file
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || return 1
+  [ "$(jq -r --arg s "$slot" '.slots[$s] // ""' "$state_file" 2>/dev/null)" = "done" ]
+}
+
+# Stamp the named slot done for today. slot_rollover owns the
+# date key; this only flips the slot bit.
+slot_mark_done() {
+  local slot="$1" state_file tmp
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg s "$slot" '.slots //= {} | .slots[$s] = "done"' "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
 
 # Eligible if not run this ISO week (weeks start Monday, local time).
 # Any tick all week can pick up an eligible repo -- no shift-window
@@ -1476,35 +1526,62 @@ while IFS= read -r repo_line; do
   fi
 done <<<"$VALIDATED_REPOS_JSON"
 
-# -- Reading pipeline + site-work block (no claimable work) ---
+# -- Discretionary daily slots (no claimable work) ------------
 #
-# When discovery came up empty, we still run Igor-driven work
-# inside the shift window: read a few sources (and maybe ship a
-# post if material clusters), then a site-work block. Both
-# scripts are self-contained executors; the harness just invokes
-# them. Daily-refrain ("post already shipped today -> stop
-# reading") is enforced inside reading-pipeline.sh; the 1-in-10
-# play-tick dice roll is inside site-work-block.sh.
+# When discovery came up empty, run ONE discretionary slot inside
+# the shift window. Three slots, prioritized: reading -> feature
+# -> design. At most one fires per tick; each at most once per
+# local calendar day (slot_* helpers + discretionary-state.json).
+# All three done for the day -> nothing fires until tomorrow.
 #
-# Phase 4 wire-in for the refactor (~/Notes/igor-refactor-plan.md).
-# Phase 4c moves these calls so they fire AFTER the issues loop
-# too, not only when discovery comes up empty.
+# This is the throttle that stops Igor opening a stack of
+# discretionary PRs overnight: one slot per tick, three slots per
+# day, full stop.
+#
+# Mark-done policy differs by slot, on purpose:
+#   - reading: marked done after the pass runs, period. The
+#     pipeline is best-effort and self-throttles double-posts via
+#     its own daily refrain; we just want exactly one reading pass
+#     per day even when it ships nothing.
+#   - feature/design: marked done only when site-work-block exits
+#     0 (shipped a PR, or cleanly decided there was nothing to do).
+#     A non-zero exit means a setup or push/PR-open error where
+#     work may be lost -- leave the slot open so the next tick
+#     retries.
 
 if [ -z "$WINNER" ]; then
   log "no claimable work across any repo"
 
   if [ -z "$WEBSITE_REPO" ]; then
-    log "WEBSITE_REPO unset -- skipping reading pipeline + site-work block"
+    log "WEBSITE_REPO unset -- skipping discretionary slots"
   elif ! in_shift_window; then
-    log "outside shift window -- skipping reading pipeline + site-work block"
+    log "outside shift window -- skipping discretionary slots"
   else
-    log "running reading pipeline"
-    "$AGENT_HOME/bin/reading-pipeline.sh" --live \
-      || log "warning: reading-pipeline exited rc=$?"
-
-    log "running site-work block"
-    "$AGENT_HOME/bin/site-work-block.sh" --live \
-      || log "warning: site-work-block exited rc=$?"
+    slot_rollover
+    if ! slot_is_done reading; then
+      log "slot: reading"
+      "$AGENT_HOME/bin/reading-pipeline.sh" --live \
+        || log "warning: reading-pipeline exited rc=$?"
+      slot_mark_done reading
+    elif ! slot_is_done feature; then
+      log "slot: feature"
+      if "$AGENT_HOME/bin/site-work-block.sh" --directive feature --live; then
+        slot_mark_done feature
+      else
+        sw_rc=$?
+        log "warning: site-work feature slot exited rc=$sw_rc -- leaving slot open for retry"
+      fi
+    elif ! slot_is_done design; then
+      log "slot: design"
+      if "$AGENT_HOME/bin/site-work-block.sh" --directive design --live; then
+        slot_mark_done design
+      else
+        sw_rc=$?
+        log "warning: site-work design slot exited rc=$sw_rc -- leaving slot open for retry"
+      fi
+    else
+      log "all discretionary slots done for today -- nothing to do"
+    fi
   fi
 
   exit 0
