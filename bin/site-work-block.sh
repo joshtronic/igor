@@ -271,20 +271,39 @@ if [ ! -s "$PR_BODY_FILE" ]; then
 fi
 
 # Auto-commit any dirty paths outside .agent/, mirroring the
-# harness pattern. Subject is the first line of PR_BODY.md or a
-# generic fallback.
+# harness pattern. Subject is the first "What this PR does"
+# checklist item from PR_BODY.md (the directive requires this
+# shape). Falls back to a safe default if the item is missing
+# or unparseable.
 if [ -n "$DIRTY_PATHS" ]; then
   git add -A
-  COMMIT_SUBJECT=$(head -1 "$PR_BODY_FILE" \
-    | sed -E 's/^[*_# ]+//; s/[*_]+$//' \
-    | head -c 72)
-  [ -z "$COMMIT_SUBJECT" ] && COMMIT_SUBJECT="chore: site-work block"
+  COMMIT_SUBJECT=$(awk '
+    /^## What this PR does/ { in_section = 1; next }
+    /^## / && in_section { exit }
+    in_section && /^- \[[x ]\] / {
+      sub(/^- \[[x ]\] /, "")
+      print
+      exit
+    }
+  ' "$PR_BODY_FILE")
+  if [ -z "$COMMIT_SUBJECT" ]; then
+    log "warning: PR_BODY.md missing '## What this PR does' first item -- using fallback subject"
+    COMMIT_SUBJECT="chore: site-work block"
+  elif ! [[ "$COMMIT_SUBJECT" =~ ^(feat|fix|chore|docs|style|refactor|test|perf|build|ci|revert):[[:space:]]+.+ ]]; then
+    log "warning: PR_BODY.md first item missing conventional-commit prefix -- prepending 'chore: '"
+    COMMIT_SUBJECT="chore: $COMMIT_SUBJECT"
+  fi
+  COMMIT_SUBJECT=$(printf '%s' "$COMMIT_SUBJECT" | head -c 72)
   git commit --quiet -m "$COMMIT_SUBJECT" || {
     log "harness-commit failed"
     exit 1
   }
   log "harness-commit: $COMMIT_SUBJECT"
 fi
+
+# PR title mirrors the commit subject (already derived above
+# from the canonical first item, BEFORE any play-tick prepend).
+PR_TITLE="$COMMIT_SUBJECT"
 
 # Prepend the play-tick note to PR_BODY.md.
 if [ "$PLAY_TICK" = "1" ]; then
@@ -296,11 +315,6 @@ if [ "$PLAY_TICK" = "1" ]; then
 fi
 
 # -- push + open PR --------------------------------------------
-
-PR_TITLE=$(head -1 "$PR_BODY_FILE" \
-  | sed -E 's/^[*_# ]+//; s/[*_]+$//' \
-  | head -c 72)
-[ -z "$PR_TITLE" ] && PR_TITLE="chore: site-work block"
 
 if [ "$LIVE" != "1" ]; then
   log "DRY-RUN: would push branch $BRANCH and open PR titled: $PR_TITLE"
