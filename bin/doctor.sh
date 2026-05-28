@@ -163,14 +163,8 @@ if [ -n "$BOT_USER" ]; then
   while read -r r; do
     [ -z "$r" ] && continue
     REPO_FULL=$(jq -r '.full_name' <<<"$r")
-    if command -v forgejo_list_open_bot_prs >/dev/null 2>&1; then
-      OPEN=$(forgejo_list_open_bot_prs "$REPO_FULL" "$BOT_USER" 2>/dev/null \
-        | jq 'length' 2>/dev/null || echo 0)
-    else
-      # fallback: raw API
-      OPEN=$(_fj GET "/repos/${REPO_FULL}/pulls?state=open&limit=50" 2>/dev/null \
-        | jq --arg u "$BOT_USER" '[.[] | select(.user.login == $u)] | length' 2>/dev/null || echo 0)
-    fi
+    OPEN=$(forgejo_list_open_bot_prs "$REPO_FULL" "$BOT_USER" 2>/dev/null \
+      | jq 'length' 2>/dev/null || echo 0)
     if [ "$OPEN" -gt 0 ]; then
       warn "$REPO_FULL: $OPEN open bot PR(s)"
       TOTAL_OPEN=$((TOTAL_OPEN + OPEN))

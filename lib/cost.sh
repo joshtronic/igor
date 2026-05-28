@@ -44,40 +44,23 @@ COST_LEDGER_PATH="$AGENT_STATE_DIR/cost-ledger.jsonl"
 _cost_write_line() {
   local site="$1" model="$2" input="$3" output="$4" cc="$5" cr="$6" usd="$7" source="$8"
   mkdir -p "$(dirname "$COST_LEDGER_PATH")"
-  if [ -n "$usd" ]; then
-    jq -cn \
-      --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      --arg pid "${TICK_PID:-$$}" \
-      --arg site "$site" \
-      --arg model "$model" \
-      --argjson input "$input" \
-      --argjson output "$output" \
-      --argjson cc "$cc" \
-      --argjson cr "$cr" \
-      --argjson usd "$usd" \
-      --arg source "$source" \
-      '{timestamp: $ts, tick_pid: $pid, call_site: $site, model: $model,
-        input_tokens: $input, output_tokens: $output,
-        cache_creation_input_tokens: $cc, cache_read_input_tokens: $cr,
-        usd: $usd, source: $source}' \
-      >> "$COST_LEDGER_PATH" 2>/dev/null || true
-  else
-    jq -cn \
-      --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      --arg pid "${TICK_PID:-$$}" \
-      --arg site "$site" \
-      --arg model "$model" \
-      --argjson input "$input" \
-      --argjson output "$output" \
-      --argjson cc "$cc" \
-      --argjson cr "$cr" \
-      --arg source "$source" \
-      '{timestamp: $ts, tick_pid: $pid, call_site: $site, model: $model,
-        input_tokens: $input, output_tokens: $output,
-        cache_creation_input_tokens: $cc, cache_read_input_tokens: $cr,
-        source: $source}' \
-      >> "$COST_LEDGER_PATH" 2>/dev/null || true
-  fi
+  jq -cn \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg pid "${TICK_PID:-$$}" \
+    --arg site "$site" \
+    --arg model "$model" \
+    --argjson input "$input" \
+    --argjson output "$output" \
+    --argjson cc "$cc" \
+    --argjson cr "$cr" \
+    --arg usd "$usd" \
+    --arg source "$source" \
+    '{timestamp: $ts, tick_pid: $pid, call_site: $site, model: $model,
+      input_tokens: $input, output_tokens: $output,
+      cache_creation_input_tokens: $cc, cache_read_input_tokens: $cr,
+      source: $source}
+     + (if $usd != "" then {usd: ($usd | tonumber)} else {} end)' \
+    >> "$COST_LEDGER_PATH" 2>/dev/null || true
 }
 
 # Direct-API call: extract usage from the response JSON we already

@@ -80,6 +80,8 @@ MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 
 # shellcheck source=../lib/cost.sh
 . "$AGENT_HOME/lib/cost.sh"
+# shellcheck source=../lib/claude.sh
+. "$AGENT_HOME/lib/claude.sh"
 # shellcheck source=../lib/brain.sh
 . "$AGENT_HOME/lib/brain.sh"
 
