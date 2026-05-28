@@ -179,15 +179,32 @@ pick_hn_top_unread() {
             | sed -E 's|<link>(.*)</link>|\1|')
 }
 
+# Decode percent-encoding (and + as space). printf %b turns the \xHH
+# sequences into bytes; URLs never carry literal backslashes.
+urldecode() { local s="${1//+/ }"; printf '%b' "${s//%/\\x}"; }
+
+# Kagi's small-web "random" 302s to a wrapper that carries the real
+# target in a url= query param:
+#   https://kagi.com/smallweb/?url=<percent-encoded external URL>
+# Pull the target out and decode it. The old code captured the wrapper,
+# saw it still matched kagi.com, and skipped the slot every single time.
 pick_kagi_redirect() {
-  local final
+  local final target
   final=$(curl -sL --max-time 15 -A "$UA" -o /dev/null \
             -w '%{url_effective}' "https://kagi.com/smallweb" 2>/dev/null)
-  case "${final:-}" in
-    ""|https://kagi.com/*|http://kagi.com/*) return 0 ;;
+  case "$final" in
+    *url=*) target="${final#*url=}"; target="${target%%&*}" ;;
+    *) return 0 ;;
   esac
-  is_url_read "$final" && return 0
-  printf '%s\n' "$final"
+  [ -z "$target" ] && return 0
+  target=$(urldecode "$target")
+  case "$target" in
+    https://kagi.com/*|http://kagi.com/*) return 0 ;;
+    http://*|https://*) ;;
+    *) return 0 ;;
+  esac
+  is_url_read "$target" && return 0
+  printf '%s\n' "$target"
 }
 
 # -- read one URL ----------------------------------------------
