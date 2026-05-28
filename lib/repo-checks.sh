@@ -13,88 +13,109 @@ if ! declare -F log >/dev/null; then
   log() { printf '[agent] %s\n' "$*"; }
 fi
 
-# -- Individual checks ------------------------------------------
+# -- Per-repo fetch cache ---------------------------------------
 #
-# Each returns 0 on pass, non-zero on fail. Pure -- no logging, no
-# side effects beyond the API GET they perform.
+# The checks below would otherwise hit the Forgejo API once per
+# candidate file (~25 GETs) and once per required label (4 GETs) per
+# repo per tick. Instead rc_cache_init does ONE root-contents listing
+# and ONE labels listing up front, and the checks consult those in
+# memory. The few files whose CONTENT (not just existence) is inspected
+# are fetched once each, only when present at the root.
+#
+# rc_cache_init <repo> MUST run before any check_* -- it does, at the
+# top of validate_repo_via_api, which is the only entry point.
 
-check_claude_md() {
-  forgejo_repo_file_exists "$1" "CLAUDE.md"
+_RC_ROOT_NAMES=""    # newline-separated names of root entries (files + dirs)
+_RC_LABELS=""        # newline-separated label names
+_RC_PACKAGE_JSON=""  # root files whose content we inspect; fetched once if present
+_RC_PYPROJECT=""
+_RC_MAKEFILE=""
+_RC_CARGO=""
+
+# Whole-line fixed-string membership tests against the cached listings.
+rc_root_has()  { grep -qxF "$1" <<<"$_RC_ROOT_NAMES"; }
+rc_has_label() { grep -qxF "$1" <<<"$_RC_LABELS"; }
+
+rc_cache_init() {
+  local repo="$1"
+  _RC_ROOT_NAMES=$(forgejo_repo_list_root "$repo" | jq -r '.[]' 2>/dev/null)
+  _RC_LABELS=$(forgejo_list_labels "$repo" | jq -r '.[]' 2>/dev/null)
+  _RC_PACKAGE_JSON=""; _RC_PYPROJECT=""; _RC_MAKEFILE=""; _RC_CARGO=""
+  if rc_root_has package.json;   then _RC_PACKAGE_JSON=$(forgejo_repo_get_file "$repo" package.json); fi
+  if rc_root_has pyproject.toml; then _RC_PYPROJECT=$(forgejo_repo_get_file "$repo" pyproject.toml); fi
+  if rc_root_has Makefile;       then _RC_MAKEFILE=$(forgejo_repo_get_file "$repo" Makefile); fi
+  if rc_root_has Cargo.toml;     then _RC_CARGO=$(forgejo_repo_get_file "$repo" Cargo.toml); fi
 }
 
+# -- Individual checks ------------------------------------------
+#
+# Each returns 0 on pass, non-zero on fail. Pure reads of the per-repo
+# cache (rc_cache_init) -- no logging, no API calls. check_ci_workflow
+# is the one exception: workflow dirs aren't at the root, so it still
+# does a (guarded) directory listing.
+
+check_claude_md() { rc_root_has CLAUDE.md; }
+
 check_readme() {
-  local repo="$1" f
+  local f
   for f in README.md README.rst README.txt README readme.md; do
-    forgejo_repo_file_exists "$repo" "$f" && return 0
+    rc_root_has "$f" && return 0
   done
   return 1
 }
 
 check_test_signal() {
-  local repo="$1" content
-
   # package.json with a "test" script
-  content=$(forgejo_repo_get_file "$repo" "package.json")
-  [ -n "$content" ] && jq -e '.scripts.test // empty' <<<"$content" >/dev/null 2>&1 && return 0
-
+  [ -n "$_RC_PACKAGE_JSON" ] && jq -e '.scripts.test // empty' <<<"$_RC_PACKAGE_JSON" >/dev/null 2>&1 && return 0
   # pytest config (own file or pyproject section)
-  forgejo_repo_file_exists "$repo" "pytest.ini" && return 0
-  content=$(forgejo_repo_get_file "$repo" "pyproject.toml")
-  [ -n "$content" ] && echo "$content" | grep -qE '^\[tool\.pytest' && return 0
-
+  rc_root_has pytest.ini && return 0
+  [ -n "$_RC_PYPROJECT" ] && grep -qE '^\[tool\.pytest' <<<"$_RC_PYPROJECT" && return 0
   # Makefile with a test target
-  content=$(forgejo_repo_get_file "$repo" "Makefile")
-  [ -n "$content" ] && echo "$content" | grep -qE '^test[[:space:]]*:' && return 0
-
+  [ -n "$_RC_MAKEFILE" ] && grep -qE '^test[[:space:]]*:' <<<"$_RC_MAKEFILE" && return 0
   # Cargo / Go projects -- test runners are implicit
-  forgejo_repo_file_exists "$repo" "Cargo.toml" && return 0
-  forgejo_repo_file_exists "$repo" "go.mod" && return 0
-
+  rc_root_has Cargo.toml && return 0
+  rc_root_has go.mod && return 0
   return 1
 }
 
 check_lint_signal() {
-  local repo="$1" content f
-
+  local f
   # ESLint variants
   for f in .eslintrc.json .eslintrc.js .eslintrc.cjs .eslintrc.yml \
            .eslintrc.yaml .eslintrc eslint.config.js eslint.config.mjs \
            eslint.config.cjs; do
-    forgejo_repo_file_exists "$repo" "$f" && return 0
+    rc_root_has "$f" && return 0
   done
-  content=$(forgejo_repo_get_file "$repo" "package.json")
-  [ -n "$content" ] && jq -e '.eslintConfig // empty' <<<"$content" >/dev/null 2>&1 && return 0
+  [ -n "$_RC_PACKAGE_JSON" ] && jq -e '.eslintConfig // empty' <<<"$_RC_PACKAGE_JSON" >/dev/null 2>&1 && return 0
 
   # Markdownlint
   for f in .markdownlint.json .markdownlint.yaml .markdownlint.yml \
            .markdownlint-cli2.jsonc; do
-    forgejo_repo_file_exists "$repo" "$f" && return 0
+    rc_root_has "$f" && return 0
   done
 
   # Stylelint
   for f in .stylelintrc .stylelintrc.json .stylelintrc.js stylelint.config.js; do
-    forgejo_repo_file_exists "$repo" "$f" && return 0
+    rc_root_has "$f" && return 0
   done
 
   # Python linters (own file or pyproject section)
   for f in .flake8 .pylintrc; do
-    forgejo_repo_file_exists "$repo" "$f" && return 0
+    rc_root_has "$f" && return 0
   done
-  content=$(forgejo_repo_get_file "$repo" "pyproject.toml")
-  [ -n "$content" ] && echo "$content" | grep -qE '^\[tool\.(ruff|black|flake8|pylint|mypy)' && return 0
+  [ -n "$_RC_PYPROJECT" ] && grep -qE '^\[tool\.(ruff|black|flake8|pylint|mypy)' <<<"$_RC_PYPROJECT" && return 0
 
   # Go
   for f in .golangci.yml .golangci.yaml; do
-    forgejo_repo_file_exists "$repo" "$f" && return 0
+    rc_root_has "$f" && return 0
   done
 
   # Rust clippy (own file or Cargo.toml lints section)
-  forgejo_repo_file_exists "$repo" "clippy.toml" && return 0
-  content=$(forgejo_repo_get_file "$repo" "Cargo.toml")
-  [ -n "$content" ] && echo "$content" | grep -qE '^\[lints' && return 0
+  rc_root_has clippy.toml && return 0
+  [ -n "$_RC_CARGO" ] && grep -qE '^\[lints' <<<"$_RC_CARGO" && return 0
 
   # Shell
-  forgejo_repo_file_exists "$repo" ".shellcheckrc" && return 0
+  rc_root_has .shellcheckrc && return 0
 
   return 1
 }
@@ -102,6 +123,9 @@ check_lint_signal() {
 check_ci_workflow() {
   local repo="$1" dir
   for dir in .forgejo/workflows .gitea/workflows; do
+    # workflow dirs live under a dotdir; skip the listing when that
+    # parent isn't even present at the root.
+    rc_root_has "${dir%%/*}" || continue
     forgejo_repo_dir_has_match "$repo" "$dir" '\.ya?ml$' && return 0
   done
   return 1
@@ -112,9 +136,9 @@ check_ci_workflow() {
 # stdout (empty on full pass), so the orchestrator can include the
 # specifics in the onboarding ticket.
 check_labels() {
-  local repo="$1" name missing=""
+  local name missing=""
   for name in "Agent" "Status/Blocked" "Status/Need More Info" "Priority/Critical"; do
-    if ! forgejo_repo_has_label "$repo" "$name"; then
+    if ! rc_has_label "$name"; then
       missing="${missing:+$missing, }\`$name\`"
     fi
   done
@@ -142,19 +166,21 @@ validate_repo_via_api() {
     fi
   }
 
-  check_claude_md "$repo"
+  rc_cache_init "$repo"
+
+  check_claude_md
   _emit $? "CLAUDE.md present at repo root" \
     "add \`CLAUDE.md\` with project conventions (test commands, code style, gotchas)"
 
-  check_readme "$repo"
+  check_readme
   _emit $? "README present at repo root" \
     "add a README (\`README.md\` / \`.rst\` / \`.txt\` / no-ext all accepted)"
 
-  check_test_signal "$repo"
+  check_test_signal
   _emit $? "Test setup detected" \
     "add a way to run tests: \`\"test\"\` script in package.json, \`pytest.ini\`, \`[tool.pytest]\` in pyproject.toml, \`test:\` target in Makefile, or use a Cargo/Go project (implicit)"
 
-  check_lint_signal "$repo"
+  check_lint_signal
   _emit $? "Lint setup detected" \
     "add a linter config: \`.eslintrc*\`, \`.markdownlint*\`, \`.stylelintrc*\`, \`.flake8\`, \`[tool.ruff]\` in pyproject.toml, \`.golangci.yml\`, Cargo \`[lints]\`, \`.shellcheckrc\`"
 
@@ -163,7 +189,7 @@ validate_repo_via_api() {
     "add a Forgejo Actions workflow at \`.forgejo/workflows/<name>.yml\` that runs lint + tests"
 
   local labels_missing
-  labels_missing=$(check_labels "$repo")
+  labels_missing=$(check_labels)
   if [ -z "$labels_missing" ]; then
     _emit 0 "Required labels present (Agent, Status/Blocked, Status/Need More Info, Priority/Critical)" ""
   else

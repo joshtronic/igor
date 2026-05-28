@@ -230,13 +230,13 @@ forgejo_count_bot_comments_matching() {
         '[.[] | select(.user.login == $u and (.body | startswith($p)))] | length'
 }
 
-# Returns 0 if a label with the given name exists on this repo, 1
-# otherwise. Used by repo-checks to verify the agent's required label set
-# is present before we try to apply any of them.
-forgejo_repo_has_label() {
-  local repo="$1" name="$2"
-  _fj GET "/repos/${repo}/labels" \
-    | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null 2>&1
+# All label names defined on the repo, as a JSON array of strings. One
+# call answers every "does label X exist?" check the validator makes,
+# instead of a GET /labels per name. Empty array on miss.
+forgejo_list_labels() {
+  local repo="$1"
+  _fj GET "/repos/${repo}/labels" 2>/dev/null \
+    | jq -c '[.[]?.name]' 2>/dev/null || printf '[]'
 }
 
 # Add a label by name. Forgejo's API takes label IDs, so this resolves
@@ -323,10 +323,14 @@ forgejo_repo_exists() {
 # These let onboarding validation inspect a repo without cloning it.
 # All take <repo> = "<owner>/<name>".
 
-# Returns 0 if path exists in repo (file or dir), 1 otherwise.
-forgejo_repo_file_exists() {
-  local repo="$1" path="$2"
-  _fj GET "/repos/${repo}/contents/${path}" >/dev/null 2>&1
+# Lists the names of entries at the repo root (files + dirs) as a JSON
+# array of strings. One call answers every root-level existence probe
+# the validator makes, instead of a GET /contents/<path> per candidate
+# file. Empty array on miss.
+forgejo_repo_list_root() {
+  local repo="$1"
+  _fj GET "/repos/${repo}/contents" 2>/dev/null \
+    | jq -c '[.[]?.name]' 2>/dev/null || printf '[]'
 }
 
 # Prints raw file contents on stdout (base64-decoded). Empty on miss.
