@@ -48,6 +48,8 @@ AGENT_HOME="${AGENT_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
 AGENT_STATE_DIR="${AGENT_STATE_DIR:-$HOME/.local/state/agent}"
 
 BRAIN_DB="$AGENT_STATE_DIR/brain.sqlite"
+VOICE_NOTES_FILE="$AGENT_STATE_DIR/voice-notes.md"
+VOICE_NOTES_STATE="$AGENT_STATE_DIR/voice-notes.json"
 VOICE_ANCHOR="$AGENT_HOME/bin/lib/voice.md"
 WEBSITE_PATH=""
 LIVE=0
@@ -106,6 +108,11 @@ CORPUS_ANCHOR_RECENT=5      # most-recent reflections always in the slice
 CORPUS_SAMPLE_SIZE=30       # randomized un-drafted reflections per round
 SHIPPED_RECENT=40          # most-recent posts always in the dedup digest
 SHIPPED_SAMPLE=20          # random sample of older posts (caps digest size)
+VOICE_NOTES_RECENT_POSTS=5      # post bodies the weekly evolve reads
+VOICE_NOTES_BOOTSTRAP_POSTS=40  # post bodies the one-time first-run seed reads
+VOICE_NOTES_MAX_POSTS_BYTES=120000 # cap on the post-bodies bundle sent
+VOICE_NOTES_MAX_BYTES=4000      # defensive cap on the notes file itself
+VOICE_NOTES_BLOCK=""            # per-run draft addendum; set in main
 
 # -- logging ----------------------------------------------------
 
@@ -227,6 +234,158 @@ shipped_digest() {
   done
 }
 
+# -- voice notes (Igor's evolving, self-maintained style layer) -
+#
+# A persistent style addendum, SUBORDINATE to voice.md, that survives
+# between ticks. Loaded into the draft prompt every run; refined at most
+# once per ISO week by reflecting on recent post bodies. Lives in agent
+# state ($VOICE_NOTES_FILE), regenerable. The guardrails against a
+# self-reinforcing drift loop: weekly cadence, hard size cap, rewrite-
+# not-append, logged diffs, the VOICE_NOTES_EVOLVE=0 kill-switch, and the
+# anchor always winning. Known/endorsed rules belong in voice.md, not here.
+
+voice_notes_evolved_this_week() {
+  local last this
+  this=$(date +%G-W%V)
+  last=$(jq -r '.last_evolved_week // ""' "$VOICE_NOTES_STATE" 2>/dev/null || echo "")
+  [ "$last" = "$this" ]
+}
+
+voice_notes_stamp_week() {
+  local this tmp
+  this=$(date +%G-W%V)
+  tmp=$(mktemp)
+  if jq -n --arg w "$this" '{last_evolved_week: $w}' > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$VOICE_NOTES_STATE"
+  else
+    rm -f "$tmp"
+  fi
+}
+
+# Bodies (frontmatter stripped) of the most recent $1 posts (default
+# VOICE_NOTES_RECENT_POSTS), byte-capped.
+recent_post_bodies() {
+  local count="${1:-$VOICE_NOTES_RECENT_POSTS}"
+  local files f body out=""
+  files=$(find "$WEBSITE_PATH"/src/posts -type f -name '*.md' 2>/dev/null \
+    | sort | tail -n "$count")
+  [ -z "$files" ] && return 0
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    # Print everything after the second '---' (i.e. the body, no frontmatter).
+    body=$(awk 'f>=2{print} /^---[[:space:]]*$/{f++}' "$f")
+    out="${out}
+
+## ${f##*/}
+
+${body}"
+  done <<EOF
+$files
+EOF
+  printf '%s' "${out:0:VOICE_NOTES_MAX_POSTS_BYTES}"
+}
+
+# Weekly: refine the notes from recent posts. Best-effort throughout.
+evolve_voice_notes() {
+  [ "${VOICE_NOTES_EVOLVE:-1}" = "0" ] && return 0
+
+  # First run with no notes file: bootstrap once from the whole archive,
+  # ignoring the weekly throttle. After that, refine weekly from recent
+  # posts only.
+  local bootstrap=0 n_posts="$VOICE_NOTES_RECENT_POSTS"
+  if [ ! -s "$VOICE_NOTES_FILE" ]; then
+    bootstrap=1
+    n_posts="$VOICE_NOTES_BOOTSTRAP_POSTS"
+  elif voice_notes_evolved_this_week; then
+    return 0
+  fi
+
+  local posts current system user raw old_lines new_lines task verb
+  posts=$(recent_post_bodies "$n_posts")
+  if [ -z "$posts" ]; then
+    log "voice-notes: no posts yet to learn from -- skipping evolve"
+    return 0
+  fi
+  current=""
+  [ -s "$VOICE_NOTES_FILE" ] && current=$(cat "$VOICE_NOTES_FILE")
+
+  system=$(cat <<EOF
+${VOICE_BODY}
+
+---
+
+You maintain a SHORT set of personal voice notes for your own writing.
+They are SUBORDINATE to the voice anchor above -- never contradict it,
+never restate it. They capture concrete, specific observations about what
+is and isn't working in your recent posts: a phrasing habit to keep or
+drop, a structural move that landed, a tic to watch.
+
+You get your current notes (maybe empty) and the bodies of your most
+recent posts. Revise the notes:
+- Refine and CONSOLIDATE. Replace them wholesale; do NOT just append.
+- Keep only specific, actionable observations grounded in the posts.
+- Prune anything stale, vague, or redundant.
+- Hard cap: 200 words. Shorter is better.
+- Output ONLY the notes themselves -- a few terse lines or bullets. No
+  preamble, no heading, no "Voice notes:" label.
+EOF
+)
+  if [ "$bootstrap" = 1 ]; then
+    task="These are posts from across your whole archive. You have no notes
+yet -- write your first set of voice notes from scratch, reading across
+them for your through-lines."
+  else
+    task="These are your most recent posts. Refine your existing notes
+against them."
+  fi
+  user=$(cat <<EOF
+My current voice notes:
+${current:-(none yet)}
+
+---
+
+${task}
+
+${posts}
+EOF
+)
+  # strip_fences=0: notes may quote a fenced snippet.
+  raw=$(anthropic_call "$MODEL" "ideation-pipeline-voice-notes" 600 "$system" "$user" 0) || {
+    log "voice-notes: evolve call failed -- keeping existing notes"
+    return 0
+  }
+  raw="${raw:0:VOICE_NOTES_MAX_BYTES}"
+  if [ -z "$raw" ]; then
+    log "voice-notes: evolve returned empty -- keeping existing notes"
+    return 0
+  fi
+
+  old_lines=$(printf '%s' "$current" | grep -c . || true)
+  new_lines=$(printf '%s' "$raw" | grep -c . || true)
+  verb=evolved; [ "$bootstrap" = 1 ] && verb=bootstrapped
+  log "voice-notes: $verb (${old_lines:-0} -> ${new_lines:-0} lines)"
+  # Log the drift so it's catchable in journalctl.
+  if [ -n "$current" ]; then
+    diff <(printf '%s\n' "$current") <(printf '%s\n' "$raw") 2>/dev/null \
+      | sed 's/^/voice-notes:   /' >&2 || true
+  else
+    printf '%s\n' "$raw" | sed 's/^/voice-notes:   + /' >&2
+  fi
+
+  printf '%s\n' "$raw" > "$VOICE_NOTES_FILE"
+  voice_notes_stamp_week
+}
+
+# The draft-prompt addendum: the current notes, framed as subordinate.
+# Empty output when there are no notes yet.
+build_voice_notes_block() {
+  [ -s "$VOICE_NOTES_FILE" ] || return 0
+  local notes
+  notes=$(cat "$VOICE_NOTES_FILE")
+  [ -z "$notes" ] && return 0
+  printf '\n---\n\nMy evolving voice notes (working observations from my own\nrecent posts; the voice anchor above wins on any conflict):\n\n%s' "$notes"
+}
+
 # -- ideation ---------------------------------------------------
 
 ideate_round() {
@@ -321,7 +480,7 @@ draft_post_body() {
   local system user
   system=$(cat <<EOF
 ${VOICE_BODY}
-
+${VOICE_NOTES_BLOCK}
 ---
 
 Draft a blog post for igor.bot under the given angle and form.
@@ -480,6 +639,11 @@ if [ "${CORPUS_N:-0}" -lt 1 ]; then
   exit 0
 fi
 log "corpus: $CORPUS_N reflection(s)"
+
+# Voice notes: weekly self-refinement of Igor's evolving style notes,
+# then load them for this run's draft. Both best-effort -- never block.
+evolve_voice_notes
+VOICE_NOTES_BLOCK=$(build_voice_notes_block)
 
 if ! run_ideation; then
   log "ideation produced no angle across $MAX_IDEATION_ROUNDS round(s) -- exiting clean"
