@@ -41,7 +41,16 @@ shape:
 
     ## Test plan
 
-    - [x] <verified steps>
+    - [x] <what you actually ran this tick: the build and/or lint pass>
+    - [ ] Manual: view it in light AND dark mode, confirm it renders right
+
+A design change is visual, and you cannot see rendered output -- so the
+real check is always a human eyeballing it. ALWAYS leave that
+`- [ ] Manual:` line UNCHECKED (light/dark mode, hover/motion, narrow
+viewports, whatever the change touches). Only mark `- [x]` what you
+genuinely ran (a build, a linter); NEVER pre-check a visual result you
+can't actually see. A ticked box means "I did this," not "this should
+be fine."
 
 The first checklist item under "What this PR does" MUST start
 with a conventional-commit prefix (`style:` or `chore:` usually
