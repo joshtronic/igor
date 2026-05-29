@@ -45,8 +45,15 @@ shape:
 
     ## Test plan
 
-    - [x] <verified steps>
-    - [ ] <manual steps if any>
+    - [x] <what you actually ran this tick: tests / lint / build pass>
+    - [ ] Manual: <steps needing a human -- anything visual or in a browser>
+
+Only mark `- [x]` what you genuinely ran and confirmed this tick. Any
+step that needs a human -- viewing a page, checking light/dark mode or
+layout, comparing against an external system -- stays a `- [ ] Manual:`
+line, UNCHECKED, because you cannot see rendered output. A ticked box
+means "I did this," not "this should be fine." If nothing needs a
+human, say so: `- [x] No manual verification needed; CI is the gate`.
 
 The first checklist item under "What this PR does" MUST start
 with a conventional-commit prefix (`feat:`, `fix:`, `chore:`,
