@@ -241,25 +241,37 @@ HTML of a web page (likely a blog post or article). Your job:
 4. If the page is mostly chrome (no real article, paywall, error,
    etc.), note that briefly and move on.
 
-Output STRICT JSON. No surrounding prose. No code fences. Just:
+Output EXACTLY this and nothing else -- no preamble, no code fences:
 
-{
-  "title": "the article title as I'd cite it",
-  "journal": "the journal entry in markdown, first person"
-}
+TITLE: <the article title as I'd cite it>
+===BODY===
+<the journal entry, first person markdown>
 EOF
 )
   user=$(printf 'URL: %s\n\nHTML content:\n\n%s' "$url" "$truncated")
-  raw=$(anthropic_call "$MODEL" "reading-pipeline-reflect" 1500 \
-          "$system" "$user") || return 1
-  title=$(printf '%s' "$raw" | jq -r '.title // empty' 2>/dev/null)
-  journal=$(printf '%s' "$raw" | jq -r '.journal // empty' 2>/dev/null)
-  if [ -z "$title" ] || [ -z "$journal" ]; then
-    log "reflect: model output missing title or journal for $url"
-    return 1
-  fi
-  printf '%s' "$journal" > "$out_journal_file"
-  printf '%s\n' "$title"
+
+  # One retry. The journal is taken verbatim after the ===BODY===
+  # sentinel, never parsed as a JSON string, so a multi-paragraph entry
+  # can no longer break the parse the way an escaped JSON body could.
+  local attempt
+  for attempt in 1 2; do
+    # strip_fences=0: the journal is raw markdown and may quote a fence.
+    raw=$(anthropic_call "$MODEL" "reading-pipeline-reflect" 1500 \
+            "$system" "$user" 0) || {
+      log "reflect: API call failed for $url (attempt $attempt)"
+      continue
+    }
+    title=$(printf '%s' "$raw" | awk '/^===BODY===[[:space:]]*$/{exit} {print}' \
+            | sed -n 's/^TITLE:[[:space:]]*//p' | head -1)
+    journal=$(printf '%s' "$raw" | awk 'f{print} /^===BODY===[[:space:]]*$/{f=1}')
+    if [ -n "$title" ] && [ -n "$journal" ]; then
+      printf '%s' "$journal" > "$out_journal_file"
+      printf '%s\n' "$title"
+      return 0
+    fi
+    log "reflect: model output missing title or journal for $url (attempt $attempt)"
+  done
+  return 1
 }
 
 # -- read cycle -------------------------------------------------

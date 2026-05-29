@@ -310,14 +310,16 @@ Rules:
 - Do not re-cover anything in the "already shipped" list; find your
   own ground.
 
-Output STRICT JSON, no code fences. Schema:
+Output EXACTLY this and nothing else -- no preamble, no code fences
+around the whole thing:
 
-{
-  "title": "post title",
-  "description": "<= 155 chars",
-  "body": "markdown body, no frontmatter, no leading h1",
-  "tags": ["zero", "to", "three", "lowercase"]
-}
+TITLE: <post title, one line>
+DESCRIPTION: <one line, 155 characters or fewer>
+TAGS: <zero to three lowercase tags, comma-separated; blank if none>
+===BODY===
+<the markdown body. Real markdown with real newlines, starting at the
+lede. No frontmatter, no leading "# Title" heading. Fenced code blocks
+are fine here.>
 EOF
 )
   user=$(cat <<EOF
@@ -335,7 +337,24 @@ Brain slice (source material, id-tagged):
 ${bundle}
 EOF
 )
-  anthropic_call "$MODEL" "ideation-pipeline-draft" 4000 "$system" "$user"
+  # Raw output (strip_fences=0): the body is markdown that may contain
+  # its own fenced code blocks, so we must NOT strip ``` lines. Headroom
+  # bumped to 8000 -- the body is no longer a JSON-escaped string, and a
+  # truncated response was one of the old "missing body" failure modes.
+  anthropic_call "$MODEL" "ideation-pipeline-draft" 8000 "$system" "$user" 0
+}
+
+# Parse the label+sentinel draft into the four fields. The body is
+# everything after the ===BODY=== line, taken verbatim -- never parsed
+# as a JSON string, which is what used to break on long markdown.
+# Sets DRAFT_TITLE / DRAFT_DESC / DRAFT_TAGS_CSV / DRAFT_BODY.
+parse_drafted_post() {
+  local raw="$1" meta
+  meta=$(printf '%s' "$raw" | awk '/^===BODY===[[:space:]]*$/{exit} {print}')
+  DRAFT_BODY=$(printf '%s' "$raw" | awk 'f{print} /^===BODY===[[:space:]]*$/{f=1}')
+  DRAFT_TITLE=$(printf '%s'    "$meta" | sed -n 's/^TITLE:[[:space:]]*//p' | head -1)
+  DRAFT_DESC=$(printf '%s'     "$meta" | sed -n 's/^DESCRIPTION:[[:space:]]*//p' | head -1)
+  DRAFT_TAGS_CSV=$(printf '%s' "$meta" | sed -n 's/^TAGS:[[:space:]]*//p' | head -1)
 }
 
 # -- write + push + PR ------------------------------------------
@@ -450,17 +469,42 @@ log "chosen: form=$FORM slug=$SLUG draws_on=[${DRAWS_ON}]"
 log "angle: $ANGLE"
 
 SHIPPED=$(shipped_digest)
-POST_JSON=$(draft_post_body "$ANGLE" "$SLUG" "$FORM" "$WIN_BUNDLE" "$SHIPPED") || {
-  log "post drafting failed -- exiting clean"
-  exit 0
-}
-TITLE=$(printf '%s' "$POST_JSON" | jq -r '.title // empty' 2>/dev/null)
-BODY_LEN=$(printf '%s' "$POST_JSON" | jq -r '.body | length' 2>/dev/null)
-if [ -z "$TITLE" ] || [ "${BODY_LEN:-0}" -lt 1 ]; then
-  log "draft missing title or body -- exiting clean"
+
+# Draft, with one retry. The tick scheduler marks this slot done the
+# moment it is attempted (no second slot today), so resilience has to
+# live here: a transient draft hiccup gets one more shot before we give
+# up on the day's post.
+TITLE=""; DESC=""; TAGS_CSV=""; BODY=""
+for attempt in 1 2; do
+  RAW=$(draft_post_body "$ANGLE" "$SLUG" "$FORM" "$WIN_BUNDLE" "$SHIPPED") || {
+    log "draft attempt $attempt: call failed"
+    continue
+  }
+  parse_drafted_post "$RAW"
+  if [ -n "$DRAFT_TITLE" ] && [ -n "$DRAFT_BODY" ]; then
+    TITLE="$DRAFT_TITLE"; DESC="$DRAFT_DESC"
+    TAGS_CSV="$DRAFT_TAGS_CSV"; BODY="$DRAFT_BODY"
+    break
+  fi
+  log "draft attempt $attempt: missing title or body -- retrying"
+done
+if [ -z "$TITLE" ] || [ -z "$BODY" ]; then
+  log "draft missing title or body after retries -- exiting clean"
   exit 0
 fi
+BODY_LEN=${#BODY}
 log "draft ready: title=${TITLE:0:60} body_chars=$BODY_LEN"
+
+# Build the post JSON ourselves so escaping is deterministic. The model
+# returns the body as raw text now; jq --arg does the JSON escaping that
+# the model used to have to do by hand (and routinely got wrong).
+TAGS_JSON=$(printf '%s' "$TAGS_CSV" | tr ',' '\n' \
+  | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' \
+  | jq -R . | jq -s '.' 2>/dev/null)
+[ -z "$TAGS_JSON" ] && TAGS_JSON='[]'
+POST_JSON=$(jq -n --arg t "$TITLE" --arg d "$DESC" --arg b "$BODY" \
+  --argjson tags "$TAGS_JSON" \
+  '{title: $t, description: $d, body: $b, tags: $tags}')
 
 if [ "$LIVE" != "1" ]; then
   SPARK_N=$(printf '%s' "$DECISION" | jq -r '.sparks | length' 2>/dev/null)

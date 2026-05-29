@@ -71,10 +71,16 @@ claude_run_with_cost() {
 }
 
 # Anthropic Messages API call. Builds the payload via tempfiles to
-# dodge ARG_MAX, POSTs via curl, records cost, echoes the content text
-# with any code fences stripped. Non-zero on any failure.
+# dodge ARG_MAX, POSTs via curl, records cost, echoes the content text.
+# Non-zero on any failure.
+#
+# Optional 6th arg strip_fences (default "1"): strip lines starting with
+# a ``` code fence from the output. Callers expecting STRICT JSON keep
+# the default. Callers that want raw markdown back (a body that may
+# legitimately contain fenced code blocks) pass "0".
 anthropic_call() {
   local model="$1" call_site="$2" max_tokens="$3" system="$4" user="$5"
+  local strip_fences="${6:-1}"
   local sys_file user_file payload_file response_file http_status text
   sys_file=$(mktemp); user_file=$(mktemp)
   payload_file=$(mktemp); response_file=$(mktemp)
@@ -110,7 +116,11 @@ anthropic_call() {
 
   text=$(jq -r '.content[0].text // empty' < "$response_file" 2>/dev/null)
   [ -z "$text" ] && { log "anthropic $call_site: empty content"; return 1; }
-  printf '%s' "$text" | sed -E '/^```/d'
+  if [ "$strip_fences" = "1" ]; then
+    printf '%s' "$text" | sed -E '/^```/d'
+  else
+    printf '%s' "$text"
+  fi
 }
 
 # Return 0 if the subject looks like a conventional commit
