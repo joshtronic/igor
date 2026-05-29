@@ -628,6 +628,13 @@ mode_label="dry-run"
 [ "$LIVE" = "1" ] && mode_label="LIVE"
 log "start ($mode_label); db=$BRAIN_DB; website=$WEBSITE_PATH"
 
+# Refine the voice notes BEFORE the daily-refrain check. Voice learning is
+# about the archive, not today's post, so it should run (and bootstrap on
+# the first ever run) even on a day that already has a post. Live only --
+# it writes persistent state, which a dry-run must not mutate. The weekly
+# throttle and best-effort handling live inside the function.
+[ "$LIVE" = "1" ] && evolve_voice_notes
+
 if post_done_today; then
   log "post already knocked out today -- exiting clean"
   exit 0
@@ -640,9 +647,8 @@ if [ "${CORPUS_N:-0}" -lt 1 ]; then
 fi
 log "corpus: $CORPUS_N reflection(s)"
 
-# Voice notes: weekly self-refinement of Igor's evolving style notes,
-# then load them for this run's draft. Both best-effort -- never block.
-evolve_voice_notes
+# Load the voice notes for this draft (the evolve ran earlier, before the
+# refrain check). Empty block if there are no notes yet.
 VOICE_NOTES_BLOCK=$(build_voice_notes_block)
 
 if ! run_ideation; then
