@@ -159,6 +159,11 @@ the actual work.
   judgment. NOT OPTIONAL. Skipping this is how a leaked secret or
   injection bug ends up shipped. Security review is NOT the final
   step -- after it passes, just exit, don't try to do anything more.
+  Note: the harness runs its OWN independent security review on the
+  diff right before pushing, and a material finding there blocks the
+  PR no matter what I do. So my pass here is the fix-early line -- the
+  cheapest place to catch and fix an issue -- not a formality I can
+  judgment-call my way past.
 - If tests, lint, or security review fail after my changes and I
   cannot fix them, block. Don't exit with unfixable failures --
   the harness will commit and push whatever I leave behind.

@@ -90,6 +90,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/cost.sh"
 # shellcheck source=lib/claude.sh
 . "$AGENT_HOME/lib/claude.sh"
+# shellcheck source=../lib/security-gate.sh
+. "$AGENT_HOME/lib/security-gate.sh"
 
 # Children invocations (agent-* helper scripts) share our tick id
 # so cost-ledger entries from child processes group with the
@@ -1263,6 +1265,24 @@ Reassigning back so a human can review/discard." 2>/dev/null \
         exit 0
       fi
 
+      # Security gate on the revision delta before pushing it back.
+      if PR_SEC_FINDINGS=$(security_gate "$PR_WORKTREE" "$PR_HEAD" "security-gate-pr-review"); then
+        :
+      else
+        log "PR-review: security review flagged the revisions, refusing push and bouncing back to $FORGEJO_REVIEWER"
+        forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+          "The agent refused to push revisions: the harness security review flagged a material issue:
+
+${PR_SEC_FINDINGS}
+
+Reassigning back so a human can review/discard." 2>/dev/null \
+          || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
+        forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
+        forgejo_assign "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
+        (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || true
+        exit 0
+      fi
+
       log "PR-review: pushing $PR_NEW new commits and reassigning to $FORGEJO_REVIEWER"
       git push origin "$PR_HEAD" || log "warning: push failed on $PR_HEAD"
       forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
@@ -1648,6 +1668,23 @@ Revert those changes (or do them yourself outside the agent) and remove \`Status
     # OUTCOME: blocked
     log "outcome: blocked (vacuous tests: 0 tests reported)"
     agent-block.sh "Tests ran but reported zero tests executed. Definition of done failed: the test suite must run at least one assertion. Either this repo's \`CLAUDE.md\` declares a meaningless test command, or the change skipped the relevant suite. Fix and remove \`Status/Blocked\` to re-queue."
+    exit 0
+  fi
+
+  # Security gate. Independent review of the diff before it ships; a
+  # material finding blocks like the guards above (work waits for the
+  # human). The agent's own /security-review is the fix-early pass --
+  # this is the unskippable one the harness owns.
+  # OUTCOME: blocked
+  if SEC_FINDINGS=$(security_gate "$WORKTREE" "$PR_BASE" "security-gate-issue"); then
+    :
+  else
+    log "outcome: blocked (security review flagged the diff)"
+    agent-block.sh "The harness security review flagged a material issue in this change, so it was NOT pushed:
+
+${SEC_FINDINGS}
+
+Address it, then remove \`Status/Blocked\` to re-queue. (If the note above says the gate could not complete, that's a transient error -- just re-queue.)"
     exit 0
   fi
 

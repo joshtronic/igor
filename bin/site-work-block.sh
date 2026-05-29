@@ -96,6 +96,8 @@ DIRECTIVE=""
 . "$AGENT_HOME/lib/cost.sh"
 # shellcheck source=../lib/claude.sh
 . "$AGENT_HOME/lib/claude.sh"
+# shellcheck source=../lib/security-gate.sh
+. "$AGENT_HOME/lib/security-gate.sh"
 
 # -- args ------------------------------------------------------
 
@@ -271,6 +273,19 @@ if [ "$LIVE" != "1" ]; then
   log "  PR body file: $PR_BODY_FILE"
   log "  (head -3 of PR body):"
   head -3 "$PR_BODY_FILE" | sed 's/^/    /' >&2
+  exit 0
+fi
+
+# Security gate before shipping. No issue/PR exists yet, so a block is
+# surfaced to the operator in the log and the change is simply not
+# shipped (the slot still counts as spent -- re-running would just
+# re-flag it). The agent's own pass is the fix-early line; this is the
+# unskippable one.
+if SEC_FINDINGS=$(security_gate "$WORKTREE" "master" "security-gate-site-work"); then
+  :
+else
+  log "SECURITY GATE BLOCKED -- not pushing this ${DIRECTIVE} change. Findings:"
+  printf '%s\n' "$SEC_FINDINGS" | sed 's/^/  /' >&2
   exit 0
 fi
 
