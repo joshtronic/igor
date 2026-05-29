@@ -104,6 +104,8 @@ WEBSITE_PATH="${WEBSITE_PATH:-$AGENT_STATE_DIR/repos/${WEBSITE_REPO}}"
 MAX_IDEATION_ROUNDS=3
 CORPUS_ANCHOR_RECENT=5      # most-recent reflections always in the slice
 CORPUS_SAMPLE_SIZE=30       # randomized un-drafted reflections per round
+SHIPPED_RECENT=40          # most-recent posts always in the dedup digest
+SHIPPED_SAMPLE=20          # random sample of older posts (caps digest size)
 
 # -- logging ----------------------------------------------------
 
@@ -181,13 +183,40 @@ corpus_sample() {
 
 # -- shipped digest (dedup signal) ------------------------------
 #
-# Every post already on the site, as "- title [tags] -- description".
-# Fed to ideation so it steers AWAY from covered ground. Small site,
-# so we include all of it; revisit if the archive ever gets large.
+# Posts already on the site, as "- title [tags] -- description", fed
+# to ideation so it steers AWAY from covered ground. Capped at the most
+# recent SHIPPED_RECENT posts plus a random sample of SHIPPED_SAMPLE
+# older ones, so the digest -- and its token cost -- stays flat as the
+# archive grows instead of scaling with post count. Recency-weighted
+# because recent posts are the ones most likely to be re-covered. Reads
+# frontmatter only; post bodies never enter a prompt.
 
 shipped_digest() {
-  local f fm title desc tags
-  for f in "$WEBSITE_PATH"/src/posts/*/*.md; do
+  local files total chosen included f fm title desc tags
+  # Date-prefixed filenames (src/posts/YYYY/YYYY-MM-DD-slug.md) sort
+  # chronologically, so a lexical sort is oldest -> newest.
+  files=$(find "$WEBSITE_PATH"/src/posts -type f -name '*.md' 2>/dev/null | sort)
+  [ -z "$files" ] && return 0
+  total=$(printf '%s\n' "$files" | grep -c .)
+
+  if [ "$total" -le $((SHIPPED_RECENT + SHIPPED_SAMPLE)) ]; then
+    chosen="$files"
+  else
+    local recent older sampled
+    recent=$(printf '%s\n' "$files" | tail -n "$SHIPPED_RECENT")
+    older=$(printf '%s\n'  "$files" | head -n "$((total - SHIPPED_RECENT))")
+    # Portable random sample: tag each older path with a random key,
+    # sort by it, take the top SHIPPED_SAMPLE. (No shuf -- not on macOS.)
+    sampled=$(printf '%s\n' "$older" \
+      | awk 'BEGIN{srand()} {print rand() "\t" $0}' \
+      | sort -n | head -n "$SHIPPED_SAMPLE" | cut -f2-)
+    chosen=$(printf '%s\n%s\n' "$sampled" "$recent")
+  fi
+
+  included=$(printf '%s\n' "$chosen" | grep -c .)
+  log "shipped digest: $included of $total post(s) (dedup signal)"
+
+  printf '%s\n' "$chosen" | while IFS= read -r f; do
     [ -f "$f" ] || continue
     fm=$(awk 'NR==1&&/^---/{f=1;next} f&&/^---/{exit} f{print}' "$f")
     title=$(printf '%s' "$fm" | sed -n 's/^title:[[:space:]]*//p' | head -1 | sed 's/^"//; s/"$//')
@@ -288,7 +317,7 @@ run_ideation() {
 # -- draft ------------------------------------------------------
 
 draft_post_body() {
-  local angle="$1" slug="$2" form="$3" bundle="$4" shipped="$5"
+  local angle="$1" slug="$2" form="$3" bundle="$4"
   local system user
   system=$(cat <<EOF
 ${VOICE_BODY}
@@ -307,8 +336,8 @@ Rules:
 - Closer: one line. No "thanks for reading".
 - Do NOT put a \`# Title\` heading at the top -- the layout renders
   the frontmatter title as the page h1.
-- Do not re-cover anything in the "already shipped" list; find your
-  own ground.
+- Stay on the given angle; don't drift into a broader survey. The
+  angle was already picked to be ground the site hasn't covered.
 
 Output EXACTLY this and nothing else -- no preamble, no code fences
 around the whole thing:
@@ -328,9 +357,6 @@ ${angle}
 
 Form: ${form}
 Proposed slug: ${slug}
-
-Posts already shipped (don't re-cover):
-${shipped:-（none yet）}
 
 Brain slice (source material, id-tagged):
 
@@ -468,15 +494,15 @@ DRAWS_ON=$(printf '%s' "$DECISION" | jq -r '[.draws_on[]? | select(type=="number
 log "chosen: form=$FORM slug=$SLUG draws_on=[${DRAWS_ON}]"
 log "angle: $ANGLE"
 
-SHIPPED=$(shipped_digest)
-
 # Draft, with one retry. The tick scheduler marks this slot done the
 # moment it is attempted (no second slot today), so resilience has to
 # live here: a transient draft hiccup gets one more shot before we give
-# up on the day's post.
+# up on the day's post. The shipped digest is a dedup signal for ANGLE
+# selection (run_ideation), not for drafting -- the angle is already
+# chosen, so the draft doesn't pay to re-send the post list.
 TITLE=""; DESC=""; TAGS_CSV=""; BODY=""
 for attempt in 1 2; do
-  RAW=$(draft_post_body "$ANGLE" "$SLUG" "$FORM" "$WIN_BUNDLE" "$SHIPPED") || {
+  RAW=$(draft_post_body "$ANGLE" "$SLUG" "$FORM" "$WIN_BUNDLE") || {
     log "draft attempt $attempt: call failed"
     continue
   }
