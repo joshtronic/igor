@@ -176,13 +176,16 @@ corpus_count() {
 corpus_sample() {
   sqlite3 "$BRAIN_DB" \
     "SELECT '### id=' || id || '  kind=' || kind || '  ' || ts
+            || CASE WHEN source_url IS NOT NULL AND source_url != ''
+                    THEN char(10) || 'source: ' || source_url ELSE '' END
             || char(10) || char(10) || content
             || char(10) || char(10) || '---' || char(10)
      FROM reflections
      WHERE id IN (
-       SELECT id FROM (SELECT id FROM reflections ORDER BY ts DESC LIMIT $CORPUS_ANCHOR_RECENT)
+       SELECT id FROM (SELECT id FROM reflections WHERE 1=1${EXCLUDED_SOURCES_SQL:-}
+                       ORDER BY ts DESC LIMIT $CORPUS_ANCHOR_RECENT)
        UNION
-       SELECT id FROM (SELECT id FROM reflections WHERE post_drafted = 0
+       SELECT id FROM (SELECT id FROM reflections WHERE post_drafted = 0${EXCLUDED_SOURCES_SQL:-}
                        ORDER BY RANDOM() LIMIT $CORPUS_SAMPLE_SIZE)
      )
      ORDER BY ts DESC;" 2>/dev/null
@@ -232,6 +235,48 @@ shipped_digest() {
     [ -z "$title" ] && continue
     printf -- '- %s %s -- %s\n' "$title" "$tags" "$desc"
   done
+}
+
+# -- source filter (don't re-mine sources already written about) -------
+#
+# Scrape the external links out of every shipped post: that's the set of
+# sources the site has already covered. Reflections pointing at those are
+# filtered out of the ideation corpus, so Igor can't build a new post on a
+# source it already used (the Sumit-reuse class). Deterministic and
+# surgical -- it drops specific used sources, not whole topics, so daily
+# posting survives. Source reuse is caught here; is_recover still catches
+# same-thesis re-covers that lean on new sources.
+
+posts_cited_sources() {
+  local f
+  for f in "$WEBSITE_PATH"/src/posts/*/*.md; do
+    [ -f "$f" ] || continue
+    grep -oE '\]\(https?://[^)]+\)' "$f"
+  done \
+    | sed -E 's/^\]\(//; s/\)$//; s#/+$##' \
+    | grep -viE '://(igor\.bot|localhost)' \
+    | sort -u
+}
+
+# SQL fragment excluding reflections whose source is already cited. Empty
+# when there's nothing to exclude. NULL sources (thoughts/sparks) always
+# pass. Trailing-slash-normalised match. Logs the count to stderr (so it
+# doesn't pollute the captured fragment on stdout).
+build_excluded_sources_sql() {
+  local urls n list="" u esc
+  urls=$(posts_cited_sources)
+  [ -z "$urls" ] && return 0
+  n=$(printf '%s\n' "$urls" | grep -c .)
+  while IFS= read -r u; do
+    [ -z "$u" ] && continue
+    esc=${u//\'/\'\'}
+    list="${list:+$list,}'${esc}'"
+  done <<EOF
+$urls
+EOF
+  [ -z "$list" ] && return 0
+  log "source filter: $n already-cited source(s) excluded from the corpus"
+  printf " AND (source_url IS NULL OR rtrim(source_url,'/') NOT IN (%s))" "$list"
 }
 
 # -- voice notes (Igor's evolving, self-maintained style layer) -
@@ -492,7 +537,11 @@ DECISION=""
 WIN_BUNDLE=""
 run_ideation() {
   local round bundle shipped raw angle novel form score best=-1
+  # Visible to corpus_sample via dynamic scope; excludes already-cited
+  # sources from the corpus. Computed once per run.
+  local EXCLUDED_SOURCES_SQL
   shipped=$(shipped_digest)
+  EXCLUDED_SOURCES_SQL=$(build_excluded_sources_sql)
   for round in $(seq 1 "$MAX_IDEATION_ROUNDS"); do
     bundle=$(corpus_sample)
     [ -z "$bundle" ] && { log "ideation round $round: empty corpus slice"; continue; }
@@ -537,7 +586,11 @@ Rules:
 - Lede 1-2 sentences; no "in today's world" intros.
 - Short paragraphs (2-4 sentences). H2 sparingly.
 - First person. No fabricated quotes, no fake numbers.
-- Link any specific source you reference -- inline markdown link.
+- Link any source you reference with an inline markdown link. For
+  something you read, use ITS source URL (shown as "source:" in the
+  brain slice). Use an internal /posts/<slug> link ONLY for a post that
+  already exists on this site -- never invent a slug; if you're unsure it
+  exists, link the external source or skip the link.
 - Closer: one line. No "thanks for reading".
 - Do NOT put a \`# Title\` heading at the top -- the layout renders
   the frontmatter title as the page h1.
@@ -586,6 +639,26 @@ parse_drafted_post() {
   DRAFT_TITLE=$(printf '%s'    "$meta" | sed -n 's/^TITLE:[[:space:]]*//p' | head -1)
   DRAFT_DESC=$(printf '%s'     "$meta" | sed -n 's/^DESCRIPTION:[[:space:]]*//p' | head -1)
   DRAFT_TAGS_CSV=$(printf '%s' "$meta" | sed -n 's/^TAGS:[[:space:]]*//p' | head -1)
+}
+
+# List internal post links in a drafted body that DON'T resolve to a real
+# post -- hallucinated /posts/<slug> slugs (Igor fabricates these when it
+# wants to cite something it read but lacks the source URL). A post URL
+# /posts/<slug> maps to a file src/posts/YYYY/YYYY-MM-DD-<slug>.md. Prints
+# one unresolved slug per line; empty output means every internal link is
+# good.
+broken_internal_links() {
+  local body="$1" slug
+  printf '%s' "$body" \
+    | grep -oE '\]\((https?://igor\.bot)?/posts/[a-z0-9][a-z0-9-]*/?\)' \
+    | sed -E 's/^\]\(//; s/\)$//; s#https?://igor\.bot##; s#^/posts/##; s#/$##' \
+    | sort -u \
+    | while IFS= read -r slug; do
+        [ -z "$slug" ] && continue
+        find "$WEBSITE_PATH/src/posts" -type f \
+             \( -name "*-${slug}.md" -o -name "${slug}.md" \) 2>/dev/null \
+          | grep -q . || printf '%s\n' "$slug"
+      done
 }
 
 # -- write + push + PR ------------------------------------------
@@ -724,6 +797,11 @@ for attempt in 1 2; do
   }
   parse_drafted_post "$RAW"
   if [ -n "$DRAFT_TITLE" ] && [ -n "$DRAFT_BODY" ]; then
+    BAD_LINKS=$(broken_internal_links "$DRAFT_BODY")
+    if [ -n "$BAD_LINKS" ]; then
+      log "draft attempt $attempt: unresolved internal link(s): $(printf '%s' "$BAD_LINKS" | tr '\n' ' ')-- retrying"
+      continue
+    fi
     TITLE="$DRAFT_TITLE"; DESC="$DRAFT_DESC"
     TAGS_CSV="$DRAFT_TAGS_CSV"; BODY="$DRAFT_BODY"
     break
@@ -731,7 +809,7 @@ for attempt in 1 2; do
   log "draft attempt $attempt: missing title or body -- retrying"
 done
 if [ -z "$TITLE" ] || [ -z "$BODY" ]; then
-  log "draft missing title or body after retries -- exiting clean"
+  log "no clean draft after retries (missing fields or unresolved internal links) -- exiting clean"
   exit 0
 fi
 BODY_LEN=${#BODY}
