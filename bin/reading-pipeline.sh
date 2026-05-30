@@ -87,7 +87,7 @@ MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 
 # -- constants --------------------------------------------------
 
-MAX_READS_PER_TICK=4
+MAX_READS_PER_TICK=5   # one read per slate source (josh/jen/HN/kagi/wiki)
 HTML_TRUNCATE_BYTES=200000
 FETCH_TIMEOUT=30
 UA="Mozilla/5.0 (compatible; agent/reading-pipeline)"
@@ -209,6 +209,21 @@ pick_kagi_redirect() {
   printf '%s\n' "$target"
 }
 
+# Wikipedia's Special:Random 302s to a random article; follow it and take
+# the final article URL (same fetch-fresh shape as the kagi small-web
+# picker, so it needs no pre-populated backlog). Skip anything already read.
+pick_wiki_random() {
+  local final
+  final=$(curl -sL --max-time 15 -A "$UA" -o /dev/null \
+            -w '%{url_effective}' "https://en.wikipedia.org/wiki/Special:Random" 2>/dev/null)
+  case "$final" in
+    https://en.wikipedia.org/wiki/*) ;;
+    *) return 0 ;;
+  esac
+  is_url_read "$final" && return 0
+  printf '%s\n' "$final"
+}
+
 # -- read one URL ----------------------------------------------
 #
 # Fetch HTML, call the model, parse {title, journal} from the strict-
@@ -281,6 +296,7 @@ declare -a SLATE_URLS=(
   "https://thatgirljen.com|personal_random"
   "https://news.ycombinator.com|hn_top"
   "https://kagi.com/smallweb|kagi_redirect"
+  "https://en.wikipedia.org/wiki/Special:Random|wiki_random"
 )
 
 successful_reads=0
@@ -299,6 +315,7 @@ pick_for() {
       ;;
     hn_top)       pick_hn_top_unread ;;
     kagi_redirect) pick_kagi_redirect ;;
+    wiki_random)   pick_wiki_random ;;
     *) ;;
   esac
 }
