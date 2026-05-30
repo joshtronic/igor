@@ -405,8 +405,10 @@ How to choose:
 - The post may connect a recent read to an older one, or springboard
   off a single spark. Reflections do NOT all need to share a theme.
 - Novelty first. Do not pick an angle the site has already covered
-  (see the shipped-posts list). If your strongest idea is already
-  covered there, pick the next-best uncovered one.
+  (see the shipped-posts list). "Already covered" means a shipped post
+  reaches the same conclusion -- a new title, new examples, or a
+  different framing of the same thesis still counts as covered. If your
+  strongest idea is already covered, pick the next-best uncovered one.
 - Choose a form:
   - "synthesis": 2+ reflections genuinely rhyme into one claim worth
     600-900 words.
@@ -443,6 +445,46 @@ EOF
   anthropic_call "$THINKING_MODEL" "ideation-pipeline-ideate" 800 "$system" "$user"
 }
 
+# Independent re-cover check. ideate's self-reported `novel` is too lenient
+# -- it will re-dress a shipped post's thesis with a new title and new
+# examples and call it novel (see the two RSS posts). This is a focused
+# second opinion on exactly one question: does the proposed angle land on
+# the SAME thesis as something already shipped? Judges the ARGUMENT, not
+# the topic (same subject + different conclusion is fine). Returns 0 only
+# on an explicit "yes"; FAILS OPEN (1) on any error -- a missed dup is
+# reviewable, a gate that silently halts all posting is not.
+is_recover() {
+  local angle="$1" shipped="$2" system user raw verdict
+  [ -z "$shipped" ] && return 1
+  system=$(cat <<'EOF'
+You decide whether a proposed blog post would re-cover an already-
+published one. Judge the ARGUMENT, not the topic. Two posts can share a
+subject and stay distinct if they reach DIFFERENT conclusions. But a post
+that lands on the SAME thesis as an existing one -- even with a new title,
+new examples, or a different framing -- is a re-cover.
+
+You get the proposed angle and the list of shipped posts (title --
+description). Decide: does the angle land on substantially the same thesis
+as any shipped post?
+
+Output ONLY a final line, exactly one of:
+RECOVER: yes
+RECOVER: no
+EOF
+)
+  user=$(cat <<EOF
+Proposed angle:
+${angle}
+
+Already shipped (title -- description):
+${shipped}
+EOF
+)
+  raw=$(anthropic_call "$MODEL" "ideation-pipeline-dedup" 200 "$system" "$user" 0) || return 1
+  verdict=$(printf '%s' "$raw" | grep -oiE 'RECOVER:[[:space:]]*(yes|no)' | tail -1 || true)
+  printf '%s' "$verdict" | grep -qiE 'yes[[:space:]]*$'
+}
+
 # Run up to MAX_IDEATION_ROUNDS, keeping the best candidate. Score:
 # novel(+2) + synthesis(+1). Stop early on a perfect 3. Always ends
 # with a non-empty DECISION (always-post).
@@ -457,6 +499,10 @@ run_ideation() {
     raw=$(ideate_round "$round" "$bundle" "$shipped") || { log "ideation round $round: call failed"; continue; }
     angle=$(printf '%s' "$raw" | jq -r '.angle // empty' 2>/dev/null)
     [ -z "$angle" ] && { log "ideation round $round: no angle returned"; continue; }
+    if is_recover "$angle" "$shipped"; then
+      log "ideation round $round: angle re-covers a shipped post's thesis -- skipping"
+      continue
+    fi
     novel=$(printf '%s' "$raw" | jq -r '.novel // false' 2>/dev/null)
     form=$(printf '%s'  "$raw" | jq -r '.form // "notes"' 2>/dev/null)
     score=0
