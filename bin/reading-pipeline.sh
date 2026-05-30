@@ -88,6 +88,7 @@ MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 # -- constants --------------------------------------------------
 
 MAX_READS_PER_TICK=5   # one read per slate source (josh/jen/HN/kagi/wiki)
+SEED_RECENT_MAX=25     # cap on posts seeded per personal feed per cycle
 HTML_TRUNCATE_BYTES=200000
 FETCH_TIMEOUT=30
 UA="Mozilla/5.0 (compatible; agent/reading-pipeline)"
@@ -320,8 +321,71 @@ pick_for() {
   esac
 }
 
+# -- personal-source discovery ---------------------------------
+#
+# The personal pickers read only from the unread pool in seen_urls, and
+# nothing else fills it -- so without this, a new josh or jen post would
+# never be discovered (the pickers would forever surface only the frozen
+# legacy backlog). Each cycle, fetch each personal source's feed via
+# autodiscovery and insert any post URL not already seen, as unread. Feeds
+# return only recent entries, so this stays bounded to recent + new.
+# Knowing the people around Igor is the point of these sources; this keeps
+# that connection live instead of freezing when the backlog drains.
+
+seed_one_feed() {
+  local site="$1" domain html feed links url ch n=0
+  domain=$(printf '%s' "$site" | sed -E 's|^https?://([^/]+).*|\1|')
+  html=$(curl -sfL --max-time "$FETCH_TIMEOUT" -A "$UA" "$site" 2>/dev/null) \
+    || { log "  seed: homepage fetch failed for $domain"; return 0; }
+  feed=$(printf '%s' "$html" \
+    | grep -oiE '<link[^>]+type="application/(rss|atom)\+xml"[^>]*>' \
+    | grep -oiE 'href="[^"]+"' | sed -E 's/.*href="([^"]+)".*/\1/' | head -1)
+  [ -z "$feed" ] && { log "  seed: no feed found for $domain"; return 0; }
+  case "$feed" in
+    http*) ;;
+    //*)   feed="https:$feed" ;;
+    /*)    feed="https://${domain}${feed}" ;;
+    *)     feed="${site%/}/${feed}" ;;
+  esac
+  links=$(curl -sfL --max-time "$FETCH_TIMEOUT" -A "$UA" "$feed" 2>/dev/null) \
+    || { log "  seed: feed fetch failed for $domain"; return 0; }
+  while IFS= read -r url; do
+    [ -z "$url" ] && continue
+    url="${url%%\?*}"   # strip WordPress ?utm_source=rss... tracking
+    case "$url" in
+      *://*/[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]/*) ;;
+      *) continue ;;
+    esac
+    ch=$(sqlite3 "$BRAIN_DB" \
+      "INSERT INTO seen_urls (url, source, domain, first_seen)
+       VALUES ($(sqlite_quote "$url"), $(sqlite_quote "$site"),
+               $(sqlite_quote "$domain"), $(sqlite_quote "$TODAY"))
+       ON CONFLICT(url) DO NOTHING;
+       SELECT changes();" 2>/dev/null)
+    [ "$ch" = "1" ] && n=$((n + 1))
+  done < <(printf '%s' "$links" \
+            | grep -oiE '<link>[^<]+</link>|<link[^>]+href="[^"]+"[^>]*>' \
+            | sed -E 's#<link>([^<]+)</link>#\1#; s#.*href="([^"]+)".*#\1#' \
+            | head -n "$SEED_RECENT_MAX")
+  [ "$n" -gt 0 ] && log "  seed: +$n new post(s) from $domain"
+}
+
+seed_personal_sources() {
+  local entry source_url picker
+  for entry in "${SLATE_URLS[@]}"; do
+    source_url="${entry%%|*}"
+    picker="${entry##*|}"
+    case "$picker" in
+      personal_newest|personal_random) seed_one_feed "$source_url" ;;
+    esac
+  done
+}
+
 run_read_cycle() {
   local entry source_url picker url journal_file title rid
+  # Discover new posts from the personal sources before reading (their
+  # pickers draw only from seen_urls; nothing else fills it).
+  seed_personal_sources
   for entry in "${SLATE_URLS[@]}"; do
     [ "$successful_reads" -ge "$MAX_READS_PER_TICK" ] && break
     source_url="${entry%%|*}"
