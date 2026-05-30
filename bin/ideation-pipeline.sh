@@ -176,6 +176,8 @@ corpus_count() {
 corpus_sample() {
   sqlite3 "$BRAIN_DB" \
     "SELECT '### id=' || id || '  kind=' || kind || '  ' || ts
+            || CASE WHEN source_url IS NOT NULL AND source_url != ''
+                    THEN char(10) || 'source: ' || source_url ELSE '' END
             || char(10) || char(10) || content
             || char(10) || char(10) || '---' || char(10)
      FROM reflections
@@ -537,7 +539,11 @@ Rules:
 - Lede 1-2 sentences; no "in today's world" intros.
 - Short paragraphs (2-4 sentences). H2 sparingly.
 - First person. No fabricated quotes, no fake numbers.
-- Link any specific source you reference -- inline markdown link.
+- Link any source you reference with an inline markdown link. For
+  something you read, use ITS source URL (shown as "source:" in the
+  brain slice). Use an internal /posts/<slug> link ONLY for a post that
+  already exists on this site -- never invent a slug; if you're unsure it
+  exists, link the external source or skip the link.
 - Closer: one line. No "thanks for reading".
 - Do NOT put a \`# Title\` heading at the top -- the layout renders
   the frontmatter title as the page h1.
@@ -586,6 +592,26 @@ parse_drafted_post() {
   DRAFT_TITLE=$(printf '%s'    "$meta" | sed -n 's/^TITLE:[[:space:]]*//p' | head -1)
   DRAFT_DESC=$(printf '%s'     "$meta" | sed -n 's/^DESCRIPTION:[[:space:]]*//p' | head -1)
   DRAFT_TAGS_CSV=$(printf '%s' "$meta" | sed -n 's/^TAGS:[[:space:]]*//p' | head -1)
+}
+
+# List internal post links in a drafted body that DON'T resolve to a real
+# post -- hallucinated /posts/<slug> slugs (Igor fabricates these when it
+# wants to cite something it read but lacks the source URL). A post URL
+# /posts/<slug> maps to a file src/posts/YYYY/YYYY-MM-DD-<slug>.md. Prints
+# one unresolved slug per line; empty output means every internal link is
+# good.
+broken_internal_links() {
+  local body="$1" slug
+  printf '%s' "$body" \
+    | grep -oE '\]\((https?://igor\.bot)?/posts/[a-z0-9][a-z0-9-]*/?\)' \
+    | sed -E 's/^\]\(//; s/\)$//; s#https?://igor\.bot##; s#^/posts/##; s#/$##' \
+    | sort -u \
+    | while IFS= read -r slug; do
+        [ -z "$slug" ] && continue
+        find "$WEBSITE_PATH/src/posts" -type f \
+             \( -name "*-${slug}.md" -o -name "${slug}.md" \) 2>/dev/null \
+          | grep -q . || printf '%s\n' "$slug"
+      done
 }
 
 # -- write + push + PR ------------------------------------------
@@ -724,6 +750,11 @@ for attempt in 1 2; do
   }
   parse_drafted_post "$RAW"
   if [ -n "$DRAFT_TITLE" ] && [ -n "$DRAFT_BODY" ]; then
+    BAD_LINKS=$(broken_internal_links "$DRAFT_BODY")
+    if [ -n "$BAD_LINKS" ]; then
+      log "draft attempt $attempt: unresolved internal link(s): $(printf '%s' "$BAD_LINKS" | tr '\n' ' ')-- retrying"
+      continue
+    fi
     TITLE="$DRAFT_TITLE"; DESC="$DRAFT_DESC"
     TAGS_CSV="$DRAFT_TAGS_CSV"; BODY="$DRAFT_BODY"
     break
@@ -731,7 +762,7 @@ for attempt in 1 2; do
   log "draft attempt $attempt: missing title or body -- retrying"
 done
 if [ -z "$TITLE" ] || [ -z "$BODY" ]; then
-  log "draft missing title or body after retries -- exiting clean"
+  log "no clean draft after retries (missing fields or unresolved internal links) -- exiting clean"
   exit 0
 fi
 BODY_LEN=${#BODY}
