@@ -182,9 +182,10 @@ corpus_sample() {
             || char(10) || char(10) || '---' || char(10)
      FROM reflections
      WHERE id IN (
-       SELECT id FROM (SELECT id FROM reflections ORDER BY ts DESC LIMIT $CORPUS_ANCHOR_RECENT)
+       SELECT id FROM (SELECT id FROM reflections WHERE 1=1${EXCLUDED_SOURCES_SQL:-}
+                       ORDER BY ts DESC LIMIT $CORPUS_ANCHOR_RECENT)
        UNION
-       SELECT id FROM (SELECT id FROM reflections WHERE post_drafted = 0
+       SELECT id FROM (SELECT id FROM reflections WHERE post_drafted = 0${EXCLUDED_SOURCES_SQL:-}
                        ORDER BY RANDOM() LIMIT $CORPUS_SAMPLE_SIZE)
      )
      ORDER BY ts DESC;" 2>/dev/null
@@ -234,6 +235,48 @@ shipped_digest() {
     [ -z "$title" ] && continue
     printf -- '- %s %s -- %s\n' "$title" "$tags" "$desc"
   done
+}
+
+# -- source filter (don't re-mine sources already written about) -------
+#
+# Scrape the external links out of every shipped post: that's the set of
+# sources the site has already covered. Reflections pointing at those are
+# filtered out of the ideation corpus, so Igor can't build a new post on a
+# source it already used (the Sumit-reuse class). Deterministic and
+# surgical -- it drops specific used sources, not whole topics, so daily
+# posting survives. Source reuse is caught here; is_recover still catches
+# same-thesis re-covers that lean on new sources.
+
+posts_cited_sources() {
+  local f
+  for f in "$WEBSITE_PATH"/src/posts/*/*.md; do
+    [ -f "$f" ] || continue
+    grep -oE '\]\(https?://[^)]+\)' "$f"
+  done \
+    | sed -E 's/^\]\(//; s/\)$//; s#/+$##' \
+    | grep -viE '://(igor\.bot|localhost)' \
+    | sort -u
+}
+
+# SQL fragment excluding reflections whose source is already cited. Empty
+# when there's nothing to exclude. NULL sources (thoughts/sparks) always
+# pass. Trailing-slash-normalised match. Logs the count to stderr (so it
+# doesn't pollute the captured fragment on stdout).
+build_excluded_sources_sql() {
+  local urls n list="" u esc
+  urls=$(posts_cited_sources)
+  [ -z "$urls" ] && return 0
+  n=$(printf '%s\n' "$urls" | grep -c .)
+  while IFS= read -r u; do
+    [ -z "$u" ] && continue
+    esc=${u//\'/\'\'}
+    list="${list:+$list,}'${esc}'"
+  done <<EOF
+$urls
+EOF
+  [ -z "$list" ] && return 0
+  log "source filter: $n already-cited source(s) excluded from the corpus"
+  printf " AND (source_url IS NULL OR rtrim(source_url,'/') NOT IN (%s))" "$list"
 }
 
 # -- voice notes (Igor's evolving, self-maintained style layer) -
@@ -494,7 +537,11 @@ DECISION=""
 WIN_BUNDLE=""
 run_ideation() {
   local round bundle shipped raw angle novel form score best=-1
+  # Visible to corpus_sample via dynamic scope; excludes already-cited
+  # sources from the corpus. Computed once per run.
+  local EXCLUDED_SOURCES_SQL
   shipped=$(shipped_digest)
+  EXCLUDED_SOURCES_SQL=$(build_excluded_sources_sql)
   for round in $(seq 1 "$MAX_IDEATION_ROUNDS"); do
     bundle=$(corpus_sample)
     [ -z "$bundle" ] && { log "ideation round $round: empty corpus slice"; continue; }
