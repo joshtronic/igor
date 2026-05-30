@@ -294,7 +294,7 @@ EOF
 
 declare -a SLATE_URLS=(
   "https://joshtronic.com|personal_newest"
-  "https://thatgirljen.com|personal_random"
+  "https://thatgirljen.com|personal_newest"
   "https://news.ycombinator.com|hn_top"
   "https://kagi.com/smallweb|kagi_redirect"
   "https://en.wikipedia.org/wiki/Special:Random|wiki_random"
