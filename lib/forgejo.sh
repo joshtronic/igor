@@ -76,6 +76,18 @@ forgejo_unassign_all() {
   _fj PATCH "/repos/${repo}/issues/${number}" '{"assignees": []}' >/dev/null
 }
 
+# Request review from a user on a PR. A separate endpoint from PR-create,
+# which can't set reviewers. Idempotent: re-requesting an already-requested
+# reviewer is a harmless no-op, so it's crash-safe to call again. PRs ONLY
+# (issues have no reviewers). Note: Forgejo rejects requesting review from a
+# PR's own author -- that's why the bot can't review its own PRs and the
+# human->bot re-engagement stays assignment-based (forgejo_my_assigned_prs).
+forgejo_request_review() {
+  local repo="$1" number="$2" reviewer="$3"
+  _fj POST "/repos/${repo}/pulls/${number}/requested_reviewers" \
+    "$(jq -n --arg r "$reviewer" '{reviewers: [$r]}')" >/dev/null
+}
+
 forgejo_comment() {
   local repo="$1" number="$2" body="$3"
   _fj POST "/repos/${repo}/issues/${number}/comments" \
@@ -95,24 +107,35 @@ forgejo_log_time() {
     || return 1
 }
 
+# Open a PR and hand it to the human as a REVIEW request, not an assignment.
+# An open bot PR is left UNASSIGNED on purpose: on a PR, unassigned means
+# "the human's to review", assigned-to-the-bot means "the bot's to act on"
+# (that's the forgejo_my_assigned_prs re-engagement signal). The 6th arg is
+# the reviewer; review-request is a second call (PR-create can't set it) and
+# is best-effort -- the PR is already open if it fails. Prints the new PR's
+# number on stdout (empty on create failure) so callers can capture it.
 forgejo_open_pr() {
-  local repo="$1" head="$2" base="$3" title="$4" body="$5" assignee="${6:-}"
-  local payload
+  local repo="$1" head="$2" base="$3" title="$4" body="$5" reviewer="${6:-}"
+  local payload number
   payload=$(jq -n \
     --arg t "$title" --arg b "$body" \
     --arg h "$head"  --arg ba "$base" \
     '{title: $t, body: $b, head: $h, base: $ba}')
-  if [ -n "$assignee" ]; then
-    payload=$(jq --arg a "$assignee" '. + {assignees: [$a]}' <<<"$payload")
+  number=$(_fj POST "/repos/${repo}/pulls" "$payload" | jq -r '.number // empty')
+  [ -z "$number" ] && return 1
+  if [ -n "$reviewer" ]; then
+    forgejo_request_review "$repo" "$number" "$reviewer" 2>/dev/null \
+      || printf 'forgejo_open_pr: review request for %s on %s#%s failed (PR is open)\n' \
+           "$reviewer" "$repo" "$number" >&2
   fi
-  # Print the new PR's number on stdout so callers can capture it
-  # (for follow-up actions like time tracking).
-  _fj POST "/repos/${repo}/pulls" "$payload" | jq -r '.number // empty'
+  printf '%s\n' "$number"
 }
 
-# All open PRs assigned to the authenticated bot user across every
-# accessible repo. The assignment-dance entry point: human reassigns a
-# PR back to the bot, next tick finds it here and reopens the work.
+# All open PRs assigned to the authenticated bot user across every accessible
+# repo. The human->bot re-engagement signal: the human assigns a PR back to
+# the bot, next tick finds it here and reopens the work. (Outbound, the bot
+# hands PRs back via review-request + unassigned, never by assigning the
+# human -- see forgejo_open_pr / forgejo_request_review.)
 forgejo_my_assigned_prs() {
   _fj GET "/repos/issues/search?type=pulls&state=open&assigned=true&limit=50"
 }

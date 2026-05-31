@@ -1128,14 +1128,16 @@ You opened PR ${PR_REPO}#${PR_NUMBER}: ${PR_TITLE}
 The human reviewer assigned the PR back to you for revisions. Read
 the comments below, decide what is actionable, address them with new
 commits on this branch (${PR_HEAD}), and exit. The harness will push
-your commits and reassign the PR back to the reviewer.
+your commits and request the reviewer's review again (the PR is left
+unassigned -- assigned-to-you means it's your turn, unassigned means
+it's back in the human's court).
 
 If you genuinely have nothing to change -- for example the comments
 were questions you can answer in a reply rather than code, or the
 feedback is a "ship it" -- post a comment with your reply using
 \`forgejo_comment\` semantics is not available; instead just exit
-without commits and the harness will reassign back with a note that
-no changes were made. The human will close the loop manually.
+without commits and the harness will request review again with a note
+that no changes were made. The human will close the loop manually.
 
 Base: ${PR_BASE}
 Branch: ${PR_HEAD}
@@ -1257,10 +1259,10 @@ EOF
 
 $(echo "$PR_OFFLIMITS" | sed 's/^/  - /')
 
-Reassigning back so a human can review/discard." 2>/dev/null \
+Review requested so a human can review/discard." 2>/dev/null \
           || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
         forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
-        forgejo_assign "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
+        forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
         (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || true
         exit 0
       fi
@@ -1275,29 +1277,29 @@ Reassigning back so a human can review/discard." 2>/dev/null \
 
 ${PR_SEC_FINDINGS}
 
-Reassigning back so a human can review/discard." 2>/dev/null \
+Review requested so a human can review/discard." 2>/dev/null \
           || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
         forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
-        forgejo_assign "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
+        forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
         (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || true
         exit 0
       fi
 
-      log "PR-review: pushing $PR_NEW new commits and reassigning to $FORGEJO_REVIEWER"
+      log "PR-review: pushing $PR_NEW new commits and requesting review from $FORGEJO_REVIEWER"
       git push origin "$PR_HEAD" || log "warning: push failed on $PR_HEAD"
       forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
         || log "warning: unassign failed on ${PR_REPO}#${PR_NUMBER}"
-      forgejo_assign "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null \
-        || log "warning: assign-to-${FORGEJO_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
+      forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null \
+        || log "warning: review-request-to-${FORGEJO_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
     else
-      log "PR-review: no commits made -- reassigning to $FORGEJO_REVIEWER with a note"
+      log "PR-review: no commits made -- requesting review from $FORGEJO_REVIEWER with a note"
       forgejo_comment "$PR_REPO" "$PR_NUMBER" \
-        "The agent reopened this PR after reassignment but didn't make any new commits. Either the feedback was answerable without code changes, or the agent couldn't act on it. Reassigning back so a human can close the loop." 2>/dev/null \
+        "The agent reopened this PR after reassignment but didn't make any new commits. Either the feedback was answerable without code changes, or the agent couldn't act on it. Review requested so a human can close the loop." 2>/dev/null \
         || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
       forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
         || log "warning: unassign failed on ${PR_REPO}#${PR_NUMBER}"
-      forgejo_assign "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null \
-        || log "warning: assign-to-${FORGEJO_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
+      forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null \
+        || log "warning: review-request-to-${FORGEJO_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
     fi
 
     forgejo_log_time "$PR_REPO" "$PR_NUMBER" "$PR_ELAPSED" \

@@ -179,9 +179,11 @@ In this mode:
 
 - I'm NOT opening a new PR. The PR already exists. Stay on the
   PR's branch and push commits onto it.
-- The harness will reassign the PR back to the reviewer after I
-  exit, whether or not I make commits. If I make no commits, the
-  harness posts a note explaining no changes were made.
+- The harness will request the reviewer's review again and leave the
+  PR unassigned after I exit, whether or not I make commits (on a PR,
+  assigned-to-me means it's my turn, unassigned means it's back in the
+  human's court). If I make no commits, the harness posts a note
+  explaining no changes were made.
 - Read the issue-level comments and inline review comments shown in
   the user message. Address what's actionable.
 - Same scope cap, TDD rules, tests + lint requirement, and
@@ -190,7 +192,7 @@ In this mode:
 
 If the feedback is unanswerable in code (questions, ambiguity, "ship
 it" with no requested changes), exit without commits. The harness
-will reassign back with a note so the human can close the loop.
+will request review again with a note so the human can close the loop.
 
 ### 2. Report (analysis tasks with no code change)
 

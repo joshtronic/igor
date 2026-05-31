@@ -44,7 +44,7 @@
 #                        joshtronic/igor.bot). Unset = no website
 #                        work; the block exits clean.
 #   TICK_TIMEOUT      -- default 30m (Claude wall-clock cap)
-#   FORGEJO_REVIEWER  -- optional, assignee on opened PR
+#   FORGEJO_REVIEWER  -- optional, requested reviewer on opened PR
 #
 # Exit codes (the caller uses these to decide whether to mark the
 # slot done for the day):
