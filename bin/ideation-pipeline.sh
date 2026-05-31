@@ -113,6 +113,7 @@ VOICE_NOTES_BOOTSTRAP_POSTS=40  # post bodies the one-time first-run seed reads
 VOICE_NOTES_MAX_POSTS_BYTES=120000 # cap on the post-bodies bundle sent
 VOICE_NOTES_MAX_BYTES=4000      # defensive cap on the notes file itself
 VOICE_NOTES_BLOCK=""            # per-run draft addendum; set in main
+LINK_GATE_UA="igor-linkcheck/1.0 (+https://igor.bot)"  # honest UA for the link gate
 
 # -- logging ----------------------------------------------------
 
@@ -586,11 +587,13 @@ Rules:
 - Lede 1-2 sentences; no "in today's world" intros.
 - Short paragraphs (2-4 sentences). H2 sparingly.
 - First person. No fabricated quotes, no fake numbers.
-- Link any source you reference with an inline markdown link. For
-  something you read, use ITS source URL (shown as "source:" in the
-  brain slice). Use an internal /posts/<slug> link ONLY for a post that
-  already exists on this site -- never invent a slug; if you're unsure it
-  exists, link the external source or skip the link.
+- Linking sources: only ever link a URL that appears VERBATIM as a
+  "source:" line in the brain slice below, or an internal /posts/<slug>
+  for a post you can see already exists on this site. NEVER write a URL
+  from memory -- do not guess, reconstruct, or approximate one, and never
+  use a site's generic index or home page (/links, /, /about, etc.) as a
+  stand-in for a specific source. No real URL for a claim? Make the claim
+  without a link. A missing link is fine; a wrong one is a correction.
 - Closer: one line. No "thanks for reading".
 - Do NOT put a \`# Title\` heading at the top -- the layout renders
   the frontmatter title as the page h1.
@@ -661,6 +664,108 @@ broken_internal_links() {
       done
 }
 
+# -- external link gate ----------------------------------------------
+#
+# PR #169 handed the drafter real source URLs and forbade inventing
+# internal /posts/ slugs, but a post still shipped three joshtronic.com/links
+# stand-ins and a fabricated Verge URL: the model reaches for an EXTERNAL
+# URL from memory when the source it wants isn't in its slice, and the
+# internal-only check above never looked at those. The draft prompt now
+# forbids that; this is the deterministic backstop. Every external link in
+# the body is fetched. A definitively-gone URL (404/410) is demoted to plain
+# text so it can't ship. An unverifiable one (timeout, 403, 5xx -- a real
+# page a bot can't reach) and a generic index/home-page stand-in are KEPT
+# but flagged in the PR body for human review. Never strips on an ambiguous
+# result, so a transient blip or a bot-hostile host can't gut good links.
+
+LINK_GATE_STRIPPED=""   # newline list of demoted (dead) URLs
+LINK_GATE_FLAGGED=""    # newline list of "url -- reason" to eyeball at review
+VETTED_BODY=""          # vet_external_links result (set, not echoed -- see below)
+
+# External http(s) URLs that appear inside a markdown link in the body.
+external_links() {
+  printf '%s' "$1" \
+    | grep -oE '\]\(https?://[^) ]+\)' \
+    | sed -E 's/^\]\(//; s/\)$//' \
+    | grep -viE '://(igor\.bot|localhost|127\.0\.0\.1)(/|$|:)' \
+    | sort -u
+}
+
+# alive | gone | unknown. HEAD first; some hosts reject HEAD, so a non-2xx/3xx
+# HEAD is retried with GET before judging. Only 404/410 count as "gone" --
+# everything else non-2xx/3xx is "unknown" (kept + flagged, never stripped).
+classify_url_liveness() {
+  local url="$1" code
+  code=$(curl -sS -o /dev/null -L --max-time 10 -A "$LINK_GATE_UA" \
+           -w '%{http_code}' --head "$url" </dev/null 2>/dev/null) || code=000
+  case "$code" in 2*|3*) printf 'alive'; return 0 ;; esac
+  code=$(curl -sS -o /dev/null -L --max-time 10 -A "$LINK_GATE_UA" \
+           -w '%{http_code}' "$url" </dev/null 2>/dev/null) || code=000
+  case "$code" in
+    2*|3*)   printf 'alive' ;;
+    404|410) printf 'gone' ;;
+    *)        printf 'unknown' ;;
+  esac
+}
+
+# A bare index/home page used as a citation is a stand-in smell (the
+# joshtronic.com/links class). Live, so not stripped -- just flagged.
+is_generic_index_url() {
+  printf '%s' "$1" \
+    | grep -qiE '^https?://[^/]+(/(links|about|blog|tags|index(\.html?)?)?)?/?$'
+}
+
+# Demote every [anchor](url) for this exact url to its anchor text. perl \Q\E
+# keeps URL metacharacters literal. Returns non-zero (and no output) if perl
+# is unavailable, so the caller flags instead of silently failing to strip.
+demote_link() {
+  command -v perl >/dev/null 2>&1 || return 1
+  URL="$2" perl -0777 -pe 's/\[([^\]]*)\]\(\Q$ENV{URL}\E\)/$1/g' <<<"$1"
+}
+
+# Vet every external link in $1. Strips dead ones (demote_link, keeping the
+# anchor text), flags unknown + generic-index ones. Sets the cleaned body in
+# the global VETTED_BODY and appends to LINK_GATE_STRIPPED / LINK_GATE_FLAGGED
+# -- NOT echoed to stdout, because the caller would have to capture it in a
+# command-substitution subshell, which would discard those two globals. No-ops
+# cleanly without curl, and leaves the body untouched when nothing's external.
+vet_external_links() {
+  local body="$1" urls url status demoted
+  command -v curl >/dev/null 2>&1 || { VETTED_BODY="$body"; return 0; }
+  urls=$(external_links "$body")
+  [ -z "$urls" ] && { VETTED_BODY="$body"; return 0; }
+  while IFS= read -r url; do
+    [ -z "$url" ] && continue
+    status=$(classify_url_liveness "$url")
+    case "$status" in
+      gone)
+        if demoted=$(demote_link "$body" "$url"); then
+          body="$demoted"
+          LINK_GATE_STRIPPED="${LINK_GATE_STRIPPED}${url}
+"
+          log "link-gate: STRIP (HTTP gone) $url"
+        else
+          LINK_GATE_FLAGGED="${LINK_GATE_FLAGGED}${url} -- dead, could not auto-strip
+"
+          log "link-gate: FLAG (dead, strip failed) $url"
+        fi ;;
+      unknown)
+        LINK_GATE_FLAGGED="${LINK_GATE_FLAGGED}${url} -- unverifiable (no 2xx/3xx)
+"
+        log "link-gate: FLAG (unverifiable) $url" ;;
+      alive)
+        if is_generic_index_url "$url"; then
+          LINK_GATE_FLAGGED="${LINK_GATE_FLAGGED}${url} -- generic index page, confirm it's the real source
+"
+          log "link-gate: FLAG (generic index page) $url"
+        fi ;;
+    esac
+  done <<EOF
+$urls
+EOF
+  VETTED_BODY="$body"
+}
+
 # -- write + push + PR ------------------------------------------
 
 sanitize_slug() {
@@ -704,11 +809,25 @@ push_and_open_pr() {
   (cd "$WEBSITE_PATH" && git commit -m "feat: add post '$title'") || return 1
   (cd "$WEBSITE_PATH" && git push -u origin "$branch") || return 1
 
+  local link_note=""
+  if [ -n "$LINK_GATE_STRIPPED" ]; then
+    link_note="${link_note}
+
+Link gate -- demoted to plain text (dead URL):
+$(printf '%s' "$LINK_GATE_STRIPPED" | sed '/^$/d; s/^/- /')"
+  fi
+  if [ -n "$LINK_GATE_FLAGGED" ]; then
+    link_note="${link_note}
+
+Link gate -- flagged for review:
+$(printf '%s' "$LINK_GATE_FLAGGED" | sed '/^$/d; s/^/- /')"
+  fi
+
   pr_body=$(cat <<EOF
 From the ideation pipeline ($form).
 
 Angle:
-$angle
+$angle${link_note}
 EOF
 )
   pr_num=$(forgejo_open_pr "$WEBSITE_REPO" "$branch" "master" \
@@ -812,6 +931,16 @@ if [ -z "$TITLE" ] || [ -z "$BODY" ]; then
   log "no clean draft after retries (missing fields or unresolved internal links) -- exiting clean"
   exit 0
 fi
+
+# External-link gate: dead URLs demoted to plain text, suspicious ones
+# flagged for the PR body. Read-only (just curl), so it runs in dry-run too
+# -- a dry-run surfaces exactly what would be stripped/flagged. Sets globals
+# (VETTED_BODY + LINK_GATE_*), so it must NOT run in a $() subshell.
+vet_external_links "$BODY"
+BODY="$VETTED_BODY"
+[ -n "$LINK_GATE_STRIPPED" ] && log "link-gate: $(printf '%s' "$LINK_GATE_STRIPPED" | grep -c .) dead link(s) demoted to text"
+[ -n "$LINK_GATE_FLAGGED" ]  && log "link-gate: $(printf '%s' "$LINK_GATE_FLAGGED"  | grep -c .) link(s) flagged for review"
+
 BODY_LEN=${#BODY}
 log "draft ready: title=${TITLE:0:60} body_chars=$BODY_LEN"
 
