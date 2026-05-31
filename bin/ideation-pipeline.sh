@@ -237,6 +237,32 @@ shipped_digest() {
   done
 }
 
+# Territory tokens (lowercased tags) of the most recent $1 posts (default 6).
+# The freshness signal for the soft anti-clustering tie-breaker in
+# run_ideation: an angle whose self-reported territory overlaps these recent
+# tokens earns no freshness bonus. Reads frontmatter tags only; handles both
+# `tags: ["a", "b"]` and `tags: [a, b]`. NOT a dedup gate -- just a nudge, so
+# a near-miss that doesn't match simply forfeits the bonus, it never blocks.
+recent_post_territory_tokens() {
+  local count="${1:-6}" files f
+  files=$(find "$WEBSITE_PATH"/src/posts -type f -name '*.md' 2>/dev/null \
+    | sort | tail -n "$count")
+  [ -z "$files" ] && return 0
+  {
+    while IFS= read -r f; do
+      [ -f "$f" ] || continue
+      awk 'NR==1&&/^---/{x=1;next} x&&/^---/{exit} x&&/^tags:/{print; exit}' "$f"
+    done <<EOF
+$files
+EOF
+  } | sed -E 's/^tags:[[:space:]]*//; s/[]["]//g' \
+    | tr ',' '\n' \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
+    | tr '[:upper:]' '[:lower:]' \
+    | grep -v '^$' \
+    | sort -u
+}
+
 # -- source filter (don't re-mine sources already written about) -------
 #
 # Scrape the external links out of every shipped post: that's the set of
@@ -434,7 +460,7 @@ build_voice_notes_block() {
 # -- ideation ---------------------------------------------------
 
 ideate_round() {
-  local round="$1" bundle="$2" shipped="$3"
+  local round="$1" bundle="$2" shipped="$3" recent_terr="$4"
   local system user
   system=$(cat <<EOF
 ${VOICE_BODY}
@@ -454,6 +480,11 @@ How to choose:
   reaches the same conclusion -- a new title, new examples, or a
   different framing of the same thesis still counts as covered. If your
   strongest idea is already covered, pick the next-best uncovered one.
+- Fresh ground: the territories your recent posts already worked are listed
+  below. Prefer an angle in a DIFFERENT territory. This is a TIE-BREAKER,
+  not a veto -- if your strongest uncovered angle sits in a worked territory,
+  still take it; a great same-territory angle beats a weak fresh one. Report
+  the angle's territory as one short lowercase tag-style word.
 - Choose a form:
   - "synthesis": 2+ reflections genuinely rhyme into one claim worth
     600-900 words.
@@ -471,6 +502,7 @@ Output STRICT JSON, no code fences, no prose:
   "slug": "kebab-case-slug",
   "form": "synthesis" | "notes",
   "novel": true | false,
+  "territory": "one lowercase tag-style word for the topic area",
   "draws_on": [12, 34],
   "sparks": ["a half-formed idea", "another"]
 }
@@ -481,6 +513,9 @@ Scan round ${round}.
 
 Posts already shipped (do NOT re-cover these):
 ${shipped:-（none yet）}
+
+Territories your recent posts already worked (prefer fresher ground):
+${recent_terr:-（none yet）}
 
 Brain slice (reflections + journal entries, id-tagged):
 
@@ -530,22 +565,49 @@ EOF
   printf '%s' "$verdict" | grep -qiE 'yes[[:space:]]*$'
 }
 
+# Soft anti-clustering signal: is this angle's territory fresh vs. the recent
+# posts' territory tokens? Fresh = the reported territory neither contains nor
+# is contained by any recent token (case-insensitive). An empty/missing
+# territory is NOT fresh (no bonus). The tie-breaker only ever ADDS points for
+# genuinely fresh ground -- never subtracts -- so it can nudge selection but
+# can't block a post or override a clearly stronger same-territory angle.
+territory_is_fresh() {
+  local terr="$1" recent="$2" t
+  terr=$(printf '%s' "$terr" | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+  [ -z "$terr" ] && return 1
+  while IFS= read -r t; do
+    t=$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]' \
+      | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+    [ -z "$t" ] && continue
+    case "$terr" in *"$t"*) return 1 ;; esac
+    case "$t" in *"$terr"*) return 1 ;; esac
+  done <<EOF
+$recent
+EOF
+  return 0
+}
+
 # Run up to MAX_IDEATION_ROUNDS, keeping the best candidate. Score:
-# novel(+2) + synthesis(+1). Stop early on a perfect 3. Always ends
-# with a non-empty DECISION (always-post).
+# novel(+2) + synthesis(+1) + fresh-territory(+1). Stop early on a perfect 4.
+# Always ends with a non-empty DECISION (always-post). The freshness term is a
+# soft anti-clustering nudge: when two rounds tie on novelty/form, the one on
+# ground the recent posts haven't worked wins -- but a worked-territory angle
+# still ships if it's the strongest thing on offer.
 DECISION=""
 WIN_BUNDLE=""
 run_ideation() {
-  local round bundle shipped raw angle novel form score best=-1
+  local round bundle shipped raw angle novel form territory fresh score best=-1
   # Visible to corpus_sample via dynamic scope; excludes already-cited
   # sources from the corpus. Computed once per run.
-  local EXCLUDED_SOURCES_SQL
+  local EXCLUDED_SOURCES_SQL recent_terr
   shipped=$(shipped_digest)
   EXCLUDED_SOURCES_SQL=$(build_excluded_sources_sql)
+  recent_terr=$(recent_post_territory_tokens)
   for round in $(seq 1 "$MAX_IDEATION_ROUNDS"); do
     bundle=$(corpus_sample)
     [ -z "$bundle" ] && { log "ideation round $round: empty corpus slice"; continue; }
-    raw=$(ideate_round "$round" "$bundle" "$shipped") || { log "ideation round $round: call failed"; continue; }
+    raw=$(ideate_round "$round" "$bundle" "$shipped" "$recent_terr") || { log "ideation round $round: call failed"; continue; }
     angle=$(printf '%s' "$raw" | jq -r '.angle // empty' 2>/dev/null)
     [ -z "$angle" ] && { log "ideation round $round: no angle returned"; continue; }
     if is_recover "$angle" "$shipped"; then
@@ -554,16 +616,19 @@ run_ideation() {
     fi
     novel=$(printf '%s' "$raw" | jq -r '.novel // false' 2>/dev/null)
     form=$(printf '%s'  "$raw" | jq -r '.form // "notes"' 2>/dev/null)
+    territory=$(printf '%s' "$raw" | jq -r '.territory // empty' 2>/dev/null)
     score=0
     [ "$novel" = "true" ] && score=$((score + 2))
     [ "$form" = "synthesis" ] && score=$((score + 1))
-    log "ideation round $round: form=$form novel=$novel score=$score"
+    fresh=no
+    if territory_is_fresh "$territory" "$recent_terr"; then fresh=yes; score=$((score + 1)); fi
+    log "ideation round $round: form=$form novel=$novel territory=${territory:-?} fresh=$fresh score=$score"
     if [ "$score" -gt "$best" ]; then
       best="$score"
       DECISION="$raw"
       WIN_BUNDLE="$bundle"
     fi
-    [ "$score" -ge 3 ] && break
+    [ "$score" -ge 4 ] && break
   done
   [ -n "$DECISION" ]
 }
