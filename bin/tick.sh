@@ -1081,7 +1081,24 @@ if [ -n "$REVIEW_PR" ]; then
     if [ -e "$PR_WORKTREE" ]; then
       (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || rm -rf "$PR_WORKTREE"
     fi
-    (cd "$PR_REPO_PATH" && git worktree add -B "$PR_HEAD" "$PR_WORKTREE" "origin/${PR_HEAD}")
+    # Free the branch if the main clone is parked on it. The ideation pipeline
+    # pushes its PR by checking the branch out in the MAIN clone (not a
+    # worktree), so the clone can be sitting on PR_HEAD -- and git refuses to
+    # check out a branch that's already checked out elsewhere. Detach the clone
+    # first, then prune any stale worktree registrations.
+    PR_CLONE_BRANCH=$(cd "$PR_REPO_PATH" && git symbolic-ref --quiet --short HEAD 2>/dev/null) || PR_CLONE_BRANCH=""
+    if [ "$PR_CLONE_BRANCH" = "$PR_HEAD" ]; then
+      (cd "$PR_REPO_PATH" && git checkout --detach --quiet) 2>/dev/null || true
+    fi
+    (cd "$PR_REPO_PATH" && git worktree prune) 2>/dev/null || true
+    # Non-fatal: a worktree-add failure must not crash the whole tick (it used
+    # to exit 128 and take the service down). Skip this PR for the tick; the
+    # next tick retries with the branch now freed.
+    if ! (cd "$PR_REPO_PATH" && git worktree add -B "$PR_HEAD" "$PR_WORKTREE" "origin/${PR_HEAD}"); then
+      log "PR-review: worktree add failed for ${PR_REPO}#${PR_NUMBER} on ${PR_HEAD} -- skipping this tick (will retry)"
+      rm -rf "$PR_WORKTREE" 2>/dev/null || true
+      exit 0
+    fi
     init_igor_scratch "$PR_WORKTREE"
 
     # Fetch comments defensively -- a 404 on any endpoint shouldn't

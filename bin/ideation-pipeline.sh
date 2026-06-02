@@ -874,6 +874,13 @@ push_and_open_pr() {
   (cd "$WEBSITE_PATH" && git commit -m "feat: add post '$title'") || return 1
   (cd "$WEBSITE_PATH" && git push -u origin "$branch") || return 1
 
+  # Don't leave the main clone parked on the feature branch. Unlike site-work
+  # (which builds its branch in a throwaway worktree), the ideation PR shares
+  # the main clone -- and git won't let a later PR-review reopen check that
+  # branch out in a worktree while the clone still holds it (the 128 crash).
+  # Detach back to master so the branch is free.
+  (cd "$WEBSITE_PATH" && git checkout --detach --quiet origin/master) 2>/dev/null || true
+
   local link_note=""
   if [ -n "$LINK_GATE_STRIPPED" ]; then
     link_note="${link_note}
