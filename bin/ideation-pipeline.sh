@@ -637,7 +637,7 @@ run_ideation() {
 # -- draft ------------------------------------------------------
 
 draft_post_body() {
-  local angle="$1" slug="$2" form="$3" bundle="$4"
+  local angle="$1" slug="$2" form="$3" bundle="$4" manifest="${5:-}"
   local system user
   system=$(cat <<EOF
 ${VOICE_BODY}
@@ -652,13 +652,22 @@ Rules:
 - Lede 1-2 sentences; no "in today's world" intros.
 - Short paragraphs (2-4 sentences). H2 sparingly.
 - First person. No fabricated quotes, no fake numbers.
-- Linking sources: only ever link a URL that appears VERBATIM as a
-  "source:" line in the brain slice below, or an internal /posts/<slug>
-  for a post you can see already exists on this site. NEVER write a URL
-  from memory -- do not guess, reconstruct, or approximate one, and never
-  use a site's generic index or home page (/links, /, /about, etc.) as a
-  stand-in for a specific source. No real URL for a claim? Make the claim
-  without a link. A missing link is fine; a wrong one is a correction.
+- Linking sources: when a point in the post comes from one of the sources
+  you're drawing on, LINK it, using that source's exact URL (the "Sources
+  this post draws on" list below, or a "source:" line in the brain slice).
+  Cite what you build on -- a source the post leans on but doesn't link is
+  a miss. But ONLY ever use a URL that appears VERBATIM in those places, or
+  an internal /posts/<slug> for a post you can see already exists. NEVER
+  write a URL from memory -- do not guess, reconstruct, or approximate one,
+  and never use a site's generic index or home page (/links, /, /about,
+  etc.) as a stand-in. No real URL for a claim? Make the claim without a
+  link. A missing link beats a wrong one; a correct link to your actual
+  source beats both.
+- Naming people and things: only name a specific person, company, product,
+  or publication that actually appears in your source material. If you
+  can't point to where a name came from, don't use it -- cut the reference
+  or keep it general. An invented name (someone the reader, or you, could
+  never place) is the worst thing you can ship.
 - Closer: one line. No "thanks for reading".
 - Do NOT put a \`# Title\` heading at the top -- the layout renders
   the frontmatter title as the page h1.
@@ -677,12 +686,23 @@ lede. No frontmatter, no leading "# Title" heading. Fenced code blocks
 are fine here.>
 EOF
 )
+  local manifest_section=""
+  if [ -n "$manifest" ]; then
+    manifest_section=$(cat <<EOF
+
+
+Sources this post draws on (link the ones your points come from, using
+these exact URLs -- never link a source you did not actually use):
+$(printf '%s' "$manifest" | sed 's/^/- /')
+EOF
+)
+  fi
   user=$(cat <<EOF
 Angle (the post's one claim):
 ${angle}
 
 Form: ${form}
-Proposed slug: ${slug}
+Proposed slug: ${slug}${manifest_section}
 
 Brain slice (source material, id-tagged):
 
@@ -746,6 +766,8 @@ broken_internal_links() {
 LINK_GATE_STRIPPED=""   # newline list of demoted (dead) URLs
 LINK_GATE_FLAGGED=""    # newline list of "url -- reason" to eyeball at review
 VETTED_BODY=""          # vet_external_links result (set, not echoed -- see below)
+SOURCE_LINK_MISSING=""  # newline list of drawn-on source URLs the post didn't link
+UNGROUNDED_ENTITIES=""  # newline list of named entities not found in the source material
 
 # External http(s) URLs that appear inside a markdown link in the body.
 external_links() {
@@ -831,6 +853,86 @@ EOF
   VETTED_BODY="$body"
 }
 
+# -- source-link + grounding gates -----------------------------
+#
+# Two backstops for the recurring blog defects: sources the post builds
+# on but never links, and named people/things that trace to nothing (the
+# "who the fuck is Sean" class). Both FLAG into the PR body for human
+# review rather than blocking -- same fail-open philosophy as the external
+# link gate above. Prevention lives in the draft prompt (link your
+# sources, name only what's in the material); these surface a miss before
+# merge when the prompt didn't take.
+
+# The source URLs of the reflections the post draws on, one per line --
+# exactly the links the post SHOULD carry when it leans on them. Empty
+# when the drawn-on reflections have no sources (e.g. sparks/thoughts).
+build_source_manifest() {
+  local ids_csv="$1"
+  [ -z "$ids_csv" ] && return 0
+  sqlite3 "$BRAIN_DB" \
+    "SELECT DISTINCT source_url FROM reflections
+      WHERE id IN ($ids_csv)
+        AND source_url IS NOT NULL AND source_url != ''
+      ORDER BY source_url;" 2>/dev/null
+}
+
+# Manifest URLs that do NOT appear in the body (trailing slash ignored).
+# Run on the PRE-vet draft so it measures whether the model linked the
+# sources it drew on, not what the link gate later demoted. One per line.
+check_source_links() {
+  local body="$1" urls="$2" u
+  [ -z "$urls" ] && return 0
+  while IFS= read -r u; do
+    [ -z "$u" ] && continue
+    u="${u%/}"
+    case "$body" in *"$u"*) : ;; *) printf '%s\n' "$u" ;; esac
+  done <<EOF
+$urls
+EOF
+}
+
+# Haiku pass: list specific named people/companies/products/publications in
+# the DRAFT that don't appear in the SOURCE MATERIAL the writer saw --
+# likely fabrications a human should verify or cut (the "who is Sean"
+# catch). Excludes Igor/Josh and generic tech. Fails open (emits nothing)
+# on any error. Echoes one name per line, or nothing when all is grounded.
+ground_named_entities() {
+  local body="$1" sources="$2" system user raw
+  [ -z "$body" ] && return 0
+  system=$(cat <<'EOF'
+You are checking a draft blog post for fabricated references. You get the
+DRAFT and the SOURCE MATERIAL the writer actually worked from.
+
+List every specific named PERSON, COMPANY, PRODUCT, or PUBLICATION named in
+the DRAFT that does NOT appear in the SOURCE MATERIAL -- a name the writer
+could not have gotten from the sources and may have invented.
+
+Never list:
+- The writer's own identity: Igor, the agent, igor.bot.
+- The author: Josh, joshtronic.
+- Generic technologies or tools used in passing (Linux, git, RSS, HTTP,
+  and the like) and plain place names.
+
+Output ONLY a bare list, one name per line, nothing else. If every named
+reference is supported by the source material, output exactly:
+NONE
+EOF
+)
+  user=$(cat <<EOF
+DRAFT:
+${body}
+
+---
+
+SOURCE MATERIAL the writer worked from:
+${sources}
+EOF
+)
+  raw=$(anthropic_call "$THINKING_MODEL" "ideation-pipeline-grounding" 300 "$system" "$user" 0) || return 0
+  printf '%s' "$raw" | grep -qiE '^[[:space:]]*none[[:space:]]*$' && return 0
+  printf '%s' "$raw" | sed '/^[[:space:]]*$/d'
+}
+
 # -- write + push + PR ------------------------------------------
 
 sanitize_slug() {
@@ -893,6 +995,18 @@ $(printf '%s' "$LINK_GATE_STRIPPED" | sed '/^$/d; s/^/- /')"
 
 Link gate -- flagged for review:
 $(printf '%s' "$LINK_GATE_FLAGGED" | sed '/^$/d; s/^/- /')"
+  fi
+  if [ -n "$SOURCE_LINK_MISSING" ]; then
+    link_note="${link_note}
+
+Source-link gate -- drew on these sources but didn't link them (consider citing):
+$(printf '%s' "$SOURCE_LINK_MISSING" | sed '/^$/d; s/^/- /')"
+  fi
+  if [ -n "$UNGROUNDED_ENTITIES" ]; then
+    link_note="${link_note}
+
+Grounding check -- named in the post but NOT found in the source material (verify or cut):
+$(printf '%s' "$UNGROUNDED_ENTITIES" | sed '/^$/d; s/^/- /')"
   fi
 
   pr_body=$(cat <<EOF
@@ -974,6 +1088,11 @@ DRAWS_ON=$(printf '%s' "$DECISION" | jq -r '[.draws_on[]? | select(type=="number
 log "chosen: form=$FORM slug=$SLUG draws_on=[${DRAWS_ON}]"
 log "angle: $ANGLE"
 
+# The source URLs the post is meant to build on -- handed to the drafter
+# so it links them, and checked against the body afterward.
+SOURCE_MANIFEST=$(build_source_manifest "$DRAWS_ON")
+[ -n "$SOURCE_MANIFEST" ] && log "source manifest: $(printf '%s' "$SOURCE_MANIFEST" | grep -c .) linkable source(s) from drawn-on reflections"
+
 # Draft, with one retry. The tick scheduler marks this slot done the
 # moment it is attempted (no second slot today), so resilience has to
 # live here: a transient draft hiccup gets one more shot before we give
@@ -982,7 +1101,7 @@ log "angle: $ANGLE"
 # chosen, so the draft doesn't pay to re-send the post list.
 TITLE=""; DESC=""; TAGS_CSV=""; BODY=""
 for attempt in 1 2; do
-  RAW=$(draft_post_body "$ANGLE" "$SLUG" "$FORM" "$WIN_BUNDLE") || {
+  RAW=$(draft_post_body "$ANGLE" "$SLUG" "$FORM" "$WIN_BUNDLE" "$SOURCE_MANIFEST") || {
     log "draft attempt $attempt: call failed"
     continue
   }
@@ -1004,6 +1123,13 @@ if [ -z "$TITLE" ] || [ -z "$BODY" ]; then
   exit 0
 fi
 
+# Source-link gate: run on the PRE-vet draft so it measures whether the
+# model linked the sources it actually drew on (the link gate below may
+# later demote a dead one, which is a separate concern). Drawn-on sources
+# absent from the body are flagged for review in the PR.
+SOURCE_LINK_MISSING=$(check_source_links "$BODY" "$SOURCE_MANIFEST")
+[ -n "$SOURCE_LINK_MISSING" ] && log "source-link gate: $(printf '%s' "$SOURCE_LINK_MISSING" | grep -c .) drawn-on source(s) not linked -- flagged for review"
+
 # External-link gate: dead URLs demoted to plain text, suspicious ones
 # flagged for the PR body. Read-only (just curl), so it runs in dry-run too
 # -- a dry-run surfaces exactly what would be stripped/flagged. Sets globals
@@ -1012,6 +1138,12 @@ vet_external_links "$BODY"
 BODY="$VETTED_BODY"
 [ -n "$LINK_GATE_STRIPPED" ] && log "link-gate: $(printf '%s' "$LINK_GATE_STRIPPED" | grep -c .) dead link(s) demoted to text"
 [ -n "$LINK_GATE_FLAGGED" ]  && log "link-gate: $(printf '%s' "$LINK_GATE_FLAGGED"  | grep -c .) link(s) flagged for review"
+
+# Grounding pass: flag named people/things in the post that don't trace to
+# the source material the writer saw (the "who is Sean" class). Cheap Haiku
+# call, fails open, flags for review in the PR body.
+UNGROUNDED_ENTITIES=$(ground_named_entities "$BODY" "$WIN_BUNDLE")
+[ -n "$UNGROUNDED_ENTITIES" ] && log "grounding: $(printf '%s' "$UNGROUNDED_ENTITIES" | grep -c .) possibly-fabricated name(s) flagged for review"
 
 BODY_LEN=${#BODY}
 log "draft ready: title=${TITLE:0:60} body_chars=$BODY_LEN"
