@@ -57,7 +57,6 @@ info "AGENT_STATE_DIR=$AGENT_STATE_DIR"
 [ -n "${FORGEJO_TOKEN:-}" ]     && ok "FORGEJO_TOKEN set"  || bad "FORGEJO_TOKEN missing"
 [ -n "${AGENT_MODEL:-}" ]        && ok "AGENT_MODEL=$AGENT_MODEL" || bad "AGENT_MODEL missing"
 info "FORGEJO_REVIEWER=${FORGEJO_REVIEWER:-(unset)}"
-info "AGENT_SHIFT_START=${AGENT_SHIFT_START:-(unset)}  AGENT_SHIFT_END=${AGENT_SHIFT_END:-(unset)}"
 
 # ----- Forgejo connectivity + bot identity ----------------------
 

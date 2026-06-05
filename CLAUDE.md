@@ -1,13 +1,17 @@
 # agent -- Igor's harness
 
-The unattended worker. Wakes on a timer, claims one piece of work,
-ships it, sleeps. When no claimable issue is found, the tick fires
-ONE discretionary slot (opt-in via `WEBSITE_REPO`): reading,
-feature, or design -- one per tick, each once per local day. The
+The unattended worker. Wakes on a timer (every minute, 24/7),
+claims one piece of work, ships it, sleeps. Each tick runs a
+strictly ordered cascade: recovery + validation, then PR-review
+pickup, then Igor's own work (daily reading + blog post, weekly
+/now refresh + site-work pass -- opt-in via `WEBSITE_REPO`), then
+scheduled maintenance, then the claimable-issue grind. Igor's own
+work comes first and is throttled (daily/weekly slots), so tickets
+soak up whatever time is left and roll over to the next day. The
 reading pipeline's durable state lives in
-`~/.local/state/agent/brain.sqlite`; the per-day slot slate in
-`~/.local/state/agent/discretionary-state.json`. This repo is
-everything that makes the cron beat real.
+`~/.local/state/agent/brain.sqlite`; the per-day/per-week slot
+slate in `~/.local/state/agent/discretionary-state.json`. This
+repo is everything that makes the cron beat real.
 
 ## What's where
 
@@ -59,29 +63,37 @@ respective tools on the host; install or skip.
 
 - The harness pulls itself at the top of every tick and re-execs
   if HEAD moved. Any change pushed to master takes effect on the
-  next systemd timer fire -- which means a bad commit is live
-  in ~10 minutes whether you wanted it to be or not.
+  next systemd timer fire -- and ticks fire every minute, so a bad
+  commit is live in ~1 minute whether you wanted it to be or not.
+  (Changing the timer interval or any `systemd/` unit needs a
+  `systemctl --user daemon-reload` + `restart agent.timer` on the
+  host; the self-pull updates the file but does not reload systemd.)
 - Validation runs every tick against every bot-accessible repo.
   Repos with an open onboarding ticket short-circuit the full
   check; closing the ticket re-enables it.
-- The shift window (`AGENT_SHIFT_START`/`_END`) gates Igor-driven
-  work only -- scheduled maintenance, the discretionary slots
-  (reading/feature/design), and bot-filed tier-1 tickets.
-  Human-driven work (validation, recovery, PR-review pickup,
-  human-filed tier-1) runs around the clock.
-- Discretionary work is slotted: one slot per tick, each slot once
-  per local calendar day, priority reading -> feature -> design.
-  The per-day slate lives in `discretionary-state.json` and rolls
-  over at midnight. This is a deliberate throttle -- don't add
-  paths that let multiple discretionary PRs land in one tick.
+- There is no shift window -- the tick runs 24/7. Midnight is just
+  the local-day rollover for the daily slots; the cascade's fixed
+  priority order is what shapes what runs, not the clock.
+- Igor's own work is slotted, one piece per tick: DAILY reading +
+  blog post (reset at midnight) and WEEKLY /now refresh + site-work
+  pass (ISO week, Monday-anchored, self-healing). The blog post is
+  special -- its slot stays open and retries every tick until a post
+  actually ships that day (capped by `POST_MAX_ATTEMPTS`). State
+  lives in `discretionary-state.json` (`slots` daily, `weekly`
+  weekly). This is a deliberate throttle -- don't add paths that let
+  multiple discretionary PRs land in one tick.
+- Validation is cached per repo for `VALIDATION_COOLDOWN_SECS`
+  (15 min) so the per-tick cost doesn't compound at the 1-minute
+  cadence as repos are added. Only PASSes are cached; failures
+  re-check every tick.
 - `AGENTS.md` is appended to Claude's system prompt for issue
   work and PR review. Other surfaces (maintenance triage, reading
   pipeline, site-work) use task-specific directives from
   `bin/lib/`. Treat changes to any of these the way you would a
   deploy.
 - Website work is opt-in via `WEBSITE_REPO`. With it unset the
-  discretionary slots no-op cleanly; the rest of the tick (issues,
-  maintenance, PR review) still runs.
+  daily/weekly Igor slots no-op cleanly; the rest of the tick
+  (issues, maintenance, PR review) still runs.
 
 ## Off-limits
 

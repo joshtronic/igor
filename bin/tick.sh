@@ -73,8 +73,6 @@ env_file_hint="$AGENT_HOME/.env"
 : "${FORGEJO_HOST:?must be set in $env_file_hint}"
 : "${FORGEJO_REVIEWER:?must be set in $env_file_hint}"
 : "${TICK_TIMEOUT:?must be set in $env_file_hint}"
-: "${AGENT_SHIFT_START:?must be set in $env_file_hint}"
-: "${AGENT_SHIFT_END:?must be set in $env_file_hint}"
 : "${AGENT_RECALL_DAYS:?must be set in $env_file_hint}"
 unset env_file_hint
 
@@ -546,6 +544,139 @@ slot_mark_done() {
   mv "$tmp" "$state_file"
 }
 
+# Per-day attempt counter for a slot. The post slot uses this to retry
+# until a post ships without retrying forever. slot_rollover wipes
+# .slots each day, so the counter resets at midnight automatically.
+# Echoes the new count.
+slot_attempt_inc() {
+  local slot="$1" state_file tmp n key
+  key="${slot}_attempts"
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  n=$(jq -r --arg k "$key" '.slots[$k] // 0' "$state_file" 2>/dev/null)
+  n=$((n + 1))
+  tmp=$(mktemp)
+  jq --arg k "$key" --argjson n "$n" '.slots //= {} | .slots[$k] = $n' "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+  echo "$n"
+}
+
+# -- Weekly slots (now, site-work) ------------------------------
+#
+# ISO-week (Monday-anchored, local) eligibility for single-target
+# Igor work that runs once a week rather than once a day. Mirrors
+# maintenance's ISO-week gate but keyed by name under a "weekly"
+# object in discretionary-state.json. Regenerable -- losing it just
+# re-opens this week's weekly work.
+
+weekly_done() {
+  local name="$1" state_file last this_week
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || return 1
+  last=$(jq -r --arg n "$name" '.weekly[$n] // ""' "$state_file" 2>/dev/null)
+  [ -z "$last" ] && return 1
+  this_week=$(date +%G-W%V)
+  [ "$last" = "$this_week" ]
+}
+
+weekly_mark_done() {
+  local name="$1" state_file tmp this_week
+  state_file=$(discretionary_state_file)
+  this_week=$(date +%G-W%V)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg n "$name" --arg w "$this_week" \
+    '.weekly //= {} | .weekly[$n] = $w' "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
+# -- Validation pass cache --------------------------------------
+#
+# The validation sweep runs every tick. At a 1-minute cadence across
+# many repos that's a lot of redundant API calls re-proving the same
+# repos pass. Cache the PASS result for a cooldown window so
+# validation effectively runs ~once per window per repo regardless of
+# tick frequency. Failures are NOT cached -- they fall through to the
+# onboarding flow every tick for fast recovery once the human fixes
+# the repo. Stored as epoch seconds under a "validation" object.
+VALIDATION_COOLDOWN_SECS="${VALIDATION_COOLDOWN_SECS:-900}"  # 15 min
+
+validation_mark_ok() {
+  local repo="$1" state_file tmp ts
+  ts=$(date +%s)
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg r "$repo" --argjson t "$ts" \
+    '.validation //= {} | .validation[$r] = $t' "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
+# 0 if the repo passed validation within the cooldown window.
+validation_fresh() {
+  local repo="$1" state_file last now
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || return 1
+  last=$(jq -r --arg r "$repo" '.validation[$r] // ""' "$state_file" 2>/dev/null)
+  [ -z "$last" ] && return 1
+  now=$(date +%s)
+  [ "$((now - last))" -lt "$VALIDATION_COOLDOWN_SECS" ]
+}
+
+# True if a blog post dated today already exists -- on the website's
+# origin/master or in an open bot PR. Mirrors ideation-pipeline.sh's
+# own daily refrain so the post slot only counts as done once a post
+# actually shipped. Requires WEBSITE_REPO.
+post_shipped_today() {
+  [ -n "$WEBSITE_REPO" ] || return 1
+  local today re wt count open_prs pr_num
+  today=$(date +%Y-%m-%d)
+  re="^src/posts/[0-9]{4}/${today}-.+\.md$"
+  wt=$(repo_path_for "$WEBSITE_REPO")
+  if [ -d "$wt/.git" ]; then
+    (cd "$wt" && git fetch --quiet origin master 2>/dev/null) || true
+    count=$(cd "$wt" && git ls-tree --name-only -r origin/master 2>/dev/null \
+      | grep -cE "$re" 2>/dev/null) || count=0
+    [ "${count:-0}" -gt 0 ] && return 0
+  fi
+  open_prs=$(forgejo_list_open_bot_prs "$WEBSITE_REPO" "$BOT_USER" 2>/dev/null || echo '[]')
+  while read -r pr_num; do
+    [ -z "$pr_num" ] && continue
+    if forgejo_pr_files "$WEBSITE_REPO" "$pr_num" 2>/dev/null \
+        | jq -e --arg re "$re" \
+            '[.[] | select(.filename | test($re))] | length > 0' \
+            >/dev/null 2>&1; then
+      return 0
+    fi
+  done < <(jq -r '.[].number' <<<"$open_prs" 2>/dev/null)
+  return 1
+}
+
+# Build the /now digest: the last week's reflections (reading +
+# thoughts) straight from brain.sqlite, newest first. Empty string
+# if there's no brain or nothing this week -- the now-directive
+# handles a thin digest. This is the "last week of digestion" the
+# /now page is rebuilt from.
+build_now_digest() {
+  local brain="$AGENT_STATE_DIR/brain.sqlite"
+  [ -f "$brain" ] || { echo ""; return 0; }
+  sqlite3 "$brain" \
+    "SELECT '- (' || date(ts) || ', ' || kind || ') '
+            || CASE WHEN source_url IS NOT NULL AND source_url != ''
+                    THEN source_url || char(10) || '  ' ELSE '' END
+            || substr(replace(replace(content, char(10), ' '), char(13), ' '), 1, 300)
+     FROM reflections
+     WHERE ts >= date('now','-7 days')
+       AND kind IN ('reading','thought')
+     ORDER BY ts DESC
+     LIMIT 50;" 2>/dev/null
+}
+
+# Daily-post retry ceiling: leave the post slot open across this many
+# ticks until a post ships, then give up for the day so a wedged
+# pipeline can't starve the ticket grind.
+POST_MAX_ATTEMPTS="${POST_MAX_ATTEMPTS:-8}"
+
 
 # Eligible if not run this ISO week (weeks start Monday, local time).
 # Any tick all week can pick up an eligible repo -- no shift-window
@@ -590,10 +721,9 @@ maintenance_eligible() {
 # repo so re-runs within the same ISO week skip already-audited
 # repos (resilience if a tick crashes mid-loop).
 #
-# Igor-driven (scheduled chore) -- gated to the shift window.
+# Igor-driven (scheduled chore). Runs after Igor's own daily work in
+# the cascade; no time-of-day gate (the shift window was removed).
 do_maintenance_tick() {
-  in_shift_window || return 1
-
   local repo_line r_name
   local eligible=()
   while IFS= read -r repo_line; do
@@ -781,18 +911,6 @@ EOF
 }
 
 
-# Shift window. Returns 0 if a configured shift is active OR no shift
-# is configured (testing / always-on). When AGENT_SHIFT_START + _END
-# are both set, only fire ticks during [START, END) local hours.
-in_shift_window() {
-  local start="${AGENT_SHIFT_START:-}" end="${AGENT_SHIFT_END:-}" hour
-  [ -z "$start" ] && return 0
-  [ -z "$end" ] && return 0
-  hour=$(date +%H)
-  hour=$((10#$hour))
-  [ "$hour" -ge "$start" ] && [ "$hour" -lt "$end" ]
-}
-
 # Worktree key: slash-free, unique per repo+issue.
 worktree_key() { printf '%s-%s' "${1//\//_}" "$2"; }
 
@@ -818,32 +936,15 @@ build_deps_section() {
   done <<<"$files"
 }
 
-# -- Shift gate (split: human-driven vs Igor-driven) -----------
+# -- Work model --------------------------------------------------
 #
-# The shift used to be a hard tick gate -- outside hours, the whole
-# tick exited. That made the agent unresponsive to human signals
-# (reviewer requested changes, human filed a new issue) for the
-# 16 off-shift hours.
-#
-# New model: the tick always runs to completion. The shift gates
-# only Igor-driven work:
-#   - Scheduled maintenance (do_maintenance_tick)
-#   - Discretionary website work / reading / reflection
-#   - Tier-1 issue work where the issue author IS the bot (issues
-#     Igor filed himself via agent-enqueue.sh during site-work)
-#
-# Human-driven work runs around the clock:
-#   - Validation sweep
-#   - Recovery sweep
-#   - PR-review pickup (REQUEST_CHANGES, reassignment)
-#   - Tier-1 issue work where the author is NOT the bot
-#
-# in_shift_window is consulted per-step below instead of gating
-# at the top.
-
-if ! in_shift_window; then
-  log "outside shift window (${AGENT_SHIFT_START:-unset}-${AGENT_SHIFT_END:-unset}), current hour $(date +%H) -- human-driven work only this tick"
-fi
+# The tick always runs to completion, 24/7 -- there is no shift
+# window. Within a tick the work cascade is strictly ordered:
+# recovery + validation, then human-driven PR-review pickup, then
+# Igor's own work (daily reading + post, weekly /now + site-work),
+# then scheduled maintenance, then the claimable-issue grind. The
+# daily/weekly slots are throttled so Igor's own work can't flood
+# the day; tickets soak up whatever time is left and roll over.
 
 # -- Bootstrap: ensure the website is cloned (if opt-in) ----------
 #
@@ -939,6 +1040,7 @@ log "validation sweep ($BOT_USER)"
 ALL_REPOS=$(forgejo_list_bot_repos)
 VALIDATED_REPOS_JSON=""
 VAL_PASS=0
+VAL_CACHED=0
 VAL_FAIL=0
 VAL_SKIPPED=0
 while IFS= read -r repo_line; do
@@ -958,12 +1060,23 @@ while IFS= read -r repo_line; do
     continue
   fi
 
+  # Cooldown: reuse a recent PASS instead of re-running the ~6-API-call
+  # validation pass every tick. Decouples validation cost from tick
+  # frequency (matters at the 1-minute cadence as repos are added).
+  # Only PASSes are cached; failures re-check every tick.
+  if validation_fresh "$R_NAME"; then
+    VALIDATED_REPOS_JSON+="${repo_line}"$'\n'
+    VAL_CACHED=$((VAL_CACHED + 1))
+    continue
+  fi
+
   set +e
   V_REPORT=$(validate_repo_via_api "$R_NAME")
   V_RC=$?
   set -e
   if [ "$V_RC" -eq 0 ]; then
     VALIDATED_REPOS_JSON+="${repo_line}"$'\n'
+    validation_mark_ok "$R_NAME"
     VAL_PASS=$((VAL_PASS + 1))
   else
     log "validation: $R_NAME failed -- filing/reopening onboarding ticket"
@@ -972,22 +1085,20 @@ while IFS= read -r repo_line; do
     VAL_FAIL=$((VAL_FAIL + 1))
   fi
 done < <(jq -c '.[]' <<<"$ALL_REPOS")
-log "validation: ${VAL_PASS} pass, ${VAL_FAIL} fail, ${VAL_SKIPPED} skipped (open onboarding ticket)"
+log "validation: ${VAL_PASS} pass, ${VAL_CACHED} cached, ${VAL_FAIL} fail, ${VAL_SKIPPED} skipped (open onboarding ticket)"
 
 if [ -z "$VALIDATED_REPOS_JSON" ]; then
   log "validation: no repos passed -- nothing to do this tick"
   exit 0
 fi
 
-# -- Scheduled maintenance (priority 1) ------------------------
+# -- Scheduled maintenance (moved) -----------------------------
 #
-# Weekly dep-freshness + security audit. Runs at the top of the
-# cascade so it always beats PR-review, claimable issues, and
-# discretionary website work. One repo per tick, weekly cap per
-# repo (ISO week, starts Monday). No shift-window gate -- any tick
-# all week can pick up an eligible repo.
-
-do_maintenance_tick || true
+# Maintenance used to run here, at the top of the cascade. It now
+# runs lower down -- after PR-review pickup and after Igor's own
+# daily/weekly work -- so the blog and site upkeep come first while
+# maintenance still beats the claimable-issue grind. See the
+# "Igor's own work + scheduled maintenance" block below.
 
 # -- PR-review pickup ------------------------------------------
 #
@@ -1328,6 +1439,86 @@ Review requested so a human can review/discard." 2>/dev/null \
     exit 0
 fi
 
+# -- Igor's own work + scheduled maintenance -------------------
+#
+# Reached only when no PR-review was picked up. Strictly ordered,
+# fire-one-then-exit: each slot that's still pending today/this week
+# fires, then the tick exits (one piece of work per tick). Only when
+# every Igor slot AND maintenance is already done do we fall through
+# to the claimable-issue grind below.
+#
+# Daily slots (reading, post): once per local day, reset at midnight
+# by slot_rollover. Weekly slots (now, site-work) and maintenance:
+# once per ISO week (Monday-anchored, self-healing if a Monday tick
+# is missed). The post slot is special: it stays open and retries
+# every tick until a post actually ships today, up to POST_MAX_ATTEMPTS
+# so a wedged pipeline can't starve the ticket grind all day.
+
+if [ -n "$WEBSITE_REPO" ]; then
+  slot_rollover
+
+  if ! slot_is_done reading; then
+    log "slot: reading"
+    "$AGENT_HOME/bin/reading-pipeline.sh" --live \
+      || log "warning: reading-pipeline exited rc=$?"
+    slot_mark_done reading
+    exit 0
+  fi
+
+  if ! slot_is_done post; then
+    log "slot: post"
+    "$AGENT_HOME/bin/ideation-pipeline.sh" --live \
+      || log "warning: ideation-pipeline exited rc=$?"
+    if post_shipped_today; then
+      log "slot: post shipped today -- marking done"
+      slot_mark_done post
+    else
+      POST_ATTEMPTS=$(slot_attempt_inc post)
+      if [ "$POST_ATTEMPTS" -ge "$POST_MAX_ATTEMPTS" ]; then
+        log "WARNING: post slot reached ${POST_ATTEMPTS}/${POST_MAX_ATTEMPTS} attempts with no post shipped today -- marking done and moving on (investigate the ideation pipeline)"
+        slot_mark_done post
+      else
+        log "slot: post not shipped (attempt ${POST_ATTEMPTS}/${POST_MAX_ATTEMPTS}) -- leaving slot open to retry next tick"
+      fi
+    fi
+    exit 0
+  fi
+
+  if ! weekly_done now; then
+    log "slot: now (weekly /now refresh)"
+    NOW_DIGEST=$(build_now_digest) || NOW_DIGEST=""
+    export NOW_DIGEST
+    if "$AGENT_HOME/bin/site-work-block.sh" --directive now --live; then
+      weekly_mark_done now
+    else
+      sw_rc=$?
+      log "warning: now pass exited rc=$sw_rc -- leaving weekly slot open for retry"
+    fi
+    unset NOW_DIGEST
+    exit 0
+  fi
+
+  if ! weekly_done site-work; then
+    log "slot: site-work (weekly site pass)"
+    if "$AGENT_HOME/bin/site-work-block.sh" --directive site-work --live; then
+      weekly_mark_done site-work
+    else
+      sw_rc=$?
+      log "warning: site-work pass exited rc=$sw_rc -- leaving weekly slot open for retry"
+    fi
+    exit 0
+  fi
+fi
+
+# Scheduled maintenance (weekly dep-freshness + security audit).
+# Repo-agnostic, so it runs even without a website configured. Runs
+# after Igor's own work, before the claimable-issue grind. Loops every
+# repo eligible this ISO week in one pass and exits; nothing eligible
+# -> fall through to discovery.
+if do_maintenance_tick; then
+  exit 0
+fi
+
 # -- Discovery: find globally oldest claimable -----------------
 #
 # Iterates VALIDATED_REPOS_JSON (built by the validation sweep at
@@ -1357,18 +1548,6 @@ while IFS= read -r repo_line; do
   while read -r candidate; do
     [ -z "$candidate" ] && continue
     C_NUM=$(jq -r .number <<<"$candidate")
-
-    # Outside shift, only human-filed tickets are eligible. Tickets
-    # the bot filed himself (via agent-enqueue.sh during discretionary
-    # site-work) are Igor's own queue and respect the shift gate the
-    # same way discretionary work does.
-    if ! in_shift_window; then
-      C_AUTHOR=$(jq -r '.user.login // ""' <<<"$candidate")
-      if [ "$C_AUTHOR" = "$BOT_USER" ]; then
-        log "skipping ${R_NAME}#${C_NUM} -- bot-filed and outside shift"
-        continue
-      fi
-    fi
 
     C_HISTORY=$(forgejo_bot_prs_for_issue "$R_NAME" "$C_NUM" "$BOT_USER" 2>/dev/null || echo '[]')
     C_OPEN=$(jq '[.[] | select(.state == "open")] | length' <<<"$C_HISTORY")
@@ -1405,70 +1584,15 @@ while IFS= read -r repo_line; do
   fi
 done <<<"$VALIDATED_REPOS_JSON"
 
-# -- Discretionary daily slots (no claimable work) ------------
+# -- No claimable work -> idle ---------------------------------
 #
-# When discovery came up empty, run ONE discretionary slot inside
-# the shift window. Four slots, prioritized: reading -> ideation
-# -> feature -> design. At most one fires per tick; each at most
-# once per local calendar day (slot_* helpers +
-# discretionary-state.json). All four done for the day -> nothing
-# fires until tomorrow.
-#
-# This is the throttle that stops Igor opening a stack of
-# discretionary PRs overnight: one slot per tick, four slots per
-# day, full stop.
-#
-# Mark-done policy differs by slot, on purpose:
-#   - reading/ideation: marked done after the pass runs, period.
-#     Both are best-effort; ideation self-throttles double-posts
-#     via its own daily refrain. We just want exactly one of each
-#     pass per day even when it ships nothing.
-#   - feature/design: marked done only when site-work-block exits
-#     0 (shipped a PR, or cleanly decided there was nothing to do).
-#     A non-zero exit means a setup or push/PR-open error where
-#     work may be lost -- leave the slot open so the next tick
-#     retries.
+# Igor's own discretionary work (reading, post, /now, site-work) and
+# scheduled maintenance already ran above, before discovery. If
+# discovery also came up empty, there's genuinely nothing to do this
+# tick.
 
 if [ -z "$WINNER" ]; then
-  log "no claimable work across any repo"
-
-  if [ -z "$WEBSITE_REPO" ]; then
-    log "WEBSITE_REPO unset -- skipping discretionary slots"
-  elif ! in_shift_window; then
-    log "outside shift window -- skipping discretionary slots"
-  else
-    slot_rollover
-    if ! slot_is_done reading; then
-      log "slot: reading"
-      "$AGENT_HOME/bin/reading-pipeline.sh" --live \
-        || log "warning: reading-pipeline exited rc=$?"
-      slot_mark_done reading
-    elif ! slot_is_done ideation; then
-      log "slot: ideation"
-      "$AGENT_HOME/bin/ideation-pipeline.sh" --live \
-        || log "warning: ideation-pipeline exited rc=$?"
-      slot_mark_done ideation
-    elif ! slot_is_done feature; then
-      log "slot: feature"
-      if "$AGENT_HOME/bin/site-work-block.sh" --directive feature --live; then
-        slot_mark_done feature
-      else
-        sw_rc=$?
-        log "warning: site-work feature slot exited rc=$sw_rc -- leaving slot open for retry"
-      fi
-    elif ! slot_is_done design; then
-      log "slot: design"
-      if "$AGENT_HOME/bin/site-work-block.sh" --directive design --live; then
-        slot_mark_done design
-      else
-        sw_rc=$?
-        log "warning: site-work design slot exited rc=$sw_rc -- leaving slot open for retry"
-      fi
-    else
-      log "all discretionary slots done for today -- nothing to do"
-    fi
-  fi
-
+  log "no claimable work across any repo -- idle"
   exit 0
 fi
 
