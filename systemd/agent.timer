@@ -5,9 +5,10 @@ Description=Agent tick timer -- fires the next tick
 # First tick a couple of minutes after boot.
 OnBootSec=2min
 # Subsequent ticks measured from previous completion -- prevents overlap
-# if a tick runs long. Override via a drop-in at
+# if a tick runs long (the tick also holds a global flock, so a long tick
+# can never be lapped by the next fire). Override via a drop-in at
 # ~/.config/systemd/user/agent.timer.d/override.conf
-OnUnitInactiveSec=10min
+OnUnitInactiveSec=1min
 Persistent=true
 
 [Install]

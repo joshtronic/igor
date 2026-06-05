@@ -12,7 +12,10 @@ A timer fires `bin/tick.sh`. Per tick:
    re-queueing" comment and is unassigned. Nothing slips through a
    midnight crash.
 4. **Validation sweep.** Every bot-accessible repo runs through
-   onboarding validation via the Forgejo API on every tick. Repos
+   onboarding validation via the Forgejo API. A PASS is cached for
+   `VALIDATION_COOLDOWN_SECS` (15 min) so the full ~6-call check
+   doesn't re-run every tick at the 1-minute cadence; failures
+   re-check every tick. Repos
    that fail get an auto-filed `Status/Need More Info` ticket
    (or a reopen on the existing one) and are excluded from this
    tick's work entirely -- no maintenance, no PR review, no
@@ -20,62 +23,64 @@ A timer fires `bin/tick.sh`. Per tick:
    iterate over. Local clones are NOT purged on failure; when
    the human closes the onboarding ticket and validation passes
    again, the clone is still there.
-5. **Scheduled maintenance.** Iterate validated repos for one not yet
-   audited this ISO week (weeks start Monday). If found, fire a
-   maintenance pass on a random eligible one. The harness runs the
-   stack-detection audit tools itself (`npm audit`, `cargo audit`,
-   `pip-audit`, `govulncheck`, `bundle audit`, plus their outdated
-   counterparts) via `lib/maintenance-checks.sh`. Clean week -> no
-   issue, no LLM. No recognized stack -> same. Findings -> invoke
-   Claude to triage the raw audit output into
-   `.agent/AGENT_MAINTENANCE_FINDINGS.md` + severity; harness files
-   a `Status/Need More Info` issue with the matching `Priority/*`
-   label.
-6. **PR-review pickup.** Scan validated repos for open bot PRs
+5. **PR-review pickup.** Scan validated repos for open bot PRs
    where the latest non-bot review on the current HEAD is
    `REQUEST_CHANGES`, or for PRs reassigned back to the bot.
-   First hit wins; reopen the work.
-7. **Discovery.** For each validated repo, query for the oldest
+   First hit wins; reopen the work. This is responsive to the
+   human, so it sits ahead of Igor's own work.
+6. **Igor's own work** (opt-in via `WEBSITE_REPO`). One piece per
+   tick, fire-one-then-exit, in priority order:
+   - **reading** (daily) -- run the reading pipeline: read a
+     source, reflect into the brain.
+   - **post** (daily) -- run the ideation pipeline and ship the
+     day's blog post. The slot stays open and retries every tick
+     until a post actually lands that day (capped by
+     `POST_MAX_ATTEMPTS`), so the daily post is near-guaranteed.
+   - **/now** (weekly) -- refresh the `/now` page from a digest of
+     the last week's reading (`site-work-block.sh --directive now`).
+   - **site-work** (weekly) -- one pass over the site: bugs, small
+     features, a touch of polish, capped at `SITE_WORK_DIFF_CAP`
+     changed lines so it can't become a rewrite
+     (`site-work-block.sh --directive site-work`).
+   Daily slots reset at midnight; weekly slots roll on the ISO week
+   (Monday-anchored, self-healing if a Monday tick is missed). State
+   lives in `discretionary-state.json`. This is the throttle that
+   keeps Igor from opening a stack of discretionary PRs.
+7. **Scheduled maintenance.** Iterate validated repos for any not yet
+   audited this ISO week (weeks start Monday) and audit each. The
+   harness runs the stack-detection audit tools itself (`npm audit`,
+   `cargo audit`, `pip-audit`, `govulncheck`, `bundle audit`, plus
+   their outdated counterparts) via `lib/maintenance-checks.sh`.
+   Clean week -> no issue, no LLM. No recognized stack -> same.
+   Findings -> invoke Claude to triage the raw audit output into
+   `.agent/AGENT_MAINTENANCE_FINDINGS.md` + severity; harness files
+   a `Status/Need More Info` issue with the matching `Priority/*`
+   label. Runs after Igor's own work, before the ticket grind.
+8. **Discovery.** For each validated repo, query for the oldest
    claimable issue (`Agent`-labeled, no assignee, not
    `Status/Blocked`). Skip repos with an open bot-authored PR --
    one PR at a time per repo so the human can review without a
    backlog forming behind them. Pick the globally oldest across
    all eligible repos.
-8. **Claim and clone.** Assign the issue to the bot. If the repo
+9. **Claim and clone.** Assign the issue to the bot. If the repo
    isn't cloned locally yet, clone it to
    `~/.local/state/agent/repos/<owner>/<repo>/` via SSH.
-9. **Preflight.** Verify `CLAUDE.md` exists at the repo root. If
-   not, block the issue with a clear comment and bail. (Same code
-   path as Claude calling `agent-block.sh` from inside the
-   worktree.)
-10. **Work.** Make a worktree, invoke Claude with `bin/lib/voice.md`
+10. **Preflight.** Verify `CLAUDE.md` exists at the repo root. If
+    not, block the issue with a clear comment and bail. (Same code
+    path as Claude calling `agent-block.sh` from inside the
+    worktree.)
+11. **Work.** Make a worktree, invoke Claude with `bin/lib/voice.md`
     plus `AGENTS.md` (the project's `CLAUDE.md` is auto-loaded by
-    Claude Code), react to whatever Claude leaves behind.
-11. **Discretionary daily slots.** If steps 5-10 found no work and
-    `WEBSITE_REPO` is set, the tick fires ONE discretionary slot,
-    prioritized: **reading** (run the reading pipeline -- read a
-    source, reflect, draft a post if material clusters), then
-    **feature** (one substantive site-work PR via
-    `site-work-block.sh --directive feature`), then **design** (one
-    small playful site-work PR via `--directive design`). At most
-    one slot fires per tick, and each slot fires at most once per
-    local calendar day -- state lives in `discretionary-state.json`
-    under a `slots` object that rolls over at midnight. Once all
-    three are done, nothing fires until tomorrow. This is the
-    throttle that prevents a stack of overnight discretionary PRs.
-    Shift-gated -- outside `AGENT_SHIFT_START`/`_END` no slot fires.
-    If `WEBSITE_REPO` is unset, the tick exits cleanly with no
-    website work attempted.
+    Claude Code), react to whatever Claude leaves behind. If
+    discovery turned up nothing, the tick is idle and exits.
 
-The shift window (`AGENT_SHIFT_START` / `_END`) gates Igor-driven
-work only -- maintenance, the discretionary slots (reading,
-feature, design), and tier-1 work on issues Igor filed himself.
-Human-driven signals
-(validation, recovery, PR-review pickup for
-`REQUEST_CHANGES`/reassignment, tier-1 work on issues filed by
-someone other than the bot) run on every tick around the clock.
-The systemd timer fires continuously; the shift just shapes what's
-eligible to fire.
+There is no shift window -- every tick runs the full cascade, 24/7.
+Midnight is just the local-day rollover for the daily slots
+(reading, post); the weekly slots (/now, site-work) and maintenance
+roll on the ISO week (Monday-anchored). What runs on a given tick is
+decided by the cascade's fixed priority order, not the clock:
+PR-review and the ticket grind respond whenever there's a signal,
+while Igor's own daily/weekly work is throttled by its slots.
 
 | What Claude did                 | What the agent does                                           |
 |---------------------------------|---------------------------------------------------------------|
@@ -98,7 +103,7 @@ prompts -- not one kitchen-sink prompt for everything. The split:
 | Issue work, PR review           | `bin/lib/voice.md` + `AGENTS.md` (repo's `CLAUDE.md` is auto-loaded)       |
 | Maintenance triage              | (none -- the user message is self-contained classification)                |
 | Reading pipeline (reflect, post drafting, post-shape decision) | `bin/lib/voice.md` + a task-specific directive      |
-| Site-work (feature/design slot) | `bin/lib/voice.md` + `bin/lib/{feature,design}-directive.md` |
+| Site-work + /now pass           | `bin/lib/voice.md` + `bin/lib/{site-work,now}-directive.md` |
 
 `voice.md` is the shared voice anchor; the task directives carry
 surface-specific framing. The slim `AGENTS.md` is only what
@@ -153,8 +158,8 @@ bin/
 |-- uninstall.sh             # stop, disable, remove units
 `-- lib/
     |-- voice.md             # shared voice anchor for every Claude invocation
-    |-- feature-directive.md # site-work feature slot directive
-    `-- design-directive.md  # site-work design slot directive
+    |-- site-work-directive.md # weekly site-work pass directive
+    `-- now-directive.md     # weekly /now refresh directive
 
 lib/
 |-- forgejo.sh               # Forgejo API helpers

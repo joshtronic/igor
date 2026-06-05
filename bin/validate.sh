@@ -59,8 +59,6 @@ for var in \
     FORGEJO_HOST \
     FORGEJO_REVIEWER \
     TICK_TIMEOUT \
-    AGENT_SHIFT_START \
-    AGENT_SHIFT_END \
     AGENT_RECALL_DAYS \
     ; do
   if [ -n "${!var:-}" ]; then
@@ -74,16 +72,10 @@ for var in \
 done
 
 # Light format checks on the vars where a typo silently breaks
-# behavior later (timeout that won't parse, shift outside 0-23, etc.).
+# behavior later (e.g. a timeout that won't parse).
 if [ -n "${TICK_TIMEOUT:-}" ] && ! [[ "$TICK_TIMEOUT" =~ ^[0-9]+[smhd]$ ]]; then
   fail "TICK_TIMEOUT format" "expected like 60m, 2h, 30s, 1d -- got '$TICK_TIMEOUT'"
 fi
-for shift_var in AGENT_SHIFT_START AGENT_SHIFT_END; do
-  val="${!shift_var:-}"
-  if [ -n "$val" ] && ! [[ "$val" =~ ^([0-9]|1[0-9]|2[0-3])$ ]]; then
-    fail "$shift_var format" "expected 0-23 (24h clock) -- got '$val'"
-  fi
-done
 if [ -n "${AGENT_RECALL_DAYS:-}" ] && ! [[ "$AGENT_RECALL_DAYS" =~ ^[1-9][0-9]*$ ]]; then
   fail "AGENT_RECALL_DAYS format" "expected positive integer -- got '$AGENT_RECALL_DAYS'"
 fi
@@ -92,7 +84,7 @@ fi
 # rest of the agent (issues, maintenance, PR-review) still runs
 # on any repo the bot has access to. With WEBSITE_REPO set, the
 # bootstrap clones the website, the reading pipeline can ship
-# posts to it, and the site-work block fires inside the shift.
+# posts to it, and the weekly /now + site-work passes run.
 if [ -n "${WEBSITE_REPO:-}" ]; then
   pass "WEBSITE_REPO set (${WEBSITE_REPO}) -- website work enabled"
 else

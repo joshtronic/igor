@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# site-work-block.sh -- one slot of daily site work.
+# site-work-block.sh -- the weekly site-work pass, and the /now refresh.
 #
-# Invoked by tick.sh's discretionary slot loop. Each call runs
-# ONE slot's worth of work: either the FEATURE slot (substantive
-# bug/feature/restructure) or the DESIGN slot (small playful CSS
-# polish). The caller picks which via --directive.
+# Invoked by tick.sh's Igor cascade. Each call runs ONE directive's
+# worth of work: either SITE-WORK (a weekly pass over the site --
+# bugs, small features, restructures, a touch of polish) or NOW (the
+# weekly refresh of the /now page from a digest of the week). The
+# caller picks which via --directive.
 #
 # Per invocation:
 #
@@ -13,8 +14,8 @@
 #
 #   2. Invoke Claude Code in that worktree with:
 #        - The voice anchor (bin/lib/voice.md)
-#        - The slot's directive (feature-directive.md or
-#          design-directive.md)
+#        - The directive (site-work-directive.md or
+#          now-directive.md)
 #        - The repo's CLAUDE.md
 #      No AGENTS.md -- non-issue-work surface.
 #
@@ -25,7 +26,7 @@
 # does, but does NOT push or open a PR. Pass --live to opt in.
 #
 # Usage:
-#   bin/site-work-block.sh --directive {feature|design}
+#   bin/site-work-block.sh --directive {site-work|now}
 #                          [--website-path PATH] [--live]
 #
 # Required env:
@@ -86,6 +87,10 @@ fi
 
 MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 TICK_TIMEOUT="${TICK_TIMEOUT:-30m}"
+# Scope cap for the site-work directive: refuse to ship a pass whose
+# diff exceeds this many changed lines. Keeps the weekly pass from
+# becoming a rewrite. /now is a single page and exempt.
+SITE_WORK_DIFF_CAP="${SITE_WORK_DIFF_CAP:-250}"
 WEBSITE_PATH=""
 LIVE=0
 DIRECTIVE=""
@@ -112,9 +117,9 @@ while [ $# -gt 0 ]; do
 done
 
 case "$DIRECTIVE" in
-  feature|design) ;;
-  "")  echo "site-work-block: --directive {feature|design} is required" >&2; exit 2 ;;
-  *)   echo "site-work-block: unknown directive '$DIRECTIVE' (want feature|design)" >&2; exit 2 ;;
+  site-work|now) ;;
+  "")  echo "site-work-block: --directive {site-work|now} is required" >&2; exit 2 ;;
+  *)   echo "site-work-block: unknown directive '$DIRECTIVE' (want site-work|now)" >&2; exit 2 ;;
 esac
 
 WEBSITE_PATH="${WEBSITE_PATH:-$AGENT_REPO_ROOT/${WEBSITE_REPO}}"
@@ -141,7 +146,7 @@ if [ ! -d "$WEBSITE_PATH/.git" ]; then
   exit 2
 fi
 
-BRANCH="agent/site-work-$(date +%Y%m%d-%H%M%S)"
+BRANCH="agent/${DIRECTIVE}-$(date +%Y%m%d-%H%M%S)"
 WORKTREE="$AGENT_STATE_DIR/worktrees/site-work-$$"
 mkdir -p "$AGENT_STATE_DIR/worktrees"
 
@@ -174,22 +179,39 @@ ${REPO_CLAUDE_MD}
 EOF
 )
 
+# The /now pass is handed a digest of the last week (reading +
+# thoughts + recent posts), built by tick.sh and passed via
+# NOW_DIGEST, so the page is grounded in what actually happened
+# rather than guessed. Empty digest or non-now directive -> no
+# section.
+DIGEST_SECTION=""
+if [ "$DIRECTIVE" = "now" ] && [ -n "${NOW_DIGEST:-}" ]; then
+  DIGEST_SECTION=$(cat <<EOF
+
+
+---
+
+## Digest of the last week (your memory of what happened)
+
+${NOW_DIGEST}
+EOF
+)
+fi
+
 # User message: the directive + a context paragraph.
 USER_MSG=$(cat <<EOF
-You're doing the ${DIRECTIVE} slot of today's site work on
-${WEBSITE_REPO}. Working directory: this worktree, branched
-fresh from origin/master.
+You're running the ${DIRECTIVE} pass on ${WEBSITE_REPO}. Working
+directory: this worktree, branched fresh from origin/master.
 
-${DIRECTIVE_BODY}
+${DIRECTIVE_BODY}${DIGEST_SECTION}
 
 ---
 
 The harness commits any dirty files outside .agent/ after you
 exit and uses your PR_BODY as the PR body verbatim.
 
-If nothing on the directive applies today, exit clean -- write
-nothing, change nothing. This slot is done for the day either
-way; don't force a change.
+If nothing on the directive applies, exit clean -- write nothing,
+change nothing. Don't force a change.
 EOF
 )
 
@@ -264,6 +286,24 @@ if [ -n "$DIRTY_PATHS" ]; then
     exit 1
   }
   log "harness-commit: $COMMIT_SUBJECT"
+fi
+
+# -- scope cap (site-work) -------------------------------------
+#
+# Refuse to ship a site-work pass whose diff is too large -- that's
+# the line between "a weekly pass" and "a rewrite". /now is a single
+# page and exempt. Over the cap: log, don't ship, exit 0 (the slot
+# is spent; a human can pick the work up). Applies in dry-run too so
+# the cap is visible before going live.
+if [ "$DIRECTIVE" = "site-work" ]; then
+  CHANGED_LINES=$(git diff --shortstat "origin/master..HEAD" 2>/dev/null \
+    | awk '{ for (i=1;i<=NF;i++) if ($i ~ /insertion|deletion/) s+=$(i-1); print s+0 }')
+  CHANGED_LINES=${CHANGED_LINES:-0}
+  if [ "$CHANGED_LINES" -gt "$SITE_WORK_DIFF_CAP" ]; then
+    log "scope cap: ${CHANGED_LINES} changed lines > ${SITE_WORK_DIFF_CAP} cap -- refusing to ship this pass (a human can pick it up)"
+    exit 0
+  fi
+  log "scope: ${CHANGED_LINES} changed lines (cap ${SITE_WORK_DIFF_CAP})"
 fi
 
 # -- push + open PR --------------------------------------------
