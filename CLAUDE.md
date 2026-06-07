@@ -107,8 +107,11 @@ respective tools on the host; install or skip.
   fully scripted (no LLM). It emails always; for `SEO_AGENTIC_SITES`
   it also files an `Agent`-labeled ticket the normal discovery flow
   works once that repo validates (so SEO *work* still honors the
-  validation gate, even though SEO *analysis* doesn't). Reset stamps
-  for testing with `bin/agent-reset.sh seo`.
+  validation gate, even though SEO *analysis* doesn't). Set
+  `SEO_DEBUG_DOMAIN` to one bare domain to run the pass against just
+  that site (otherwise a normal day). State (incl. SEO weekly stamps
+  under `.seo`) lives in `~/.local/state/agent/discretionary-state.json`;
+  clear a domain's stamp there to re-run it.
 
 ## Off-limits
 

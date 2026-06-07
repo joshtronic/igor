@@ -147,6 +147,7 @@ export SEO_EXTRA_RECIPIENTS="${SEO_EXTRA_RECIPIENTS:-}"
 export SEO_AGENTIC_SITES="${SEO_AGENTIC_SITES:-}"
 export SEO_IMPRESSION_FLOOR="${SEO_IMPRESSION_FLOOR:-50}"
 export SEO_TOP_K="${SEO_TOP_K:-10}"
+export SEO_DEBUG_DOMAIN="${SEO_DEBUG_DOMAIN:-}"
 
 # Put the harness's bin dir on PATH for every Claude invocation in
 # this script. Without this, Claude can't call agent-enqueue.sh /
@@ -1062,18 +1063,29 @@ do_seo_tick() {
   local token
   token=$(gsc_access_token) || { log "seo: GSC token refresh failed -- skipping this tick"; return 1; }
 
+  # SEO_DEBUG_DOMAIN restricts the pass to a single domain for isolated
+  # testing before the full sweep. Everything else is identical to a
+  # normal day -- same weekly gate, same email/ticket/record path -- so a
+  # debug run still stamps the domain done. To re-run, clear its stamp
+  # under .seo in discretionary-state.json. Bare domain, e.g.
+  # "joshtronic.com".
   local domains target="" d
-  domains=$(gsc_list_domains "$token" || true)
-  if [ -z "$domains" ]; then
-    log "seo: no sc-domain properties visible to this account -- nothing to do"
-    return 1
+  if [ -n "${SEO_DEBUG_DOMAIN:-}" ]; then
+    domains="$SEO_DEBUG_DOMAIN"
+    log "seo: DEBUG mode -- restricted to ${SEO_DEBUG_DOMAIN} (unset SEO_DEBUG_DOMAIN for the full sweep)"
+  else
+    domains=$(gsc_list_domains "$token" || true)
+    if [ -z "$domains" ]; then
+      log "seo: no sc-domain properties visible to this account -- nothing to do"
+      return 1
+    fi
   fi
   while IFS= read -r d; do
     [ -z "$d" ] && continue
     if seo_eligible "$d"; then target="$d"; break; fi
   done <<<"$domains"
   if [ -z "$target" ]; then
-    log "seo: all visible domains analyzed this week -- continuing"
+    log "seo: all domains analyzed this week -- continuing"
     return 1
   fi
 
