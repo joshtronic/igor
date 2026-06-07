@@ -18,11 +18,13 @@ A timer fires `bin/tick.sh`. Per tick:
    re-check every tick. Repos
    that fail get an auto-filed `Status/Need More Info` ticket
    (or a reopen on the existing one) and are excluded from this
-   tick's work entirely -- no maintenance, no PR review, no
-   issue pickup. The validated set is what downstream steps
-   iterate over. Local clones are NOT purged on failure; when
-   the human closes the onboarding ticket and validation passes
-   again, the clone is still there.
+   tick's **work** -- no PR review, no issue pickup. Validation
+   gates work, not analysis: the read-only weekly security/dep
+   audit still runs on a failed repo (it only files an issue, never
+   commits). The validated set is what the work steps iterate over.
+   Local clones are NOT purged on failure; when the human closes
+   the onboarding ticket and validation passes again, the clone is
+   still there.
 5. **PR-review pickup.** Scan validated repos for open bot PRs
    where the latest non-bot review on the current HEAD is
    `REQUEST_CHANGES`, or for PRs reassigned back to the bot.
@@ -46,8 +48,10 @@ A timer fires `bin/tick.sh`. Per tick:
    (Monday-anchored, self-healing if a Monday tick is missed). State
    lives in `discretionary-state.json`. This is the throttle that
    keeps Igor from opening a stack of discretionary PRs.
-7. **Scheduled maintenance.** Iterate validated repos for any not yet
-   audited this ISO week (weeks start Monday) and audit each. The
+7. **Scheduled maintenance / analysis.** Iterate EVERY bot-accessible
+   repo -- not just the validated set; analysis is read-only and
+   decoupled from the validation gate -- for any not yet audited this
+   ISO week (weeks start Monday) and audit each. The
    harness runs the stack-detection audit tools itself (`npm audit`,
    `cargo audit`, `pip-audit`, `govulncheck`, `bundle audit`, plus
    their outdated counterparts) via `lib/maintenance-checks.sh`.

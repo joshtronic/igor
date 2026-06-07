@@ -708,11 +708,14 @@ maintenance_eligible() {
   [ "$last_week" != "$this_week" ]
 }
 
-# Scheduled maintenance pass -- top of the work cascade.
-# Loops EVERY validated repo eligible this ISO week (per Phase 4
-# of ~/Notes/igor-refactor-plan.md -- was random-one-per-tick
-# before). Returns 0 if any maintenance ran, 1 if nothing was
-# eligible this week.
+# Scheduled maintenance/analysis pass.
+# Loops EVERY bot-accessible repo eligible this ISO week -- the
+# ANALYSIS set (ANALYSIS_REPOS_JSON), NOT the validated WORK set.
+# Analysis is read-only (it only files an issue, never commits), so
+# it is deliberately decoupled from validation: a repo that fails
+# validation -- or carries an open onboarding ticket -- still gets
+# its dependencies audited. Returns 0 if any maintenance ran, 1 if
+# nothing was eligible this week.
 #
 # Each repo's maintenance is its own self-contained pass in
 # do_maintenance_for_repo, with its own worktree + cleanup. The
@@ -732,10 +735,10 @@ do_maintenance_tick() {
     if maintenance_eligible "$r_name"; then
       eligible+=("$r_name")
     fi
-  done <<<"$VALIDATED_REPOS_JSON"
+  done <<<"$ANALYSIS_REPOS_JSON"
 
   if [ "${#eligible[@]}" -eq 0 ]; then
-    log "maintenance: no validated repos eligible this week -- continuing"
+    log "maintenance: no repos eligible this week -- continuing"
     return 1
   fi
 
@@ -1038,6 +1041,15 @@ fi
 
 log "validation sweep ($BOT_USER)"
 ALL_REPOS=$(forgejo_list_bot_repos)
+
+# Analysis set: every bot-accessible repo, in the same newline-delimited
+# JSON-object shape as VALIDATED_REPOS_JSON. Validation gates WORK
+# (issue pickup, PR pushes, site-work); it does NOT gate read-only
+# ANALYSIS (the weekly security/dep audit, which only files an issue and
+# never commits). do_maintenance_tick loops this set so a repo that
+# fails validation -- or has an open onboarding ticket -- still gets its
+# dependencies audited.
+ANALYSIS_REPOS_JSON=$(jq -c '.[]' <<<"$ALL_REPOS")
 VALIDATED_REPOS_JSON=""
 VAL_PASS=0
 VAL_CACHED=0
@@ -1088,7 +1100,13 @@ done < <(jq -c '.[]' <<<"$ALL_REPOS")
 log "validation: ${VAL_PASS} pass, ${VAL_CACHED} cached, ${VAL_FAIL} fail, ${VAL_SKIPPED} skipped (open onboarding ticket)"
 
 if [ -z "$VALIDATED_REPOS_JSON" ]; then
-  log "validation: no repos passed -- nothing to do this tick"
+  # No repo is safe for agentic WORK this tick. Read-only analysis is
+  # decoupled from validation, so still run the maintenance/analysis
+  # pass over the full bot-accessible set before exiting -- everything
+  # below here (PR-review, Igor's own work, the ticket grind) needs a
+  # validated repo and is correctly skipped.
+  log "validation: no repos passed -- running analysis-only pass, then done"
+  do_maintenance_tick || true
   exit 0
 fi
 
@@ -1510,11 +1528,13 @@ if [ -n "$WEBSITE_REPO" ]; then
   fi
 fi
 
-# Scheduled maintenance (weekly dep-freshness + security audit).
-# Repo-agnostic, so it runs even without a website configured. Runs
-# after Igor's own work, before the claimable-issue grind. Loops every
-# repo eligible this ISO week in one pass and exits; nothing eligible
-# -> fall through to discovery.
+# Scheduled maintenance/analysis (weekly dep-freshness + security
+# audit). Read-only, so it runs on EVERY bot-accessible repo (the
+# analysis set), not just the validated work set -- validation gates
+# work, not analysis. Repo-agnostic; runs even without a website
+# configured. Runs after Igor's own work, before the claimable-issue
+# grind. Loops every repo eligible this ISO week in one pass and exits;
+# nothing eligible -> fall through to discovery.
 if do_maintenance_tick; then
   exit 0
 fi
