@@ -70,7 +70,12 @@ respective tools on the host; install or skip.
   host; the self-pull updates the file but does not reload systemd.)
 - Validation runs every tick against every bot-accessible repo.
   Repos with an open onboarding ticket short-circuit the full
-  check; closing the ticket re-enables it.
+  check; closing the ticket re-enables it. Validation gates only
+  WORK (issue pickup, PR pushes, site-work) -- the read-only weekly
+  analysis pass (security/dep audit) runs on every bot-accessible
+  repo regardless of validation, since it only files an issue and
+  never commits. `ANALYSIS_REPOS_JSON` is the analysis set;
+  `VALIDATED_REPOS_JSON` is the work set.
 - There is no shift window -- the tick runs 24/7. Midnight is just
   the local-day rollover for the daily slots; the cascade's fixed
   priority order is what shapes what runs, not the clock.
