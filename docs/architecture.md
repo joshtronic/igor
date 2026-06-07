@@ -64,9 +64,14 @@ A timer fires `bin/tick.sh`. Per tick:
    no-ops when unconfigured). GSC-driven, not repo-driven: enumerate
    Search Console **domain properties** (`sc-domain:` only) and analyze
    ONE per tick (weekly per domain). The harness scores opportunities
-   from the Search Analytics API -- striking-distance queries, low-CTR
-   pages, decaying pages -- entirely in shell (`lib/seo-analysis.sh`,
-   no LLM), applies an impression floor + top-K cap, grades the batch
+   from the Search Analytics API entirely in shell (`lib/seo-analysis.sh`,
+   no LLM): four click-estimate lenses (striking-distance, low-CTR,
+   decay, rising) plus two informational ones (cannibalization,
+   zero-click). The upside estimate is deliberately conservative -- it
+   scales by how well a page already converts and routes structurally-
+   eaten queries (featured snippets / intent mismatch) to the zero-click
+   bucket instead of over-crediting title fixes. It applies an impression
+   floor + top-K cap, grades the batch
    (GOOD/INDIFFERENT by estimated click upside), and emails the owner
    (`SEO_PRIMARY_EMAIL` always, plus selective extras per
    `SEO_EXTRA_RECIPIENTS`) via SMTP2GO. For domains in
