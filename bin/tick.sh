@@ -90,6 +90,12 @@ unset env_file_hint
 . "$AGENT_HOME/lib/claude.sh"
 # shellcheck source=../lib/security-gate.sh
 . "$AGENT_HOME/lib/security-gate.sh"
+# shellcheck source=lib/gsc.sh
+. "$AGENT_HOME/lib/gsc.sh"
+# shellcheck source=lib/email.sh
+. "$AGENT_HOME/lib/email.sh"
+# shellcheck source=lib/seo-analysis.sh
+. "$AGENT_HOME/lib/seo-analysis.sh"
 
 # Children invocations (agent-* helper scripts) share our tick id
 # so cost-ledger entries from child processes group with the
@@ -126,6 +132,22 @@ export WEBSITE_REPO="${WEBSITE_REPO:-}"
 if [ -n "$WEBSITE_REPO" ]; then
   export AGENT_WEBSITE_PATH="$AGENT_REPO_ROOT/${WEBSITE_REPO}"
 fi
+
+# SEO analysis pass -- opt-in via Google Search Console + SMTP2GO creds.
+# All default to empty so referencing them under `set -u` is safe when
+# the subsystem isn't configured; do_seo_tick no-ops cleanly if any of
+# the required ones are unset. Floor/top-K carry tuning defaults.
+export GSC_OAUTH_CLIENT_ID="${GSC_OAUTH_CLIENT_ID:-}"
+export GSC_OAUTH_CLIENT_SECRET="${GSC_OAUTH_CLIENT_SECRET:-}"
+export GSC_OAUTH_REFRESH_TOKEN="${GSC_OAUTH_REFRESH_TOKEN:-}"
+export SMTP2GO_API_KEY="${SMTP2GO_API_KEY:-}"
+export SEO_SENDER_EMAIL="${SEO_SENDER_EMAIL:-}"
+export SEO_PRIMARY_EMAIL="${SEO_PRIMARY_EMAIL:-}"
+export SEO_EXTRA_RECIPIENTS="${SEO_EXTRA_RECIPIENTS:-}"
+export SEO_AGENTIC_SITES="${SEO_AGENTIC_SITES:-}"
+export SEO_IMPRESSION_FLOOR="${SEO_IMPRESSION_FLOOR:-50}"
+export SEO_TOP_K="${SEO_TOP_K:-10}"
+export SEO_DEBUG_DOMAIN="${SEO_DEBUG_DOMAIN:-}"
 
 # Put the harness's bin dir on PATH for every Claude invocation in
 # this script. Without this, Claude can't call agent-enqueue.sh /
@@ -590,6 +612,34 @@ weekly_mark_done() {
   mv "$tmp" "$state_file"
 }
 
+# -- SEO per-domain weekly state --------------------------------
+#
+# Same ISO-week gate as the weekly slots, but keyed per GSC domain
+# under a "seo" object in discretionary-state.json. One domain is
+# analyzed per tick (do_seo_tick), so this stamps each as it's done
+# and the next eligible domain is picked next tick. Regenerable.
+
+seo_eligible() {
+  local domain="$1" state_file last this_week
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || return 0
+  last=$(jq -r --arg d "$domain" '.seo[$d] // ""' "$state_file" 2>/dev/null)
+  [ -z "$last" ] && return 0
+  this_week=$(date +%G-W%V)
+  [ "$last" != "$this_week" ]
+}
+
+seo_mark_done() {
+  local domain="$1" state_file tmp this_week
+  state_file=$(discretionary_state_file)
+  this_week=$(date +%G-W%V)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg d "$domain" --arg w "$this_week" \
+    '.seo //= {} | .seo[$d] = $w' "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
 # -- Validation pass cache --------------------------------------
 #
 # The validation sweep runs every tick. At a 1-minute cadence across
@@ -913,6 +963,181 @@ EOF
   return 0
 }
 
+
+# -- SEO analysis pass --------------------------------------------
+#
+# Weekly, GSC-driven (NOT repo-driven and NOT WEBSITE_REPO-gated):
+# enumerate Search Console domain properties, analyze ONE per tick,
+# email the owner a graded report, and -- for sites listed as agentic
+# -- file ONE curated, deduped, Agent-labeled ticket the normal
+# discovery/work flow can later pick up. Read-only by itself; the
+# eventual fixes flow through the standard issue machinery (gated by
+# validation). All analysis is scripted (lib/seo-analysis.sh) -- no
+# LLM. See docs/architecture.md.
+
+SEO_TICKET_MARKER="<!-- agent:seo-opportunities -->"
+
+# Comma-separated extra recipients subscribed to this domain, parsed
+# from SEO_EXTRA_RECIPIENTS ("email=site1,site2|email2=site3").
+seo_extra_recipients_for() {
+  local domain="$1" entry email sites out=""
+  local IFS='|'
+  for entry in ${SEO_EXTRA_RECIPIENTS:-}; do
+    [ -z "$entry" ] && continue
+    email="${entry%%=*}"
+    sites="${entry#*=}"
+    case ",$sites," in
+      *",$domain,"*) out="${out:+$out,}$email" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# Full recipient list for a domain: primary always, plus any subscribed
+# extras. Primary getting every domain means it's always copied, so no
+# separate CC is needed.
+seo_recipients_for() {
+  local domain="$1" extras out
+  out="${SEO_PRIMARY_EMAIL:-}"
+  extras=$(seo_extra_recipients_for "$domain")
+  [ -n "$extras" ] && out="${out:+$out,}$extras"
+  printf '%s' "$out"
+}
+
+# The Forgejo repo mapped to an agentic domain, or empty. Parsed from
+# SEO_AGENTIC_SITES ("domain=owner/repo|domain2=owner/repo2").
+seo_agentic_repo_for() {
+  local domain="$1" entry d repo
+  local IFS='|'
+  for entry in ${SEO_AGENTIC_SITES:-}; do
+    [ -z "$entry" ] && continue
+    d="${entry%%=*}"
+    repo="${entry#*=}"
+    [ "$d" = "$domain" ] && { printf '%s' "$repo"; return 0; }
+  done
+  return 0
+}
+
+# File ONE curated SEO ticket per domain, one open at a time. Dedup is
+# check-then-act on a per-domain marker: if an OPEN ticket already
+# exists we don't refile (so a non-validated agentic repo accrues at
+# most one). The Agent label lets discovery pick it up once the repo is
+# validated; until then it just waits.
+seo_file_ticket() {
+  local repo="$1" domain="$2" body_md="$3"
+  if ! forgejo_repo_exists "$repo"; then
+    log "seo: agentic repo $repo not accessible to bot -- emailed only, no ticket"
+    return 0
+  fi
+  local marker existing
+  marker="${SEO_TICKET_MARKER} ${domain}"
+  existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$marker" 2>/dev/null)
+  if [ -n "$existing" ] && [ "$existing" != "null" ] && [ "$existing" != "empty" ] \
+     && [ "$(jq -r '.state' <<<"$existing" 2>/dev/null)" = "open" ]; then
+    log "seo: $repo already has an open SEO ticket #$(jq -r '.number' <<<"$existing") for $domain -- not refiling"
+    return 0
+  fi
+  local title body num
+  title="SEO opportunities: ${domain} ($(date +%Y-%m-%d))"
+  body="${body_md}
+
+${marker}"
+  num=$(forgejo_open_issue "$repo" "$title" "$body") \
+    || { log "warning: seo ticket open failed on $repo (continuing)"; return 0; }
+  forgejo_add_label "$repo" "$num" "Agent" 2>/dev/null \
+    || log "warning: could not apply 'Agent' label on $repo#$num"
+  log "seo: filed ticket #$num on $repo for $domain"
+}
+
+# One weekly SEO pass over a single eligible domain. Returns 0 if a
+# domain was processed (caller exits the tick), 1 if the subsystem is
+# unconfigured or nothing was eligible (caller falls through).
+do_seo_tick() {
+  # Opt-in gate: every required credential must be present.
+  if [ -z "${GSC_OAUTH_CLIENT_ID:-}" ] || [ -z "${GSC_OAUTH_CLIENT_SECRET:-}" ] \
+     || [ -z "${GSC_OAUTH_REFRESH_TOKEN:-}" ] || [ -z "${SMTP2GO_API_KEY:-}" ] \
+     || [ -z "${SEO_SENDER_EMAIL:-}" ] || [ -z "${SEO_PRIMARY_EMAIL:-}" ]; then
+    return 1
+  fi
+
+  local token
+  token=$(gsc_access_token) || { log "seo: GSC token refresh failed -- skipping this tick"; return 1; }
+
+  # SEO_DEBUG_DOMAIN restricts the pass to a single domain for isolated
+  # testing before the full sweep. Everything else is identical to a
+  # normal day -- same weekly gate, same email/ticket/record path -- so a
+  # debug run still stamps the domain done. To re-run, clear its stamp
+  # under .seo in discretionary-state.json. Bare domain, e.g.
+  # "joshtronic.com".
+  local domains target="" d
+  if [ -n "${SEO_DEBUG_DOMAIN:-}" ]; then
+    domains="$SEO_DEBUG_DOMAIN"
+    log "seo: DEBUG mode -- restricted to ${SEO_DEBUG_DOMAIN} (unset SEO_DEBUG_DOMAIN for the full sweep)"
+  else
+    domains=$(gsc_list_domains "$token" || true)
+    if [ -z "$domains" ]; then
+      log "seo: no sc-domain properties visible to this account -- nothing to do"
+      return 1
+    fi
+  fi
+  while IFS= read -r d; do
+    [ -z "$d" ] && continue
+    if seo_eligible "$d"; then target="$d"; break; fi
+  done <<<"$domains"
+  if [ -z "$target" ]; then
+    log "seo: all domains analyzed this week -- continuing"
+    return 1
+  fi
+
+  log "seo: analyzing $target"
+  local start end pstart pend
+  read -r start end pstart pend <<<"$(seo_window)"
+
+  local cur_qp cur_page prev_page
+  cur_qp=$(gsc_query "$token" "$target" "$start" "$end" "query,page") || cur_qp='{"rows":[]}'
+  cur_page=$(gsc_query "$token" "$target" "$start" "$end" "page") || cur_page='{"rows":[]}'
+  prev_page=$(gsc_query "$token" "$target" "$pstart" "$pend" "page") || prev_page='{"rows":[]}'
+
+  local report count grade upside
+  report=$(seo_build_report "$target" "$cur_qp" "$cur_page" "$prev_page" \
+             "$start" "$end" "$pstart" "$pend")
+  count=$(jq -r '.count // 0' <<<"$report" 2>/dev/null || echo 0)
+  grade=$(jq -r '.grade // "INDIFFERENT"' <<<"$report" 2>/dev/null || echo INDIFFERENT)
+  upside=$(jq -r '.total_upside // 0' <<<"$report" 2>/dev/null || echo 0)
+
+  if [ "${count:-0}" -eq 0 ]; then
+    log "seo: $target -- nothing above the impression floor this week (no email/ticket)"
+    seo_mark_done "$target"
+    return 0
+  fi
+
+  # Record baselines for future Layer-2 outcome grading (append-only).
+  local week agentic_repo agentic_bool=false
+  week=$(date +%G-W%V)
+  agentic_repo=$(seo_agentic_repo_for "$target")
+  [ -n "$agentic_repo" ] && agentic_bool=true
+  seo_record_opportunities "$report" "$agentic_bool" "$week"
+
+  # Render once, reuse for email (text+html) and ticket (markdown).
+  local md html recipients subject
+  md=$(seo_render_markdown <<<"$report")
+  html=$(seo_render_html <<<"$report")
+  recipients=$(seo_recipients_for "$target")
+  subject="[SEO] ${target} -- ${grade} (${count} opportunities, ~${upside} est. clicks)"
+  if email_send "$subject" "$html" "$md" "$recipients"; then
+    log "seo: emailed $target report ($grade, $count opps) to $recipients"
+  else
+    log "warning: seo email for $target failed (continuing)"
+  fi
+
+  # Agentic sites also get the curated ticket.
+  if [ -n "$agentic_repo" ]; then
+    seo_file_ticket "$agentic_repo" "$target" "$md"
+  fi
+
+  seo_mark_done "$target"
+  return 0
+}
 
 # Worktree key: slash-free, unique per repo+issue.
 worktree_key() { printf '%s-%s' "${1//\//_}" "$2"; }
@@ -1536,6 +1761,16 @@ fi
 # grind. Loops every repo eligible this ISO week in one pass and exits;
 # nothing eligible -> fall through to discovery.
 if do_maintenance_tick; then
+  exit 0
+fi
+
+# Scheduled SEO analysis (weekly, ONE domain per tick). Opt-in via the
+# Google Search Console + SMTP2GO + SEO_PRIMARY_EMAIL env; no-ops when
+# unconfigured. GSC-driven, not repo-driven: emails the owner a graded
+# report per domain, and for agentic sites files a deduped Agent-labeled
+# ticket the discovery step below picks up once that repo is validated.
+# One domain per tick spreads the GSC/email load across the 1-min beat.
+if do_seo_tick; then
   exit 0
 fi
 

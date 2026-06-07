@@ -5,7 +5,8 @@ claims one piece of work, ships it, sleeps. Each tick runs a
 strictly ordered cascade: recovery + validation, then PR-review
 pickup, then Igor's own work (daily reading + blog post, weekly
 /now refresh + site-work pass -- opt-in via `WEBSITE_REPO`), then
-scheduled maintenance, then the claimable-issue grind. Igor's own
+scheduled maintenance, then the weekly GSC-driven SEO pass (opt-in),
+then the claimable-issue grind. Igor's own
 work comes first and is throttled (daily/weekly slots), so tickets
 soak up whatever time is left and roll over to the next day. The
 reading pipeline's durable state lives in
@@ -24,7 +25,8 @@ repo is everything that makes the cron beat real.
 - `bin/lib/` -- shared voice anchor + task directives loaded into
   Claude's system prompt per surface.
 - `lib/*.sh` -- sourced shell libraries (Forgejo API, repo checks,
-  maintenance checks, cost tracking).
+  maintenance checks, cost tracking, and the opt-in SEO trio:
+  `gsc.sh` + `email.sh` + `seo-analysis.sh`).
 - `AGENTS.md` -- the universal agent rules appended to Claude's
   system prompt for issue work and PR review.
 - `agent-settings.json` -- Claude's tool permission profile.
@@ -99,6 +101,17 @@ respective tools on the host; install or skip.
 - Website work is opt-in via `WEBSITE_REPO`. With it unset the
   daily/weekly Igor slots no-op cleanly; the rest of the tick
   (issues, maintenance, PR review) still runs.
+- The SEO pass (`do_seo_tick`) is opt-in via the GSC + SMTP2GO env
+  and is GSC-driven, NOT repo-driven -- it enumerates Search Console
+  domain properties, not Forgejo repos. Weekly, one domain per tick,
+  fully scripted (no LLM). It emails always; for `SEO_AGENTIC_SITES`
+  it also files an `Agent`-labeled ticket the normal discovery flow
+  works once that repo validates (so SEO *work* still honors the
+  validation gate, even though SEO *analysis* doesn't). Set
+  `SEO_DEBUG_DOMAIN` to one bare domain to run the pass against just
+  that site (otherwise a normal day). State (incl. SEO weekly stamps
+  under `.seo`) lives in `~/.local/state/agent/discretionary-state.json`;
+  clear a domain's stamp there to re-run it.
 
 ## Off-limits
 
