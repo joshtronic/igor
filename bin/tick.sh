@@ -1093,14 +1093,16 @@ do_seo_tick() {
   local start end pstart pend
   read -r start end pstart pend <<<"$(seo_window)"
 
-  local cur_qp cur_page prev_page
-  cur_qp=$(gsc_query "$token" "$target" "$start" "$end" "query,page") || cur_qp='{"rows":[]}'
-  cur_page=$(gsc_query "$token" "$target" "$start" "$end" "page") || cur_page='{"rows":[]}'
-  prev_page=$(gsc_query "$token" "$target" "$pstart" "$pend" "page") || prev_page='{"rows":[]}'
+  local cur_qp cur_page prev_page cur_query prev_query
+  cur_qp=$(gsc_query "$token" "$target" "$start" "$end" "query,page")    || cur_qp='{"rows":[]}'
+  cur_page=$(gsc_query "$token" "$target" "$start" "$end" "page")        || cur_page='{"rows":[]}'
+  prev_page=$(gsc_query "$token" "$target" "$pstart" "$pend" "page")     || prev_page='{"rows":[]}'
+  cur_query=$(gsc_query "$token" "$target" "$start" "$end" "query")      || cur_query='{"rows":[]}'
+  prev_query=$(gsc_query "$token" "$target" "$pstart" "$pend" "query")   || prev_query='{"rows":[]}'
 
   local report count grade upside
   report=$(seo_build_report "$target" "$cur_qp" "$cur_page" "$prev_page" \
-             "$start" "$end" "$pstart" "$pend")
+             "$cur_query" "$prev_query" "$start" "$end" "$pstart" "$pend")
   count=$(jq -r '.count // 0' <<<"$report" 2>/dev/null || echo 0)
   grade=$(jq -r '.grade // "INDIFFERENT"' <<<"$report" 2>/dev/null || echo INDIFFERENT)
   upside=$(jq -r '.total_upside // 0' <<<"$report" 2>/dev/null || echo 0)
