@@ -60,28 +60,43 @@ A timer fires `bin/tick.sh`. Per tick:
    `.agent/AGENT_MAINTENANCE_FINDINGS.md` + severity; harness files
    a `Status/Need More Info` issue with the matching `Priority/*`
    label. Runs after Igor's own work, before the ticket grind.
-8. **Discovery.** For each validated repo, query for the oldest
+8. **SEO analysis** (opt-in via Google Search Console + SMTP2GO env;
+   no-ops when unconfigured). GSC-driven, not repo-driven: enumerate
+   Search Console **domain properties** (`sc-domain:` only) and analyze
+   ONE per tick (weekly per domain). The harness scores opportunities
+   from the Search Analytics API -- striking-distance queries, low-CTR
+   pages, decaying pages -- entirely in shell (`lib/seo-analysis.sh`,
+   no LLM), applies an impression floor + top-K cap, grades the batch
+   (GOOD/INDIFFERENT by estimated click upside), and emails the owner
+   (`SEO_PRIMARY_EMAIL` always, plus selective extras per
+   `SEO_EXTRA_RECIPIENTS`) via SMTP2GO. For domains in
+   `SEO_AGENTIC_SITES` it also files ONE curated, deduped,
+   `Agent`-labeled ticket on the mapped repo -- which Discovery (next)
+   picks up once that repo is validated. Surfaced opportunities are
+   logged to `seo-opportunities.jsonl` with baselines for future
+   outcome grading. Nothing above the floor -> no email, no ticket.
+9. **Discovery.** For each validated repo, query for the oldest
    claimable issue (`Agent`-labeled, no assignee, not
    `Status/Blocked`). Skip repos with an open bot-authored PR --
    one PR at a time per repo so the human can review without a
    backlog forming behind them. Pick the globally oldest across
    all eligible repos.
-9. **Claim and clone.** Assign the issue to the bot. If the repo
-   isn't cloned locally yet, clone it to
-   `~/.local/state/agent/repos/<owner>/<repo>/` via SSH.
-10. **Preflight.** Verify `CLAUDE.md` exists at the repo root. If
+10. **Claim and clone.** Assign the issue to the bot. If the repo
+    isn't cloned locally yet, clone it to
+    `~/.local/state/agent/repos/<owner>/<repo>/` via SSH.
+11. **Preflight.** Verify `CLAUDE.md` exists at the repo root. If
     not, block the issue with a clear comment and bail. (Same code
     path as Claude calling `agent-block.sh` from inside the
     worktree.)
-11. **Work.** Make a worktree, invoke Claude with `bin/lib/voice.md`
+12. **Work.** Make a worktree, invoke Claude with `bin/lib/voice.md`
     plus `AGENTS.md` (the project's `CLAUDE.md` is auto-loaded by
     Claude Code), react to whatever Claude leaves behind. If
     discovery turned up nothing, the tick is idle and exits.
 
 There is no shift window -- every tick runs the full cascade, 24/7.
 Midnight is just the local-day rollover for the daily slots
-(reading, post); the weekly slots (/now, site-work) and maintenance
-roll on the ISO week (Monday-anchored). What runs on a given tick is
+(reading, post); the weekly slots (/now, site-work), maintenance, and
+the per-domain SEO pass roll on the ISO week (Monday-anchored). What runs on a given tick is
 decided by the cascade's fixed priority order, not the clock:
 PR-review and the ticket grind respond whenever there's a signal,
 while Igor's own daily/weekly work is throttled by its slots.
@@ -158,6 +173,8 @@ bin/
 |-- check-sync.sh            # CI lint: AGENTS.md <-> tick.sh contract
 |-- validate.sh              # validate env + Forgejo connectivity + bot perms
 |-- validate-repo.sh         # audit a single repo (or --all) for readiness
+|-- gsc-auth.sh              # one-time: mint a GSC OAuth refresh token (SEO)
+|-- agent-reset.sh           # clear discretionary state for testing
 |-- install.sh               # one-time: install systemd units + enable timer
 |-- uninstall.sh             # stop, disable, remove units
 `-- lib/
@@ -169,7 +186,10 @@ lib/
 |-- forgejo.sh               # Forgejo API helpers
 |-- cost.sh                  # Anthropic cost ledger (CLI + raw API)
 |-- repo-checks.sh           # repo-readiness checks + onboarding ticket lifecycle
-`-- maintenance-checks.sh    # stack detection + audit tool dispatch
+|-- maintenance-checks.sh    # stack detection + audit tool dispatch
+|-- gsc.sh                   # Google Search Console API client (SEO, opt-in)
+|-- email.sh                 # SMTP2GO HTTP API sender (SEO, opt-in)
+`-- seo-analysis.sh          # scripted SEO analysis: score, grade, render (no LLM)
 
 systemd/                     # user units (no @ instance)
 |-- agent.service
@@ -186,6 +206,8 @@ On the host (deployment-specific, not in the repo):
 ~/.local/share/agent/.env                      # secrets, chmod 600 -- the only config
 ~/.local/state/agent/lock                      # global flock
 ~/.local/state/agent/brain.sqlite              # seen URLs, sources, reflections
+~/.local/state/agent/discretionary-state.json  # daily/weekly slots + per-repo maintenance + per-domain SEO stamps
+~/.local/state/agent/seo-opportunities.jsonl   # surfaced SEO opportunities + baselines (for outcome grading)
 ~/.local/state/agent/worktrees/<key>/          # per-tick worktrees
 ~/.local/state/agent/repos/<owner>/<repo>/     # harness's per-repo clones
 ~/.local/state/agent/repos/<WEBSITE_REPO>/     # the bot's website -- bootstrap-soft, opt-in
