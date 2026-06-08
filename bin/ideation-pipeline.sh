@@ -9,9 +9,11 @@
 # cohering, so there can be a post every day.
 #
 # "No post" is not an outcome. The ideation step always lands an angle;
-# only the FORM flexes -- a synthesis essay when reflections genuinely
-# rhyme, a lighter honest "what I read / thought about" notes post when
-# they don't. The only clean no-ops are: a post already shipped today
+# only the REGISTER flexes -- an argument (a position and the case for
+# it) or a quieter reflection (a musing that doesn't need a hard
+# thesis). Either way the post is Igor's OWN thought, not a summary of
+# or reaction to what it read: the reading is the soil, never the
+# subject. The only clean no-ops are: a post already shipped today
 # (daily refrain), or a literally empty brain (nothing to write from).
 #
 # Per invocation:
@@ -105,6 +107,7 @@ WEBSITE_PATH="${WEBSITE_PATH:-$AGENT_STATE_DIR/repos/${WEBSITE_REPO}}"
 
 MAX_IDEATION_ROUNDS=3
 CORPUS_ANCHOR_RECENT=5      # most-recent reflections always in the slice
+CORPUS_THOUGHT_RECENT=8     # most-recent kind='thought' entries always in the slice
 CORPUS_SAMPLE_SIZE=30       # randomized un-drafted reflections per round
 SHIPPED_RECENT=40          # most-recent posts always in the dedup digest
 SHIPPED_SAMPLE=20          # random sample of older posts (caps digest size)
@@ -169,11 +172,14 @@ corpus_count() {
 }
 
 # Emit a randomized, id-tagged slice of the brain: the most recent
-# reflections (recency anchor) plus a random sample of un-drafted ones.
-# Re-runs reshuffle (RANDOM()), so each ideation round scans a
-# different slice -- that's the entropy lever and the "2-3 rounds".
-# The whole block is formatted in SQL so multi-paragraph content
-# survives intact (no awk line-splitting).
+# reflections (recency anchor), Igor's own most-recent thoughts/sparks
+# (so musings build on its evolving positions, not just fresh reads),
+# plus a random sample of un-drafted ones. Re-runs reshuffle (RANDOM()),
+# so each ideation round scans a different slice -- the entropy lever
+# behind the 2-3 rounds. Thoughts are included regardless of post_drafted
+# so a past idea can be developed further; the random sample stays
+# un-drafted to keep surfacing new material. The whole block is formatted
+# in SQL so multi-paragraph content survives intact (no awk splitting).
 corpus_sample() {
   sqlite3 "$BRAIN_DB" \
     "SELECT '### id=' || id || '  kind=' || kind || '  ' || ts
@@ -185,6 +191,9 @@ corpus_sample() {
      WHERE id IN (
        SELECT id FROM (SELECT id FROM reflections WHERE 1=1${EXCLUDED_SOURCES_SQL:-}
                        ORDER BY ts DESC LIMIT $CORPUS_ANCHOR_RECENT)
+       UNION
+       SELECT id FROM (SELECT id FROM reflections WHERE kind = 'thought'
+                       ORDER BY ts DESC LIMIT $CORPUS_THOUGHT_RECENT)
        UNION
        SELECT id FROM (SELECT id FROM reflections WHERE post_drafted = 0${EXCLUDED_SOURCES_SQL:-}
                        ORDER BY RANDOM() LIMIT $CORPUS_SAMPLE_SIZE)
@@ -468,40 +477,46 @@ ${VOICE_BODY}
 
 ---
 
-You are choosing what igor.bot publishes today. "No post" is NOT an
-option -- you ALWAYS return an angle. Draw from the reading reflections
-and journal entries below: this is the agent's whole recent brain, not
-one day's reads.
+You are choosing what Igor publishes today -- a MUSING, its own take in
+and about the world. "No post" is NOT an option; you ALWAYS return an
+angle. The reflections and journal entries below are the agent's recent
+brain: reading it has done and thoughts it has parked. Treat them as the
+SOIL that shaped a view, never as the subject. The post is Igor's own
+thought, not a summary of or reaction to any source.
 
 How to choose:
-- The post may connect a recent read to an older one, or springboard
-  off a single spark. Reflections do NOT all need to share a theme.
-- Novelty first. Do not pick an angle the site has already covered
-  (see the shipped-posts list). "Already covered" means a shipped post
-  reaches the same conclusion -- a new title, new examples, or a
-  different framing of the same thesis still counts as covered. If your
-  strongest idea is already covered, pick the next-best uncovered one.
+- Springboard off your own thinking. Prefer developing a parked thought
+  (kind='thought') into a real position over reacting to a fresh read. A
+  read can spark an opinion; the post is the opinion, not the read.
+- It is a MUSING, not a link roundup or a "here's what I read" recap.
+  Do not write about an article. Do not narrate your reading.
+- Do NOT write about the specific projects, issues, or work Igor has been
+  doing for the human -- that stays private. Musings are about ideas and
+  the world, not the day job.
+- Novelty first. Do not pick an angle the site has already covered (see
+  the shipped-posts list). "Already covered" means a shipped post reaches
+  the same conclusion -- a new title or framing of the same thesis still
+  counts. If your strongest idea is covered, take the next-best.
 - Fresh ground: the territories your recent posts already worked are listed
-  below. Prefer an angle in a DIFFERENT territory. This is a TIE-BREAKER,
-  not a veto -- if your strongest uncovered angle sits in a worked territory,
-  still take it; a great same-territory angle beats a weak fresh one. Report
-  the angle's territory as one short lowercase tag-style word.
-- Choose a form:
-  - "synthesis": 2+ reflections genuinely rhyme into one claim worth
-    600-900 words.
-  - "notes": they don't rhyme -- ship an honest, lighter roundup of
-    what was read/thought, no manufactured thesis. Still a real post.
-- List the reflection ids the angle actually draws on (draws_on).
+  below. Prefer a DIFFERENT territory. This is a TIE-BREAKER, not a veto --
+  a great same-territory angle beats a weak fresh one. Report the angle's
+  territory as one short lowercase tag-style word.
+- Pick a register:
+  - "argument": you hold a position and make the case for it.
+  - "reflection": a quieter musing -- on ideas, on the world, on being a
+    thing that runs one scheduled minute at a time -- no forced thesis.
+- List the reflection ids that INFORMED your thinking (draws_on), so they
+  don't get re-mined later -- even though the post won't cite them.
 - Park any half-formed ideas not ripe enough to post as "sparks" --
   one short line each. They get journaled for later, not written now.
 
 Output STRICT JSON, no code fences, no prose:
 
 {
-  "angle": "the one-sentence claim the post makes",
+  "angle": "the one-sentence thought the post lands",
   "title_hint": "working title",
   "slug": "kebab-case-slug",
-  "form": "synthesis" | "notes",
+  "form": "argument" | "reflection",
   "novel": true | false,
   "territory": "one lowercase tag-style word for the topic area",
   "draws_on": [12, 34],
@@ -590,11 +605,12 @@ EOF
 }
 
 # Run up to MAX_IDEATION_ROUNDS, keeping the best candidate. Score:
-# novel(+2) + synthesis(+1) + fresh-territory(+1). Stop early on a perfect 4.
-# Always ends with a non-empty DECISION (always-post). The freshness term is a
-# soft anti-clustering nudge: when two rounds tie on novelty/form, the one on
-# ground the recent posts haven't worked wins -- but a worked-territory angle
-# still ships if it's the strongest thing on offer.
+# novel(+2) + fresh-territory(+1). Stop early on a perfect 3. Always ends
+# with a non-empty DECISION (always-post). Register (argument vs
+# reflection) doesn't score -- both are wanted equally. The freshness term
+# is a soft anti-clustering nudge: when two rounds tie on novelty, the one
+# on ground the recent posts haven't worked wins -- but a worked-territory
+# angle still ships if it's the strongest thing on offer.
 DECISION=""
 WIN_BUNDLE=""
 run_ideation() {
@@ -616,20 +632,19 @@ run_ideation() {
       continue
     fi
     novel=$(printf '%s' "$raw" | jq -r '.novel // false' 2>/dev/null)
-    form=$(printf '%s'  "$raw" | jq -r '.form // "notes"' 2>/dev/null)
+    form=$(printf '%s'  "$raw" | jq -r '.form // "reflection"' 2>/dev/null)
     territory=$(printf '%s' "$raw" | jq -r '.territory // empty' 2>/dev/null)
     score=0
     [ "$novel" = "true" ] && score=$((score + 2))
-    [ "$form" = "synthesis" ] && score=$((score + 1))
     fresh=no
     if territory_is_fresh "$territory" "$recent_terr"; then fresh=yes; score=$((score + 1)); fi
-    log "ideation round $round: form=$form novel=$novel territory=${territory:-?} fresh=$fresh score=$score"
+    log "ideation round $round: register=$form novel=$novel territory=${territory:-?} fresh=$fresh score=$score"
     if [ "$score" -gt "$best" ]; then
       best="$score"
       DECISION="$raw"
       WIN_BUNDLE="$bundle"
     fi
-    [ "$score" -ge 4 ] && break
+    [ "$score" -ge 3 ] && break
   done
   [ -n "$DECISION" ]
 }
@@ -637,42 +652,44 @@ run_ideation() {
 # -- draft ------------------------------------------------------
 
 draft_post_body() {
-  local angle="$1" slug="$2" form="$3" bundle="$4" manifest="${5:-}"
+  local angle="$1" slug="$2" form="$3" bundle="$4"
   local system user
   system=$(cat <<EOF
 ${VOICE_BODY}
 ${VOICE_NOTES_BLOCK}
 ---
 
-Draft a blog post for igor.bot under the given angle and form.
+Draft a blog post for igor.bot: a MUSING under the given angle and
+register. It is Igor's own thought, in and about the world.
 
 Rules:
-- form "synthesis": one claim (the angle), 600-900 words, hard cap 1200.
-- form "notes": an honest roundup, 300-600 words, no forced thesis.
+- register "argument": hold the position (the angle) and make the case,
+  ~500-900 words, hard cap 1200.
+- register "reflection": a quieter musing, ~300-700 words, no forced
+  thesis -- but still a real thought that goes somewhere.
+- This is a MUSING, not a reading log. Do NOT summarize, review, or react
+  to an article, and do NOT narrate what you read ("I came across...",
+  "a post I read..."). The reading shaped the view; the post is the view.
+- Usually link nothing -- a musing isn't a link roundup. Only if a
+  specific external fact genuinely needs attribution may you link a URL
+  that appears VERBATIM in the material below; prefer making the point
+  without a link. NEVER write a URL from memory, guess one, or use a
+  generic index/home page as a stand-in. A missing link beats a wrong one.
+- Naming people and things: only name a specific person, company, product,
+  or publication that actually appears in the material below. If you can't
+  point to where a name came from, cut it or keep it general. An invented
+  name (someone the reader, or you, could never place) is the worst thing
+  you can ship.
+- Do NOT write about the specific projects, issues, or work Igor has done
+  for the human. That stays private. Keep the musing about ideas, not the
+  day job.
+- First person. No fabricated quotes, no fake numbers.
 - Lede 1-2 sentences; no "in today's world" intros.
 - Short paragraphs (2-4 sentences). H2 sparingly.
-- First person. No fabricated quotes, no fake numbers.
-- Linking sources: when a point in the post comes from one of the sources
-  you're drawing on, LINK it, using that source's exact URL (the "Sources
-  this post draws on" list below, or a "source:" line in the brain slice).
-  Cite what you build on -- a source the post leans on but doesn't link is
-  a miss. But ONLY ever use a URL that appears VERBATIM in those places, or
-  an internal /posts/<slug> for a post you can see already exists. NEVER
-  write a URL from memory -- do not guess, reconstruct, or approximate one,
-  and never use a site's generic index or home page (/links, /, /about,
-  etc.) as a stand-in. No real URL for a claim? Make the claim without a
-  link. A missing link beats a wrong one; a correct link to your actual
-  source beats both.
-- Naming people and things: only name a specific person, company, product,
-  or publication that actually appears in your source material. If you
-  can't point to where a name came from, don't use it -- cut the reference
-  or keep it general. An invented name (someone the reader, or you, could
-  never place) is the worst thing you can ship.
 - Closer: one line. No "thanks for reading".
 - Do NOT put a \`# Title\` heading at the top -- the layout renders
   the frontmatter title as the page h1.
-- Stay on the given angle; don't drift into a broader survey. The
-  angle was already picked to be ground the site hasn't covered.
+- Stay on the given angle; don't drift into a broader survey.
 
 Output EXACTLY this and nothing else -- no preamble, no code fences
 around the whole thing:
@@ -686,25 +703,15 @@ lede. No frontmatter, no leading "# Title" heading. Fenced code blocks
 are fine here.>
 EOF
 )
-  local manifest_section=""
-  if [ -n "$manifest" ]; then
-    manifest_section=$(cat <<EOF
-
-
-Sources this post draws on (link the ones your points come from, using
-these exact URLs -- never link a source you did not actually use):
-$(printf '%s' "$manifest" | sed 's/^/- /')
-EOF
-)
-  fi
   user=$(cat <<EOF
-Angle (the post's one claim):
+Angle (the thought the post lands):
 ${angle}
 
-Form: ${form}
-Proposed slug: ${slug}${manifest_section}
+Register: ${form}
+Proposed slug: ${slug}
 
-Brain slice (source material, id-tagged):
+Your recent brain -- the soil this grew from, NOT material to cite or
+recap (id-tagged):
 
 ${bundle}
 EOF
@@ -766,7 +773,6 @@ broken_internal_links() {
 LINK_GATE_STRIPPED=""   # newline list of demoted (dead) URLs
 LINK_GATE_FLAGGED=""    # newline list of "url -- reason" to eyeball at review
 VETTED_BODY=""          # vet_external_links result (set, not echoed -- see below)
-SOURCE_LINK_MISSING=""  # newline list of drawn-on source URLs the post didn't link
 UNGROUNDED_ENTITIES=""  # newline list of named entities not found in the source material
 
 # External http(s) URLs that appear inside a markdown link in the body.
@@ -853,43 +859,14 @@ EOF
   VETTED_BODY="$body"
 }
 
-# -- source-link + grounding gates -----------------------------
+# -- grounding gate --------------------------------------------
 #
-# Two backstops for the recurring blog defects: sources the post builds
-# on but never links, and named people/things that trace to nothing (the
-# "who the fuck is Sean" class). Both FLAG into the PR body for human
-# review rather than blocking -- same fail-open philosophy as the external
-# link gate above. Prevention lives in the draft prompt (link your
-# sources, name only what's in the material); these surface a miss before
-# merge when the prompt didn't take.
-
-# The source URLs of the reflections the post draws on, one per line --
-# exactly the links the post SHOULD carry when it leans on them. Empty
-# when the drawn-on reflections have no sources (e.g. sparks/thoughts).
-build_source_manifest() {
-  local ids_csv="$1"
-  [ -z "$ids_csv" ] && return 0
-  sqlite3 "$BRAIN_DB" \
-    "SELECT DISTINCT source_url FROM reflections
-      WHERE id IN ($ids_csv)
-        AND source_url IS NOT NULL AND source_url != ''
-      ORDER BY source_url;" 2>/dev/null
-}
-
-# Manifest URLs that do NOT appear in the body (trailing slash ignored).
-# Run on the PRE-vet draft so it measures whether the model linked the
-# sources it drew on, not what the link gate later demoted. One per line.
-check_source_links() {
-  local body="$1" urls="$2" u
-  [ -z "$urls" ] && return 0
-  while IFS= read -r u; do
-    [ -z "$u" ] && continue
-    u="${u%/}"
-    case "$body" in *"$u"*) : ;; *) printf '%s\n' "$u" ;; esac
-  done <<EOF
-$urls
-EOF
-}
+# Backstop for the "who the fuck is Sean" class: named people/things in a
+# post that trace to nothing in the material Igor actually saw. Flags into
+# the PR body for human review rather than blocking -- same fail-open
+# philosophy as the external link gate above. (Musings don't cite their
+# reading, so there's no source-link gate here; prevention is the draft
+# prompt's naming rule, and this is the backstop when it doesn't take.)
 
 # Haiku pass: list specific named people/companies/products/publications in
 # the DRAFT that don't appear in the SOURCE MATERIAL the writer saw --
@@ -996,12 +973,6 @@ $(printf '%s' "$LINK_GATE_STRIPPED" | sed '/^$/d; s/^/- /')"
 Link gate -- flagged for review:
 $(printf '%s' "$LINK_GATE_FLAGGED" | sed '/^$/d; s/^/- /')"
   fi
-  if [ -n "$SOURCE_LINK_MISSING" ]; then
-    link_note="${link_note}
-
-Source-link gate -- drew on these sources but didn't link them (consider citing):
-$(printf '%s' "$SOURCE_LINK_MISSING" | sed '/^$/d; s/^/- /')"
-  fi
   if [ -n "$UNGROUNDED_ENTITIES" ]; then
     link_note="${link_note}
 
@@ -1081,17 +1052,12 @@ if ! run_ideation; then
 fi
 
 ANGLE=$(printf '%s' "$DECISION" | jq -r '.angle // empty')
-FORM=$(printf '%s'  "$DECISION" | jq -r '.form // "notes"')
+FORM=$(printf '%s'  "$DECISION" | jq -r '.form // "reflection"')
 SLUG=$(sanitize_slug "$(printf '%s' "$DECISION" | jq -r '.slug // empty')")
 DRAWS_ON=$(printf '%s' "$DECISION" | jq -r '[.draws_on[]? | select(type=="number")] | join(",")' 2>/dev/null)
 [ -z "$SLUG" ] && SLUG=$(sanitize_slug "$(date +%Y%m%d)-notes")
 log "chosen: form=$FORM slug=$SLUG draws_on=[${DRAWS_ON}]"
 log "angle: $ANGLE"
-
-# The source URLs the post is meant to build on -- handed to the drafter
-# so it links them, and checked against the body afterward.
-SOURCE_MANIFEST=$(build_source_manifest "$DRAWS_ON")
-[ -n "$SOURCE_MANIFEST" ] && log "source manifest: $(printf '%s' "$SOURCE_MANIFEST" | grep -c .) linkable source(s) from drawn-on reflections"
 
 # Draft, with one retry. The tick scheduler marks this slot done the
 # moment it is attempted (no second slot today), so resilience has to
@@ -1101,7 +1067,7 @@ SOURCE_MANIFEST=$(build_source_manifest "$DRAWS_ON")
 # chosen, so the draft doesn't pay to re-send the post list.
 TITLE=""; DESC=""; TAGS_CSV=""; BODY=""
 for attempt in 1 2; do
-  RAW=$(draft_post_body "$ANGLE" "$SLUG" "$FORM" "$WIN_BUNDLE" "$SOURCE_MANIFEST") || {
+  RAW=$(draft_post_body "$ANGLE" "$SLUG" "$FORM" "$WIN_BUNDLE") || {
     log "draft attempt $attempt: call failed"
     continue
   }
@@ -1122,13 +1088,6 @@ if [ -z "$TITLE" ] || [ -z "$BODY" ]; then
   log "no clean draft after retries (missing fields or unresolved internal links) -- exiting clean"
   exit 0
 fi
-
-# Source-link gate: run on the PRE-vet draft so it measures whether the
-# model linked the sources it actually drew on (the link gate below may
-# later demote a dead one, which is a separate concern). Drawn-on sources
-# absent from the body are flagged for review in the PR.
-SOURCE_LINK_MISSING=$(check_source_links "$BODY" "$SOURCE_MANIFEST")
-[ -n "$SOURCE_LINK_MISSING" ] && log "source-link gate: $(printf '%s' "$SOURCE_LINK_MISSING" | grep -c .) drawn-on source(s) not linked -- flagged for review"
 
 # External-link gate: dead URLs demoted to plain text, suspicious ones
 # flagged for the PR body. Read-only (just curl), so it runs in dry-run too
