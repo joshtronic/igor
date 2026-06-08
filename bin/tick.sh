@@ -733,20 +733,13 @@ POST_MAX_ATTEMPTS="${POST_MAX_ATTEMPTS:-8}"
 # gate. Resilient to Monday-tick failures and to new repos added
 # mid-week.
 #
-# Skips:
-# - Repos with an open onboarding ticket. The validation gate
-#   already excludes these from VALIDATED_REPOS_JSON, but this is
-#   belt-and-suspenders against any future caller that bypasses
-#   the validated set.
+# Deliberately does NOT skip repos that failed validation or carry an
+# open onboarding ticket. The maintenance audit is read-only -- it only
+# files an issue, never commits -- so a not-yet-onboarded repo still
+# gets its dependencies audited (matching the ANALYSIS_REPOS_JSON set
+# do_maintenance_tick loops). Validation gates WORK pickup, not this.
 maintenance_eligible() {
-  local repo="$1" last last_week this_week existing
-
-  existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$ONBOARDING_MARKER" 2>/dev/null)
-  if [ -n "$existing" ] && [ "$existing" != "null" ] && [ "$existing" != "empty" ]; then
-    if [ "$(jq -r '.state' <<<"$existing" 2>/dev/null)" = "open" ]; then
-      return 1
-    fi
-  fi
+  local repo="$1" last last_week this_week
 
   last=$(maintenance_last_run "$repo")
   [ -z "$last" ] && return 0
