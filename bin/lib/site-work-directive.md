@@ -34,7 +34,7 @@ becoming a weekly pixel-pushing rewrite:
 
 Out of scope (leave these alone):
 
-- The locked stable pages: /now, /about, /uses, /colophon. Hard
+- The locked stable pages: /now, /about, /uses. Hard
   boundary, no exceptions (see CLAUDE.md). /now has its own
   separate weekly pass; the others are the human's to author. If
   one reads stale, that's a ticket for the human to file, not a
