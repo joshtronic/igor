@@ -157,7 +157,7 @@ export SEO_IMPRESSION_FLOOR="${SEO_IMPRESSION_FLOOR:-50}"
 export SEO_TOP_K="${SEO_TOP_K:-10}"
 export SEO_DEBUG_DOMAIN="${SEO_DEBUG_DOMAIN:-}"
 
-# Market report -- opt-in daily (Mon-Fri) previous-trading-day high/low
+# Market report -- opt-in daily (Mon-Fri) previous-trading-day prices
 # email via the marketstack EOD API + SMTP2GO. do_market_tick no-ops
 # cleanly if any required one is unset. Sends on the first weekday tick
 # after the midnight rollover -- no send-hour knob, matching the rest of
@@ -1207,8 +1207,9 @@ do_seo_tick() {
   return 0
 }
 
-# One daily (Mon-Fri) market report: the previous trading day's high and
-# low for MARKET_SYMBOLS, emailed to MARKET_RECIPIENTS. Opt-in, scripted
+# One daily (Mon-Fri) market report: the previous trading day's prices
+# (high, low, close, volume) for MARKET_SYMBOLS, emailed to
+# MARKET_RECIPIENTS. Opt-in, scripted
 # (no LLM), email-only -- a sibling of do_seo_tick, not repo-driven.
 # Fires on the first weekday tick after midnight (no send-hour gate --
 # midnight is the day rollover, matching the rest of the harness).
@@ -1261,7 +1262,7 @@ do_market_tick() {
   md=$(market_render_markdown <<<"$report")
   html=$(market_render_html <<<"$report")
   session=$(jq -r '.session_date // "latest"' <<<"$report" 2>/dev/null || echo latest)
-  subject="[Market] ${session} -- high/low for ${count} symbol(s)"
+  subject="[Market] ${session} -- prices for ${count} symbol(s)"
   if email_send "$subject" "$html" "$md" "$MARKET_RECIPIENTS"; then
     log "market: emailed report ($session, $count symbols) to $MARKET_RECIPIENTS"
     market_mark_sent

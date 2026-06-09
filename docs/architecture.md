@@ -82,8 +82,9 @@ A timer fires `bin/tick.sh`. Per tick:
    outcome grading. Nothing above the floor -> no email, no ticket.
 9. **Market report** (opt-in via marketstack + SMTP2GO env; no-ops
    when unconfigured). A daily Mon-Fri email of the previous trading
-   day's HIGH and LOW for the symbols in `MARKET_SYMBOLS`, to
-   `MARKET_RECIPIENTS`. Scripted (`lib/marketstack.sh` makes one v2 EOD
+   day's prices (company, high, low, close, volume) for the symbols in
+   `MARKET_SYMBOLS`, to `MARKET_RECIPIENTS`, as an HTML table.
+   Scripted (`lib/marketstack.sh` makes one v2 EOD
    request for all symbols; `lib/market-report.sh` builds + renders the
    table -- no LLM); email-only, NOT repo-driven (a sibling of the SEO
    pass). Sends at most once per weekday, on the first tick after the
@@ -210,7 +211,7 @@ lib/
 |-- email.sh                 # SMTP2GO HTTP API sender (shared: SEO, market)
 |-- seo-analysis.sh          # scripted SEO analysis: score, grade, render (no LLM)
 |-- marketstack.sh           # marketstack EOD API client (market report, opt-in)
-`-- market-report.sh         # scripted market report: build + render high/low (no LLM)
+`-- market-report.sh         # scripted market report: build + render price table (no LLM)
 
 systemd/                     # user units (no @ instance)
 |-- agent.service
