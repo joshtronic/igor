@@ -159,9 +159,11 @@ export SEO_DEBUG_DOMAIN="${SEO_DEBUG_DOMAIN:-}"
 
 # Market report -- opt-in daily (Mon-Fri) previous-trading-day prices
 # email via the marketstack EOD API + SMTP2GO. do_market_tick no-ops
-# cleanly if any required one is unset. Sends on the first weekday tick
+# cleanly if any required one is unset. Tries on the first weekday tick
 # after the midnight rollover -- no send-hour knob, matching the rest of
-# the harness (midnight = a new day, no clock gating).
+# the harness (midnight = a new day, no clock gating) -- but only emails
+# once the latest EOD bar is the session it expects; until then it holds
+# and re-checks on a cooldown (see MARKET_RETRY_COOLDOWN_SECS).
 export MARKETSTACK_API_KEY="${MARKETSTACK_API_KEY:-}"
 export MARKET_SYMBOLS="${MARKET_SYMBOLS:-}"
 export MARKET_RECIPIENTS="${MARKET_RECIPIENTS:-}"
@@ -660,22 +662,35 @@ seo_mark_done() {
 # -- Market report daily send state -----------------------------
 #
 # One ".market" object in discretionary-state.json (same file as
-# .slots/.weekly/.maintenance/.seo), shaped { date, sent, attempts } --
-# mirroring how .slots carries its date + flags + attempt counters in a
-# single namespaced key. The date drives a self-resetting daily rollover
-# for both fields; each mutator normalizes to today before touching it.
+# .slots/.weekly/.maintenance/.seo), shaped { date, sent, failures,
+# last_attempt } -- mirroring how .slots carries its date + flags +
+# counters in a single namespaced key. The date drives a self-resetting
+# daily rollover for every field; each mutator normalizes to today before
+# touching it.
 #
 # The report sends at most once per local day (sent=true), and unlike
-# the slots this is independent of WEBSITE_REPO. The attempt counter
-# bounds how many times a failing send re-hits the metered marketstack
-# API in a day: a few retries ride out a transient blip, then the day is
-# abandoned rather than burning quota at the 1-minute cadence.
+# the slots this is independent of WEBSITE_REPO. Two distinct concerns,
+# decoupled on purpose:
+#   - last_attempt (epoch secs) spaces EVERY marketstack hit by
+#     MARKET_RETRY_COOLDOWN_SECS, so the midnight-boundary wait for fresh
+#     EOD data doesn't poll the metered API every minute.
+#   - failures counts only HARD failures (API error / empty read / send
+#     failure) -- a broken key or outage. It's capped so the day is
+#     abandoned rather than burning quota indefinitely; a successful fetch
+#     clears it. Stale-but-valid data ("not published yet") is NOT a
+#     failure: it just holds and re-checks on the next cooldown.
 # Regenerable -- losing it just re-opens today's send.
+
+# Space EVERY per-day marketstack hit so a stale/empty read (common at the
+# midnight boundary, before EOD data is published) doesn't re-hit the
+# metered API every tick. Override-with-default, mirroring
+# VALIDATION_COOLDOWN_SECS; the first attempt of the day is never delayed.
+MARKET_RETRY_COOLDOWN_SECS="${MARKET_RETRY_COOLDOWN_SECS:-900}"  # 15 min
 
 # jq fragment: normalize .market to today, resetting if the day rolled.
 # shellcheck disable=SC2016  # $d is a jq --arg, not shell -- must not expand
 MARKET_ROLL='(if (.market.date // "") == $d then .market
-              else {date:$d, sent:false, attempts:0} end)'
+              else {date:$d, sent:false, failures:0, last_attempt:0} end)'
 
 market_sent_today() {
   local state_file today
@@ -698,19 +713,90 @@ market_mark_sent() {
   mv "$tmp" "$state_file"
 }
 
-# Increment today's attempt count (resetting on a day rollover) and echo
-# the new value. The cap that consumes this lives in do_market_tick.
-market_attempt_inc() {
+# Echo today's failure count (0 if unset or the day rolled). Read-only --
+# the cap that consumes it lives in do_market_tick.
+market_failures() {
+  local state_file today n
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || { echo 0; return; }
+  today=$(date +%Y-%m-%d)
+  n=$(jq -r --arg d "$today" \
+    'if (.market.date // "") == $d then (.market.failures // 0) else 0 end' \
+    "$state_file" 2>/dev/null)
+  [ -n "$n" ] && [ "$n" != "null" ] || n=0
+  echo "$n"
+}
+
+# Stamp last_attempt=now (resetting on a day rollover). Called once per
+# marketstack hit, before the request -- it's what the cooldown reads.
+market_mark_attempt() {
+  local state_file tmp today now
+  state_file=$(discretionary_state_file)
+  today=$(date +%Y-%m-%d)
+  now=$(date +%s)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg d "$today" --argjson now "$now" \
+    ".market = ($MARKET_ROLL | .last_attempt = \$now)" \
+    "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
+# Bump today's HARD-failure count (API error / empty read / send failure)
+# and echo the new value. Stale-but-valid reads do NOT call this.
+market_failure_inc() {
   local state_file tmp today n
   state_file=$(discretionary_state_file)
   today=$(date +%Y-%m-%d)
   [ -f "$state_file" ] || echo '{}' > "$state_file"
   tmp=$(mktemp)
-  jq --arg d "$today" ".market = ($MARKET_ROLL | .attempts += 1)" \
+  jq --arg d "$today" ".market = ($MARKET_ROLL | .failures += 1)" \
     "$state_file" > "$tmp"
   mv "$tmp" "$state_file"
-  n=$(jq -r '.market.attempts' "$state_file" 2>/dev/null)
+  n=$(jq -r '.market.failures' "$state_file" 2>/dev/null)
   echo "$n"
+}
+
+# Clear today's failure streak -- a successful fetch proves the API works,
+# so any prior transient failures shouldn't count toward the cap.
+market_clear_failures() {
+  local state_file tmp today
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || return 0
+  today=$(date +%Y-%m-%d)
+  tmp=$(mktemp)
+  jq --arg d "$today" ".market = ($MARKET_ROLL | .failures = 0)" \
+    "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
+# True when it's OK to hit marketstack again today: either no attempt yet
+# today (first post-midnight tick fires immediately) or the cooldown since
+# the last attempt has elapsed. Keeps a stale/failed read from re-polling
+# the metered API every minute while we wait for fresh EOD data.
+market_retry_ready() {
+  local state_file today last now
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || return 0
+  today=$(date +%Y-%m-%d)
+  last=$(jq -r --arg d "$today" \
+    'if (.market.date // "") == $d then (.market.last_attempt // 0) else 0 end' \
+    "$state_file" 2>/dev/null)
+  [ -n "$last" ] && [ "$last" != "null" ] || last=0
+  now=$(date +%s)
+  [ "$((now - last))" -ge "$MARKET_RETRY_COOLDOWN_SECS" ]
+}
+
+# Echo the most recent completed trading session we expect EOD data for:
+# the previous weekday (yesterday Tue-Fri, or Friday on a Monday). Holiday-
+# naive -- on the trading day after a market holiday the real last session
+# predates this, so the freshness gate won't match and the report holds for
+# the day (see do_market_tick).
+# Portable across GNU (Linux server) and BSD (macOS dev) date.
+market_prev_trading_day() {
+  local back=1
+  [ "$(date +%u)" -eq 1 ] && back=3  # Monday -> Friday
+  date -d "-${back} days" +%F 2>/dev/null || date -v-"${back}"d +%F 2>/dev/null
 }
 
 # -- Validation pass cache --------------------------------------
@@ -1212,10 +1298,18 @@ do_seo_tick() {
 # MARKET_RECIPIENTS. Opt-in, scripted
 # (no LLM), email-only -- a sibling of do_seo_tick, not repo-driven.
 # Fires on the first weekday tick after midnight (no send-hour gate --
-# midnight is the day rollover, matching the rest of the harness).
+# midnight is the day rollover, matching the rest of the harness), but
+# only emails once the latest EOD bar is the session we expect: at the
+# boundary marketstack often still has the prior session, and sending
+# that would email stale prices. A stale read just holds (no send) and
+# re-checks on the next cooldown; a HARD failure (API error / empty read /
+# send failure) bumps a small bounded counter so a broken key or outage
+# abandons the day instead of burning the metered quota. (Holiday-naive:
+# on the trading day after a market holiday the freshness gate never
+# matches, so no report goes out that day -- see market_prev_trading_day.)
 # Returns 0 if a report was sent (caller exits the tick), 1 if the
-# subsystem is unconfigured, it's the weekend, today's already sent, or
-# the send failed (caller falls through to the grind).
+# subsystem is unconfigured, it's the weekend, today's already sent, the
+# data isn't fresh yet, or the send failed (caller falls through).
 do_market_tick() {
   # Opt-in gate: every required credential/config must be present.
   if [ -z "${MARKETSTACK_API_KEY:-}" ] || [ -z "${MARKET_SYMBOLS:-}" ] \
@@ -1231,44 +1325,75 @@ do_market_tick() {
   # At most once per day (set only on a successful send).
   market_sent_today && return 1
 
-  # Bound the daily retries so a persistent failure can't re-hit the
-  # metered marketstack API every minute. A handful of attempts rides
-  # out a transient blip; past the cap, abandon today (clear the .market
-  # object in discretionary-state.json to force a retry). Hardcoded, not
-  # an env knob -- keep the .env surface small.
-  local max_attempts=5 attempt
-  attempt=$(market_attempt_inc)
-  if [ "$attempt" -gt "$max_attempts" ]; then
-    [ "$attempt" -eq $((max_attempts + 1)) ] \
-      && log "market: ${max_attempts} failed attempts today -- abandoning the report for the day"
-    return 1
-  fi
+  # Failure budget: once marketstack/SMTP has hard-failed too many times
+  # today, abandon the day rather than keep burning the metered quota
+  # (clear the .market object in discretionary-state.json to force a retry).
+  # Checked before the cooldown so an abandoned day stops cheaply, and
+  # before any API hit so we never re-fetch past the cap. Hardcoded, not an
+  # env knob -- keep the .env surface small.
+  local max_failures=5 failures
+  failures=$(market_failures)
+  [ "$failures" -ge "$max_failures" ] && return 1
 
-  log "market: fetching EOD for ${MARKET_SYMBOLS} (attempt ${attempt}/${max_attempts})"
+  # Cooldown gate: at most one marketstack hit per MARKET_RETRY_COOLDOWN_SECS.
+  # The first attempt of the day passes straight through (last_attempt=0);
+  # a stale or failed read then waits out the cooldown instead of polling
+  # the metered API every minute while EOD data is still being published.
+  market_retry_ready || return 1
+  market_mark_attempt  # start the cooldown clock for this hit
+
+  log "market: fetching EOD for ${MARKET_SYMBOLS}"
   local eod report count
   eod=$(marketstack_eod_latest "$MARKET_SYMBOLS") || eod='{"data":[]}'
   report=$(market_build_report "$eod" "$MARKET_SYMBOLS")
   count=$(jq -r '.count // 0' <<<"$report" 2>/dev/null || echo 0)
 
   if [ "${count:-0}" -eq 0 ]; then
-    # No bars at all -- almost always a transient API failure or a bad
-    # key (a valid symbol always has a last EOD bar). Don't send; the
-    # bounded retry above will try again next tick.
-    log "market: no EOD rows returned -- not sending (will retry, attempt ${attempt}/${max_attempts})"
+    # No bars at all -- a hard failure (transient API error or a bad key;
+    # a valid symbol always has a last EOD bar). Count it toward the cap.
+    failures=$(market_failure_inc)
+    if [ "$failures" -ge "$max_failures" ]; then
+      log "market: ${max_failures} consecutive failures today -- abandoning the report for the day"
+    else
+      log "market: no EOD rows returned -- not sending (failure ${failures}/${max_failures}, retry after cooldown)"
+    fi
     return 1
   fi
 
-  local md html session subject
+  # Got data -- the API works, so clear any prior transient-failure streak.
+  market_clear_failures
+
+  # Freshness gate: the latest bar should be the most recent completed
+  # session (yesterday, or Friday on a Monday). At the midnight boundary
+  # marketstack often still has only the prior session -- hold for fresh
+  # data rather than emailing stale prices. This is NOT a failure (the API
+  # answered fine), so it doesn't touch the failure budget; the cooldown
+  # alone rate-limits the wait.
+  local session expected
+  session=$(jq -r '.session_date // ""' <<<"$report" 2>/dev/null || echo "")
+  expected=$(market_prev_trading_day)
+  if [ "$session" != "$expected" ]; then
+    log "market: latest bar is ${session:-none}, expected ${expected} -- holding for fresh data (retry after cooldown)"
+    return 1
+  fi
+
+  local md html subject
   md=$(market_render_markdown <<<"$report")
   html=$(market_render_html <<<"$report")
-  session=$(jq -r '.session_date // "latest"' <<<"$report" 2>/dev/null || echo latest)
-  subject="[Market] ${session} -- prices for ${count} symbol(s)"
+  subject="[Market] ${session:-latest} -- prices for ${count} symbol(s)"
   if email_send "$subject" "$html" "$md" "$MARKET_RECIPIENTS"; then
-    log "market: emailed report ($session, $count symbols) to $MARKET_RECIPIENTS"
+    log "market: emailed report (${session:-latest}, $count symbols) to $MARKET_RECIPIENTS"
     market_mark_sent
     return 0
   fi
-  log "warning: market email failed (attempt ${attempt}/${max_attempts}) -- will retry next tick"
+  # Send failure -- count it toward the cap so a persistent SMTP outage
+  # abandons the day rather than re-fetching marketstack every cooldown.
+  failures=$(market_failure_inc)
+  if [ "$failures" -ge "$max_failures" ]; then
+    log "market: ${max_failures} consecutive failures today -- abandoning the report for the day"
+  else
+    log "warning: market email failed (failure ${failures}/${max_failures}) -- will retry after cooldown"
+  fi
   return 1
 }
 
