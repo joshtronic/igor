@@ -25,8 +25,12 @@ MARKETSTACK_BASE_URL="${MARKETSTACK_BASE_URL:-https://api.marketstack.com/v2}"
 # marketstack_eod_latest <symbols_csv>
 # Fetches the latest end-of-day bar for each symbol -- i.e. the most
 # recent completed trading session (the "previous trading day": Friday's
-# data on a Monday, the pre-holiday session after a market holiday). One
-# request returns every symbol. Echoes the raw JSON response object
+# data on a Monday, the pre-holiday session after a market holiday). All
+# symbols come back in ONE request (no per-symbol fan-out); the once-per-
+# day gate in do_market_tick is the rate limit. EOD is not subject to
+# the real-time endpoints' 1-call/minute throttle. limit=1000 (the API
+# max) lifts the default 100-row pagination so a large MARKET_SYMBOLS
+# list isn't silently truncated. Echoes the raw JSON response object
 # ({ "data": [ {open,high,low,close,volume,symbol,exchange,date}, ... ] })
 # on stdout. Echoes '{"data":[]}' and rc=1 on any failure so callers can
 # branch on the row count rather than parse errors.
@@ -37,7 +41,8 @@ marketstack_eod_latest() {
   fi
   resp=$(curl -fsS -G "$MARKETSTACK_BASE_URL/eod/latest" \
     --data-urlencode "access_key=${MARKETSTACK_API_KEY}" \
-    --data-urlencode "symbols=${symbols}" 2>/dev/null) || {
+    --data-urlencode "symbols=${symbols}" \
+    --data-urlencode "limit=1000" 2>/dev/null) || {
       log "marketstack: request to $MARKETSTACK_BASE_URL/eod/latest failed"
       printf '%s' '{"data":[]}'; return 1
     }
