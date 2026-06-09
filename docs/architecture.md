@@ -83,17 +83,17 @@ A timer fires `bin/tick.sh`. Per tick:
 9. **Market report** (opt-in via marketstack + SMTP2GO env; no-ops
    when unconfigured). A daily Mon-Fri email of the previous trading
    day's HIGH and LOW for the symbols in `MARKET_SYMBOLS`, to
-   `MARKET_RECIPIENTS`. Scripted (`lib/marketstack.sh` fetches one EOD
+   `MARKET_RECIPIENTS`. Scripted (`lib/marketstack.sh` makes one v2 EOD
    request for all symbols; `lib/market-report.sh` builds + renders the
    table -- no LLM); email-only, NOT repo-driven (a sibling of the SEO
-   pass). Sends at most once per weekday, on the first tick at/after
-   `MARKET_SEND_HOUR` (local, default 7 -- a pre-market brief). Stamped
-   in a single `.market` object `{date, sent, attempts}` in
-   `discretionary-state.json`: `sent` flips true only on a successful
-   send; a failing send retries on the next tick but is capped (5
-   attempts/day via `attempts`) so a bad key or outage can't burn the
-   metered marketstack quota all day. Weekends, pre-send-hour, and
-   already-sent ticks fall through.
+   pass). Sends at most once per weekday, on the first tick after the
+   midnight rollover (no send-hour knob -- midnight is the day boundary,
+   same as the rest of the harness). Stamped in a single `.market`
+   object `{date, sent, attempts}` in `discretionary-state.json`:
+   `sent` flips true only on a successful send; a failing send retries
+   on the next tick but is capped (5 attempts/day via `attempts`) so a
+   bad key or outage can't burn the metered marketstack quota all day.
+   Weekends and already-sent ticks fall through.
 10. **Discovery.** For each validated repo, query for the oldest
    claimable issue (`Agent`-labeled, no assignee, not
    `Status/Blocked`). Skip repos with an open bot-authored PR --

@@ -159,13 +159,12 @@ export SEO_DEBUG_DOMAIN="${SEO_DEBUG_DOMAIN:-}"
 
 # Market report -- opt-in daily (Mon-Fri) previous-trading-day high/low
 # email via the marketstack EOD API + SMTP2GO. do_market_tick no-ops
-# cleanly if any required one is unset. MARKET_SEND_HOUR is the earliest
-# local hour a weekday tick will send (a single daily email, before the
-# US open by default).
+# cleanly if any required one is unset. Sends on the first weekday tick
+# after the midnight rollover -- no send-hour knob, matching the rest of
+# the harness (midnight = a new day, no clock gating).
 export MARKETSTACK_API_KEY="${MARKETSTACK_API_KEY:-}"
 export MARKET_SYMBOLS="${MARKET_SYMBOLS:-}"
 export MARKET_RECIPIENTS="${MARKET_RECIPIENTS:-}"
-export MARKET_SEND_HOUR="${MARKET_SEND_HOUR:-7}"
 
 # Put the harness's bin dir on PATH for every Claude invocation in
 # this script. Without this, Claude can't call agent-enqueue.sh /
@@ -1211,9 +1210,11 @@ do_seo_tick() {
 # One daily (Mon-Fri) market report: the previous trading day's high and
 # low for MARKET_SYMBOLS, emailed to MARKET_RECIPIENTS. Opt-in, scripted
 # (no LLM), email-only -- a sibling of do_seo_tick, not repo-driven.
+# Fires on the first weekday tick after midnight (no send-hour gate --
+# midnight is the day rollover, matching the rest of the harness).
 # Returns 0 if a report was sent (caller exits the tick), 1 if the
-# subsystem is unconfigured, it's the weekend, it's too early, today's
-# already sent, or the send failed (caller falls through to the grind).
+# subsystem is unconfigured, it's the weekend, today's already sent, or
+# the send failed (caller falls through to the grind).
 do_market_tick() {
   # Opt-in gate: every required credential/config must be present.
   if [ -z "${MARKETSTACK_API_KEY:-}" ] || [ -z "${MARKET_SYMBOLS:-}" ] \
@@ -1226,14 +1227,6 @@ do_market_tick() {
   local dow; dow=$(date +%u)
   [ "$dow" -ge 6 ] && return 1
 
-  # Send-hour gate: hold until the configured local hour so the report
-  # lands as a morning brief, not at the midnight rollover. %-H strips
-  # the leading zero so "07" doesn't parse as octal under arithmetic.
-  local hour; hour=$(date +%-H)
-  if [ "$hour" -lt "${MARKET_SEND_HOUR:-7}" ]; then
-    return 1
-  fi
-
   # At most once per day (set only on a successful send).
   market_sent_today && return 1
 
@@ -1241,7 +1234,7 @@ do_market_tick() {
   # metered marketstack API every minute. A handful of attempts rides
   # out a transient blip; past the cap, abandon today (clear the .market
   # object in discretionary-state.json to force a retry). Hardcoded, not
-  # an env knob -- keep the .env surface to the 4 vars.
+  # an env knob -- keep the .env surface small.
   local max_attempts=5 attempt
   attempt=$(market_attempt_inc)
   if [ "$attempt" -gt "$max_attempts" ]; then
@@ -1913,11 +1906,10 @@ if do_seo_tick; then
   exit 0
 fi
 
-# Daily market report (Mon-Fri, one email per weekday at/after
-# MARKET_SEND_HOUR). Opt-in via the marketstack + SMTP2GO env; no-ops
-# when unconfigured, on weekends, before the send hour, or once today's
-# already sent. Scripted, email-only -- a sibling of the SEO pass, not
-# repo-driven.
+# Daily market report (Mon-Fri, one email per weekday, on the first
+# tick after midnight). Opt-in via the marketstack + SMTP2GO env;
+# no-ops when unconfigured, on weekends, or once today's already sent.
+# Scripted, email-only -- a sibling of the SEO pass, not repo-driven.
 if do_market_tick; then
   exit 0
 fi

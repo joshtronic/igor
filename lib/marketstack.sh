@@ -7,6 +7,7 @@
 #   MARKETSTACK_API_KEY, MARKET_SYMBOLS
 # Requires on PATH: curl, jq.
 #
+# Uses the v2 API (the current marketstack surface; v1 is legacy).
 # Auth model: marketstack takes the access key as a query-string param
 # (access_key). On a paid plan the base URL is HTTPS, so the key is
 # encrypted in transit; MARKETSTACK_BASE_URL can override it (e.g. to the
@@ -17,9 +18,9 @@ if ! declare -F log >/dev/null; then
   log() { printf '[agent] %s\n' "$*"; }
 fi
 
-# Paid-plan default; override via MARKETSTACK_BASE_URL for the HTTP-only
-# free tier. No trailing slash.
-MARKETSTACK_BASE_URL="${MARKETSTACK_BASE_URL:-https://api.marketstack.com/v1}"
+# Paid-plan v2 default; override via MARKETSTACK_BASE_URL for the
+# HTTP-only free tier or a different API version. No trailing slash.
+MARKETSTACK_BASE_URL="${MARKETSTACK_BASE_URL:-https://api.marketstack.com/v2}"
 
 # marketstack_eod_latest <symbols_csv>
 # Fetches the latest end-of-day bar for each symbol -- i.e. the most

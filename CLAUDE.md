@@ -115,12 +115,13 @@ respective tools on the host; install or skip.
   under `.seo`) lives in `~/.local/state/agent/discretionary-state.json`;
   clear a domain's stamp there to re-run it.
 - The market report (`do_market_tick`) is opt-in via the marketstack
-  + SMTP2GO env and is a sibling of the SEO pass: scripted (no LLM),
-  email-only, NOT repo-driven. It's the only DAILY-but-weekday-gated
-  schedule (`date +%u` <= 5), and unlike the slots it's independent of
-  `WEBSITE_REPO`. Sends one email per weekday on the first tick at/after
-  `MARKET_SEND_HOUR` (local). It shares `email.sh` with SEO -- both now
-  gate on `SMTP2GO_API_KEY` + `SMTP2GO_SENDER` (renamed from
+  (v2 EOD API) + SMTP2GO env and is a sibling of the SEO pass: scripted
+  (no LLM), email-only, NOT repo-driven. It's the only DAILY-but-weekday-
+  gated schedule (`date +%u` <= 5), and unlike the slots it's independent
+  of `WEBSITE_REPO`. Sends one email per weekday on the first tick after
+  the midnight rollover -- no send-hour knob, matching the harness's
+  no-clock-gating design. It shares `email.sh` with SEO -- both now gate
+  on `SMTP2GO_API_KEY` + `SMTP2GO_SENDER` (renamed from
   `SEO_SENDER_EMAIL`; if you change the code's email vars, the host
   `.env` must change in lockstep or BOTH reports break). State is a
   single `.market` object `{date, sent, attempts}` in
