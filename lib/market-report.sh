@@ -63,16 +63,15 @@ MARKET_FMT_DEF='
 
 # market_render_markdown <report_json>
 # Markdown body -- doubles as the email text/plain part (a markdown table
-# reads fine as plain text). Pipes in a company name are swapped to "/"
-# so they can not break the table.
+# reads fine as plain text).
 market_render_markdown() {
   jq -r "$MARKET_FMT_DEF"'
     "# Market report — \(.session_date // "no session data")\n",
     "Previous trading day.\n",
-    "| Company | Symbol | High | Low | Close | Volume |",
-    "| --- | --- | ---: | ---: | ---: | ---: |",
+    "| Symbol | High | Low | Close | Volume |",
+    "| --- | ---: | ---: | ---: | ---: |",
     (.rows[]
-      | "| \(company(.name) | gsub("\\|"; "/")) | \(.symbol) | \(money(.high)) | \(money(.low)) | \(money(.close)) | \(vol(.volume)) |"),
+      | "| \(.symbol) | \(money(.high)) | \(money(.low)) | \(money(.close)) | \(vol(.volume)) |"),
     (if (.missing | length) > 0 then
       "\n> No data returned for: \(.missing | join(", "))"
      else empty end),
@@ -89,12 +88,12 @@ market_render_html() {
     "<p>Previous trading day.</p>",
     "<table cellpadding=\"6\" style=\"border-collapse:collapse\">",
     "<thead><tr>"
-      + "<th align=\"left\">Company</th><th align=\"left\">Symbol</th>"
+      + "<th align=\"left\">Symbol</th>"
       + "<th align=\"right\">High</th><th align=\"right\">Low</th>"
       + "<th align=\"right\">Close</th><th align=\"right\">Volume</th></tr></thead>",
     "<tbody>",
     (.rows[]
-      | "<tr><td>\(company(.name)|esc)</td><td>\(.symbol|esc)</td>"
+      | "<tr><td>\(.symbol|esc)</td>"
         + "<td align=\"right\">\(money(.high))</td><td align=\"right\">\(money(.low))</td>"
         + "<td align=\"right\">\(money(.close))</td><td align=\"right\">\(vol(.volume))</td></tr>"),
     "</tbody></table>",
