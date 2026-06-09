@@ -80,28 +80,43 @@ A timer fires `bin/tick.sh`. Per tick:
    picks up once that repo is validated. Surfaced opportunities are
    logged to `seo-opportunities.jsonl` with baselines for future
    outcome grading. Nothing above the floor -> no email, no ticket.
-9. **Discovery.** For each validated repo, query for the oldest
+9. **Market report** (opt-in via marketstack + SMTP2GO env; no-ops
+   when unconfigured). A daily Mon-Fri email of the previous trading
+   day's HIGH and LOW for the symbols in `MARKET_SYMBOLS`, to
+   `MARKET_RECIPIENTS`. Scripted (`lib/marketstack.sh` fetches one EOD
+   request for all symbols; `lib/market-report.sh` builds + renders the
+   table -- no LLM); email-only, NOT repo-driven (a sibling of the SEO
+   pass). Sends at most once per weekday, on the first tick at/after
+   `MARKET_SEND_HOUR` (local, default 7 -- a pre-market brief). Stamped
+   in a single `.market` object `{date, sent, attempts}` in
+   `discretionary-state.json`: `sent` flips true only on a successful
+   send; a failing send retries on the next tick but is capped (5
+   attempts/day via `attempts`) so a bad key or outage can't burn the
+   metered marketstack quota all day. Weekends, pre-send-hour, and
+   already-sent ticks fall through.
+10. **Discovery.** For each validated repo, query for the oldest
    claimable issue (`Agent`-labeled, no assignee, not
    `Status/Blocked`). Skip repos with an open bot-authored PR --
    one PR at a time per repo so the human can review without a
    backlog forming behind them. Pick the globally oldest across
    all eligible repos.
-10. **Claim and clone.** Assign the issue to the bot. If the repo
+11. **Claim and clone.** Assign the issue to the bot. If the repo
     isn't cloned locally yet, clone it to
     `~/.local/state/agent/repos/<owner>/<repo>/` via SSH.
-11. **Preflight.** Verify `CLAUDE.md` exists at the repo root. If
+12. **Preflight.** Verify `CLAUDE.md` exists at the repo root. If
     not, block the issue with a clear comment and bail. (Same code
     path as Claude calling `agent-block.sh` from inside the
     worktree.)
-12. **Work.** Make a worktree, invoke Claude with `bin/lib/voice.md`
+13. **Work.** Make a worktree, invoke Claude with `bin/lib/voice.md`
     plus `AGENTS.md` (the project's `CLAUDE.md` is auto-loaded by
     Claude Code), react to whatever Claude leaves behind. If
     discovery turned up nothing, the tick is idle and exits.
 
 There is no shift window -- every tick runs the full cascade, 24/7.
 Midnight is just the local-day rollover for the daily slots
-(reading, post); the weekly slots (/now, site-work), maintenance, and
-the per-domain SEO pass roll on the ISO week (Monday-anchored). What runs on a given tick is
+(reading, post) and the daily market report; the weekly slots
+(/now, site-work), maintenance, and the per-domain SEO pass roll on
+the ISO week (Monday-anchored). What runs on a given tick is
 decided by the cascade's fixed priority order, not the clock:
 PR-review and the ticket grind respond whenever there's a signal,
 while Igor's own daily/weekly work is throttled by its slots.
@@ -192,8 +207,10 @@ lib/
 |-- repo-checks.sh           # repo-readiness checks + onboarding ticket lifecycle
 |-- maintenance-checks.sh    # stack detection + audit tool dispatch
 |-- gsc.sh                   # Google Search Console API client (SEO, opt-in)
-|-- email.sh                 # SMTP2GO HTTP API sender (SEO, opt-in)
-`-- seo-analysis.sh          # scripted SEO analysis: score, grade, render (no LLM)
+|-- email.sh                 # SMTP2GO HTTP API sender (shared: SEO, market)
+|-- seo-analysis.sh          # scripted SEO analysis: score, grade, render (no LLM)
+|-- marketstack.sh           # marketstack EOD API client (market report, opt-in)
+`-- market-report.sh         # scripted market report: build + render high/low (no LLM)
 
 systemd/                     # user units (no @ instance)
 |-- agent.service
@@ -210,7 +227,7 @@ On the host (deployment-specific, not in the repo):
 ~/.local/share/agent/.env                      # secrets, chmod 600 -- the only config
 ~/.local/state/agent/lock                      # global flock
 ~/.local/state/agent/brain.sqlite              # seen URLs, sources, reflections
-~/.local/state/agent/discretionary-state.json  # daily/weekly slots + per-repo maintenance + per-domain SEO stamps
+~/.local/state/agent/discretionary-state.json  # daily/weekly slots + per-repo maintenance + per-domain SEO + daily market state
 ~/.local/state/agent/seo-opportunities.jsonl   # surfaced SEO opportunities + baselines (for outcome grading)
 ~/.local/state/agent/worktrees/<key>/          # per-tick worktrees
 ~/.local/state/agent/repos/<owner>/<repo>/     # harness's per-repo clones
