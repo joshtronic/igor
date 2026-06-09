@@ -96,6 +96,10 @@ unset env_file_hint
 . "$AGENT_HOME/lib/email.sh"
 # shellcheck source=lib/seo-analysis.sh
 . "$AGENT_HOME/lib/seo-analysis.sh"
+# shellcheck source=lib/marketstack.sh
+. "$AGENT_HOME/lib/marketstack.sh"
+# shellcheck source=lib/market-report.sh
+. "$AGENT_HOME/lib/market-report.sh"
 
 # Children invocations (agent-* helper scripts) share our tick id
 # so cost-ledger entries from child processes group with the
@@ -133,21 +137,34 @@ if [ -n "$WEBSITE_REPO" ]; then
   export AGENT_WEBSITE_PATH="$AGENT_REPO_ROOT/${WEBSITE_REPO}"
 fi
 
+# Email delivery (SMTP2GO) -- shared by every opt-in report subsystem
+# (SEO, market). All default to empty so referencing them under `set -u`
+# is safe when nothing is configured; each report tick no-ops cleanly if
+# its required creds (incl. these) are unset.
+export SMTP2GO_API_KEY="${SMTP2GO_API_KEY:-}"
+export SMTP2GO_SENDER="${SMTP2GO_SENDER:-}"
+
 # SEO analysis pass -- opt-in via Google Search Console + SMTP2GO creds.
-# All default to empty so referencing them under `set -u` is safe when
-# the subsystem isn't configured; do_seo_tick no-ops cleanly if any of
-# the required ones are unset. Floor/top-K carry tuning defaults.
+# do_seo_tick no-ops cleanly if any required one is unset. Floor/top-K
+# carry tuning defaults.
 export GSC_OAUTH_CLIENT_ID="${GSC_OAUTH_CLIENT_ID:-}"
 export GSC_OAUTH_CLIENT_SECRET="${GSC_OAUTH_CLIENT_SECRET:-}"
 export GSC_OAUTH_REFRESH_TOKEN="${GSC_OAUTH_REFRESH_TOKEN:-}"
-export SMTP2GO_API_KEY="${SMTP2GO_API_KEY:-}"
-export SEO_SENDER_EMAIL="${SEO_SENDER_EMAIL:-}"
 export SEO_PRIMARY_EMAIL="${SEO_PRIMARY_EMAIL:-}"
 export SEO_EXTRA_RECIPIENTS="${SEO_EXTRA_RECIPIENTS:-}"
 export SEO_AGENTIC_SITES="${SEO_AGENTIC_SITES:-}"
 export SEO_IMPRESSION_FLOOR="${SEO_IMPRESSION_FLOOR:-50}"
 export SEO_TOP_K="${SEO_TOP_K:-10}"
 export SEO_DEBUG_DOMAIN="${SEO_DEBUG_DOMAIN:-}"
+
+# Market report -- opt-in daily (Mon-Fri) previous-trading-day prices
+# email via the marketstack EOD API + SMTP2GO. do_market_tick no-ops
+# cleanly if any required one is unset. Sends on the first weekday tick
+# after the midnight rollover -- no send-hour knob, matching the rest of
+# the harness (midnight = a new day, no clock gating).
+export MARKETSTACK_API_KEY="${MARKETSTACK_API_KEY:-}"
+export MARKET_SYMBOLS="${MARKET_SYMBOLS:-}"
+export MARKET_RECIPIENTS="${MARKET_RECIPIENTS:-}"
 
 # Put the harness's bin dir on PATH for every Claude invocation in
 # this script. Without this, Claude can't call agent-enqueue.sh /
@@ -640,6 +657,62 @@ seo_mark_done() {
   mv "$tmp" "$state_file"
 }
 
+# -- Market report daily send state -----------------------------
+#
+# One ".market" object in discretionary-state.json (same file as
+# .slots/.weekly/.maintenance/.seo), shaped { date, sent, attempts } --
+# mirroring how .slots carries its date + flags + attempt counters in a
+# single namespaced key. The date drives a self-resetting daily rollover
+# for both fields; each mutator normalizes to today before touching it.
+#
+# The report sends at most once per local day (sent=true), and unlike
+# the slots this is independent of WEBSITE_REPO. The attempt counter
+# bounds how many times a failing send re-hits the metered marketstack
+# API in a day: a few retries ride out a transient blip, then the day is
+# abandoned rather than burning quota at the 1-minute cadence.
+# Regenerable -- losing it just re-opens today's send.
+
+# jq fragment: normalize .market to today, resetting if the day rolled.
+# shellcheck disable=SC2016  # $d is a jq --arg, not shell -- must not expand
+MARKET_ROLL='(if (.market.date // "") == $d then .market
+              else {date:$d, sent:false, attempts:0} end)'
+
+market_sent_today() {
+  local state_file today
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || return 1
+  today=$(date +%Y-%m-%d)
+  [ "$(jq -r --arg d "$today" \
+        '(.market.date == $d) and (.market.sent == true)' \
+        "$state_file" 2>/dev/null)" = "true" ]
+}
+
+market_mark_sent() {
+  local state_file tmp today
+  state_file=$(discretionary_state_file)
+  today=$(date +%Y-%m-%d)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg d "$today" ".market = ($MARKET_ROLL | .sent = true)" \
+    "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
+# Increment today's attempt count (resetting on a day rollover) and echo
+# the new value. The cap that consumes this lives in do_market_tick.
+market_attempt_inc() {
+  local state_file tmp today n
+  state_file=$(discretionary_state_file)
+  today=$(date +%Y-%m-%d)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg d "$today" ".market = ($MARKET_ROLL | .attempts += 1)" \
+    "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+  n=$(jq -r '.market.attempts' "$state_file" 2>/dev/null)
+  echo "$n"
+}
+
 # -- Validation pass cache --------------------------------------
 #
 # The validation sweep runs every tick. At a 1-minute cadence across
@@ -1049,7 +1122,7 @@ do_seo_tick() {
   # Opt-in gate: every required credential must be present.
   if [ -z "${GSC_OAUTH_CLIENT_ID:-}" ] || [ -z "${GSC_OAUTH_CLIENT_SECRET:-}" ] \
      || [ -z "${GSC_OAUTH_REFRESH_TOKEN:-}" ] || [ -z "${SMTP2GO_API_KEY:-}" ] \
-     || [ -z "${SEO_SENDER_EMAIL:-}" ] || [ -z "${SEO_PRIMARY_EMAIL:-}" ]; then
+     || [ -z "${SMTP2GO_SENDER:-}" ] || [ -z "${SEO_PRIMARY_EMAIL:-}" ]; then
     return 1
   fi
 
@@ -1132,6 +1205,71 @@ do_seo_tick() {
 
   seo_mark_done "$target"
   return 0
+}
+
+# One daily (Mon-Fri) market report: the previous trading day's prices
+# (high, low, close, volume) for MARKET_SYMBOLS, emailed to
+# MARKET_RECIPIENTS. Opt-in, scripted
+# (no LLM), email-only -- a sibling of do_seo_tick, not repo-driven.
+# Fires on the first weekday tick after midnight (no send-hour gate --
+# midnight is the day rollover, matching the rest of the harness).
+# Returns 0 if a report was sent (caller exits the tick), 1 if the
+# subsystem is unconfigured, it's the weekend, today's already sent, or
+# the send failed (caller falls through to the grind).
+do_market_tick() {
+  # Opt-in gate: every required credential/config must be present.
+  if [ -z "${MARKETSTACK_API_KEY:-}" ] || [ -z "${MARKET_SYMBOLS:-}" ] \
+     || [ -z "${MARKET_RECIPIENTS:-}" ] || [ -z "${SMTP2GO_API_KEY:-}" ] \
+     || [ -z "${SMTP2GO_SENDER:-}" ]; then
+    return 1
+  fi
+
+  # Weekday only -- markets are closed Sat/Sun (date +%u: 1=Mon..7=Sun).
+  local dow; dow=$(date +%u)
+  [ "$dow" -ge 6 ] && return 1
+
+  # At most once per day (set only on a successful send).
+  market_sent_today && return 1
+
+  # Bound the daily retries so a persistent failure can't re-hit the
+  # metered marketstack API every minute. A handful of attempts rides
+  # out a transient blip; past the cap, abandon today (clear the .market
+  # object in discretionary-state.json to force a retry). Hardcoded, not
+  # an env knob -- keep the .env surface small.
+  local max_attempts=5 attempt
+  attempt=$(market_attempt_inc)
+  if [ "$attempt" -gt "$max_attempts" ]; then
+    [ "$attempt" -eq $((max_attempts + 1)) ] \
+      && log "market: ${max_attempts} failed attempts today -- abandoning the report for the day"
+    return 1
+  fi
+
+  log "market: fetching EOD for ${MARKET_SYMBOLS} (attempt ${attempt}/${max_attempts})"
+  local eod report count
+  eod=$(marketstack_eod_latest "$MARKET_SYMBOLS") || eod='{"data":[]}'
+  report=$(market_build_report "$eod" "$MARKET_SYMBOLS")
+  count=$(jq -r '.count // 0' <<<"$report" 2>/dev/null || echo 0)
+
+  if [ "${count:-0}" -eq 0 ]; then
+    # No bars at all -- almost always a transient API failure or a bad
+    # key (a valid symbol always has a last EOD bar). Don't send; the
+    # bounded retry above will try again next tick.
+    log "market: no EOD rows returned -- not sending (will retry, attempt ${attempt}/${max_attempts})"
+    return 1
+  fi
+
+  local md html session subject
+  md=$(market_render_markdown <<<"$report")
+  html=$(market_render_html <<<"$report")
+  session=$(jq -r '.session_date // "latest"' <<<"$report" 2>/dev/null || echo latest)
+  subject="[Market] ${session} -- prices for ${count} symbol(s)"
+  if email_send "$subject" "$html" "$md" "$MARKET_RECIPIENTS"; then
+    log "market: emailed report ($session, $count symbols) to $MARKET_RECIPIENTS"
+    market_mark_sent
+    return 0
+  fi
+  log "warning: market email failed (attempt ${attempt}/${max_attempts}) -- will retry next tick"
+  return 1
 }
 
 # Worktree key: slash-free, unique per repo+issue.
@@ -1766,6 +1904,14 @@ fi
 # ticket the discovery step below picks up once that repo is validated.
 # One domain per tick spreads the GSC/email load across the 1-min beat.
 if do_seo_tick; then
+  exit 0
+fi
+
+# Daily market report (Mon-Fri, one email per weekday, on the first
+# tick after midnight). Opt-in via the marketstack + SMTP2GO env;
+# no-ops when unconfigured, on weekends, or once today's already sent.
+# Scripted, email-only -- a sibling of the SEO pass, not repo-driven.
+if do_market_tick; then
   exit 0
 fi
 

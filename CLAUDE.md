@@ -6,7 +6,8 @@ strictly ordered cascade: recovery + validation, then PR-review
 pickup, then Igor's own work (daily reading + blog post, weekly
 /now refresh + site-work pass -- opt-in via `WEBSITE_REPO`), then
 scheduled maintenance, then the weekly GSC-driven SEO pass (opt-in),
-then the claimable-issue grind. Igor's own
+then the daily weekday market report (opt-in), then the
+claimable-issue grind. Igor's own
 work comes first and is throttled (daily/weekly slots), so tickets
 soak up whatever time is left and roll over to the next day. The
 reading pipeline's durable state lives in
@@ -25,8 +26,9 @@ repo is everything that makes the cron beat real.
 - `bin/lib/` -- shared voice anchor + task directives loaded into
   Claude's system prompt per surface.
 - `lib/*.sh` -- sourced shell libraries (Forgejo API, repo checks,
-  maintenance checks, cost tracking, and the opt-in SEO trio:
-  `gsc.sh` + `email.sh` + `seo-analysis.sh`).
+  maintenance checks, cost tracking; the shared SMTP2GO sender
+  `email.sh`; the opt-in SEO pair `gsc.sh` + `seo-analysis.sh`; and
+  the opt-in market-report pair `marketstack.sh` + `market-report.sh`).
 - `AGENTS.md` -- the universal agent rules appended to Claude's
   system prompt for issue work and PR review.
 - `agent-settings.json` -- Claude's tool permission profile.
@@ -112,6 +114,23 @@ respective tools on the host; install or skip.
   that site (otherwise a normal day). State (incl. SEO weekly stamps
   under `.seo`) lives in `~/.local/state/agent/discretionary-state.json`;
   clear a domain's stamp there to re-run it.
+- The market report (`do_market_tick`) is opt-in via the marketstack
+  (v2 EOD API) + SMTP2GO env and is a sibling of the SEO pass: scripted
+  (no LLM), email-only, NOT repo-driven. It's the only DAILY-but-weekday-
+  gated schedule (`date +%u` <= 5), and unlike the slots it's independent
+  of `WEBSITE_REPO`. Sends one email per weekday on the first tick after
+  the midnight rollover -- no send-hour knob, matching the harness's
+  no-clock-gating design. It shares `email.sh` with SEO -- both now gate
+  on `SMTP2GO_API_KEY` + `SMTP2GO_SENDER` (renamed from
+  `SEO_SENDER_EMAIL`; if you change the code's email vars, the host
+  `.env` must change in lockstep or BOTH reports break). State is a
+  single `.market` object `{date, sent, attempts}` in
+  `discretionary-state.json` (same one-key-per-subsystem shape as
+  `.slots`/`.seo`): `sent` flips true only on a successful send; a
+  failing send retries on the next tick but is capped (a hardcoded 5
+  attempts/day via `attempts`) so a bad key or outage can't burn the
+  metered marketstack quota all day. Clear `.market` to force a re-send.
+  Keep it a single report until there's a real reason to split it.
 
 ## Off-limits
 

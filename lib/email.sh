@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # email.sh -- transactional email via the SMTP2GO HTTP API. Sourced by
-# bin/tick.sh for SEO report delivery.
+# bin/tick.sh for report delivery (SEO, market, ...).
 #
-# The SEO subsystem is opt-in; callers gate on these being set:
-#   SMTP2GO_API_KEY, SEO_SENDER_EMAIL
+# Email delivery is shared across opt-in subsystems; callers gate on
+# these being set:
+#   SMTP2GO_API_KEY, SMTP2GO_SENDER
 # Requires on PATH: curl, jq.
 
 # Fallback logger so this module is sourceable standalone (tests).
@@ -30,7 +31,7 @@ email_send() {
 
   payload=$(jq -n \
     --arg key "$SMTP2GO_API_KEY" \
-    --arg sender "$SEO_SENDER_EMAIL" \
+    --arg sender "$SMTP2GO_SENDER" \
     --arg subject "$subject" \
     --arg html "$html" \
     --arg text "$text" \
