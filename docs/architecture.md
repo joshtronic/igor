@@ -87,14 +87,22 @@ A timer fires `bin/tick.sh`. Per tick:
    Scripted (`lib/marketstack.sh` makes one v2 EOD
    request for all symbols; `lib/market-report.sh` builds + renders the
    table -- no LLM); email-only, NOT repo-driven (a sibling of the SEO
-   pass). Sends at most once per weekday, on the first tick after the
-   midnight rollover (no send-hour knob -- midnight is the day boundary,
-   same as the rest of the harness). Stamped in a single `.market`
-   object `{date, sent, attempts}` in `discretionary-state.json`:
-   `sent` flips true only on a successful send; a failing send retries
-   on the next tick but is capped (5 attempts/day via `attempts`) so a
-   bad key or outage can't burn the metered marketstack quota all day.
-   Weekends and already-sent ticks fall through.
+   pass). Sends at most once per weekday, starting on the first tick
+   after the midnight rollover (no send-hour knob -- midnight is the day
+   boundary, same as the rest of the harness), but gated on a freshness
+   check: the midnight tick can beat marketstack's EOD publish, so it
+   only emails once the latest bar's date is the expected previous
+   trading day; a stale read holds and the next marketstack hit waits out
+   `MARKET_RETRY_COOLDOWN_SECS` (default 15 min) rather than polling the
+   metered API every minute. Stamped in a single `.market` object
+   `{date, sent, failures, last_attempt}` in `discretionary-state.json`:
+   `sent` flips true only on a successful send; `last_attempt` drives the
+   cooldown; `failures` counts only hard failures (API error, empty read,
+   send failure) and is capped at 5/day so a bad key or outage abandons
+   the day instead of burning quota, while a stale-but-valid read is not a
+   failure and just holds. The freshness gate is holiday-naive, so the
+   trading day after a market holiday holds all day and sends no report
+   (logged each cooldown). Weekends and already-sent ticks fall through.
 10. **Discovery.** For each validated repo, query for the oldest
    claimable issue (`Agent`-labeled, no assignee, not
    `Status/Blocked`). Skip repos with an open bot-authored PR --

@@ -123,14 +123,25 @@ respective tools on the host; install or skip.
   no-clock-gating design. It shares `email.sh` with SEO -- both now gate
   on `SMTP2GO_API_KEY` + `SMTP2GO_SENDER` (renamed from
   `SEO_SENDER_EMAIL`; if you change the code's email vars, the host
-  `.env` must change in lockstep or BOTH reports break). State is a
-  single `.market` object `{date, sent, attempts}` in
-  `discretionary-state.json` (same one-key-per-subsystem shape as
-  `.slots`/`.seo`): `sent` flips true only on a successful send; a
-  failing send retries on the next tick but is capped (a hardcoded 5
-  attempts/day via `attempts`) so a bad key or outage can't burn the
-  metered marketstack quota all day. Clear `.market` to force a re-send.
-  Keep it a single report until there's a real reason to split it.
+  `.env` must change in lockstep or BOTH reports break). Because the
+  midnight tick can beat marketstack's EOD publish for the just-closed
+  session, the send is gated on a freshness check: it only emails once the
+  latest bar's date equals the expected previous trading day (yesterday,
+  or Friday on a Monday). Two concerns are decoupled in the `.market`
+  state object `{date, sent, failures, last_attempt}` (same
+  one-key-per-subsystem shape as `.slots`/`.seo`): `last_attempt` (epoch
+  secs) spaces EVERY marketstack hit by `MARKET_RETRY_COOLDOWN_SECS`
+  (default 15 min) so a stale/empty read doesn't poll the metered API every
+  minute; `failures` counts only HARD failures (API error, empty read, or
+  send failure) and is capped at a hardcoded 5/day so a bad key or outage
+  abandons the day instead of burning quota -- a successful fetch clears
+  it, and a stale-but-valid read ("not published yet") is NOT a failure, it
+  just holds and re-checks on the next cooldown. `sent` flips true only on
+  a successful send. The freshness gate is holiday-naive: on the trading
+  day *after* a market holiday the latest bar predates the expected
+  previous weekday, so the gate never matches and no report goes out that
+  day (logged each cooldown, not silent). Clear `.market` to force a
+  re-send. Keep it a single report until there's a real reason to split it.
 
 ## Off-limits
 
