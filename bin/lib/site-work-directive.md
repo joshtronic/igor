@@ -18,6 +18,13 @@ polish if one earns its place. In scope:
 - A content or copy restructure that needs more than a one-line
   fix: splitting a page that's grown unwieldy, consolidating copy
   duplicated across pages (but NOT the locked pages below).
+- The /links page: keep it current, but it's a HIGH-bar taste list
+  ("feeds I'd subscribe to again"), not a reading log -- and it's the
+  source of truth the blog names its sources from. Add an entry ONLY
+  for a site you've engaged with repeatedly across distinct reads (the
+  "I keep coming back" signal, never a single read); prune any entry
+  that's dead or has gone silent. Most weeks this is no change. Never
+  bulk-add what you read -- that turns taste into a dump.
 - Visual or interaction polish: a CSS variable, spacing, type, a
   subtle hover/transition, a turn of microcopy with personality.
   At most a small part of the pass -- polish is the garnish, not

@@ -116,6 +116,7 @@ VOICE_NOTES_BOOTSTRAP_POSTS=40  # post bodies the one-time first-run seed reads
 VOICE_NOTES_MAX_POSTS_BYTES=120000 # cap on the post-bodies bundle sent
 VOICE_NOTES_MAX_BYTES=4000      # defensive cap on the notes file itself
 VOICE_NOTES_BLOCK=""            # per-run draft addendum; set in main
+LINKS_ROSTER_BLOCK=""           # per-run draft addendum (the /links allow-list); set in main
 LINK_GATE_UA="igor-linkcheck/1.0 (+https://igor.bot)"  # honest UA for the link gate
 
 # -- logging ----------------------------------------------------
@@ -467,6 +468,29 @@ build_voice_notes_block() {
   printf '\n---\n\nMy evolving voice notes (working observations from my own\nrecent posts; the voice anchor above wins on any conflict):\n\n%s' "$notes"
 }
 
+# -- links roster (the only outside names a musing may drop) -----
+#
+# The Hybrid voice rule: a musing makes its own case and does not hang on
+# named people, but when naming a source is genuinely load-bearing it must
+# be one already credited on the site's /links page -- never an inline
+# link. Parse the anchors + domains out of src/links.md so the draft prompt
+# can hand the model that allow-list. Empty (and the rule then forbids
+# naming anyone) if the page is absent. Mirrors build_voice_notes_block.
+links_roster() {
+  local f="$WEBSITE_PATH/src/links.md"
+  [ -f "$f" ] || return 0
+  grep -oE '\[[^]]+\]\(https?://[^)]+\)' "$f" 2>/dev/null \
+    | sed -E 's#\[([^]]+)\]\(https?://([^/)]+)[^)]*\)#\1 (\2)#' \
+    | sort -u
+}
+
+build_links_roster_block() {
+  local roster
+  roster=$(links_roster)
+  [ -z "$roster" ] && return 0
+  printf '\n---\n\nThe sources on your /links page -- the ONLY outside people or sites you\nmay name, and only when naming one is genuinely load-bearing. Name them\nplainly in prose, never as a link. Anyone not on this list: do not name\nthem; make the point in your own words.\n\n%s' "$roster"
+}
+
 # -- ideation ---------------------------------------------------
 
 ideate_round() {
@@ -490,6 +514,8 @@ How to choose:
   read can spark an opinion; the post is the opinion, not the read.
 - It is a MUSING, not a link roundup or a "here's what I read" recap.
   Do not write about an article. Do not narrate your reading.
+- The angle is an idea you hold, not a named person's take. Don't frame it
+  around who said or did something; frame it around the thought itself.
 - Do NOT write about the specific projects, issues, or work Igor has been
   doing for the human -- that stays private. Musings are about ideas and
   the world, not the day job.
@@ -657,6 +683,7 @@ draft_post_body() {
   system=$(cat <<EOF
 ${VOICE_BODY}
 ${VOICE_NOTES_BLOCK}
+${LINKS_ROSTER_BLOCK}
 ---
 
 Draft a blog post for igor.bot: a MUSING under the given angle and
@@ -670,16 +697,22 @@ Rules:
 - This is a MUSING, not a reading log. Do NOT summarize, review, or react
   to an article, and do NOT narrate what you read ("I came across...",
   "a post I read..."). The reading shaped the view; the post is the view.
-- Usually link nothing -- a musing isn't a link roundup. Only if a
-  specific external fact genuinely needs attribution may you link a URL
-  that appears VERBATIM in the material below; prefer making the point
-  without a link. NEVER write a URL from memory, guess one, or use a
-  generic index/home page as a stand-in. A missing link beats a wrong one.
-- Naming people and things: only name a specific person, company, product,
-  or publication that actually appears in the material below. If you can't
-  point to where a name came from, cut it or keep it general. An invented
-  name (someone the reader, or you, could never place) is the worst thing
-  you can ship.
+- Make the case in YOUR OWN voice. Do NOT hang the argument on named
+  people or their work: no "the exits X and Y landed on", no "Z's note
+  about W", no "as someone put it". Internalize what you read as your own
+  position and state it directly. The idea stands on its own, not on whose
+  it was.
+- Naming an outside source is the rare exception, not the reflex. You may
+  name a specific person or site ONLY when it is genuinely load-bearing
+  AND it appears on your /links page (the roster above). Name it plainly,
+  in prose -- NEVER as an inline markdown link. Anyone not on that roster:
+  do not name them, make the point in your own words. Never invent a name
+  or write a URL from memory; a name you can't place on /links is cut.
+- Link nothing by default -- a musing isn't a link roundup, and /links is
+  where the sites you read are credited, not the post body. (If a hard
+  external fact ever truly needs a source, a URL that appears VERBATIM in
+  the material below is the only kind you may use. Prefer making the point
+  without one.)
 - Do NOT write about the specific projects, issues, or work Igor has done
   for the human. That stays private. Keep the musing about ideas, not the
   day job.
@@ -1045,6 +1078,7 @@ log "corpus: $CORPUS_N reflection(s)"
 # Load the voice notes for this draft (the evolve ran earlier, before the
 # refrain check). Empty block if there are no notes yet.
 VOICE_NOTES_BLOCK=$(build_voice_notes_block)
+LINKS_ROSTER_BLOCK=$(build_links_roster_block)
 
 if ! run_ideation; then
   log "ideation produced no angle across $MAX_IDEATION_ROUNDS round(s) -- exiting clean"
