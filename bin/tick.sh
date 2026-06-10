@@ -817,6 +817,23 @@ market_prev_trading_day() {
   date -d "-${back} days" +%F 2>/dev/null || date -v-"${back}"d +%F 2>/dev/null
 }
 
+# market_format_date <YYYY-MM-DD>
+# Returns a human-readable date like "Tuesday, June 9th, 2026".
+market_format_date() {
+  local date_str="$1" day suffix weekday month year
+  day="${date_str##*-}"; day="${day#0}"
+  case "$day" in
+    1|21|31) suffix="st" ;;
+    2|22)    suffix="nd" ;;
+    3|23)    suffix="rd" ;;
+    *)       suffix="th" ;;
+  esac
+  weekday=$(date -d "$date_str" +%A 2>/dev/null || date -jf "%Y-%m-%d" "$date_str" +%A 2>/dev/null)
+  month=$(date -d "$date_str" +%B 2>/dev/null || date -jf "%Y-%m-%d" "$date_str" +%B 2>/dev/null)
+  year="${date_str%%-*}"
+  printf '%s, %s %s%s, %s' "$weekday" "$month" "$day" "$suffix" "$year"
+}
+
 # -- Validation pass cache --------------------------------------
 #
 # The validation sweep runs every tick. At a 1-minute cadence across
@@ -1395,10 +1412,13 @@ do_market_tick() {
     return 1
   fi
 
-  local md html subject
+  local md html subject today formatted_today
+  today=$(date +%Y-%m-%d)
+  report=$(jq --arg today "$today" '. + {report_date: $today}' <<<"$report")
   md=$(market_render_markdown <<<"$report")
   html=$(market_render_html <<<"$report")
-  subject="[Market] ${session:-latest} -- prices for ${count} symbol(s)"
+  formatted_today=$(market_format_date "$today")
+  subject="[Market] ${formatted_today:-$today}"
   if email_send "$subject" "$html" "$md" "$MARKET_RECIPIENTS"; then
     log "market: emailed report (${session:-latest}, $count symbols) to $MARKET_RECIPIENTS"
     market_mark_sent

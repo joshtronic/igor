@@ -20,10 +20,11 @@ fi
 #   { session_date, count,
 #     rows:[{symbol,name,high,low,close,volume,date}], missing:[...] }
 # session_date is the latest bar date present (the "previous trading
-# day"). rows are sorted by symbol. missing lists requested symbols
-# marketstack returned no bar for (typo, delisted, not-on-plan) --
-# surfaced so a silent gap reads as a gap, not a clean report. Symbols
-# are compared upper-cased so request/response casing can't drop a row.
+# day"). rows follow the order of symbols_csv (the env-declared order).
+# missing lists requested symbols marketstack returned no bar for
+# (typo, delisted, not-on-plan) -- surfaced so a silent gap reads as a
+# gap, not a clean report. Symbols are compared upper-cased so
+# request/response casing can't drop a row.
 market_build_report() {
   local eod="$1" symbols="$2"
   local rows
@@ -35,10 +36,11 @@ market_build_report() {
                      high:.high, low:.low, close:.close, volume:.volume,
                      date:((.date // "") | split("T")[0]) })) as $rows
     | ($rows | map(.symbol)) as $present
+    | ($req | map(. as $s | ($rows | map(select(.symbol == $s))[0]) | select(. != null))) as $ordered
     | {
         session_date: ($rows | map(.date) | max // null),
         count: ($rows | length),
-        rows: ($rows | sort_by(.symbol)),
+        rows: $ordered,
         missing: ($req | map(select(. as $s | ($present | index($s)) | not)))
       }' 2>/dev/null || printf '{"session_date":null,"count":0,"rows":[],"missing":[]}'
 }
@@ -66,19 +68,12 @@ MARKET_FMT_DEF='
 # reads fine as plain text).
 market_render_markdown() {
   jq -r "$MARKET_FMT_DEF"'
-    "# Market report — \(.session_date // "no session data")\n",
-    "Previous trading day.\n",
-<<<<<<< HEAD
-    "| Company | Symbol | Previous Low | Previous High | Close | Volume |",
-    "| --- | --- | ---: | ---: | ---: | ---: |",
-    (.rows[]
-      | "| \(company(.name) | gsub("\\|"; "/")) | \(.symbol) | \(money(.low)) | \(money(.high)) | \(money(.close)) | \(vol(.volume)) |"),
-=======
-    "| Symbol | High | Low | Close | Volume |",
+    "# Market report — \(.report_date // .session_date // "no date")\n",
+    "Data from the previous trading session (\(.session_date // "unknown")).\n",
+    "| Symbol | Previous Low | Previous High | Close | Volume |",
     "| --- | ---: | ---: | ---: | ---: |",
     (.rows[]
-      | "| \(.symbol) | \(money(.high)) | \(money(.low)) | \(money(.close)) | \(vol(.volume)) |"),
->>>>>>> master
+      | "| \(.symbol) | \(money(.low)) | \(money(.high)) | \(money(.close)) | \(vol(.volume)) |"),
     (if (.missing | length) > 0 then
       "\n> No data returned for: \(.missing | join(", "))"
      else empty end),
@@ -91,8 +86,8 @@ market_render_markdown() {
 market_render_html() {
   jq -r "$MARKET_FMT_DEF"'
     def esc: @html;
-    "<h2>Market report — \(.session_date // "no session data" | esc)</h2>",
-    "<p>Previous trading day.</p>",
+    "<h2>Market report — \((.report_date // .session_date // "no date") | esc)</h2>",
+    "<p>Data from the previous trading session (\(.session_date // "unknown" | esc)).</p>",
     "<table cellpadding=\"6\" style=\"border-collapse:collapse\">",
     "<thead><tr>"
       + "<th align=\"left\">Symbol</th>"
@@ -100,9 +95,8 @@ market_render_html() {
       + "<th align=\"right\">Close</th><th align=\"right\">Volume</th></tr></thead>",
     "<tbody>",
     (.rows[]
-      | "<tr><td>\(company(.name)|esc)</td><td>\(.symbol|esc)</td>"
+      | "<tr><td>\(.symbol|esc)</td>"
         + "<td align=\"right\">\(money(.low))</td><td align=\"right\">\(money(.high))</td>"
-        + "<th align=\"right\">Close</th><th align=\"right\">Volume</th></tr></thead>",
         + "<td align=\"right\">\(money(.close))</td><td align=\"right\">\(vol(.volume))</td></tr>"),
     "</tbody></table>",
     (if (.missing | length) > 0 then
