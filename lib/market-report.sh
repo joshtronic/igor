@@ -20,10 +20,11 @@ fi
 #   { session_date, count,
 #     rows:[{symbol,name,high,low,close,volume,date}], missing:[...] }
 # session_date is the latest bar date present (the "previous trading
-# day"). rows are sorted by symbol. missing lists requested symbols
-# marketstack returned no bar for (typo, delisted, not-on-plan) --
-# surfaced so a silent gap reads as a gap, not a clean report. Symbols
-# are compared upper-cased so request/response casing can't drop a row.
+# day"). rows follow the order of symbols_csv (the env-declared order).
+# missing lists requested symbols marketstack returned no bar for
+# (typo, delisted, not-on-plan) -- surfaced so a silent gap reads as a
+# gap, not a clean report. Symbols are compared upper-cased so
+# request/response casing can't drop a row.
 market_build_report() {
   local eod="$1" symbols="$2"
   local rows
@@ -35,10 +36,11 @@ market_build_report() {
                      high:.high, low:.low, close:.close, volume:.volume,
                      date:((.date // "") | split("T")[0]) })) as $rows
     | ($rows | map(.symbol)) as $present
+    | ($req | map(. as $s | ($rows | map(select(.symbol == $s))[0]) | select(. != null))) as $ordered
     | {
         session_date: ($rows | map(.date) | max // null),
         count: ($rows | length),
-        rows: ($rows | sort_by(.symbol)),
+        rows: $ordered,
         missing: ($req | map(select(. as $s | ($present | index($s)) | not)))
       }' 2>/dev/null || printf '{"session_date":null,"count":0,"rows":[],"missing":[]}'
 }
