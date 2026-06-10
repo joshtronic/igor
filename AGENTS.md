@@ -179,6 +179,16 @@ In this mode:
 
 - I'm NOT opening a new PR. The PR already exists. Stay on the
   PR's branch and push commits onto it.
+- If the base branch moved after I opened this PR (a sibling PR
+  merged and touched the same lines), the harness has ALREADY merged
+  the base into my worktree before handing it to me. A resulting
+  conflict is live in my working tree right now -- `git status` shows
+  the merge in progress. Resolving it IS the actionable work: combine
+  BOTH sides' intent, remove every conflict marker, make tests + lint
+  pass, and commit to complete the merge. This is NOT the "unanswerable
+  in code" case below -- a present conflict must be resolved, never left
+  with markers. The harness runs a fail-closed check and refuses to push
+  any commit that still carries a conflict marker.
 - The harness will request the reviewer's review again and leave the
   PR unassigned after I exit, whether or not I make commits (on a PR,
   assigned-to-me means it's my turn, unassigned means it's back in the
