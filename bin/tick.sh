@@ -479,6 +479,24 @@ list_offlimits_violations() {
     | grep -E '^\.(forgejo|github)/workflows/' || true
 }
 
+# Conflict-marker gate. When the harness stages a base-branch merge into
+# a reopened PR (see PR-review pickup), a botched resolution can leave
+# literal git conflict markers in a committed file -- exactly how PR #191
+# shipped <<<<<<< / ======= / >>>>>>> straight to master because nothing
+# checked. Scan the new commits' delta for an ADDED line beginning with
+# git's 7-character angle marker (anchored at line start + a trailing
+# space/EOL, so a Python ">>> " prompt or a markdown "> " quote can't
+# false-trigger; a real conflict always carries both angle markers, so
+# the noisier bare "=======" separator needn't be matched). Returns the
+# offending lines; a non-empty result fails the push closed.
+list_conflict_marker_violations() {
+  local base="$1"
+  # shellcheck disable=SC2016  # the $ is a regex end-anchor, not a shell var
+  git diff "origin/${base}..HEAD" 2>/dev/null \
+    | grep -E '^\+(<<<<<<<|>>>>>>>)( |$)' \
+    | sed 's/^+//' || true
+}
+
 
 
 # Idempotent clone-if-missing + ref refresh. Creates the owner subdir
@@ -1733,6 +1751,38 @@ if [ -n "$REVIEW_PR" ]; then
     fi
     init_igor_scratch "$PR_WORKTREE"
 
+    # Stage the base branch INTO the PR branch before handing it over.
+    #
+    # A PR that was clean when opened can go un-mergeable after a sibling
+    # PR merges to the base -- a purely textual conflict, no fault of this
+    # branch (this is precisely how #189 landing turned #190 into a
+    # conflict the moment it was merged). The reviewer's ask is then
+    # "resolve the conflict with <base>" -- but the worktree is checked
+    # out on origin/$PR_HEAD ALONE, so there is nothing in the tree to
+    # resolve and the agent correctly no-ops (AGENTS.md 1b: nothing
+    # actionable -> exit without commits). That is the no-op that wasted a
+    # review round-trip.
+    #
+    # So bring <base> in HERE, before the agent sees the tree:
+    #   - clean merge (or already current) -> the branch is now up to date
+    #     with base; any merge commit is a real change to push, not a no-op.
+    #   - conflict -> leave the merge IN PROGRESS, markers and all, and the
+    #     prompt (below) tells the agent it is mid-merge with real conflicts
+    #     to resolve. The fail-closed marker gate before push backstops a
+    #     botched resolution.
+    # origin/$PR_BASE is current: ensure_repo_local + the fetch above
+    # refreshed it, and the worktree shares the clone's object store.
+    PR_MERGE_CONFLICT=""
+    if [ -n "$PR_BASE" ]; then
+      if (cd "$PR_WORKTREE" && git merge --no-edit "origin/${PR_BASE}" >/dev/null 2>&1); then
+        log "PR-review: staged origin/${PR_BASE} into ${PR_HEAD} cleanly (or already current)"
+      else
+        PR_MERGE_CONFLICT=$(cd "$PR_WORKTREE" \
+          && git diff --name-only --diff-filter=U 2>/dev/null | paste -sd ' ' -)
+        log "PR-review: ${PR_HEAD} conflicts with origin/${PR_BASE} -- merge left in progress for the agent (conflicted: ${PR_MERGE_CONFLICT:-unknown})"
+      fi
+    fi
+
     # Fetch comments defensively -- a 404 on any endpoint shouldn't
     # kill the tick; just treat as no-comments.
     #
@@ -1771,6 +1821,33 @@ if [ -n "$REVIEW_PR" ]; then
 
     log "PR-review: ${#PR_ISSUE_COMMENTS} chars of issue comments, ${#PR_INLINE_COMMENTS} chars of inline review, ${#PR_REVIEW_BODIES} chars of review bodies"
 
+    # When the harness staged a base merge that conflicted, the worktree
+    # is mid-merge with real markers right now. Tell the agent so it does
+    # NOT mistake a present conflict for the "nothing actionable" case.
+    PR_MERGE_CONFLICT_MSG=""
+    if [ -n "$PR_MERGE_CONFLICT" ]; then
+      PR_MERGE_CONFLICT_MSG=$(cat <<CONFLICT_EOF
+
+## RESOLVE THE MERGE CONFLICT FIRST (this is real, actionable work)
+
+This PR went stale: the base branch (${PR_BASE}) moved after you opened
+it -- almost certainly a sibling PR merged and edited the same lines. The
+harness has ALREADY started the merge of origin/${PR_BASE} into your
+branch and it conflicts. The conflicts are live in your working tree
+RIGHT NOW -- run \`git status\` and you will see this merge in progress.
+Conflicted files: ${PR_MERGE_CONFLICT}.
+
+This is your PRIMARY task and it IS actionable -- do not treat it as
+"nothing to change." Open each conflicted file, combine BOTH sides'
+intent (keep both changes; do not just pick one side and do not drop
+either), remove every conflict marker, make the project tests + lint
+pass, then commit to complete the merge. The harness runs a fail-closed
+check and will REFUSE to push if any conflict marker survives, so leaving
+markers in just bounces the PR straight back.
+CONFLICT_EOF
+)
+    fi
+
     PR_USER_MSG=$(cat <<EOF
 You opened PR ${PR_REPO}#${PR_NUMBER}: ${PR_TITLE}
 
@@ -1780,6 +1857,7 @@ commits on this branch (${PR_HEAD}), and exit. The harness will push
 your commits and request the reviewer's review again (the PR is left
 unassigned -- assigned-to-you means it's your turn, unassigned means
 it's back in the human's court).
+${PR_MERGE_CONFLICT_MSG}
 
 If you genuinely have nothing to change -- for example the comments
 were questions you can answer in a reply rather than code, or the
@@ -1897,6 +1975,29 @@ EOF
     PR_NEW=$(git rev-list --count "origin/${PR_HEAD}..HEAD" 2>/dev/null || echo 0)
 
     if [ "$PR_NEW" -gt 0 ]; then
+      # Conflict-marker gate before push. If the harness staged a base
+      # merge and it conflicted, the agent (or the auto-commit above,
+      # which `git add -A`s and completes a half-resolved merge) may have
+      # committed literal markers into the resolution. Scanning the
+      # committed delta catches that no matter who created the commit --
+      # the exact shape that put <<<<<<< / ======= / >>>>>>> on master via
+      # PR #191. Refuse it closed rather than ship broken code.
+      PR_MARKERS=$(list_conflict_marker_violations "$PR_HEAD")
+      if [ -n "$PR_MARKERS" ]; then
+        log "PR-review: committed conflict markers detected, refusing push and bouncing back to $FORGEJO_REVIEWER"
+        forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+          "The agent refused to push revisions: the new commits still contain unresolved conflict markers:
+
+$(printf '%s\n' "$PR_MARKERS" | sed 's/^/    /')
+
+Review requested so a human can resolve the conflict or re-trigger the agent." 2>/dev/null \
+          || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
+        forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
+        forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
+        (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || true
+        exit 0
+      fi
+
       # Off-limits guard before push -- CI workflows shouldn't be
       # touched even in a review round-trip.
       PR_OFFLIMITS=$(list_offlimits_violations "$PR_HEAD")
