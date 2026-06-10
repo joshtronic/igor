@@ -1394,11 +1394,13 @@ do_market_tick() {
     return 1
   fi
 
-  local md html subject formatted_date
+  local md html subject today formatted_today
+  today=$(date +%Y-%m-%d)
+  report=$(jq --arg today "$today" '. + {report_date: $today}' <<<"$report")
   md=$(market_render_markdown <<<"$report")
   html=$(market_render_html <<<"$report")
-  formatted_date=$(market_format_date "${session:-}")
-  subject="[Market] ${formatted_date:-${session:-latest}}"
+  formatted_today=$(market_format_date "$today")
+  subject="[Market] ${formatted_today:-$today}"
   if email_send "$subject" "$html" "$md" "$MARKET_RECIPIENTS"; then
     log "market: emailed report (${session:-latest}, $count symbols) to $MARKET_RECIPIENTS"
     market_mark_sent

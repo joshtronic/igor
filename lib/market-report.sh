@@ -68,8 +68,8 @@ MARKET_FMT_DEF='
 # reads fine as plain text).
 market_render_markdown() {
   jq -r "$MARKET_FMT_DEF"'
-    "# Market report — \(.session_date // "no session data")\n",
-    "Previous trading day.\n",
+    "# Market report — \(.report_date // .session_date // "no date")\n",
+    "Data from the previous trading session (\(.session_date // "unknown")).\n",
     "| Symbol | Previous Low | Previous High | Close | Volume |",
     "| --- | ---: | ---: | ---: | ---: |",
     (.rows[]
@@ -86,8 +86,8 @@ market_render_markdown() {
 market_render_html() {
   jq -r "$MARKET_FMT_DEF"'
     def esc: @html;
-    "<h2>Market report — \(.session_date // "no session data" | esc)</h2>",
-    "<p>Previous trading day.</p>",
+    "<h2>Market report — \((.report_date // .session_date // "no date") | esc)</h2>",
+    "<p>Data from the previous trading session (\(.session_date // "unknown" | esc)).</p>",
     "<table cellpadding=\"6\" style=\"border-collapse:collapse\">",
     "<thead><tr>"
       + "<th align=\"left\">Symbol</th>"
