@@ -65,9 +65,9 @@ set +a
 # anything is missing. The env_file_hint surfaces in the error so the
 # operator knows exactly where to fix it.
 env_file_hint="$AGENT_HOME/.env"
-: "${ANTHROPIC_API_KEY:?must be set in $env_file_hint}"
 : "${AGENT_MODEL:?must be set in $env_file_hint}"
-: "${AGENT_MODEL_THINKING:?must be set in $env_file_hint}"
+: "${AGENT_MODEL_REVIEW:?must be set in $env_file_hint}"
+: "${AGENT_MODEL_SECURITY:?must be set in $env_file_hint}"
 : "${FORGEJO_URL:?must be set in $env_file_hint}"
 : "${FORGEJO_TOKEN:?must be set in $env_file_hint}"
 : "${FORGEJO_HOST:?must be set in $env_file_hint}"
@@ -156,6 +156,12 @@ export SEO_AGENTIC_SITES="${SEO_AGENTIC_SITES:-}"
 export SEO_IMPRESSION_FLOOR="${SEO_IMPRESSION_FLOOR:-50}"
 export SEO_TOP_K="${SEO_TOP_K:-10}"
 export SEO_DEBUG_DOMAIN="${SEO_DEBUG_DOMAIN:-}"
+
+# Claude health alerts -- where the once-daily "claude auth/usage is
+# broken" email goes (see do_health_tick). Optional; falls back to
+# SEO_PRIMARY_EMAIL, and with neither set (or no SMTP2GO creds) the
+# alert is log-only.
+export HEALTH_RECIPIENTS="${HEALTH_RECIPIENTS:-${SEO_PRIMARY_EMAIL:-}}"
 
 # Market report -- opt-in daily (Mon-Fri) previous-trading-day prices
 # email via the marketstack EOD API + SMTP2GO. do_market_tick no-ops
@@ -316,11 +322,13 @@ normalize_worktree_dashes() {
   done
 }
 
-# The Claude/Anthropic invocation primitives -- claude_run_with_cost
-# (agentic CLI runner), anthropic_call (one-shot Messages API), and the
-# PR-subject text helpers (looks_like_conventional_commit /
-# normalize_subject / pr_body_first_item) -- now live in lib/claude.sh,
-# sourced above.
+# The Claude invocation primitives -- claude_run_with_cost (agentic
+# CLI runner), claude_call (one-shot no-tools completion), the
+# claude_health_* state helpers, and the PR-subject text helpers
+# (looks_like_conventional_commit / normalize_subject /
+# pr_body_first_item) -- live in lib/claude.sh, sourced above. Both
+# runners bill the operator's Claude subscription (OAuth login), not
+# an API key.
 
 # Derive a commit subject for the harness commit. Three tiers,
 # tried in order:
@@ -353,7 +361,7 @@ derive_commit_subject() {
     fi
   fi
 
-  # Tier 2: API-generated from the staged diff
+  # Tier 2: model-generated from the staged diff
   if [ -n "$worktree" ] && [ -d "$worktree" ]; then
     local diff_summary
     diff_summary=$( (
@@ -363,13 +371,13 @@ derive_commit_subject() {
         git diff --cached 2>/dev/null | head -200
       }
     ) 2>/dev/null)
-    # Only call the API if we actually have changes to describe.
+    # Only call the model if we actually have changes to describe.
     # `--stat` is empty when nothing's staged; the divider alone
-    # without it isn't worth burning an API call on.
+    # without it isn't worth burning a call on.
     if printf '%s' "$diff_summary" | grep -q "files\? changed"; then
       local api_subject
-      api_subject=$(anthropic_call \
-        "${AGENT_MODEL_THINKING:-claude-haiku-4-5-20251001}" \
+      api_subject=$(claude_call \
+        "$AGENT_MODEL" \
         "commit-subject" \
         80 \
         "You generate ONE single-line conventional-commit subject. Output ONLY the subject line -- no quotes, no preamble, no explanation, no questions. Format: 'type: description' where type is one of feat/fix/chore/docs/style/refactor/test. Under 72 chars. Imperative mood ('Add X' not 'Added X'). Be specific about what changed. If the input is empty or you cannot tell what changed, output exactly: chore: tick work" \
@@ -396,8 +404,8 @@ derive_commit_subject() {
 # as a fallback when Claude exited without writing .agent/PR_BODY.md
 # this tick -- AGENTS.md says it's mandatory but compliance is
 # probabilistic, and a thin git-log-derived body wastes the
-# reviewer's time. Better to spend a cent on Haiku to synth a real
-# description than ship a one-liner.
+# reviewer's time. Better to spend one cheap completion synthesizing
+# a real description than ship a one-liner.
 #
 # Args:
 #   $1 -- worktree path (used to compute the diff against base)
@@ -423,8 +431,8 @@ derive_pr_body() {
   printf '%s' "$diff_summary" | grep -q "files\? changed" || return 1
 
   local body
-  body=$(anthropic_call \
-    "${AGENT_MODEL_THINKING:-claude-haiku-4-5-20251001}" \
+  body=$(claude_call \
+    "$AGENT_MODEL" \
     "pr-body-fallback" \
     800 \
     "You generate Forgejo PR bodies from git diffs. Output EXACTLY this format and nothing else -- no preamble, no explanation, no fenced code blocks around the output:
@@ -1106,7 +1114,7 @@ EOF
   local m_exit
   set +e
   claude_run_with_cost "maintenance" "$m_log" "$TICK_TIMEOUT" \
-    --model "$AGENT_MODEL" \
+    --model "$AGENT_MODEL_REVIEW" \
     --settings "$AGENT_HOME/agent-settings.json" \
     --max-turns 50 \
     --print "$m_user_msg"
@@ -1435,6 +1443,96 @@ do_market_tick() {
   return 1
 }
 
+# -- Claude auth/usage health canary -----------------------------
+#
+# Every model call now bills the operator's Claude subscription; if
+# the login drops or the usage window is exhausted, every model
+# surface goes dark at once. The claude_health_* state helpers live
+# in lib/claude.sh (both runners record ok/auth/limit outcomes on
+# every organic call); this tick-side canary adds the two pieces
+# that need the tick's context:
+#
+#   1. Daily probe: one tiny no-tools completion on the first tick
+#      after midnight, so a broken login is noticed even on a day
+#      with no organic model calls -- and noticed BEFORE the nightly
+#      batch (reading/post slots) rather than by it.
+#   2. Once-daily alert email while a failure is live. Routed to
+#      HEALTH_RECIPIENTS via the shared SMTP2GO creds; without
+#      either, log-only. One email per local day, re-armed only
+#      after a day rollover (mirroring the market report's
+#      at-most-once-daily send).
+#
+# Runs every tick, before the backoff gate, so a blocked day still
+# probes (the inner claude_call fast-skips while blocked) and still
+# emails.
+do_health_tick() {
+  local f today
+  f=$(claude_health_state_file)
+  today=$(date +%Y-%m-%d)
+
+  # Daily probe. Stamped attempted up front regardless of outcome --
+  # organic calls keep recording health the rest of the day, so a
+  # failed probe must not retry every tick.
+  local probed tmp probe_out
+  probed=$(jq -r '.health.probed_on // ""' "$f" 2>/dev/null || echo "")
+  if [ "$probed" != "$today" ]; then
+    [ -f "$f" ] || echo '{}' > "$f"
+    tmp=$(mktemp)
+    jq --arg d "$today" '.health = ((.health // {}) + {probed_on: $d})' \
+      "$f" > "$tmp" && mv "$tmp" "$f"
+    # On failure claude_call's diagnostics land on stdout -- captured
+    # here so the journal shows WHY (auth/limit failures also start
+    # the backoff via the health state).
+    if probe_out=$(claude_call "$AGENT_MODEL" "health-probe" 32 \
+        "You are a liveness probe for an unattended agent. Reply with exactly: ok" \
+        "ping"); then
+      log "health: daily probe ok"
+    else
+      log "health: daily probe FAILED${probe_out:+ -- $probe_out}"
+    fi
+  fi
+
+  # Once-daily alert while a failure is live.
+  local first kind detail emailed since subject body
+  first=$(jq -r '.health.first_failure // 0' "$f" 2>/dev/null || echo 0)
+  [ -n "$first" ] && [ "$first" != "null" ] && [ "$first" -gt 0 ] 2>/dev/null || return 0
+  emailed=$(jq -r '.health.emailed_on // ""' "$f" 2>/dev/null || echo "")
+  if [ "$emailed" = "$today" ]; then return 0; fi
+  kind=$(jq -r '.health.kind // "unknown"' "$f" 2>/dev/null)
+  detail=$(jq -r '.health.detail // ""' "$f" 2>/dev/null)
+  since=$(date -d "@$first" +'%Y-%m-%d %H:%M %Z' 2>/dev/null || echo "$first")
+
+  if [ -z "$HEALTH_RECIPIENTS" ] || [ -z "$SMTP2GO_API_KEY" ] || [ -z "$SMTP2GO_SENDER" ]; then
+    log "health: $kind failure live since $since but alert email not configured (HEALTH_RECIPIENTS + SMTP2GO) -- log-only"
+    return 0
+  fi
+
+  subject="[Agent] Claude ${kind} problem on $(hostname -s 2>/dev/null || echo agent)"
+  body="The agent's Claude CLI calls are failing.
+
+Kind:   ${kind} (auth = login/token problem, limit = subscription usage window exhausted)
+Since:  ${since}
+Detail: ${detail:-n/a}
+
+Model work (issues, PR review, pipelines, security gate) is paused on
+a backoff and re-tests automatically; scripted reports still run.
+If kind is auth: re-login on the host (claude auth login, or mint a
+fresh setup-token). If kind is limit: it clears when the usage window
+resets, or enable/raise extra usage on the plan.
+
+This alert is sent at most once per day; the agent recovers on its
+own once calls succeed again."
+  if email_send "$subject" "<pre>${body}</pre>" "$body" "$HEALTH_RECIPIENTS"; then
+    tmp=$(mktemp)
+    jq --arg d "$today" '.health = ((.health // {}) + {emailed_on: $d})' \
+      "$f" > "$tmp" && mv "$tmp" "$f"
+    log "health: $kind alert emailed to $HEALTH_RECIPIENTS"
+  else
+    log "warning: health alert email failed -- will retry next tick"
+  fi
+  return 0
+}
+
 # Worktree key: slash-free, unique per repo+issue.
 worktree_key() { printf '%s-%s' "${1//\//_}" "$2"; }
 
@@ -1469,6 +1567,25 @@ build_deps_section() {
 # then scheduled maintenance, then the claimable-issue grind. The
 # daily/weekly slots are throttled so Igor's own work can't flood
 # the day; tickets soak up whatever time is left and roll over.
+
+# -- Claude health: probe, alert, global backoff gate ------------
+#
+# Before any work: run the daily canary (probe + once-daily alert
+# email -- see do_health_tick), then bail out of ALL model work if a
+# health cooldown is live (auth broken or subscription usage window
+# exhausted -- see lib/claude.sh). A blocked tick still runs the
+# scripted, no-LLM subsystems (SEO, market report) so their emails
+# aren't held hostage by a usage limit; everything else waits.
+# `|| true`: the canary must never kill a tick.
+
+do_health_tick || true
+
+if claude_health_blocked; then
+  log "claude health: backoff active (kind=$(claude_health_kind)) -- skipping all model work this tick"
+  do_seo_tick || true
+  do_market_tick || true
+  exit 0
+fi
 
 # -- Bootstrap: ensure the website is cloned (if opt-in) ----------
 #
@@ -1936,7 +2053,7 @@ EOF
     PR_START=$(date +%s)
     set +e
     claude_run_with_cost "pr-review" "$PR_LOG" "$TICK_TIMEOUT" \
-      --model "$AGENT_MODEL" \
+      --model "$AGENT_MODEL_REVIEW" \
       --append-system-prompt "$PR_SYSTEM_PROMPT" \
       --settings "$AGENT_HOME/agent-settings.json" \
       --max-turns 50 \

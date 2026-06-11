@@ -13,8 +13,8 @@ missing.
   (most are usually already installed; `jq` and `sqlite3` are typically
   the ones to add).
 - `claude` -- Anthropic's Claude CLI. Install via Anthropic's installer
-  (see [docs.claude.com](https://docs.claude.com)). `ANTHROPIC_API_KEY`
-  from `.env` is what it authenticates with.
+  (see [docs.claude.com](https://docs.claude.com)). It authenticates
+  with the host's Claude subscription login -- see "Auth and secrets".
 
 **Ecosystem toolchains for repos the agent will actually work:**
 
@@ -30,20 +30,34 @@ You only need toolchains for languages the agent will actually touch.
 
 ## Auth and secrets
 
-The agent runs against the Anthropic API (not the Max plan). Create a dedicated
-API key in the [Anthropic Console](https://console.anthropic.com) and set
-a hard spending limit on it -- a pathological tick should not be able to
-drain the account. Set the key as `ANTHROPIC_API_KEY` in `.env`.
+Every model call -- agentic ticks AND the one-shot pipeline/PR-text/
+security-gate completions -- goes through the `claude` CLI on the host's
+Claude subscription login. No API key. Authenticate the agent's Unix
+user once:
 
-The Max plan is for interactive Claude Code sessions (you, typing). The
-robot is a separate workload with different cost shape -- metered billing
-gives real per-task visibility, model selection, and prompt caching you
-control.
+```sh
+claude auth login        # interactive OAuth, or:
+claude setup-token       # long-lived token for headless installs
+claude auth status       # verify
+```
 
-Pick the model in `AGENT_MODEL` (also in `.env`). Sensible defaults:
-`claude-sonnet-4-6` for normal coding work, `claude-opus-4-7` if you find
-The agent consistently noops on tickets that need deeper reasoning,
-`claude-haiku-4-5-20251001` only for cheap/light tasks.
+If an `ANTHROPIC_API_KEY` ends up in the environment anyway, the
+invocation primitives in `lib/claude.sh` strip it from every CLI call --
+an inherited key silently flips the CLI to pay-as-you-go API billing.
+(The Messages-API client `anthropic_call` is kept in `lib/claude.sh` as
+an escape hatch back to key billing; it has no live call sites.)
+
+The harness watches its own auth health: every call records whether
+auth/quota worked, a daily probe covers idle days, model work backs off
+while the subscription usage window is exhausted, and a once-daily
+alert email goes to `HEALTH_RECIPIENTS` while anything is broken.
+
+Pick the models in `.env`, stakes-ordered per surface: `AGENT_MODEL`
+(the workhorse -- issues, site-work, pipelines; e.g. `claude-sonnet-4-6`),
+`AGENT_MODEL_REVIEW` (PR-review revisions + maintenance triage; e.g.
+`claude-opus-4-8`), `AGENT_MODEL_SECURITY` (the security gate's
+independent reviewer -- the strongest tier you have; e.g.
+`claude-fable-5`).
 
 The bot's Forgejo token (`FORGEJO_TOKEN`) lives in the same `.env`, chmod
 600. See `.env.example` for the full template.

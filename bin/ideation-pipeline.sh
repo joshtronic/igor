@@ -19,12 +19,12 @@
 # Per invocation:
 #   0. Daily refrain. Post already knocked out today (master OR open
 #      bot PR)? Exit clean.
-#   1. Ideate (Haiku), up to MAX_IDEATION_ROUNDS scans over randomized
+#   1. Ideate, up to MAX_IDEATION_ROUNDS scans over randomized
 #      slices of the brain, biased toward un-drafted material and
 #      anchored on the most recent reflections. Picks an angle that the
 #      site has NOT already covered (full shipped-post digest as the
 #      dedup signal). Spare half-formed ideas come back as "sparks".
-#   2. Draft (Sonnet) the post under the chosen angle.
+#   2. Draft the post under the chosen angle.
 #   3. (--live) Write src/posts/YYYY/<date>-<slug>.md, push a branch,
 #      open a PR; mark the drawn-on reflections post_drafted=1; journal
 #      the sparks as kind='thought' for future ideation.
@@ -37,10 +37,13 @@
 #     [--voice-anchor PATH] [--live]
 #
 # Required env:
-#   ANTHROPIC_API_KEY  FORGEJO_URL  FORGEJO_TOKEN  FORGEJO_HOST  BOT_USER
+#   FORGEJO_URL  FORGEJO_TOKEN  FORGEJO_HOST  BOT_USER
 # Optional env:
-#   WEBSITE_REPO (opt-in gate)  AGENT_MODEL  AGENT_MODEL_THINKING
+#   WEBSITE_REPO (opt-in gate)  AGENT_MODEL
 #   AGENT_STATE_DIR  AGENT_HOME  FORGEJO_REVIEWER
+#
+# Model calls go through claude_call (the `claude` CLI on the host's
+# subscription login) -- no API key needed or wanted in the env.
 
 set -uo pipefail
 
@@ -76,8 +79,6 @@ if [ -f "$AGENT_HOME/.env" ]; then
   set +a
 fi
 
-: "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set}"
-
 if [ -z "${WEBSITE_REPO:-}" ]; then
   echo "ideation-pipeline: WEBSITE_REPO unset -- nothing to do (set it in .env to opt in)" >&2
   exit 0
@@ -89,7 +90,6 @@ fi
 : "${BOT_USER:?BOT_USER must be set (export it before calling)}"
 
 MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
-THINKING_MODEL="${AGENT_MODEL_THINKING:-claude-haiku-4-5-20251001}"
 WEBSITE_PATH="${WEBSITE_PATH:-$AGENT_STATE_DIR/repos/${WEBSITE_REPO}}"
 
 # -- libs -------------------------------------------------------
@@ -432,7 +432,7 @@ ${posts}
 EOF
 )
   # strip_fences=0: notes may quote a fenced snippet.
-  raw=$(anthropic_call "$MODEL" "ideation-pipeline-voice-notes" 600 "$system" "$user" 0) || {
+  raw=$(claude_call "$MODEL" "ideation-pipeline-voice-notes" 600 "$system" "$user" 0) || {
     log "voice-notes: evolve call failed -- keeping existing notes"
     return 0
   }
@@ -564,7 +564,7 @@ Brain slice (reflections + journal entries, id-tagged):
 ${bundle}
 EOF
 )
-  anthropic_call "$THINKING_MODEL" "ideation-pipeline-ideate" 800 "$system" "$user"
+  claude_call "$MODEL" "ideation-pipeline-ideate" 800 "$system" "$user"
 }
 
 # Independent re-cover check. ideate's self-reported `novel` is too lenient
@@ -602,7 +602,7 @@ Already shipped (title -- description):
 ${shipped}
 EOF
 )
-  raw=$(anthropic_call "$MODEL" "ideation-pipeline-dedup" 200 "$system" "$user" 0) || return 1
+  raw=$(claude_call "$MODEL" "ideation-pipeline-dedup" 200 "$system" "$user" 0) || return 1
   verdict=$(printf '%s' "$raw" | grep -oiE 'RECOVER:[[:space:]]*(yes|no)' | tail -1 || true)
   printf '%s' "$verdict" | grep -qiE 'yes[[:space:]]*$'
 }
@@ -753,7 +753,7 @@ EOF
   # its own fenced code blocks, so we must NOT strip ``` lines. Headroom
   # bumped to 8000 -- the body is no longer a JSON-escaped string, and a
   # truncated response was one of the old "missing body" failure modes.
-  anthropic_call "$MODEL" "ideation-pipeline-draft" 8000 "$system" "$user" 0
+  claude_call "$MODEL" "ideation-pipeline-draft" 8000 "$system" "$user" 0
 }
 
 # Parse the label+sentinel draft into the four fields. The body is
@@ -938,7 +938,7 @@ SOURCE MATERIAL the writer worked from:
 ${sources}
 EOF
 )
-  raw=$(anthropic_call "$THINKING_MODEL" "ideation-pipeline-grounding" 300 "$system" "$user" 0) || return 0
+  raw=$(claude_call "$MODEL" "ideation-pipeline-grounding" 300 "$system" "$user" 0) || return 0
   printf '%s' "$raw" | grep -qiE '^[[:space:]]*none[[:space:]]*$' && return 0
   printf '%s' "$raw" | sed '/^[[:space:]]*$/d'
 }

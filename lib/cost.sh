@@ -87,15 +87,22 @@ cost_record_api() {
 # store the precomputed USD verbatim -- authoritative wins. Token
 # counts come along for the ride so reports can show breakdowns.
 # Best-effort: missing/malformed log silently skips.
+#
+# Note: on a subscription login the CLI still computes total_cost_usd,
+# so the ledger keeps working -- the number is dollars-EQUIVALENT used
+# (a plan-consumption meter), not dollars billed.
+#
+# Optional $3: model fallback when the result event carries no .model
+# (the `--output-format json` envelope claude_call records doesn't).
 cost_record_cli() {
-  local call_site="$1" stream_log="$2"
+  local call_site="$1" stream_log="$2" model_fallback="${3:-}"
   [ -f "$stream_log" ] || return 0
   local result_line
   result_line=$(grep -E '^\{"type":"result"' "$stream_log" 2>/dev/null | tail -1)
   [ -n "$result_line" ] || return 0
   local model input output cache_create cache_read usd
   model=$(jq -r '.model // empty' <<<"$result_line" 2>/dev/null)
-  [ -n "$model" ] || model="${AGENT_MODEL:-unknown}"
+  [ -n "$model" ] || model="${model_fallback:-${AGENT_MODEL:-unknown}}"
   input=$(jq -r '.usage.input_tokens // 0' <<<"$result_line" 2>/dev/null) || input=0
   output=$(jq -r '.usage.output_tokens // 0' <<<"$result_line" 2>/dev/null) || output=0
   cache_create=$(jq -r '.usage.cache_creation_input_tokens // 0' <<<"$result_line" 2>/dev/null) || cache_create=0

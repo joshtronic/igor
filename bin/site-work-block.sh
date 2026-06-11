@@ -30,7 +30,6 @@
 #                          [--website-path PATH] [--live]
 #
 # Required env:
-#   ANTHROPIC_API_KEY  -- for Claude invocation
 #   FORGEJO_URL        -- e.g. https://git.sherver.org
 #   FORGEJO_TOKEN      -- for PR open
 #   FORGEJO_HOST       -- e.g. git.sherver.org
@@ -71,7 +70,6 @@ if [ -f "$AGENT_HOME/.env" ]; then
   set +a
 fi
 
-: "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set}"
 : "${FORGEJO_URL:?FORGEJO_URL must be set}"
 : "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set}"
 : "${FORGEJO_HOST:?FORGEJO_HOST must be set}"
