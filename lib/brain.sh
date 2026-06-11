@@ -1,6 +1,6 @@
 # lib/brain.sh -- the sqlite "brain" store (seen_urls + reflections)
 # for the reading-ingest and ideation pipelines. Model calls live in
-# lib/claude.sh (anthropic_call).
+# lib/claude.sh (claude_call).
 #
 # Expects the global BRAIN_DB set before any call.
 #

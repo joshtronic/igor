@@ -25,8 +25,8 @@
 # Usage:
 #   bin/reading-pipeline.sh [--brain-db PATH] [--voice-anchor PATH] [--live]
 #
-# Required env:
-#   ANTHROPIC_API_KEY  -- reflection calls
+# Model calls go through claude_call (the `claude` CLI on the host's
+# subscription login) -- no API key needed or wanted in the env.
 #
 # Optional env:
 #   WEBSITE_REPO       -- opt-in gate; unset -> no-op clean
@@ -62,8 +62,6 @@ if [ -f "$AGENT_HOME/.env" ]; then
   . "$AGENT_HOME/.env"
   set +a
 fi
-
-: "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set}"
 
 # WEBSITE_REPO is the opt-in gate for all website-side work. With it
 # unset there is no point accumulating reflections no downstream
@@ -272,7 +270,7 @@ EOF
   local attempt
   for attempt in 1 2; do
     # strip_fences=0: the journal is raw markdown and may quote a fence.
-    raw=$(anthropic_call "$MODEL" "reading-pipeline-reflect" 1500 \
+    raw=$(claude_call "$MODEL" "reading-pipeline-reflect" 1500 \
             "$system" "$user" 0) || {
       log "reflect: API call failed for $url (attempt $attempt)"
       continue

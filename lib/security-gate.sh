@@ -10,9 +10,14 @@
 # `SECURITY_VERDICT: PASS|BLOCK` line, which we parse. One retry; if no
 # verdict lands, we FAIL CLOSED (treat as block) -- security-first.
 #
-# Source order: expects lib/claude.sh (anthropic_call) already sourced,
-# a model in the env (AGENT_MODEL or MODEL), and a `log` function
-# defined by the caller.
+# Source order: expects lib/claude.sh (claude_call) already sourced,
+# a model in the env (AGENT_MODEL_SECURITY, falling back to AGENT_MODEL
+# or MODEL), and a `log` function defined by the caller.
+#
+# The reviewer model is deliberately the strongest tier configured
+# (AGENT_MODEL_SECURITY, normally Fable): a one-shot adversarial
+# judgment is exactly where the extra capability pays, and on
+# subscription billing the marginal cost of the bigger model is zero.
 
 # Max diff bytes fed to the reviewer. Issue-work diffs are already
 # scope-capped (~400 lines); this bounds the pathological case and keeps
@@ -33,7 +38,7 @@ security_gate() {
   local worktree="$1" base="$2" call_site="$3"
   local model diff note="" system user raw verdict findings attempt
 
-  model="${AGENT_MODEL:-${MODEL:-claude-sonnet-4-6}}"
+  model="${AGENT_MODEL_SECURITY:-${AGENT_MODEL:-${MODEL:-claude-sonnet-4-6}}}"
 
   diff=$(git -C "$worktree" diff "origin/${base}..HEAD" 2>/dev/null || true)
   if [ -z "$diff" ]; then
@@ -81,7 +86,7 @@ ${diff}${note}"
   for attempt in 1 2; do
     # strip_fences=0: the diff (and any findings quoting it) can contain
     # ``` fences that must not be stripped.
-    raw=$(anthropic_call "$model" "$call_site" 1500 "$system" "$user" 0) || {
+    raw=$(claude_call "$model" "$call_site" 1500 "$system" "$user" 0) || {
       log "security gate: review call failed (attempt $attempt)"
       continue
     }

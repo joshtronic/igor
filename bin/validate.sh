@@ -51,9 +51,9 @@ fi
 # these two in sync -- a var added there should be added here so
 # operators see the missing config before kicking off a tick.
 for var in \
-    ANTHROPIC_API_KEY \
     AGENT_MODEL \
-    AGENT_MODEL_THINKING \
+    AGENT_MODEL_REVIEW \
+    AGENT_MODEL_SECURITY \
     FORGEJO_URL \
     FORGEJO_TOKEN \
     FORGEJO_HOST \
@@ -63,13 +63,29 @@ for var in \
     ; do
   if [ -n "${!var:-}" ]; then
     case "$var" in
-      ANTHROPIC_API_KEY|FORGEJO_TOKEN) pass "$var set" ;;
+      FORGEJO_TOKEN) pass "$var set" ;;
       *) pass "$var set (${!var})" ;;
     esac
   else
     fail "$var set" "missing from .env"
   fi
 done
+
+# Claude CLI auth: every model call bills the host's Claude
+# subscription login (OAuth), NOT an API key. ANTHROPIC_API_KEY is
+# intentionally absent from the required list -- the runners strip it
+# from the child env even if present.
+if command -v claude >/dev/null 2>&1; then
+  auth_json=$(claude auth status --json 2>/dev/null || echo '{}')
+  if [ "$(jq -r '.loggedIn // false' <<<"$auth_json" 2>/dev/null)" = "true" ]; then
+    pass "claude CLI logged in ($(jq -r '[.authMethod, .subscriptionType] | map(select(. != null)) | join(", ")' <<<"$auth_json" 2>/dev/null))"
+  else
+    fail "claude CLI logged in" "run 'claude auth login' as this user (or mint a token with 'claude setup-token')"
+  fi
+fi
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  warn "ANTHROPIC_API_KEY present in .env -- unused (CLI runs on the subscription login; the key is only for the anthropic_call escape hatch)"
+fi
 
 # Light format checks on the vars where a typo silently breaks
 # behavior later (e.g. a timeout that won't parse).

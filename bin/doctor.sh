@@ -52,11 +52,39 @@ info()    { printf '         %s\n' "$*"; }
 section "Environment"
 info "AGENT_HOME=$AGENT_HOME"
 info "AGENT_STATE_DIR=$AGENT_STATE_DIR"
-[ -n "${ANTHROPIC_API_KEY:-}" ] && ok "ANTHROPIC_API_KEY set" || bad "ANTHROPIC_API_KEY missing"
 [ -n "${FORGEJO_URL:-}" ]       && ok "FORGEJO_URL=$FORGEJO_URL" || bad "FORGEJO_URL missing"
 [ -n "${FORGEJO_TOKEN:-}" ]     && ok "FORGEJO_TOKEN set"  || bad "FORGEJO_TOKEN missing"
 [ -n "${AGENT_MODEL:-}" ]        && ok "AGENT_MODEL=$AGENT_MODEL" || bad "AGENT_MODEL missing"
+[ -n "${AGENT_MODEL_REVIEW:-}" ]   && ok "AGENT_MODEL_REVIEW=$AGENT_MODEL_REVIEW" || bad "AGENT_MODEL_REVIEW missing"
+[ -n "${AGENT_MODEL_SECURITY:-}" ] && ok "AGENT_MODEL_SECURITY=$AGENT_MODEL_SECURITY" || bad "AGENT_MODEL_SECURITY missing"
 info "FORGEJO_REVIEWER=${FORGEJO_REVIEWER:-(unset)}"
+
+# ----- Claude CLI auth (subscription login, not API key) ---------
+
+section "Claude auth"
+if command -v claude >/dev/null 2>&1; then
+  AUTH_JSON=$(claude auth status --json 2>/dev/null || echo '{}')
+  if [ "$(jq -r '.loggedIn // false' <<<"$AUTH_JSON" 2>/dev/null)" = "true" ]; then
+    ok "logged in: $(jq -r '[.email, .authMethod, .subscriptionType] | map(select(. != null)) | join(" / ")' <<<"$AUTH_JSON" 2>/dev/null)"
+  else
+    bad "claude CLI not logged in -- run 'claude auth login' as this user"
+  fi
+else
+  bad "claude CLI not on PATH"
+fi
+HEALTH_FILE="$AGENT_STATE_DIR/discretionary-state.json"
+if [ -f "$HEALTH_FILE" ] && command -v jq >/dev/null 2>&1; then
+  H_FIRST=$(jq -r '.health.first_failure // 0' "$HEALTH_FILE" 2>/dev/null)
+  H_LAST_OK=$(jq -r '.health.last_ok // 0' "$HEALTH_FILE" 2>/dev/null)
+  if [ "${H_FIRST:-0}" -gt 0 ] 2>/dev/null; then
+    bad "health failure live: kind=$(jq -r '.health.kind // "?"' "$HEALTH_FILE"), since $(date -d "@$H_FIRST" 2>/dev/null || echo "$H_FIRST")"
+    info "detail: $(jq -r '.health.detail // ""' "$HEALTH_FILE" | head -c 160)"
+  elif [ "${H_LAST_OK:-0}" -gt 0 ] 2>/dev/null; then
+    ok "last successful model call: $(date -d "@$H_LAST_OK" 2>/dev/null || echo "$H_LAST_OK")"
+  else
+    info "no health record yet (no model call since this shipped)"
+  fi
+fi
 
 # ----- Forgejo connectivity + bot identity ----------------------
 

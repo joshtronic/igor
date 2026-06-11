@@ -65,6 +65,29 @@ respective tools on the host; install or skip.
 
 ## Gotchas
 
+- ALL model calls go through the `claude` CLI on the host's Claude
+  subscription login (OAuth) -- there is no API key in play. Both
+  invocation primitives in `lib/claude.sh` (`claude_run_with_cost`
+  agentic, `claude_call` one-shot no-tools) strip `ANTHROPIC_API_KEY`
+  from the child env: an inherited key silently flips the CLI to
+  pay-as-you-go billing. `anthropic_call` (raw Messages API) is kept
+  as the escape hatch and has no live call sites. Three model vars
+  are REQUIRED in `.env`, stakes-ordered by surface: `AGENT_MODEL`
+  (workhorse: issues, site-work, pipelines, PR text),
+  `AGENT_MODEL_REVIEW` (PR-review + maintenance triage),
+  `AGENT_MODEL_SECURITY` (security gate). `AGENT_MODEL_THINKING` is
+  retired. Adding/renaming model vars is a host-`.env` lockstep
+  change -- tick.sh fails fast on a missing one, every minute.
+- Claude auth/usage health: every CLI call records ok/auth/limit
+  under `.health` in `discretionary-state.json` (only auth and
+  usage-limit failures count -- ordinary nonzero exits stay the
+  surface's problem). While a cooldown is live the tick skips ALL
+  model work (scripted SEO/market emails still run); a daily probe
+  covers idle days and a once-daily alert email goes to
+  `HEALTH_RECIPIENTS` (falls back to `SEO_PRIMARY_EMAIL`; log-only
+  without SMTP2GO). Clear `.health` to reset. Side effect of
+  subscription billing: the cost ledger's `usd` is dollars-EQUIVALENT
+  consumed (a plan-usage meter), not dollars billed.
 - The harness pulls itself at the top of every tick and re-execs
   if HEAD moved. Any change pushed to master takes effect on the
   next systemd timer fire -- and ticks fire every minute, so a bad
