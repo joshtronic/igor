@@ -341,6 +341,24 @@ forgejo_repo_get_file() {
   jq -r '.content // empty' <<<"$resp" | base64 -d 2>/dev/null || true
 }
 
+# Names of the entries in a repo directory, one per line. Non-zero
+# when the API call fails OR the directory doesn't exist -- callers
+# (logwatch service discovery) treat both as "nothing to list".
+forgejo_repo_list_dir() {
+  local repo="$1" dir="$2" resp
+  resp=$(_fj GET "/repos/${repo}/contents/${dir}" 2>/dev/null) || return 1
+  jq -r '.[]?.name // empty' <<<"$resp" 2>/dev/null
+}
+
+# Subjects (first lines) of the N most recent commits on the default
+# branch, one per line. Best-effort: empty on API failure -- this is
+# a dedup signal, not a gate.
+forgejo_recent_commit_subjects() {
+  local repo="$1" n="${2:-20}" resp
+  resp=$(_fj GET "/repos/${repo}/commits?limit=${n}&stat=false&verification=false&files=false" 2>/dev/null) || return 0
+  jq -r '.[]? | .commit.message // empty | split("\n")[0]' <<<"$resp" 2>/dev/null || true
+}
+
 # Returns 0 if the given dir in the repo contains at least one file
 # matching the given regex. Useful for "does .forgejo/workflows have a
 # .yml file?" without enumerating each candidate path.
