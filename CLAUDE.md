@@ -180,10 +180,11 @@ respective tools on the host; install or skip.
   expected holds, anything matching an open issue title, and symptoms
   covered by a recent commit (titles + subjects ride along per repo
   as dedup signals) are explicitly not ticket-worthy. At most 2
-  tickets per unit per day, filed on the owning repo, Agent-labeled
-  but ASSIGNED to `FORGEJO_REVIEWER` with review time logged --
-  assigned issues are invisible to claimable discovery, so unassigning
-  is the human's per-ticket greenlight for Igor to work it. Stamped
+  tickets per unit per day, filed on the owning repo UNLABELED and
+  ASSIGNED to `FORGEJO_REVIEWER` with review time logged. The `Agent`
+  label is the human's triage stamp, never the filing default:
+  greenlighting a ticket for Igor = add the label + unassign, and
+  until both happen claimable discovery can't see it. Stamped
   attempted under `.logwatch` BEFORE any model call (slot semantics --
   no retry storm); clear `.logwatch` to re-run. When a greenlit ticket
   targets this repo, Igor PRs against its own harness -- safe only

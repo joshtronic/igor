@@ -1570,11 +1570,11 @@ own once calls succeed again."
 # list is the expected common case. Open issue titles and recent
 # commit subjects on the owning repo ride along as dedup signals so a
 # chronic (or already-fixed) condition gets ONE ticket, not one per
-# day. Tickets are filed on the owning repo, Agent-labeled, and
-# ASSIGNED to FORGEJO_REVIEWER -- assigned issues are invisible to
-# claimable discovery, so the human reviews first and unassigning is
-# the per-ticket greenlight for Igor to work it (the assignment
-# dance, same as PRs). Review time is logged on each filed ticket.
+# day. Tickets are filed on the owning repo UNLABELED and ASSIGNED to
+# FORGEJO_REVIEWER: the "Agent" label is the human's triage stamp,
+# never the filing default. Greenlighting a ticket for Igor = add the
+# Agent label + unassign; until both happen, claimable discovery
+# can't see it. Review time is logged on each filed ticket.
 #
 # State: one ".logwatch" object {date} in discretionary-state.json.
 # Stamped once ATTEMPTED (slot semantics): a wedged pass must not
@@ -1745,10 +1745,11 @@ window: ${today} 00:00-01:00 (filed by the nightly logwatch pass)
 ${LOGWATCH_MARKER}"
     num=$(forgejo_open_issue "$repo" "$title" "$body") \
       || { log "warning: logwatch ticket open failed on $repo (continuing)"; continue; }
-    forgejo_add_label "$repo" "$num" "Agent" 2>/dev/null \
-      || log "warning: could not apply 'Agent' label on ${repo}#${num}"
-    # Assigned-to-reviewer = invisible to claimable discovery until
-    # the human unassigns (the per-ticket greenlight).
+    # Deliberately NO "Agent" label here: the label is the human's
+    # triage stamp, not the filing default. The operator greenlights a
+    # ticket for Igor by adding the label AND unassigning -- until
+    # then it's doubly invisible to claimable discovery (which wants
+    # Agent-labeled AND unassigned).
     forgejo_assign "$repo" "$num" "$FORGEJO_REVIEWER" 2>/dev/null \
       || log "warning: could not assign ${repo}#${num} to $FORGEJO_REVIEWER"
     forgejo_log_time "$repo" "$num" "$elapsed" 2>/dev/null \
@@ -2566,9 +2567,10 @@ fi
 # bot-accessible repo declaring systemd/*.service gets each unit's
 # local midnight-hour journal reviewed (one review-tier call per
 # unit with entries; empty journal = runs elsewhere or didn't run =
-# skip). Hard-failure tickets land on the owning repo, Agent-labeled
-# but assigned to FORGEJO_REVIEWER -- invisible to the issue grind
-# until the human unassigns.
+# skip). Hard-failure tickets land on the owning repo unlabeled and
+# assigned to FORGEJO_REVIEWER -- the human triages by adding the
+# Agent label and unassigning; until then the issue grind can't see
+# them.
 if do_logwatch_tick; then
   exit 0
 fi
