@@ -166,24 +166,29 @@ respective tools on the host; install or skip.
   previous weekday, so the gate never matches and no report goes out that
   day (logged each cooldown, not silent). Clear `.market` to force a
   re-send. Keep it a single report until there's a real reason to split it.
-- The logwatch pass (`do_logwatch_tick`) is opt-in via `LOGWATCH_REPO`
-  and is the harness reviewing ITSELF: once a day, first tick after
-  01:00 (window-completeness, not a send-hour -- the midnight batch
-  hour it reads in full must have closed), one `claude_call` on
-  `AGENT_MODEL_REVIEW` over journalctl output, filing at most 2
-  Agent-labeled hard-failure tickets on `LOGWATCH_REPO`. The contract
-  is failure-smell, not narration: retries that succeeded, expected
-  holds, anything matching an open issue title, and symptoms covered
-  by a recently-landed commit (open titles + 2 days of harness
-  commit subjects ride along as dedup signals -- the log window
-  always predates same-day fixes) are explicitly not ticket-worthy.
-  Stamped attempted
-  under `.logwatch` BEFORE the model call (slot semantics -- no retry
-  storm); clear `.logwatch` to re-run. Because tickets are
-  Agent-labeled and `LOGWATCH_REPO` is normally this repo, Igor will
-  claim and PR fixes against its own harness -- safe only because a
-  human-reviewed merge gates master (and master self-deploys in ~1
-  minute, so review those PRs accordingly).
+- The logwatch pass (`do_logwatch_tick`) is convention-driven, NO env
+  knob: a root-level `systemd/` directory in any bot-accessible repo
+  declares "I run as a service", and once a day (first tick after
+  01:00 -- window-completeness, not a send-hour: the 00:00-01:00
+  journal being read must have closed) each declared unit's LOCAL
+  user journal gets one `claude_call` on `AGENT_MODEL_REVIEW` hunting
+  hard failures. Empty journal = unit runs elsewhere or didn't run =
+  skip; no canary/uptime semantics, no news is good news. The harness
+  discovers itself this way (`systemd/agent.service`); only its
+  known-benign blurb is special-cased, keyed off the UNIT name. The
+  contract is failure-smell, not narration: retries that succeeded,
+  expected holds, anything matching an open issue title, and symptoms
+  covered by a recent commit (titles + subjects ride along per repo
+  as dedup signals) are explicitly not ticket-worthy. At most 2
+  tickets per unit per day, filed on the owning repo, Agent-labeled
+  but ASSIGNED to `FORGEJO_REVIEWER` with review time logged --
+  assigned issues are invisible to claimable discovery, so unassigning
+  is the human's per-ticket greenlight for Igor to work it. Stamped
+  attempted under `.logwatch` BEFORE any model call (slot semantics --
+  no retry storm); clear `.logwatch` to re-run. When a greenlit ticket
+  targets this repo, Igor PRs against its own harness -- safe only
+  because a human-reviewed merge gates master (and master self-deploys
+  in ~1 minute, so review those PRs accordingly).
 
 ## Off-limits
 
