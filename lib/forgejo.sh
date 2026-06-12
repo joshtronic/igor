@@ -10,16 +10,19 @@
 : "${FORGEJO_URL:?FORGEJO_URL must be set}"
 : "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set}"
 
+# --max-time: a wedged Forgejo must fail fast, not stall the tick --
+# an untimed curl once sat ~2.5 minutes mid-validation before failing.
+# 30s is generous for small JSON calls on the same network.
 _fj() {
   local method="$1" path="$2" body="${3:-}"
   if [ -n "$body" ]; then
-    curl -sf -X "$method" \
+    curl -sf --max-time 30 -X "$method" \
       -H "Authorization: token $FORGEJO_TOKEN" \
       -H "Content-Type: application/json" \
       -d "$body" \
       "$FORGEJO_URL/api/v1${path}"
   else
-    curl -sf -X "$method" \
+    curl -sf --max-time 30 -X "$method" \
       -H "Authorization: token $FORGEJO_TOKEN" \
       "$FORGEJO_URL/api/v1${path}"
   fi
@@ -234,10 +237,12 @@ forgejo_count_bot_comments_matching() {
 # All label names defined on the repo, as a JSON array of strings. One
 # call answers every "does label X exist?" check the validator makes,
 # instead of a GET /labels per name. Empty array on miss.
+# NON-ZERO on API failure, same contract (and reason) as
+# forgejo_repo_list_root above.
 forgejo_list_labels() {
-  local repo="$1"
-  _fj GET "/repos/${repo}/labels" 2>/dev/null \
-    | jq -c '[.[]?.name]' 2>/dev/null || printf '[]'
+  local repo="$1" resp
+  resp=$(_fj GET "/repos/${repo}/labels" 2>/dev/null) || return 1
+  jq -c '[.[]?.name]' <<<"$resp" 2>/dev/null || printf '[]'
 }
 
 # Add a label by name. Forgejo's API takes label IDs, so this resolves
@@ -314,18 +319,25 @@ forgejo_repo_exists() {
 # Lists the names of entries at the repo root (files + dirs) as a JSON
 # array of strings. One call answers every root-level existence probe
 # the validator makes, instead of a GET /contents/<path> per candidate
-# file. Empty array on miss.
+# file. Empty array for a genuinely empty repo; NON-ZERO when the API
+# call itself fails -- "couldn't read the repo" must stay
+# distinguishable from "the repo has no files", or one network hiccup
+# fails every existence check at once (and files a bogus onboarding
+# ticket; see rc_cache_init).
 forgejo_repo_list_root() {
-  local repo="$1"
-  _fj GET "/repos/${repo}/contents" 2>/dev/null \
-    | jq -c '[.[]?.name]' 2>/dev/null || printf '[]'
+  local repo="$1" resp
+  resp=$(_fj GET "/repos/${repo}/contents" 2>/dev/null) || return 1
+  jq -c '[.[]?.name]' <<<"$resp" 2>/dev/null || printf '[]'
 }
 
-# Prints raw file contents on stdout (base64-decoded). Empty on miss.
+# Prints raw file contents on stdout (base64-decoded). NON-ZERO when
+# the API call fails (incl. 404) -- callers gate on the file existing
+# first, so a failure here means the read itself broke, not the file
+# is absent.
 forgejo_repo_get_file() {
   local repo="$1" path="$2"
   local resp
-  resp=$(_fj GET "/repos/${repo}/contents/${path}" 2>/dev/null) || return 0
+  resp=$(_fj GET "/repos/${repo}/contents/${path}" 2>/dev/null) || return 1
   jq -r '.content // empty' <<<"$resp" | base64 -d 2>/dev/null || true
 }
 

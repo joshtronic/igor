@@ -1935,6 +1935,7 @@ VAL_PASS=0
 VAL_CACHED=0
 VAL_FAIL=0
 VAL_SKIPPED=0
+VAL_INDET=0
 while IFS= read -r repo_line; do
   [ -z "$repo_line" ] && continue
   R_NAME=$(jq -r '.full_name' <<<"$repo_line")
@@ -1970,6 +1971,14 @@ while IFS= read -r repo_line; do
     VALIDATED_REPOS_JSON+="${repo_line}"$'\n'
     validation_mark_ok "$R_NAME"
     VAL_PASS=$((VAL_PASS + 1))
+  elif [ "$V_RC" -eq 2 ]; then
+    # Indeterminate: the Forgejo API errored mid-read, so no check
+    # actually ran. A hiccup must NOT file an onboarding ticket on a
+    # healthy repo (that short-circuits validation until a human
+    # closes the ticket) -- skip the repo for work this tick only;
+    # nothing is cached, so the next tick re-checks.
+    log "validation: $R_NAME indeterminate (Forgejo API error) -- no ticket filed, re-checking next tick"
+    VAL_INDET=$((VAL_INDET + 1))
   else
     log "validation: $R_NAME failed -- filing/reopening onboarding ticket"
     handle_onboarding_failure "$R_NAME" "$BOT_USER" "$V_REPORT" \
@@ -1977,7 +1986,7 @@ while IFS= read -r repo_line; do
     VAL_FAIL=$((VAL_FAIL + 1))
   fi
 done < <(jq -c '.[]' <<<"$ALL_REPOS")
-log "validation: ${VAL_PASS} pass, ${VAL_CACHED} cached, ${VAL_FAIL} fail, ${VAL_SKIPPED} skipped (open onboarding ticket)"
+log "validation: ${VAL_PASS} pass, ${VAL_CACHED} cached, ${VAL_FAIL} fail, ${VAL_INDET} indeterminate, ${VAL_SKIPPED} skipped (open onboarding ticket)"
 
 if [ -z "$VALIDATED_REPOS_JSON" ]; then
   # No repo is safe for agentic WORK this tick. Read-only analysis is

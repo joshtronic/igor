@@ -36,15 +36,23 @@ _RC_CARGO=""
 rc_root_has()  { grep -qxF "$1" <<<"$_RC_ROOT_NAMES"; }
 rc_has_label() { grep -qxF "$1" <<<"$_RC_LABELS"; }
 
+# Returns non-zero when any underlying API call fails -- the caller
+# must treat that as INDETERMINATE (can't read the repo right now),
+# never as a check failure. Before this distinction existed, one
+# Forgejo hiccup emptied the cache, failed every check at once, and
+# filed a bogus onboarding ticket on a healthy repo -- which then
+# short-circuited validation until a human closed it.
 rc_cache_init() {
-  local repo="$1"
-  _RC_ROOT_NAMES=$(forgejo_repo_list_root "$repo" | jq -r '.[]' 2>/dev/null)
-  _RC_LABELS=$(forgejo_list_labels "$repo" | jq -r '.[]' 2>/dev/null)
+  local repo="$1" root_json labels_json
+  root_json=$(forgejo_repo_list_root "$repo") || return 1
+  labels_json=$(forgejo_list_labels "$repo") || return 1
+  _RC_ROOT_NAMES=$(jq -r '.[]' <<<"$root_json" 2>/dev/null)
+  _RC_LABELS=$(jq -r '.[]' <<<"$labels_json" 2>/dev/null)
   _RC_PACKAGE_JSON=""; _RC_PYPROJECT=""; _RC_MAKEFILE=""; _RC_CARGO=""
-  if rc_root_has package.json;   then _RC_PACKAGE_JSON=$(forgejo_repo_get_file "$repo" package.json); fi
-  if rc_root_has pyproject.toml; then _RC_PYPROJECT=$(forgejo_repo_get_file "$repo" pyproject.toml); fi
-  if rc_root_has Makefile;       then _RC_MAKEFILE=$(forgejo_repo_get_file "$repo" Makefile); fi
-  if rc_root_has Cargo.toml;     then _RC_CARGO=$(forgejo_repo_get_file "$repo" Cargo.toml); fi
+  if rc_root_has package.json;   then _RC_PACKAGE_JSON=$(forgejo_repo_get_file "$repo" package.json)   || return 1; fi
+  if rc_root_has pyproject.toml; then _RC_PYPROJECT=$(forgejo_repo_get_file "$repo" pyproject.toml)    || return 1; fi
+  if rc_root_has Makefile;       then _RC_MAKEFILE=$(forgejo_repo_get_file "$repo" Makefile)           || return 1; fi
+  if rc_root_has Cargo.toml;     then _RC_CARGO=$(forgejo_repo_get_file "$repo" Cargo.toml)            || return 1; fi
 }
 
 # -- Individual checks ------------------------------------------
@@ -148,9 +156,15 @@ check_labels() {
 
 # -- Main validator ---------------------------------------------
 #
-# Runs all checks, prints a markdown checklist to stdout, returns 0
-# if every required check passed, 1 if any failed. The checklist is
-# safe to drop straight into an issue body.
+# Runs all checks, prints a markdown checklist to stdout. Returns:
+#   0 -- every required check passed
+#   1 -- one or more checks definitively FAILED (file/reopen the
+#        onboarding ticket; the repo really is missing scaffolding)
+#   2 -- INDETERMINATE: the Forgejo API errored while reading the
+#        repo, so no check result is trustworthy. Do NOT file a
+#        ticket; skip the repo for work this tick and re-check next
+#        tick (failures are never cached).
+# The checklist is safe to drop straight into an issue body.
 
 validate_repo_via_api() {
   local repo="$1"
@@ -166,7 +180,10 @@ validate_repo_via_api() {
     fi
   }
 
-  rc_cache_init "$repo"
+  if ! rc_cache_init "$repo"; then
+    printf 'validation indeterminate: the Forgejo API errored while reading the repo -- no check was actually evaluated\n'
+    return 2
+  fi
 
   check_claude_md
   _emit $? "CLAUDE.md present at repo root" \
