@@ -1362,11 +1362,20 @@ do_market_tick() {
   fi
 
   # Weekday only -- markets are closed Sat/Sun (date +%u: 1=Mon..7=Sun).
+  # Every configured-but-not-sending path below logs its status: the
+  # journal should say WHY market did nothing this tick, same as
+  # maintenance ("no repos eligible") and seo ("all domains analyzed").
   local dow; dow=$(date +%u)
-  [ "$dow" -ge 6 ] && return 1
+  if [ "$dow" -ge 6 ]; then
+    log "market: weekend -- markets closed, no report today"
+    return 1
+  fi
 
   # At most once per day (set only on a successful send).
-  market_sent_today && return 1
+  if market_sent_today; then
+    log "market: report already sent today -- continuing"
+    return 1
+  fi
 
   # Failure budget: once marketstack/SMTP has hard-failed too many times
   # today, abandon the day rather than keep burning the metered quota
@@ -1376,13 +1385,19 @@ do_market_tick() {
   # env knob -- keep the .env surface small.
   local max_failures=5 failures
   failures=$(market_failures)
-  [ "$failures" -ge "$max_failures" ] && return 1
+  if [ "$failures" -ge "$max_failures" ]; then
+    log "market: abandoned for the day (${failures}/${max_failures} hard failures; clear .market in discretionary-state.json to retry) -- continuing"
+    return 1
+  fi
 
   # Cooldown gate: at most one marketstack hit per MARKET_RETRY_COOLDOWN_SECS.
   # The first attempt of the day passes straight through (last_attempt=0);
   # a stale or failed read then waits out the cooldown instead of polling
   # the metered API every minute while EOD data is still being published.
-  market_retry_ready || return 1
+  if ! market_retry_ready; then
+    log "market: not sent yet today, waiting out the retry cooldown -- continuing"
+    return 1
+  fi
   market_mark_attempt  # start the cooldown clock for this hit
 
   log "market: fetching EOD for ${MARKET_SYMBOLS}"

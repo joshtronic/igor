@@ -231,8 +231,15 @@ pick_wiki_random() {
 reflect_on_url() {
   local url="$1" out_journal_file="$2"
   local html truncated raw title journal
+  # tr -d '\0': sources occasionally serve binary (HN loves a PDF).
+  # Bash strips NUL bytes from command substitutions anyway -- with a
+  # per-byte warning to stderr -- so do it explicitly and quietly. The
+  # surviving bytes are enough for the model to reflect on (PDFs carry
+  # readable text runs and metadata); pipefail keeps curl failures
+  # detected through the pipe.
   html=$(curl -sfL --max-time "$FETCH_TIMEOUT" \
-              --max-filesize 5000000 -A "$UA" "$url" 2>/dev/null) || return 1
+              --max-filesize 5000000 -A "$UA" "$url" 2>/dev/null \
+        | tr -d '\0') || return 1
   [ -z "$html" ] && return 1
   truncated="${html:0:HTML_TRUNCATE_BYTES}"
 

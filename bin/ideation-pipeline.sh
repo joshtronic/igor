@@ -1116,7 +1116,14 @@ for attempt in 1 2; do
     TAGS_CSV="$DRAFT_TAGS_CSV"; BODY="$DRAFT_BODY"
     break
   fi
-  log "draft attempt $attempt: missing title or body -- retrying"
+  # Say WHICH field is missing and how much text came back -- the
+  # difference between "model flubbed the format" (normal raw length)
+  # and "output got truncated" (short/odd raw length) matters when
+  # reading the journal after the fact.
+  MISSING=""
+  [ -z "$DRAFT_TITLE" ] && MISSING="title"
+  [ -z "$DRAFT_BODY" ] && MISSING="${MISSING:+$MISSING+}body"
+  log "draft attempt $attempt: missing ${MISSING:-fields} (raw ${#RAW} chars) -- retrying with a fresh roll"
 done
 if [ -z "$TITLE" ] || [ -z "$BODY" ]; then
   log "no clean draft after retries (missing fields or unresolved internal links) -- exiting clean"
