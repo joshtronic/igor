@@ -174,6 +174,12 @@ export MARKETSTACK_API_KEY="${MARKETSTACK_API_KEY:-}"
 export MARKET_SYMBOLS="${MARKET_SYMBOLS:-}"
 export MARKET_RECIPIENTS="${MARKET_RECIPIENTS:-}"
 
+# Logwatch self-report -- opt-in daily review of the harness's own
+# journal (see do_logwatch_tick). Names the Forgejo repo the
+# hard-failure tickets are filed on (normally this harness's own
+# repo). Unset = disabled.
+export LOGWATCH_REPO="${LOGWATCH_REPO:-}"
+
 # Put the harness's bin dir on PATH for every Claude invocation in
 # this script. Without this, Claude can't call agent-enqueue.sh /
 # agent-ask.sh / agent-block.sh / agent-report.sh by name -- it
@@ -1548,6 +1554,207 @@ own once calls succeed again."
   return 0
 }
 
+# -- Logwatch: daily self-report over the harness's own journal --
+#
+# Opt-in via LOGWATCH_REPO. Once a day, after the midnight batch hour
+# has closed, a one-shot review-tier model call reads the harness's
+# own journalctl output and files tickets for HARD failures on
+# LOGWATCH_REPO (normally this repo). The window is two slices:
+#   - the midnight hour (00:00-01:00 today) in FULL -- that's where
+#     the daily batch lives (probe, reading, post, market), so it
+#     gets full fidelity;
+#   - the prior 23 hours (yesterday 01:00 -> today 00:00) pre-filtered
+#     to warning/error/failure-shaped lines -- catches the 3am router
+#     reboot without drowning the reviewer in idle-tick spam.
+# Consecutive days tile the clock exactly once.
+#
+# The reviewer's contract is failure-SMELL, not log narration: a
+# retry that then succeeded is the system working; expected holds and
+# skips are normal; an empty findings list is the expected common
+# case. Open issue titles ride along as the dedup signal so a chronic
+# condition gets ONE ticket, not one per day. Tickets are
+# Agent-labeled, so Igor can claim and fix them like any other work --
+# safe because nothing lands on master without a human-reviewed merge.
+#
+# State: one ".logwatch" object {date} in discretionary-state.json.
+# Stamped once ATTEMPTED (slot semantics): a wedged pass must not
+# retry a model call every tick for the rest of the day. The
+# after-01:00 gate is window-completeness (the hour being analyzed
+# must have closed), not a send-hour preference -- same flavor as the
+# market report's freshness gate.
+
+LOGWATCH_MARKER='<!-- agent:logwatch -->'
+
+logwatch_done_today() {
+  local state_file today
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || return 1
+  today=$(date +%Y-%m-%d)
+  [ "$(jq -r '.logwatch.date // ""' "$state_file" 2>/dev/null)" = "$today" ]
+}
+
+logwatch_mark_done() {
+  local state_file tmp today
+  state_file=$(discretionary_state_file)
+  today=$(date +%Y-%m-%d)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg d "$today" '.logwatch = {date: $d}' "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
+do_logwatch_tick() {
+  [ -n "${LOGWATCH_REPO:-}" ] || return 1
+
+  # Window-completeness gate: the midnight hour must have closed.
+  # 10#: zero-padded %H must not parse as octal.
+  local hour; hour=$((10#$(date +%H)))
+  if [ "$hour" -lt 1 ]; then
+    log "logwatch: midnight hour still open -- continuing"
+    return 1
+  fi
+  if logwatch_done_today; then
+    log "logwatch: today's pass already ran -- continuing"
+    return 1
+  fi
+
+  if ! command -v journalctl >/dev/null 2>&1; then
+    log "logwatch: journalctl not available on this host -- marking done for today"
+    logwatch_mark_done
+    return 1
+  fi
+
+  # Attempted = done for the day, BEFORE the model call (see header).
+  logwatch_mark_done
+
+  if ! forgejo_repo_exists "$LOGWATCH_REPO"; then
+    log "logwatch: LOGWATCH_REPO=$LOGWATCH_REPO not accessible to bot -- skipping"
+    return 1
+  fi
+
+  local today yday midnight_log filtered_log
+  today=$(date +%F)
+  yday=$(date -d yesterday +%F 2>/dev/null || date -v-1d +%F)
+  midnight_log=$(journalctl --user -u agent.service \
+    --since "$today 00:00:00" --until "$today 01:00:00" \
+    --no-pager 2>/dev/null | tail -c 60000)
+  filtered_log=$(journalctl --user -u agent.service \
+    --since "$yday 01:00:00" --until "$today 00:00:00" \
+    --no-pager 2>/dev/null \
+    | grep -aiE 'warning|error|fail|fatal|refus|abandon|blocked|backoff|exit-code' \
+    | tail -c 20000)
+  if [ -z "$midnight_log" ] && [ -z "$filtered_log" ]; then
+    log "logwatch: journal empty for the window -- nothing to review"
+    return 1
+  fi
+
+  local open_titles
+  open_titles=$(forgejo_list_open_issue_titles "$LOGWATCH_REPO" 2>/dev/null || true)
+
+  local system user
+  system=$(cat <<'EOF'
+You are the nightly log reviewer for an unattended agent harness
+("Igor") that runs a cron tick every minute, 24/7. You'll receive its
+own systemd journal: the midnight batch hour in full, plus a
+pre-filtered sweep of the prior 23 hours, plus the titles of issues
+already open on the harness repo.
+
+Your job: find HARD failures and unresolved anomalies worth filing as
+tickets. You are a failure-smell detector, not a log narrator.
+
+Do NOT file for:
+- a retry that subsequently succeeded -- retrying is the system
+  working as designed
+- expected holds and skips: market freshness holds, validation skips
+  over open onboarding tickets, "no claimable work -- idle", weekend
+  or already-sent statuses, cooldown waits
+- one-off network blips that self-healed on a later tick
+- anything substantially covered by an already-open issue (titles
+  provided) -- chronic conditions get ONE ticket, not one per day
+
+DO file for:
+- a step that exhausted its retries or abandoned the day (e.g. "no
+  clean draft after retries", a slot hitting its attempt cap, the
+  market report abandoning the day on hard failures)
+- a subsystem that failed in the window and never succeeded after
+- claude auth/usage-limit backoff or health alerts
+- systemd unit failures with no benign explanation in the log
+- shell-level warnings or errors that look like harness bugs
+  (unbound variables, command substitution warnings, jq parse noise)
+
+Output STRICT JSON only -- no preamble, no fences:
+{"findings": [{"title": "...", "severity": "low|medium|high", "body": "..."}]}
+
+- findings: [] when the night was clean. This is the expected common
+  case; do not invent work.
+- At most 2 findings; pick the most material.
+- title: terse, specific, greppable -- it becomes a Forgejo issue
+  title (no "[logwatch]" prefix, no date).
+- body: markdown -- a short diagnosis, the evidence log lines quoted
+  verbatim in a fenced block, and what "fixed" would look like.
+EOF
+)
+  user="## Currently open issues on ${LOGWATCH_REPO} (do NOT refile these)
+
+${open_titles:-(none)}
+
+## Midnight batch hour (${today} 00:00-01:00, full fidelity)
+
+${midnight_log:-(empty)}
+
+## Prior 23h (${yday} 01:00 -> ${today} 00:00, pre-filtered to failure-shaped lines)
+
+${filtered_log:-(nothing matched the filter)}"
+
+  local raw findings attempt
+  findings=""
+  for attempt in 1 2; do
+    raw=$(claude_call "$AGENT_MODEL_REVIEW" "logwatch" 4000 "$system" "$user") || {
+      log "logwatch: review call failed (attempt $attempt)"
+      continue
+    }
+    if findings=$(jq -ce '.findings // []' <<<"$raw" 2>/dev/null); then
+      break
+    fi
+    findings=""
+    log "logwatch: unparseable review response (attempt $attempt)"
+  done
+  if [ -z "$findings" ]; then
+    log "logwatch: no parseable review after 2 attempts -- giving up until tomorrow"
+    return 0
+  fi
+
+  local count
+  count=$(jq 'length' <<<"$findings")
+  if [ "$count" -eq 0 ]; then
+    log "logwatch: clean night -- nothing to file"
+    return 0
+  fi
+  [ "$count" -gt 2 ] && log "logwatch: reviewer returned $count findings -- filing the first 2 only"
+
+  local f title sev fbody body num
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    title=$(jq -r '.title // empty' <<<"$f" | head -1 | head -c 120)
+    [ -n "$title" ] || continue
+    sev=$(jq -r '.severity // "unknown"' <<<"$f")
+    fbody=$(jq -r '.body // ""' <<<"$f")
+    body="${fbody}
+
+---
+severity: ${sev}
+window: ${yday} 01:00 -> ${today} 01:00 (filed by the nightly logwatch pass)
+${LOGWATCH_MARKER}"
+    num=$(forgejo_open_issue "$LOGWATCH_REPO" "$title" "$body") \
+      || { log "warning: logwatch ticket open failed on $LOGWATCH_REPO (continuing)"; continue; }
+    forgejo_add_label "$LOGWATCH_REPO" "$num" "Agent" 2>/dev/null \
+      || log "warning: could not apply 'Agent' label on ${LOGWATCH_REPO}#${num}"
+    log "logwatch: filed ticket #$num: $title"
+  done < <(jq -c '.[0:2][]' <<<"$findings")
+
+  return 0
+}
+
 # Worktree key: slash-free, unique per repo+issue.
 worktree_key() { printf '%s-%s' "${1//\//_}" "$2"; }
 
@@ -2290,6 +2497,16 @@ fi
 # no-ops when unconfigured, on weekends, or once today's already sent.
 # Scripted, email-only -- a sibling of the SEO pass, not repo-driven.
 if do_market_tick; then
+  exit 0
+fi
+
+# Daily logwatch self-report (first tick after 01:00, once the
+# midnight batch hour has closed). Opt-in via LOGWATCH_REPO; one
+# review-tier model call over the harness's own journal, filing
+# Agent-labeled hard-failure tickets on the harness repo -- which the
+# issue grind below can then claim and fix like any other work (a
+# human-reviewed merge still gates every change to master).
+if do_logwatch_tick; then
   exit 0
 fi
 

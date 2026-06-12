@@ -6,7 +6,8 @@ strictly ordered cascade: recovery + validation, then PR-review
 pickup, then Igor's own work (daily reading + blog post, weekly
 /now refresh + site-work pass -- opt-in via `WEBSITE_REPO`), then
 scheduled maintenance, then the weekly GSC-driven SEO pass (opt-in),
-then the daily weekday market report (opt-in), then the
+then the daily weekday market report (opt-in), then the daily
+logwatch self-report (opt-in), then the
 claimable-issue grind. Igor's own
 work comes first and is throttled (daily/weekly slots), so tickets
 soak up whatever time is left and roll over to the next day. The
@@ -165,6 +166,21 @@ respective tools on the host; install or skip.
   previous weekday, so the gate never matches and no report goes out that
   day (logged each cooldown, not silent). Clear `.market` to force a
   re-send. Keep it a single report until there's a real reason to split it.
+- The logwatch pass (`do_logwatch_tick`) is opt-in via `LOGWATCH_REPO`
+  and is the harness reviewing ITSELF: once a day, first tick after
+  01:00 (window-completeness, not a send-hour -- the midnight batch
+  hour it reads in full must have closed), one `claude_call` on
+  `AGENT_MODEL_REVIEW` over journalctl output, filing at most 2
+  Agent-labeled hard-failure tickets on `LOGWATCH_REPO`. The contract
+  is failure-smell, not narration: retries that succeeded, expected
+  holds, and anything matching an open issue title (fed back as the
+  dedup signal) are explicitly not ticket-worthy. Stamped attempted
+  under `.logwatch` BEFORE the model call (slot semantics -- no retry
+  storm); clear `.logwatch` to re-run. Because tickets are
+  Agent-labeled and `LOGWATCH_REPO` is normally this repo, Igor will
+  claim and PR fixes against its own harness -- safe only because a
+  human-reviewed merge gates master (and master self-deploys in ~1
+  minute, so review those PRs accordingly).
 
 ## Off-limits
 

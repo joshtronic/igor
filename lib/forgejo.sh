@@ -344,6 +344,15 @@ forgejo_repo_dir_has_match() {
 # Open a new issue. Prints the new issue number to stdout. Labels are
 # applied separately via forgejo_add_label so missing labels degrade
 # gracefully instead of failing the whole call.
+# All open issue titles in a repo (issues only, not PRs), one per
+# line. Used by the logwatch pass as a dedup signal -- the reviewer
+# is told not to refile anything already covered by an open ticket.
+forgejo_list_open_issue_titles() {
+  local repo="$1"
+  _fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" \
+    | jq -r '.[].title'
+}
+
 forgejo_open_issue() {
   local repo="$1" title="$2" body="$3"
   _fj POST "/repos/${repo}/issues" \
