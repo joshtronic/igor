@@ -240,10 +240,15 @@ claude_run_with_cost() {
 #     thousands of session files otherwise
 #   - user prompt via stdin: dodges ARG_MAX for big payloads (diffs);
 #     system prompts are small, so an arg is fine there
-#   - max_tokens is floored at 4096: the API rejects lower ceilings
-#     once the CLI's thinking budget is in play. It's a ceiling, not
-#     a target -- prompts still control length, and on subscription
-#     billing the old cost-capping role is moot.
+#   - max_tokens gets +8192 headroom: on the CLI, THINKING tokens
+#     share the output budget (the Messages API's max_tokens only
+#     bounded visible text), so an unpadded cap can starve the
+#     visible text -- seen in the wild as draft responses with the
+#     tail (or all) of the expected output missing. The padded value
+#     is a runaway ceiling, not a target; prompts still control
+#     length, and on subscription billing the old cost-capping role
+#     is moot. (It also clears the API's ~1024 minimum thinking
+#     budget, which rejects very low caps outright.)
 claude_call() {
   local model="$1" call_site="$2" max_tokens="$3" system="$4" user="$5"
   local strip_fences="${6:-1}"
@@ -253,7 +258,7 @@ claude_call() {
     log "claude $call_site: health backoff active -- skipping call"
     return 1
   fi
-  if [ "$max_tokens" -lt 4096 ]; then max_tokens=4096; fi
+  max_tokens=$((max_tokens + 8192))
 
   scratch=$(mktemp -d)
   # shellcheck disable=SC2064
