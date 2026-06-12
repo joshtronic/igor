@@ -1651,6 +1651,17 @@ do_logwatch_tick() {
   local open_titles
   open_titles=$(forgejo_list_open_issue_titles "$LOGWATCH_REPO" 2>/dev/null || true)
 
+  # Recently-landed fixes are a dedup signal too: the reviewer reads
+  # logs, not git history, and the analyzed window is always the past
+  # -- so a symptom whose fix merged the same day would otherwise get
+  # refiled. The harness self-pulls every tick, so AGENT_HOME's log is
+  # current master; two days of commit subjects is enough for the
+  # model to connect "warning X" in the journal to "fix: X" and stay
+  # quiet.
+  local recent_commits
+  recent_commits=$(git -C "$AGENT_HOME" log --since="2 days ago" \
+    --pretty='%s' 2>/dev/null | head -20 || true)
+
   local system user
   system=$(cat <<'EOF'
 You are the nightly log reviewer for an unattended agent harness
@@ -1671,6 +1682,11 @@ Do NOT file for:
 - one-off network blips that self-healed on a later tick
 - anything substantially covered by an already-open issue (titles
   provided) -- chronic conditions get ONE ticket, not one per day
+- a symptom that one of the recently-landed commits (list provided)
+  plausibly already fixes -- the log window predates the fix by
+  design, so the journal will show symptoms of bugs that are
+  already dead. When a commit subject and a log symptom line up,
+  the fix wins: do not file.
 
 DO file for:
 - a step that exhausted its retries or abandoned the day (e.g. "no
@@ -1697,6 +1713,10 @@ EOF
   user="## Currently open issues on ${LOGWATCH_REPO} (do NOT refile these)
 
 ${open_titles:-(none)}
+
+## Commits landed on the harness in the last 2 days (fixes here may already cover symptoms below)
+
+${recent_commits:-(none)}
 
 ## Midnight batch hour (${today} 00:00-01:00, full fidelity)
 

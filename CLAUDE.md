@@ -173,8 +173,11 @@ respective tools on the host; install or skip.
   `AGENT_MODEL_REVIEW` over journalctl output, filing at most 2
   Agent-labeled hard-failure tickets on `LOGWATCH_REPO`. The contract
   is failure-smell, not narration: retries that succeeded, expected
-  holds, and anything matching an open issue title (fed back as the
-  dedup signal) are explicitly not ticket-worthy. Stamped attempted
+  holds, anything matching an open issue title, and symptoms covered
+  by a recently-landed commit (open titles + 2 days of harness
+  commit subjects ride along as dedup signals -- the log window
+  always predates same-day fixes) are explicitly not ticket-worthy.
+  Stamped attempted
   under `.logwatch` BEFORE the model call (slot semantics -- no retry
   storm); clear `.logwatch` to re-run. Because tickets are
   Agent-labeled and `LOGWATCH_REPO` is normally this repo, Igor will
