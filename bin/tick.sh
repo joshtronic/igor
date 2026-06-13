@@ -100,6 +100,10 @@ unset env_file_hint
 . "$AGENT_HOME/lib/marketstack.sh"
 # shellcheck source=lib/market-report.sh
 . "$AGENT_HOME/lib/market-report.sh"
+# shellcheck source=lib/espn.sh
+. "$AGENT_HOME/lib/espn.sh"
+# shellcheck source=lib/sports-digest.sh
+. "$AGENT_HOME/lib/sports-digest.sh"
 
 # Children invocations (agent-* helper scripts) share our tick id
 # so cost-ledger entries from child processes group with the
@@ -173,6 +177,19 @@ export HEALTH_RECIPIENTS="${HEALTH_RECIPIENTS:-${SEO_PRIMARY_EMAIL:-}}"
 export MARKETSTACK_API_KEY="${MARKETSTACK_API_KEY:-}"
 export MARKET_SYMBOLS="${MARKET_SYMBOLS:-}"
 export MARKET_RECIPIENTS="${MARKET_RECIPIENTS:-}"
+
+# Sports digest -- opt-in daily (7 days; sports don't take weekends off)
+# ELI5 sports-tutor email: scripted ESPN fetch, ONE distill call on
+# AGENT_MODEL, sent via SMTP2GO. do_sports_tick no-ops cleanly if any
+# required var is unset. Leagues are ESPN {sport}/{league} paths (e.g.
+# football/nfl, hockey/nhl, soccer/fifa.world, racing/nascar-premier,
+# football/college-football); one flat list -- the directive weights
+# coverage by significance, so a quiet league costs nothing and a
+# college championship outranks a routine pro slate on its own merits.
+# Unlike market, this pass USES the model, so it waits out a Claude
+# health cooldown like every other model surface.
+export SPORTS_RECIPIENTS="${SPORTS_RECIPIENTS:-}"
+export SPORTS_LEAGUES="${SPORTS_LEAGUES:-}"
 
 # Put the harness's bin dir on PATH for every Claude invocation in
 # this script. Without this, Claude can't call agent-enqueue.sh /
@@ -842,6 +859,107 @@ market_format_date() {
   printf '%s, %s %s%s, %s' "$weekday" "$month" "$day" "$suffix" "$year"
 }
 
+# -- Sports digest state (discretionary-state.json `.sports`) -----
+#
+# Same day-keyed shape and semantics as `.market` (one report per day,
+# retry-on-cooldown until it sends, bounded hard-failure budget):
+#   .sports = { date, sent, failures, last_attempt }
+# Here the metered resource being protected is the model call, not an
+# API quota -- ESPN is free, but a parse-flaky day must not re-run the
+# distill call every minute. The taught-concepts curriculum ledger
+# lives in its own file (see lib/sports-digest.sh), NOT here, so
+# clearing `.sports` to force a re-send never wipes it.
+# Regenerable -- losing it just re-opens today's send.
+
+SPORTS_RETRY_COOLDOWN_SECS="${SPORTS_RETRY_COOLDOWN_SECS:-900}"  # 15 min
+
+# jq fragment: normalize .sports to today, resetting if the day rolled.
+# shellcheck disable=SC2016  # $d is a jq --arg, not shell -- must not expand
+SPORTS_ROLL='(if (.sports.date // "") == $d then .sports
+              else {date:$d, sent:false, failures:0, last_attempt:0} end)'
+
+sports_sent_today() {
+  local state_file today
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || return 1
+  today=$(date +%Y-%m-%d)
+  [ "$(jq -r --arg d "$today" \
+        '(.sports.date == $d) and (.sports.sent == true)' \
+        "$state_file" 2>/dev/null)" = "true" ]
+}
+
+sports_mark_sent() {
+  local state_file tmp today
+  state_file=$(discretionary_state_file)
+  today=$(date +%Y-%m-%d)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg d "$today" ".sports = ($SPORTS_ROLL | .sent = true)" \
+    "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
+# Echo today's failure count (0 if unset or the day rolled). Read-only --
+# the cap that consumes it lives in do_sports_tick.
+sports_failures() {
+  local state_file today n
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || { echo 0; return; }
+  today=$(date +%Y-%m-%d)
+  n=$(jq -r --arg d "$today" \
+    'if (.sports.date // "") == $d then (.sports.failures // 0) else 0 end' \
+    "$state_file" 2>/dev/null)
+  [ -n "$n" ] && [ "$n" != "null" ] || n=0
+  echo "$n"
+}
+
+# Stamp last_attempt=now (resetting on a day rollover). Called once per
+# digest attempt, before any fetch/model work -- it's what the cooldown
+# reads.
+sports_mark_attempt() {
+  local state_file tmp today now
+  state_file=$(discretionary_state_file)
+  today=$(date +%Y-%m-%d)
+  now=$(date +%s)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg d "$today" --argjson now "$now" \
+    ".sports = ($SPORTS_ROLL | .last_attempt = \$now)" \
+    "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
+# Bump today's HARD-failure count (empty fetch / failed or unparseable
+# distill call / send failure) and echo the new value.
+sports_failure_inc() {
+  local state_file tmp today n
+  state_file=$(discretionary_state_file)
+  today=$(date +%Y-%m-%d)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg d "$today" ".sports = ($SPORTS_ROLL | .failures += 1)" \
+    "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+  n=$(jq -r '.sports.failures' "$state_file" 2>/dev/null)
+  echo "$n"
+}
+
+# True when it's OK to attempt the digest again today: either no attempt
+# yet (the first post-03:00 tick fires immediately) or the cooldown since
+# the last attempt has elapsed.
+sports_retry_ready() {
+  local state_file today last now
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || return 0
+  today=$(date +%Y-%m-%d)
+  last=$(jq -r --arg d "$today" \
+    'if (.sports.date // "") == $d then (.sports.last_attempt // 0) else 0 end' \
+    "$state_file" 2>/dev/null)
+  [ -n "$last" ] && [ "$last" != "null" ] || last=0
+  now=$(date +%s)
+  [ "$((now - last))" -ge "$SPORTS_RETRY_COOLDOWN_SECS" ]
+}
+
 # -- Validation pass cache --------------------------------------
 #
 # The validation sweep runs every tick. At a 1-minute cadence across
@@ -1454,6 +1572,152 @@ do_market_tick() {
     log "market: ${max_failures} consecutive failures today -- abandoning the report for the day"
   else
     log "warning: market email failed (failure ${failures}/${max_failures}) -- will retry after cooldown"
+  fi
+  return 1
+}
+
+# -- Sports digest (daily, opt-in) --------------------------------
+#
+# The ELI5 sports-tutor email: harness-side ESPN fetch (lib/espn.sh),
+# ONE claude_call distill on AGENT_MODEL, email via SMTP2GO. Email-only
+# and not repo-driven like market/SEO -- but unlike them it USES the
+# model, so it lives below the global health gate (a blocked tick
+# skips it) and is the reason it can't join their blocked-tick
+# carve-out.
+#
+# Fires on the first tick after 03:00 -- a window-completeness gate
+# like logwatch's, not a send-hour: the digest covers YESTERDAY, and
+# west-coast NBA/NHL games routinely end past midnight CT. By 03:00
+# every previous-day event is final and recapped. Runs 7 days a week.
+#
+# Retry semantics are market's (.sports = {date, sent, failures,
+# last_attempt}): sent flips only on a successful send, attempts are
+# spaced by SPORTS_RETRY_COOLDOWN_SECS, and a hardcoded 5-hard-failure
+# cap abandons the day. Unlike market there is no clear-on-good-fetch:
+# ESPN being up says nothing about the distill call, and clearing
+# would let a parse-flaky day burn unbounded model calls -- the cap
+# must count every hard failure.
+#
+# The taught-concepts curriculum ledger (what makes the digest a
+# course, not a loop) is appended only after a successful send and
+# lives in its own file -- see lib/sports-digest.sh.
+#
+# Returns 0 if a digest was sent (caller exits the tick), 1 otherwise
+# (caller falls through).
+do_sports_tick() {
+  # Opt-in gate: every required config must be present.
+  if [ -z "${SPORTS_RECIPIENTS:-}" ] || [ -z "${SPORTS_LEAGUES:-}" ] \
+     || [ -z "${SMTP2GO_API_KEY:-}" ] || [ -z "${SMTP2GO_SENDER:-}" ]; then
+    return 1
+  fi
+
+  # Window-completeness gate. 10#: zero-padded %H must not parse as octal.
+  local hour; hour=$((10#$(date +%H)))
+  if [ "$hour" -lt 3 ]; then
+    log "sports: yesterday's late games may not be final/recapped yet -- holding until 03:00"
+    return 1
+  fi
+
+  if sports_sent_today; then
+    log "sports: digest already sent today -- continuing"
+    return 1
+  fi
+
+  # Failure budget (hardcoded, not an env knob -- keep the .env surface
+  # small). Checked before the cooldown so an abandoned day stops cheaply.
+  local max_failures=5 failures
+  failures=$(sports_failures)
+  if [ "$failures" -ge "$max_failures" ]; then
+    log "sports: abandoned for the day (${failures}/${max_failures} hard failures; clear .sports in discretionary-state.json to retry) -- continuing"
+    return 1
+  fi
+
+  if ! sports_retry_ready; then
+    log "sports: not sent yet today, waiting out the retry cooldown -- continuing"
+    return 1
+  fi
+  sports_mark_attempt  # start the cooldown clock for this attempt
+
+  # Yesterday, both shapes (dashed for humans/prompt, compact for ESPN).
+  # Portable across GNU (Linux server) and BSD (macOS dev) date.
+  local ydash ycompact
+  ydash=$(date -d "-1 days" +%F 2>/dev/null || date -v-1d +%F 2>/dev/null)
+  ycompact=${ydash//-/}
+
+  # Fetch + slim every configured league -- ESPN is free, and the
+  # PROMPT curates by significance, so a quiet league rides along at
+  # no cost. fetched_ok distinguishes "quiet day" from "ESPN/network
+  # down": only a day where at least one endpoint answered may be
+  # skipped as genuinely quiet.
+  log "sports: fetching ESPN payloads for ${ycompact}"
+  local payload='[]' entry sb nw slim fetched_ok=0
+  while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    sb=$(espn_scoreboard "$entry" "$ycompact") && fetched_ok=1 || sb='{"events":[]}'
+    nw=$(espn_news "$entry") && fetched_ok=1 || nw='{"articles":[]}'
+    slim=$(espn_slim_league "$entry" "$sb" "$nw")
+    payload=$(jq -c --argjson item "$slim" '. + [$item]' <<<"$payload")
+  done < <(tr ',' '\n' <<<"$SPORTS_LEAGUES" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+  if [ "$fetched_ok" -eq 0 ]; then
+    failures=$(sports_failure_inc)
+    log "sports: every ESPN fetch failed -- not sending (failure ${failures}/${max_failures}, retry after cooldown)"
+    return 1
+  fi
+
+  local items
+  items=$(jq '[.[] | (.events | length) + (.headlines | length)] | add // 0' <<<"$payload")
+  if [ "${items:-0}" -eq 0 ]; then
+    # ESPN answered and there is genuinely nothing -- a quiet day, not
+    # a failure. Don't email an empty digest; close the day.
+    log "sports: no events or headlines across all leagues -- quiet day, no digest"
+    sports_mark_sent
+    return 1
+  fi
+
+  # One distill call; the label-line + sentinel response is parsed
+  # harness-side (sports_parse_response), never model-written JSON.
+  # strip_fences=0: the body is markdown prose, not a JSON envelope.
+  local covered prompt directive raw parsed attempt
+  covered=$(sports_concepts_load)
+  prompt=$(sports_build_prompt "$payload" "$covered" "$ydash")
+  directive=$(cat "$AGENT_HOME/bin/lib/sports-digest-directive.md")
+  parsed=""
+  for attempt in 1 2; do
+    raw=$(claude_call "$AGENT_MODEL" "sports-digest" 4000 "$directive" "$prompt" 0) || {
+      log "sports: distill call failed (attempt $attempt)"
+      continue
+    }
+    if parsed=$(sports_parse_response "$raw"); then
+      break
+    fi
+    parsed=""
+    log "sports: unparseable distill response (attempt $attempt)"
+  done
+  if [ -z "$parsed" ]; then
+    failures=$(sports_failure_inc)
+    log "sports: no parseable digest after 2 attempts (failure ${failures}/${max_failures}, retry after cooldown)"
+    return 1
+  fi
+
+  local body concepts html subject formatted
+  body=$(jq -r '.body' <<<"$parsed")
+  concepts=$(jq -c '.concepts' <<<"$parsed")
+  html=$(sports_render_html <<<"$body")
+  formatted=$(market_format_date "$ydash")
+  subject="[Sports] ${formatted:-$ydash}"
+  if email_send "$subject" "$html" "$body" "$SPORTS_RECIPIENTS"; then
+    sports_mark_sent
+    sports_concepts_append "$concepts" "$(date +%Y-%m-%d)" \
+      || log "warning: sports: curriculum ledger update failed (digest sent fine)"
+    log "sports: emailed digest for ${ydash} ($(jq 'length' <<<"$concepts") new concepts) to $SPORTS_RECIPIENTS"
+    return 0
+  fi
+  failures=$(sports_failure_inc)
+  if [ "$failures" -ge "$max_failures" ]; then
+    log "sports: ${max_failures} consecutive failures today -- abandoning the digest for the day"
+  else
+    log "warning: sports email failed (failure ${failures}/${max_failures}) -- will retry after cooldown"
   fi
   return 1
 }
@@ -2559,6 +2823,17 @@ fi
 # no-ops when unconfigured, on weekends, or once today's already sent.
 # Scripted, email-only -- a sibling of the SEO pass, not repo-driven.
 if do_market_tick; then
+  exit 0
+fi
+
+# Daily sports digest (7 days a week, first tick after 03:00 -- by
+# then even west-coast games are final and recapped). Opt-in via
+# SPORTS_RECIPIENTS + SPORTS_LEAGUES + SMTP2GO; no-ops when
+# unconfigured or once today's already sent. ESPN fetch is scripted,
+# but the distill is a model call -- so unlike SEO/market this pass
+# sits below the health gate and goes dark with the rest of the model
+# work during a cooldown.
+if do_sports_tick; then
   exit 0
 fi
 

@@ -103,27 +103,50 @@ A timer fires `bin/tick.sh`. Per tick:
    failure and just holds. The freshness gate is holiday-naive, so the
    trading day after a market holiday holds all day and sends no report
    (logged each cooldown). Weekends and already-sent ticks fall through.
-10. **Discovery.** For each validated repo, query for the oldest
+10. **Sports digest** (opt-in via `SPORTS_RECIPIENTS` + `SPORTS_LEAGUES`
+   + SMTP2GO env; no-ops when unconfigured). A daily, 7-days-a-week
+   email that teaches sports through yesterday's news: `lib/espn.sh`
+   fetches each configured league's scoreboard (yesterday) + headlines
+   from ESPN's free public JSON API, and ONE `claude_call` on
+   `AGENT_MODEL` (directive: `bin/lib/sports-digest-directive.md`)
+   distills it into an ELI5 tutorial-digest. The third email sibling,
+   but the first that uses the model -- a Claude health cooldown holds
+   it, unlike SEO/market. Fires on the first tick after 03:00: a
+   window-completeness gate, not a send-hour -- the digest covers
+   yesterday and west-coast games end past midnight CT. `SPORTS_LEAGUES`
+   is one flat CSV of ESPN `{sport}/{league}` paths; the directive
+   curates by significance (a college championship outranks a routine
+   pro slate). Day-state mirrors `.market` (a `.sports` object, cooldown
+   via `SPORTS_RETRY_COOLDOWN_SECS`, 5-hard-failure/day cap). The model
+   returns a `CONCEPTS:` label line + `===BODY===` sentinel + markdown,
+   parsed harness-side (never model-written JSON; links only verbatim
+   from the ESPN payload). Taught concepts accumulate in
+   `~/.local/state/agent/sports-curriculum.json` (capped at 300) and
+   ride into the next day's prompt, so the digest builds toward
+   fluency instead of re-explaining -- a curriculum, not a loop.
+11. **Discovery.** For each validated repo, query for the oldest
    claimable issue (`Agent`-labeled, no assignee, not
    `Status/Blocked`). Skip repos with an open bot-authored PR --
    one PR at a time per repo so the human can review without a
    backlog forming behind them. Pick the globally oldest across
    all eligible repos.
-11. **Claim and clone.** Assign the issue to the bot. If the repo
+12. **Claim and clone.** Assign the issue to the bot. If the repo
     isn't cloned locally yet, clone it to
     `~/.local/state/agent/repos/<owner>/<repo>/` via SSH.
-12. **Preflight.** Verify `CLAUDE.md` exists at the repo root. If
+13. **Preflight.** Verify `CLAUDE.md` exists at the repo root. If
     not, block the issue with a clear comment and bail. (Same code
     path as Claude calling `agent-block.sh` from inside the
     worktree.)
-13. **Work.** Make a worktree, invoke Claude with `bin/lib/voice.md`
+14. **Work.** Make a worktree, invoke Claude with `bin/lib/voice.md`
     plus `AGENTS.md` (the project's `CLAUDE.md` is auto-loaded by
     Claude Code), react to whatever Claude leaves behind. If
     discovery turned up nothing, the tick is idle and exits.
 
 There is no shift window -- every tick runs the full cascade, 24/7.
 Midnight is just the local-day rollover for the daily slots
-(reading, post) and the daily market report; the weekly slots
+(reading, post), the daily market report, and the daily sports
+digest (which additionally holds until 03:00 for window
+completeness); the weekly slots
 (/now, site-work), maintenance, and the per-domain SEO pass roll on
 the ISO week (Monday-anchored). What runs on a given tick is
 decided by the cascade's fixed priority order, not the clock:
@@ -152,6 +175,7 @@ prompts -- not one kitchen-sink prompt for everything. The split:
 | Maintenance triage              | (none -- the user message is self-contained classification)                |
 | Reading pipeline (reflect, post drafting, post-shape decision) | `bin/lib/voice.md` + a task-specific directive      |
 | Site-work + /now pass           | `bin/lib/voice.md` + `bin/lib/{site-work,now}-directive.md` |
+| Sports digest distill           | `bin/lib/sports-digest-directive.md` (no voice anchor -- the digest has its own persona) |
 
 `voice.md` is the shared voice anchor; the task directives carry
 surface-specific framing. The slim `AGENTS.md` is only what
