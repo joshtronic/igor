@@ -7,8 +7,8 @@ pickup, then Igor's own work (daily reading + blog post, weekly
 /now refresh + site-work pass -- opt-in via `WEBSITE_REPO`), then
 scheduled maintenance, then the weekly GSC-driven SEO pass (opt-in),
 then the daily weekday market report (opt-in), then the daily
-logwatch self-report (opt-in), then the
-claimable-issue grind. Igor's own
+sports digest (opt-in), then the daily logwatch self-report
+(opt-in), then the claimable-issue grind. Igor's own
 work comes first and is throttled (daily/weekly slots), so tickets
 soak up whatever time is left and roll over to the next day. The
 reading pipeline's durable state lives in
@@ -28,8 +28,9 @@ repo is everything that makes the cron beat real.
   Claude's system prompt per surface.
 - `lib/*.sh` -- sourced shell libraries (Forgejo API, repo checks,
   maintenance checks, cost tracking; the shared SMTP2GO sender
-  `email.sh`; the opt-in SEO pair `gsc.sh` + `seo-analysis.sh`; and
-  the opt-in market-report pair `marketstack.sh` + `market-report.sh`).
+  `email.sh`; the opt-in SEO pair `gsc.sh` + `seo-analysis.sh`; the
+  opt-in market-report pair `marketstack.sh` + `market-report.sh`; and
+  the opt-in sports-digest pair `espn.sh` + `sports-digest.sh`).
 - `AGENTS.md` -- the universal agent rules appended to Claude's
   system prompt for issue work and PR review.
 - `agent-settings.json` -- Claude's tool permission profile.
@@ -166,6 +167,28 @@ respective tools on the host; install or skip.
   previous weekday, so the gate never matches and no report goes out that
   day (logged each cooldown, not silent). Clear `.market` to force a
   re-send. Keep it a single report until there's a real reason to split it.
+- The sports digest (`do_sports_tick`) is opt-in via `SPORTS_RECIPIENTS`
+  + `SPORTS_LEAGUES` + SMTP2GO and is the third email sibling -- but the
+  FIRST that uses the model (scripted ESPN fetch via `lib/espn.sh`, ONE
+  `claude_call` distill on `AGENT_MODEL`), so unlike SEO/market it sits
+  below the health gate and goes dark during a Claude cooldown. Daily,
+  7 days a week, first tick after 03:00 (window-completeness like
+  logwatch: the digest covers YESTERDAY and west-coast games end past
+  midnight CT). `SPORTS_LEAGUES` is one flat CSV of ESPN
+  `{sport}/{league}` paths -- no tier var; the directive
+  (`bin/lib/sports-digest-directive.md`) curates by significance.
+  Day-state is `.market`-shaped (`.sports = {date, sent, failures,
+  last_attempt}`, cooldown via `SPORTS_RETRY_COOLDOWN_SECS`, hardcoded
+  5-failure cap, sent flips only on a successful send; deliberately no
+  clear-on-good-fetch -- ESPN being up says nothing about the distill,
+  and clearing would let a parse-flaky day burn unbounded model calls).
+  Clear `.sports` to force a re-send. The model's output is label-line +
+  `===BODY===` sentinel, parsed harness-side -- never model-written
+  JSON; links must come from the ESPN payload verbatim. The taught-
+  concepts curriculum ledger (what makes it a course, not a loop) lives
+  in `~/.local/state/agent/sports-curriculum.json` -- a SEPARATE file,
+  appended only after a successful send and capped at 300, so clearing
+  `.sports` never wipes what the reader has been taught.
 - The logwatch pass (`do_logwatch_tick`) is convention-driven, NO env
   knob: a root-level `systemd/` directory in any bot-accessible repo
   declares "I run as a service", and once a day (first tick after
