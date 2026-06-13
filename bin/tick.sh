@@ -1678,13 +1678,21 @@ do_sports_tick() {
   # One distill call; the label-line + sentinel response is parsed
   # harness-side (sports_parse_response), never model-written JSON.
   # strip_fences=0: the body is markdown prose, not a JSON envelope.
-  local covered prompt directive raw parsed attempt
+  #
+  # max_tokens 16000: the digest is a long-output call (a busy day
+  # runs 2-3k visible tokens) and on the CLI thinking shares the
+  # output budget. A starved cap doesn't fail loudly -- the visible
+  # text gets cut mid-stream and the envelope's result keeps only the
+  # final segment, which surfaces here as an "unparseable" response
+  # whose head starts mid-sentence with no CONCEPTS/sentinel. Thinking
+  # length varies run to run, which is exactly the flaky-parse shape.
+  local covered prompt directive raw parsed attempt snippet tail_snip
   covered=$(sports_concepts_load)
   prompt=$(sports_build_prompt "$payload" "$covered" "$ydash")
   directive=$(cat "$AGENT_HOME/bin/lib/sports-digest-directive.md")
   parsed=""
   for attempt in 1 2; do
-    raw=$(claude_call "$AGENT_MODEL" "sports-digest" 4000 "$directive" "$prompt" 0) || {
+    raw=$(claude_call "$AGENT_MODEL" "sports-digest" 16000 "$directive" "$prompt" 0) || {
       log "sports: distill call failed (attempt $attempt)"
       continue
     }
@@ -1692,7 +1700,13 @@ do_sports_tick() {
       break
     fi
     parsed=""
-    log "sports: unparseable distill response (attempt $attempt)"
+    # Say WHY it didn't parse: the head/tail of the response make
+    # "model skipped the sentinel" vs "output truncated" legible from
+    # the journal alone.
+    snippet=$(printf '%s' "$raw" | tr '\n' ' ')
+    tail_snip=""
+    [ "${#snippet}" -gt 160 ] && tail_snip=${snippet:$(( ${#snippet} - 160 ))}
+    log "sports: unparseable distill response (attempt $attempt, ${#raw} chars; head: ${snippet:0:160} [...] tail: ${tail_snip})"
   done
   if [ -z "$parsed" ]; then
     failures=$(sports_failure_inc)
