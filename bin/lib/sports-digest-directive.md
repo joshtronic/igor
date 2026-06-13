@@ -77,6 +77,8 @@ CONCEPTS: <concept name>; <concept name>; <concept name>
   (semicolon-separated, short canonical names like "power play" or
   "aggregate score" -- they become the reader's permanent curriculum
   ledger). Never repeat an already-taught concept here.
-- The body should open with a one-or-two-sentence cold open on the
-  day's biggest story, then cover leagues in sections. Aim for a
-  5-minute read on a busy day, shorter on a quiet one.
+- The body should open with a one-or-two-sentence cold open on
+  yesterday's biggest story (the email arrives the morning after --
+  frame the content as yesterday's action, not breaking news), then
+  cover leagues in sections. Aim for a 5-minute read on a busy day,
+  shorter on a quiet one.

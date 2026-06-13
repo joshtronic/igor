@@ -1700,12 +1700,16 @@ do_sports_tick() {
     return 1
   fi
 
-  local body concepts html subject formatted
+  # Subject carries TODAY's date, like the market report: it's today's
+  # digest of yesterday's action, and the body already frames the
+  # content as yesterday's highlights.
+  local body concepts html subject today formatted
   body=$(jq -r '.body' <<<"$parsed")
   concepts=$(jq -c '.concepts' <<<"$parsed")
   html=$(sports_render_html <<<"$body")
-  formatted=$(market_format_date "$ydash")
-  subject="[Sports] ${formatted:-$ydash}"
+  today=$(date +%Y-%m-%d)
+  formatted=$(market_format_date "$today")
+  subject="[Sports] ${formatted:-$today}"
   if email_send "$subject" "$html" "$body" "$SPORTS_RECIPIENTS"; then
     sports_mark_sent
     sports_concepts_append "$concepts" "$(date +%Y-%m-%d)" \
