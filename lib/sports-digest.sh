@@ -83,7 +83,14 @@ for how recency changes what "already taught" means.
 One object per configured league. events are yesterday'\''s
 games/sessions; headlines are current ESPN stories with real links.
 
-%s' "$date" "${covered_lines:-(none yet -- this is the first digest; start from zero)}" "$payload"
+%s
+
+## Output format (mechanical contract -- repeated because it matters)
+
+Your VERY FIRST line must be the CONCEPTS: label line. Your second
+line must be exactly ===BODY===. Then the markdown digest. No
+preamble, no fences around the whole response, nothing after the
+digest.' "$date" "${covered_lines:-(none yet -- this is the first digest; start from zero)}" "$payload"
 }
 
 # sports_parse_response <raw>
