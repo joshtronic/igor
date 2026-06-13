@@ -27,12 +27,16 @@ sports_curriculum_file() {
 }
 
 # sports_concepts_load
-# Echoes the taught-concept names as a JSON array of strings (oldest
-# first). Empty array if the ledger doesn't exist yet (first run).
+# Echoes the taught concepts as a JSON array of {name, date} objects
+# (oldest first). The date rides along into the prompt so the model
+# can tell a freshly-taught concept (reference only) from a stale one
+# (a brief refresher is welcome when it resurfaces) -- taught-once-
+# months-ago is not the same as known. Empty array if the ledger
+# doesn't exist yet (first run).
 sports_concepts_load() {
   local f; f=$(sports_curriculum_file)
   [ -f "$f" ] || { printf '[]'; return 0; }
-  jq -c '[.concepts[]?.name] // []' "$f" 2>/dev/null || printf '[]'
+  jq -c '[.concepts[]? | {name, date}] // []' "$f" 2>/dev/null || printf '[]'
 }
 
 # sports_concepts_append <names_json_array> <date>
@@ -64,12 +68,13 @@ sports_concepts_append() {
 # contract) lives in bin/lib/sports-digest-directive.md.
 sports_build_prompt() {
   local payload="$1" covered="$2" date="$3" covered_lines
-  covered_lines=$(jq -r '.[]? | "- " + .' <<<"$covered" 2>/dev/null)
+  covered_lines=$(jq -r '.[]? | "- \(.name) (taught \(.date))"' <<<"$covered" 2>/dev/null)
   printf 'Digest date: this email covers %s (yesterday).
 
 ## Concepts already taught in previous digests
 
-Build on these -- reference them freely, do NOT re-explain them.
+Each entry carries the date it was taught -- see the curriculum rule
+for how recency changes what "already taught" means.
 
 %s
 
