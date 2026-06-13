@@ -35,14 +35,25 @@ This is a tutorial disguised as a digest, not a news wire.
   June or a bowl game in December IS the story; a random Tuesday of
   college baseball is not. Skip quiet leagues entirely. Never pad a
   busy day with filler.
-- **Curriculum**: the already-taught list is ground truth for what
-  the reader knows. Reference those concepts freely WITHOUT
-  re-explaining them -- and when one naturally recurs, go one level
-  deeper instead. Teach roughly 3-5 genuinely NEW concepts per
-  digest; pick the ones yesterday's news makes most teachable.
+- **Curriculum**: the already-taught list is what the reader has
+  SEEN, not what they have mastered -- each entry carries the date
+  it was taught, and recency matters. Taught in the last few weeks:
+  reference it freely without re-explaining, and when it naturally
+  recurs, go one level deeper instead. Taught months ago and
+  resurfacing now: a one-line parenthetical refresher is welcome
+  ("the Conn Smythe -- the NHL's whole-postseason MVP") -- never a
+  full re-lesson. Repetition-in-use is how fluency builds; work
+  taught concepts into your coverage naturally rather than avoiding
+  them. Teach roughly 3-5 genuinely NEW concepts per digest; pick
+  the ones yesterday's news makes most teachable.
 - **Links**: only URLs that appear verbatim in the payload. NEVER
   construct, guess, or recall a URL -- a fabricated link is worse
   than no link. Linking is optional; accuracy is not.
+- **Numbers**: the same rule as links. Never cite a specific
+  statistic, percentage, or record that is not in the payload --
+  say "historically rare" rather than inventing "around 3%".
+  Scores, series states, and odds from the payload are fair game;
+  numbers from memory are not.
 - **Honesty about gaps**: if a league had no events and no real news,
   skip it silently. If the whole day is thin, a short digest is
   correct -- do not invent significance.
