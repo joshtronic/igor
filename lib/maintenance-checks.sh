@@ -64,12 +64,52 @@ _run_npm() {
 
   (cd "$repo_path" && npm audit 2>&1) > "$audit_file"
   local audit_rc=$?
-  (cd "$repo_path" && npm outdated 2>&1) > "$outdated_file"
-  # npm outdated exits non-zero when there ARE outdated packages, 0
-  # when clean. Output is empty when clean.
-
   if [ "$audit_rc" -eq 0 ]; then echo "npm-audit:clean"; else echo "npm-audit:findings"; fi
-  if [ ! -s "$outdated_file" ]; then echo "npm-outdated:clean"; else echo "npm-outdated:findings"; fi
+
+  # npm outdated. We deliberately do NOT run `npm ci` -- the audit
+  # runs in a throwaway worktree and installing deps is out of
+  # scope. The catch: with no node_modules, `Current` is MISSING for
+  # every package, so the plain-text output is non-empty even when
+  # nothing is actually out of date -- which used to flag EVERY npm
+  # repo as "findings" and burn an LLM triage pass to conclude
+  # there's nothing to do.
+  #
+  # The real, codebase-actionable drift signal is Wanted != Latest:
+  # the package.json range can't reach the latest release, so a
+  # manifest bump is needed. Wanted == Latest means `npm ci` would
+  # install the newest version as-is -- nothing to do, MISSING
+  # current notwithstanding. So the verdict comes from the JSON
+  # (Wanted vs Latest); the MISSING-current artifact never counts.
+  local outdated_json
+  outdated_json=$(cd "$repo_path" && npm outdated --json 2>/dev/null)
+  [ -z "$outdated_json" ] && outdated_json='{}'
+
+  # Human-readable table for the triage LLM/operator IF this ends up
+  # a real finding, prefaced so neither re-derives the MISSING note.
+  {
+    echo "NOTE: this audit does not run 'npm ci', so node_modules is"
+    echo "absent and the Current column reads MISSING for every"
+    echo "package. That is a harness artifact, not a finding. Only"
+    echo "rows where Wanted != Latest are real version drift (the"
+    echo "package.json range cannot reach the latest release)."
+    echo
+    (cd "$repo_path" && npm outdated 2>&1) || true
+  } > "$outdated_file"
+
+  # Findings only if some package has Wanted != Latest. Empty / `{}`
+  # JSON -> clean. Unparseable JSON -> findings (let the LLM look;
+  # conservative, matching this module's any-ambiguity-is-findings
+  # bias).
+  local drift
+  drift=$(printf '%s' "$outdated_json" | jq -r \
+    '[to_entries[] | select(.value.wanted != .value.latest)] | length' 2>/dev/null)
+  if [ -z "$drift" ]; then
+    echo "npm-outdated:findings"
+  elif [ "$drift" -eq 0 ]; then
+    echo "npm-outdated:clean"
+  else
+    echo "npm-outdated:findings"
+  fi
 }
 
 _run_cargo() {
