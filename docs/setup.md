@@ -18,15 +18,29 @@ missing.
 
 **Ecosystem toolchains for repos the agent will actually work:**
 
-The weekly maintenance pass auto-detects the stack and runs standard audit tools (`npm audit`, `cargo audit`, `pip-audit`, `govulncheck`, `bundle audit`, etc.) from the harness directly. Missing audit binaries (`cargo-audit`, `pip-audit`, `govulncheck`, `bundler-audit`) are installed on demand into user-writable paths -- no sudo. But the base language toolchain must already be on the host:
+The weekly maintenance pass auto-detects the stack and runs standard audit tools (`npm audit`, `cargo audit`, `pip-audit`, `govulncheck`, `bundle audit`, etc.) from the harness directly. Missing audit binaries (`cargo-audit`, `pip-audit`, `bundler-audit`) are installed on demand into user-writable paths -- no sudo. Go's `govulncheck` is handled specially (see the Go note below). But the base language toolchain must already be on the host:
 
 - Node projects (including the agent's own website) → `sudo apt-get install -y nodejs npm`
 - Python projects → `sudo apt-get install -y python3 python3-pip python3-venv`
-- Go projects → `sudo apt-get install -y golang-go`
+- Go projects → `sudo apt-get install -y golang-go` (host Go only needs to be new enough to read a `tool` directive, i.e. ≥1.24)
 - Rust projects → install [rustup](https://rustup.rs) (not in apt)
 - Ruby projects → `sudo apt-get install -y ruby ruby-dev`
 
 You only need toolchains for languages the agent will actually touch.
+
+**Go vuln scanning -- pin `govulncheck` per repo, don't rely on the host's.**
+`govulncheck` is coupled to the Go toolchain it was *built* with: a scanner
+built against an older stdlib can't parse newer source (e.g. range-over-func),
+so an apt/distro `govulncheck` frozen at the distro Go will choke on a repo that
+has moved to a newer Go. The maintenance pass therefore ignores any
+`govulncheck` on `PATH` and instead prefers each repo's **own pinned tool**: add
+it once with `go get -tool golang.org/x/vuln/cmd/govulncheck@latest` (Go 1.24+
+`tool` directive in `go.mod`) and the harness runs it via `go tool govulncheck`,
+which compiles the scanner with that repo's selected toolchain -- so it always
+matches the repo's Go, and upgrading one repo never drifts the others. Repos
+that haven't adopted the directive fall back to a global install built with the
+toolchain the repo's `go.mod` selects. If the apt `govulncheck` is installed you
+can safely `apt remove` it; it is intentionally bypassed.
 
 ## Auth and secrets
 

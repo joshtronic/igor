@@ -170,16 +170,71 @@ _run_go() {
   local audit_file="$out_dir/govulncheck.txt"
   local outdated_file="$out_dir/go-outdated.txt"
 
-  if ensure_audit_tool govulncheck "go install golang.org/x/vuln/cmd/govulncheck@latest"; then
-    (cd "$repo_path" && govulncheck ./... 2>&1) > "$audit_file"
-    if [ $? -eq 0 ]; then echo "govulncheck:clean"; else echo "govulncheck:findings"; fi
+  # Pick how to invoke govulncheck. PREFER the repo's own pinned tool
+  # (go.mod `tool` directive, Go 1.24+): `go tool` compiles the scanner
+  # with the repo's selected toolchain, so it ALWAYS matches the repo's
+  # Go version -- no host-level version juggling, no cross-repo drift
+  # (a scanner built against an older stdlib can't parse newer source).
+  #
+  # Repos that haven't adopted the directive fall back to a global
+  # install built with the toolchain the repo's own go.mod selects
+  # (GOTOOLCHAIN=go1.X.Y, derived below) and invoked by absolute path,
+  # so a stale distro binary on PATH (e.g. apt's, frozen at the distro
+  # Go) can't shadow it. Last-ditch: a plain install with the default
+  # toolchain.
+  local -a gv=()
+  local modjson
+  modjson=$(cd "$repo_path" && go mod edit -json 2>/dev/null)
+  if printf '%s' "$modjson" | jq -e '.Tool[]?.Path | select(endswith("/govulncheck"))' >/dev/null 2>&1; then
+    gv=(go tool govulncheck)
   else
-    echo "govulncheck unavailable on this host" > "$audit_file"
+    # Normalize the repo's Go version to a full toolchain name. GOTOOLCHAIN
+    # requires the patch (go1.26.2); a language version (go1.26) is rejected.
+    local repo_go tc=""
+    repo_go=$(printf '%s' "$modjson" | jq -r '.Toolchain // .Go // empty' 2>/dev/null)
+    case "$repo_go" in
+      go*)    tc="$repo_go" ;;        # already a toolchain name
+      *.*.*)  tc="go$repo_go" ;;      # has patch    -> go1.26.2
+      *.*)    tc="go${repo_go}.0" ;;  # language ver -> go1.26.0
+    esac
+    if [ -n "$tc" ] && GOTOOLCHAIN="$tc" go install golang.org/x/vuln/cmd/govulncheck@latest >/dev/null 2>&1; then
+      gv=("$(go env GOPATH)/bin/govulncheck")
+    elif go install golang.org/x/vuln/cmd/govulncheck@latest >/dev/null 2>&1; then
+      gv=("$(go env GOPATH)/bin/govulncheck")
+    fi
+  fi
+
+  if [ "${#gv[@]}" -eq 0 ]; then
+    echo "govulncheck unavailable: no repo tool directive and global install failed" > "$audit_file"
     echo "govulncheck:skipped"
+  else
+    # Text-mode exit codes are unambiguous AND reachability-aware:
+    #   0     = clean (uncalled stdlib advisories are NOT flagged)
+    #   3     = reachable/called vulnerabilities -> real findings
+    #   other = build/load/tool error -> NOT a vuln (a crash must not
+    #           masquerade as a finding and burn a triage run)
+    local rc
+    (cd "$repo_path" && "${gv[@]}" ./...) > "$audit_file" 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
+      # Native build failed (e.g. a headless host can't compile a
+      # desktop GUI backend's X11/cgo deps). Retry the wasm target the
+      # web clients actually ship as -- that backend needs no C headers.
+      { echo; echo "--- native build failed (exit $rc); retried GOOS=js GOARCH=wasm ---"; echo; } >> "$audit_file"
+      (cd "$repo_path" && GOOS=js GOARCH=wasm "${gv[@]}" ./...) >> "$audit_file" 2>&1
+      rc=$?
+    fi
+    case "$rc" in
+      0) echo "govulncheck:clean" ;;
+      3) echo "govulncheck:findings" ;;
+      *) echo "govulncheck:error" ;;
+    esac
   fi
 
   # go list -m -u all marks updatable modules with bracketed
   # versions: "example.com/mod v1.0.0 [v1.2.0]". No brackets -> clean.
+  # (Now also surfaces a stale pinned govulncheck, turning toolchain
+  # drift into a visible outdated finding instead of silent rot.)
   (cd "$repo_path" && go list -m -u all 2>&1) > "$outdated_file"
   if ! grep -qE "\[v[0-9]" "$outdated_file"; then
     echo "go-outdated:clean"
