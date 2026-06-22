@@ -102,9 +102,37 @@ respective tools on the host; install or skip.
   check; closing the ticket re-enables it. Validation gates only
   WORK (issue pickup, PR pushes, site-work) -- the read-only weekly
   analysis pass (security/dep audit) runs on every bot-accessible
-  repo regardless of validation, since it only files an issue and
-  never commits. `ANALYSIS_REPOS_JSON` is the analysis set;
-  `VALIDATED_REPOS_JSON` is the work set.
+  repo regardless of validation, since the audit itself only files
+  tickets and never commits. `ANALYSIS_REPOS_JSON` is the analysis
+  set; `VALIDATED_REPOS_JSON` is the work set. Validation is also what
+  proves a repo has tests + CI: `check_test_signal` AND
+  `check_ci_workflow` are both REQUIRED to pass, so "validated" is a
+  reliable stand-in for "a dependency bump here can be CI-verified" --
+  which is exactly the gate the maintenance pass uses to decide
+  PR-vs-issue (next bullet).
+- The maintenance pass (`do_maintenance_tick` ->
+  `do_maintenance_for_repo`, weekly, one ISO-week stamp per repo under
+  `.maintenance`) is a two-tier Dependabot. The harness runs the audit
+  tools (`lib/maintenance-checks.sh`); a clean repo costs no LLM. On
+  findings, ONE `claude_call` on `AGENT_MODEL_REVIEW` CLASSIFIES (never
+  fixes) into lanes and the harness files up to four DEDUPED tickets,
+  each keyed by an HTML-comment marker (skip-if-open dedup, like the
+  SEO/onboarding tickets -- a repo is audited at most once per ISO
+  week, so the guard is just last week's ticket still being open):
+  `maint-security` + `maint-bumps` are **Agent-labeled, unassigned**
+  work tickets that the normal claimable grind turns into a reviewed PR
+  -- filed ONLY for validated repos (the validation gate IS the opt-in;
+  no separate list), so unverifiable PRs never land; `maint-triage` is
+  the human ticket for majors/judgment, or for EVERYTHING when the repo
+  isn't validated (audit reach is preserved for every repo, PR-routing
+  is not); `maint-tooling` fires when an audit tool can't run --
+  uninstallable (`:skipped`) OR crashed mid-scan (`:error`, e.g.
+  govulncheck failing to build) -- because a tool that didn't run is a
+  blind spot, not a clean bill. Auto-Agent-labeling bump tickets means
+  dep PRs open without a per-ticket human greenlight (matching the SEO
+  agentic-site precedent); the human gate is the PR review/merge.
+  govulncheck is kept but deprioritized (flaky); its `:error` rides the
+  deduped `maint-tooling` ticket so it can't spam.
 - There is no shift window -- the tick runs 24/7. Midnight is just
   the local-day rollover for the daily slots; the cascade's fixed
   priority order is what shapes what runs, not the clock.
