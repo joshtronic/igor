@@ -382,20 +382,22 @@ seo_render_html() {
   '
 }
 
-# seo_record_opportunities <report_json> <agentic_bool> <iso_week>
+# seo_record_opportunities <report_json> <agentic_bool> <period>
 # Appends one JSONL record per surfaced opportunity to
 # $AGENT_STATE_DIR/seo-opportunities.jsonl, capturing baseline metrics +
 # date so a future Layer-2 pass can re-measure whether each prediction
-# panned out. Append-only = crash-safe, no read-modify-write.
+# panned out. <period> is the cadence bucket the baseline was captured in
+# (see seo_period in tick.sh). Append-only = crash-safe, no
+# read-modify-write.
 seo_record_opportunities() {
-  local report="$1" agentic="${2:-false}" week="$3"
+  local report="$1" agentic="${2:-false}" period="$3"
   local out="${AGENT_STATE_DIR:-$HOME/.local/state/agent}/seo-opportunities.jsonl"
   local today; today=$(date +%F)
   mkdir -p "$(dirname "$out")"
-  jq -c --arg today "$today" --arg week "$week" --argjson agentic "$agentic" '
+  jq -c --arg today "$today" --arg period "$period" --argjson agentic "$agentic" '
     .domain as $d
     | (.groups | to_entries[].value[])
-    | { recorded:$today, week:$week, domain:$d, agentic:$agentic,
+    | { recorded:$today, period:$period, domain:$d, agentic:$agentic,
         type:.type, query:(.query // null), page:(.page // null),
         baseline:{ impressions:(.impressions // null), clicks:(.clicks // null),
                    ctr:(.ctr // null), position:(.position // null) },

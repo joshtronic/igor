@@ -674,30 +674,43 @@ weekly_mark_done() {
   mv "$tmp" "$state_file"
 }
 
-# -- SEO per-domain weekly state --------------------------------
+# -- SEO per-domain monthly state -------------------------------
 #
-# Same ISO-week gate as the weekly slots, but keyed per GSC domain
-# under a "seo" object in discretionary-state.json. One domain is
-# analyzed per tick (do_seo_tick), so this stamps each as it's done
-# and the next eligible domain is picked next tick. Regenerable.
+# A per-GSC-domain cadence gate, keyed under a "seo" object in
+# discretionary-state.json. One domain is analyzed per tick
+# (do_seo_tick), so this stamps each as it's done and the next
+# eligible domain is picked next tick. Regenerable.
+#
+# Cadence: once per CALENDAR MONTH. The analysis window is 28 days
+# (seo_window), so a monthly beat hands each run a fresh,
+# near-non-overlapping window -- and gives any fix from last month's
+# ticket time to land before the page is re-evaluated (a weekly beat
+# re-flagged the same pages before their CTR could move). Self-healing:
+# eligibility is "stamp != current period", NOT a hard day-of-month
+# window, so a transient early-month failure just re-runs on the next
+# tick instead of skipping the whole month. seo_period is the ONLY
+# place the cadence lives -- switch it to "%G-W%V" (weekly) or a
+# quarter computation and every call site below follows.
+
+seo_period() { date +%Y-%m; }
 
 seo_eligible() {
-  local domain="$1" state_file last this_week
+  local domain="$1" state_file last this_period
   state_file=$(discretionary_state_file)
   [ -f "$state_file" ] || return 0
   last=$(jq -r --arg d "$domain" '.seo[$d] // ""' "$state_file" 2>/dev/null)
   [ -z "$last" ] && return 0
-  this_week=$(date +%G-W%V)
-  [ "$last" != "$this_week" ]
+  this_period=$(seo_period)
+  [ "$last" != "$this_period" ]
 }
 
 seo_mark_done() {
-  local domain="$1" state_file tmp this_week
+  local domain="$1" state_file tmp this_period
   state_file=$(discretionary_state_file)
-  this_week=$(date +%G-W%V)
+  this_period=$(seo_period)
   [ -f "$state_file" ] || echo '{}' > "$state_file"
   tmp=$(mktemp)
-  jq --arg d "$domain" --arg w "$this_week" \
+  jq --arg d "$domain" --arg w "$this_period" \
     '.seo //= {} | .seo[$d] = $w' "$state_file" > "$tmp"
   mv "$tmp" "$state_file"
 }
@@ -1279,7 +1292,7 @@ EOF
 
 # -- SEO analysis pass --------------------------------------------
 #
-# Weekly, GSC-driven (NOT repo-driven and NOT WEBSITE_REPO-gated):
+# Monthly, GSC-driven (NOT repo-driven and NOT WEBSITE_REPO-gated):
 # enumerate Search Console domain properties, analyze ONE per tick,
 # email the owner a graded report, and -- for sites listed as agentic
 # -- file ONE curated, deduped, Agent-labeled ticket the normal
@@ -1362,7 +1375,7 @@ ${marker}"
   log "seo: filed ticket #$num on $repo for $domain"
 }
 
-# One weekly SEO pass over a single eligible domain. Returns 0 if a
+# One monthly SEO pass over a single eligible domain. Returns 0 if a
 # domain was processed (caller exits the tick), 1 if the subsystem is
 # unconfigured or nothing was eligible (caller falls through).
 do_seo_tick() {
@@ -1378,7 +1391,7 @@ do_seo_tick() {
 
   # SEO_DEBUG_DOMAIN restricts the pass to a single domain for isolated
   # testing before the full sweep. Everything else is identical to a
-  # normal day -- same weekly gate, same email/ticket/record path -- so a
+  # normal day -- same monthly gate, same email/ticket/record path -- so a
   # debug run still stamps the domain done. To re-run, clear its stamp
   # under .seo in discretionary-state.json. Bare domain, e.g.
   # "joshtronic.com".
@@ -1398,7 +1411,7 @@ do_seo_tick() {
     if seo_eligible "$d"; then target="$d"; break; fi
   done <<<"$domains"
   if [ -z "$target" ]; then
-    log "seo: all domains analyzed this week -- continuing"
+    log "seo: all domains analyzed this month -- continuing"
     return 1
   fi
 
@@ -1421,17 +1434,17 @@ do_seo_tick() {
   upside=$(jq -r '.total_upside // 0' <<<"$report" 2>/dev/null || echo 0)
 
   if [ "${count:-0}" -eq 0 ]; then
-    log "seo: $target -- nothing above the impression floor this week (no email/ticket)"
+    log "seo: $target -- nothing above the impression floor this month (no email/ticket)"
     seo_mark_done "$target"
     return 0
   fi
 
   # Record baselines for future Layer-2 outcome grading (append-only).
-  local week agentic_repo agentic_bool=false
-  week=$(date +%G-W%V)
+  local period agentic_repo agentic_bool=false
+  period=$(seo_period)
   agentic_repo=$(seo_agentic_repo_for "$target")
   [ -n "$agentic_repo" ] && agentic_bool=true
-  seo_record_opportunities "$report" "$agentic_bool" "$week"
+  seo_record_opportunities "$report" "$agentic_bool" "$period"
 
   # Render once, reuse for email (text+html) and ticket (markdown).
   local md html recipients subject
@@ -2826,7 +2839,7 @@ if do_maintenance_tick; then
   exit 0
 fi
 
-# Scheduled SEO analysis (weekly, ONE domain per tick). Opt-in via the
+# Scheduled SEO analysis (monthly, ONE domain per tick). Opt-in via the
 # Google Search Console + SMTP2GO + SEO_PRIMARY_EMAIL env; no-ops when
 # unconfigured. GSC-driven, not repo-driven: emails the owner a graded
 # report per domain, and for agentic sites files a deduped Agent-labeled

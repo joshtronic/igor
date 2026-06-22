@@ -5,7 +5,7 @@ claims one piece of work, ships it, sleeps. Each tick runs a
 strictly ordered cascade: recovery + validation, then PR-review
 pickup, then Igor's own work (daily reading + blog post, weekly
 /now refresh + site-work pass -- opt-in via `WEBSITE_REPO`), then
-scheduled maintenance, then the weekly GSC-driven SEO pass (opt-in),
+scheduled maintenance, then the monthly GSC-driven SEO pass (opt-in),
 then the daily weekday market report (opt-in), then the daily
 sports digest (opt-in), then the daily logwatch self-report
 (opt-in), then the claimable-issue grind. Igor's own
@@ -130,15 +130,21 @@ respective tools on the host; install or skip.
   (issues, maintenance, PR review) still runs.
 - The SEO pass (`do_seo_tick`) is opt-in via the GSC + SMTP2GO env
   and is GSC-driven, NOT repo-driven -- it enumerates Search Console
-  domain properties, not Forgejo repos. Weekly, one domain per tick,
-  fully scripted (no LLM). It emails always; for `SEO_AGENTIC_SITES`
+  domain properties, not Forgejo repos. Monthly (once per calendar
+  month per domain, self-healing -- not a hard day-of-month window),
+  one domain per tick, fully scripted (no LLM). The 28-day analysis
+  window pairs with the monthly beat so each run gets a fresh,
+  near-non-overlapping window and last month's fixes have time to land
+  before re-evaluation; `seo_period` in `tick.sh` is the single knob if
+  the cadence ever changes. It emails always; for `SEO_AGENTIC_SITES`
   it also files an `Agent`-labeled ticket the normal discovery flow
   works once that repo validates (so SEO *work* still honors the
   validation gate, even though SEO *analysis* doesn't). Set
   `SEO_DEBUG_DOMAIN` to one bare domain to run the pass against just
-  that site (otherwise a normal day). State (incl. SEO weekly stamps
-  under `.seo`) lives in `~/.local/state/agent/discretionary-state.json`;
-  clear a domain's stamp there to re-run it.
+  that site (otherwise a normal day). State (incl. SEO monthly stamps
+  under `.seo`, now `YYYY-MM`) lives in
+  `~/.local/state/agent/discretionary-state.json`; clear a domain's
+  stamp there to re-run it.
 - The market report (`do_market_tick`) is opt-in via the marketstack
   (v2 EOD API) + SMTP2GO env and is a sibling of the SEO pass: scripted
   (no LLM), email-only, NOT repo-driven. It's the only DAILY-but-weekday-
