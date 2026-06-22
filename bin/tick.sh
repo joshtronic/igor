@@ -334,7 +334,9 @@ normalize_worktree_dashes() {
   local worktree="$1"
   [ -n "$worktree" ] || return 0
   local f
-  for f in PR_BODY.md AGENT_JOURNAL.md AGENT_MAINTENANCE_FINDINGS.md; do
+  for f in PR_BODY.md AGENT_JOURNAL.md \
+           AGENT_MAINTENANCE_FINDINGS.md \
+           AGENT_MAINTENANCE_SECURITY.md AGENT_MAINTENANCE_BUMPS.md; do
     normalize_unicode_dashes_in_file "$worktree/.agent/$f"
   done
 }
@@ -1087,11 +1089,15 @@ maintenance_eligible() {
 # Scheduled maintenance/analysis pass.
 # Loops EVERY bot-accessible repo eligible this ISO week -- the
 # ANALYSIS set (ANALYSIS_REPOS_JSON), NOT the validated WORK set.
-# Analysis is read-only (it only files an issue, never commits), so
-# it is deliberately decoupled from validation: a repo that fails
-# validation -- or carries an open onboarding ticket -- still gets
-# its dependencies audited. Returns 0 if any maintenance ran, 1 if
-# nothing was eligible this week.
+# Analysis is read-only (it files tickets, never commits), so it is
+# deliberately decoupled from validation: a repo that fails validation
+# -- or carries an open onboarding ticket -- still gets its
+# dependencies audited. The two-tier split lives one level down, in
+# do_maintenance_for_repo: a finding becomes an Agent-labeled bump
+# ticket (-> reviewed PR via the work flow) ONLY on a validated repo;
+# otherwise it's a human triage ticket. So audit reach ignores
+# validation, but PR-routing honors it. Returns 0 if any maintenance
+# ran, 1 if nothing was eligible this week.
 #
 # Each repo's maintenance is its own self-contained pass in
 # do_maintenance_for_repo, with its own worktree + cleanup. The
@@ -1127,10 +1133,83 @@ do_maintenance_tick() {
   return 0
 }
 
+# -- Maintenance issue routing -----------------------------------
+#
+# The audit fans its results out to up to four DEDUPED tickets, each
+# keyed by an HTML-comment marker (same mechanism as the onboarding +
+# SEO tickets). Dedup is skip-if-open: a repo is audited at most once
+# per ISO week (maintenance_eligible), so the only thing to guard is
+# last week's ticket still being open -- we don't stack a second one.
+#
+# Two tiers, decided by validation. A repo that PASSES validation has
+# (provably) a test signal + a CI workflow -- so a dependency bump can
+# be opened as a PR and actually verified. Those repos get Agent-labeled
+# "apply these bumps" tickets that the normal claimable-work flow turns
+# into a reviewed PR (the maintenance pass never commits; the work flow
+# does, gated by validation). Repos that don't validate -- or findings
+# that need human judgment -- get a triage ticket instead: audit reach
+# is preserved for every repo, but nothing lands as an unverifiable PR.
+MAINT_SECURITY_MARKER="<!-- agent:maint-security -->"  # Agent: clean security fix -> PR
+MAINT_BUMPS_MARKER="<!-- agent:maint-bumps -->"        # Agent: routine drift bumps -> PR
+MAINT_TRIAGE_MARKER="<!-- agent:maint-triage -->"      # human: majors + judgment + unvalidated
+MAINT_TOOLING_MARKER="<!-- agent:maint-tooling -->"    # human: an audit tool could not run
+
+# True if <repo> is in the validated WORK set (has tests + CI per
+# validate_repo_via_api). VALIDATED_REPOS_JSON is the newline-delimited
+# repo set the per-tick validation sweep builds before the cascade runs.
+maintenance_repo_validated() {
+  local target="$1"
+  printf '%s' "$VALIDATED_REPOS_JSON" | jq -r '.full_name' 2>/dev/null \
+    | grep -qxF "$target"
+}
+
+# critical|high|medium|low -> Priority/* label ("" for anything else).
+maint_priority_label() {
+  case "$1" in
+    critical) echo "Priority/Critical" ;;
+    high)     echo "Priority/High" ;;
+    medium)   echo "Priority/Medium" ;;
+    low)      echo "Priority/Low" ;;
+    *)        echo "" ;;
+  esac
+}
+
+# maint_file_deduped_issue <repo> <marker> <title> <body> <agent-bool> <priority-label|"">
+# Files <body> (which MUST already contain <marker>) as an issue, unless
+# an open issue carrying <marker> already exists (skip-if-open dedup).
+# agent-bool=true -> Agent-labeled + left UNASSIGNED so claimable
+# discovery works it into a PR; false -> Status/Need More Info for a
+# human. No-op-safe: logs and returns 0 on any Forgejo hiccup so the
+# audit loop continues.
+maint_file_deduped_issue() {
+  local repo="$1" marker="$2" title="$3" body="$4" agent="$5" pri="$6"
+  local existing
+  existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$marker" 2>/dev/null)
+  if [ -n "$existing" ] && [ "$existing" != "null" ] \
+     && [ "$(jq -r '.state' <<<"$existing" 2>/dev/null)" = "open" ]; then
+    log "maintenance: $repo already has an open ticket #$(jq -r '.number' <<<"$existing") for ${marker} -- not refiling"
+    return 0
+  fi
+  local num
+  num=$(forgejo_open_issue "$repo" "$title" "$body") \
+    || { log "warning: maintenance ticket open failed on $repo (continuing)"; return 0; }
+  if [ "$agent" = "true" ]; then
+    forgejo_add_label "$repo" "$num" "Agent" 2>/dev/null \
+      || log "warning: could not apply 'Agent' on $repo#$num"
+  else
+    forgejo_add_label "$repo" "$num" "Status/Need More Info" 2>/dev/null \
+      || log "warning: could not apply 'Status/Need More Info' on $repo#$num"
+  fi
+  if [ -n "$pri" ]; then
+    forgejo_add_label "$repo" "$num" "$pri" 2>/dev/null \
+      || log "warning: could not apply '$pri' on $repo#$num"
+  fi
+  log "maintenance: filed #$num on $repo (${marker})"
+}
+
 # Per-repo maintenance executor. Audits ONE repo via
-# lib/maintenance-checks.sh and (for findings) invokes Claude to
-# triage into a Forgejo issue. Worktree is created here and
-# cleaned via a RETURN trap so we don't leak when the function
+# lib/maintenance-checks.sh and routes the result. Worktree is created
+# here and cleaned via a RETURN trap so we don't leak when the function
 # unwinds.
 #
 # Hybrid execution:
@@ -1138,10 +1217,15 @@ do_maintenance_tick() {
 #     audit + outdated, pip-audit + pip list --outdated,
 #     govulncheck + go list -m -u all, bundle-audit + bundle
 #     outdated).
-#   - Clean week -> no LLM, no issue.
-#   - No recognized stack -> same.
-#   - Findings -> invoke Claude to triage; harness files the
-#     Status/Need More Info issue with the triaged report.
+#   - A tool that could NOT run (skipped/error) -> deduped operational
+#     ticket: the host should be able to run its own tooling, and a
+#     skipped tool is a blind spot, not a clean bill.
+#   - Clean week / no recognized stack -> no LLM, no ticket.
+#   - Findings -> ONE Claude pass CLASSIFIES them (it does not fix), and
+#     the harness files up to three deduped tickets from its output:
+#     security bumps + drift bumps (Agent-labeled, validated repos only,
+#     -> reviewed PR) and a human triage ticket (majors/judgment, or
+#     everything when the repo isn't validated).
 do_maintenance_for_repo() {
   local target="$1"
 
@@ -1179,6 +1263,36 @@ do_maintenance_for_repo() {
   audit_rc=$?
   set -e
 
+  # Broken-tool reporting, independent of findings. A tool that could
+  # not run -- not installable (:skipped) or crashed mid-scan (:error,
+  # e.g. govulncheck failing to build the project) -- means those deps
+  # were NOT actually audited: a blind spot, not a clean bill. Surface
+  # it as a deduped operational ticket so the host gets fixed instead of
+  # the gap passing silently as "clean".
+  local summary_file="$audit_dir/AUDIT_SUMMARY.txt"
+  local broken
+  broken=$(grep -hE ':(skipped|error)$' "$summary_file" 2>/dev/null || true)
+  if [ -n "$broken" ]; then
+    local ops_body tool_line tool_name
+    ops_body="The scheduled maintenance audit on \`$target\` could not run one or more tools, so the dependencies those tools cover were NOT actually audited -- a blind spot, not a clean bill of health. The agent's host should be able to run its own audit tooling: install the missing tool, or fix whatever makes the scan fail.
+
+"
+    while IFS= read -r tool_line; do
+      [ -z "$tool_line" ] && continue
+      tool_name="${tool_line%%:*}"
+      ops_body+="### ${tool_line}
+
+\`\`\`
+$(tail -n 30 "$audit_dir/${tool_name}.txt" 2>/dev/null || echo "(no output captured)")
+\`\`\`
+
+"
+    done <<<"$broken"
+    ops_body+="$MAINT_TOOLING_MARKER"
+    maint_file_deduped_issue "$target" "$MAINT_TOOLING_MARKER" \
+      "[maintenance] audit tooling can't run on $target" "$ops_body" false "Priority/Low"
+  fi
+
   # rc==2: no recognized stack manifests. Templated "no audit
   # surface" outcome. Still mark done so we don't try again
   # this week.
@@ -1196,49 +1310,73 @@ do_maintenance_for_repo() {
     return 0
   fi
 
-  # rc==1: findings present in at least one tool's output. Invoke
-  # Claude to triage. The raw output files are in
-  # .agent/audit-output/ for him to read.
+  # rc==1: findings in at least one tool. ONE Claude pass classifies
+  # them into lanes (it classifies, it does not fix); the harness files
+  # the resulting deduped tickets. Raw output is in .agent/audit-output/.
   log "maintenance: findings detected on $target, invoking claude for triage"
+
+  local validated=false
+  maintenance_repo_validated "$target" && validated=true
+  log "maintenance: $target validated=$validated (validated -> bump PRs; else triage ticket)"
 
   local m_user_msg
   m_user_msg=$(cat <<EOF
-You are triaging the output of a scheduled maintenance audit on $target.
+You are triaging a scheduled dependency/security audit on $target. The
+harness already ran the audit tools in this worktree; their raw output
+is in .agent/audit-output/ -- one file per tool, plus AUDIT_SUMMARY.txt
+listing clean/findings/skipped/error per check.
 
-The harness already ran the audit tools. Their raw output is in
-.agent/audit-output/ -- one file per tool, plus AUDIT_SUMMARY.txt
-listing clean/findings/skipped per check.
+You are CLASSIFYING and ROUTING findings, NOT fixing them. Do not edit
+code, do not commit, do not open PRs. The harness files tickets from
+the files you write; a separate work flow makes any actual change.
 
-Your job:
+This repo's validation status: VALIDATED=$validated.
+  - true:  it has tests + CI, so a safe bump can be opened as a PR and
+           verified. You MAY route safe bumps to the work tickets below.
+  - false: do NOT write bump tickets -- everything actionable goes to
+           the human triage file (no unverifiable PR against a no-CI repo).
 
-  1. Read .agent/audit-output/AUDIT_SUMMARY.txt for the at-a-glance
-     status, then read the individual files for any check marked
-     "findings". Skip the "clean" and "skipped" entries unless
-     context warrants a look.
-  2. Apply judgment: which findings actually matter for THIS repo?
-     Are CVEs reachable in the code? Are outdated deps blocking
-     something or just trivia? Read the source as needed.
-  3. Write .agent/AGENT_MAINTENANCE_FINDINGS.md with a triaged
-     summary -- lead with what matters, bury what's noise. The
-     harness files this as a Forgejo issue for human triage.
-  4. Write a single-word severity to
-     .agent/AGENT_MAINTENANCE_PRIORITY: critical, high, medium, or
-     low. Guidelines:
-       - critical: actively-exploited vulns, leaked secrets in deps
-       - high:     unfixed CVEs of moderate-or-worse severity
-       - medium:   outdated-but-functional, low-severity advisories
-       - low:      minor version bumps, nice-to-haves
+Steps:
+  1. Read AUDIT_SUMMARY.txt, then each file marked "findings". Ignore
+     "clean". The harness already handles "skipped"/"error" tools --
+     don't report those.
+  2. Sort each real finding into a lane:
+       SECURITY  -- a CVE/advisory WITH a clean fix (a patch/minor bump,
+                    no code change). Reachability matters: govulncheck
+                    only flags called vulns; for others, judge whether
+                    the vulnerable path is actually used.
+       DRIFT     -- an outdated dependency that is a patch/minor bump.
+       JUDGMENT  -- anything that is NOT a clean mechanical bump: major
+                    versions, fixes needing a major bump or code change,
+                    vulns you judge unreachable, or anything uncertain.
+  3. Write these files (OMIT a file entirely when its lane is empty):
+       .agent/AGENT_MAINTENANCE_SECURITY.md   (only if VALIDATED=true)
+         A short work ticket -- "Apply these security fixes and open a
+         PR." Per item: package, current -> target, advisory id, one
+         line on why it is safe. Tell the worker: update lockfiles, run
+         the test suite, keep the diff minimal, no unrelated changes.
+       .agent/AGENT_MAINTENANCE_BUMPS.md      (only if VALIDATED=true)
+         Same work-ticket shape, grouping the routine patch/minor DRIFT
+         bumps into one ticket. Same worker instructions.
+       .agent/AGENT_MAINTENANCE_FINDINGS.md
+         The human-triage report: JUDGMENT items, plus -- when
+         VALIDATED=false -- everything actionable. Lead with what
+         matters, bury noise. Prose for a human, not a work spec.
+       .agent/AGENT_MAINTENANCE_PRIORITY
+         One word -- critical | high | medium | low -- severity of the
+         most serious finding overall:
+           critical: actively-exploited vulns, leaked secrets in deps
+           high:     reachable/unfixed CVEs, moderate severity or worse
+           medium:   outdated-but-functional, low-severity advisories
+           low:      minor version bumps, nice-to-haves
 
-You're triaging, not fixing. Don't commit, don't open PRs. The
-harness files the issue.
+If nothing is real after you look (all noise), write nothing.
 EOF
 )
 
-  # Maintenance triage is classification work, not agent work.
-  # Phase 5 of the refactor explicitly: no voice anchor, no
-  # AGENTS.md -- the user message is self-contained instructions.
-  # Claude Code's built-in system prompt is fine for the
-  # task; we just don't append our own.
+  # Maintenance triage is classification work, not agent work: no voice
+  # anchor, no AGENTS.md -- the user message is self-contained. Claude
+  # Code's built-in system prompt is fine; we don't append our own.
   log "invoking claude for maintenance triage (timeout ${TICK_TIMEOUT})"
   local m_log="$m_worktree/.agent/claude-output.log"
   local m_start; m_start=$(date +%s)
@@ -1255,34 +1393,54 @@ EOF
 
   normalize_worktree_dashes "$m_worktree"
 
-  local findings="$m_worktree/.agent/AGENT_MAINTENANCE_FINDINGS.md"
-  if [ -s "$findings" ]; then
-    local m_title m_body m_num
-    m_title="Maintenance pass $(date +%Y-%m-%d): findings"
-    m_body=$(cat "$findings")
-    m_num=$(forgejo_open_issue "$target" "$m_title" "$m_body")
-    forgejo_add_label "$target" "$m_num" "Status/Need More Info" 2>/dev/null \
-      || log "warning: could not apply 'Status/Need More Info' on #$m_num ($target)"
+  # Severity label, shared by the security + triage tickets.
+  local m_pri_label=""
+  local m_priority_file="$m_worktree/.agent/AGENT_MAINTENANCE_PRIORITY"
+  if [ -s "$m_priority_file" ]; then
+    local m_priority
+    m_priority=$(tr -d '[:space:]' < "$m_priority_file" | tr '[:upper:]' '[:lower:]')
+    m_pri_label=$(maint_priority_label "$m_priority")
+  fi
 
-    local m_priority_file="$m_worktree/.agent/AGENT_MAINTENANCE_PRIORITY"
-    if [ -s "$m_priority_file" ]; then
-      local m_priority m_pri_label=""
-      m_priority=$(tr -d '[:space:]' < "$m_priority_file" | tr '[:upper:]' '[:lower:]')
-      case "$m_priority" in
-        critical) m_pri_label="Priority/Critical" ;;
-        high)     m_pri_label="Priority/High" ;;
-        medium)   m_pri_label="Priority/Medium" ;;
-        low)      m_pri_label="Priority/Low" ;;
-      esac
-      if [ -n "$m_pri_label" ]; then
-        forgejo_add_label "$target" "$m_num" "$m_pri_label" 2>/dev/null \
-          || log "warning: could not apply '$m_pri_label' on #$m_num ($target)"
-      fi
-    fi
+  # Route the triage output. Each file is optional; each maps to one
+  # deduped ticket. SECURITY + BUMPS are Agent-labeled work tickets (only
+  # produced for validated repos -> the work flow opens the PR); FINDINGS
+  # is the human triage ticket.
+  local sec_file="$m_worktree/.agent/AGENT_MAINTENANCE_SECURITY.md"
+  local bumps_file="$m_worktree/.agent/AGENT_MAINTENANCE_BUMPS.md"
+  local findings_file="$m_worktree/.agent/AGENT_MAINTENANCE_FINDINGS.md"
+  local filed=0
 
-    log "maintenance: filed #$m_num on $target (awaiting human triage)"
-  else
-    log "maintenance: claude exited without findings file -- nothing to file"
+  if [ -s "$sec_file" ]; then
+    maint_file_deduped_issue "$target" "$MAINT_SECURITY_MARKER" \
+      "[deps] security fixes for $target" \
+      "$(cat "$sec_file")
+
+$MAINT_SECURITY_MARKER" \
+      true "${m_pri_label:-Priority/High}"
+    filed=1
+  fi
+  if [ -s "$bumps_file" ]; then
+    maint_file_deduped_issue "$target" "$MAINT_BUMPS_MARKER" \
+      "[deps] dependency bumps for $target" \
+      "$(cat "$bumps_file")
+
+$MAINT_BUMPS_MARKER" \
+      true ""
+    filed=1
+  fi
+  if [ -s "$findings_file" ]; then
+    maint_file_deduped_issue "$target" "$MAINT_TRIAGE_MARKER" \
+      "[maintenance] findings needing triage for $target" \
+      "$(cat "$findings_file")
+
+$MAINT_TRIAGE_MARKER" \
+      false "$m_pri_label"
+    filed=1
+  fi
+
+  if [ "$filed" -eq 0 ]; then
+    log "maintenance: claude produced no routable findings for $target -- nothing filed"
   fi
 
   maintenance_mark_done "$target"
@@ -2253,10 +2411,11 @@ ALL_REPOS=$(forgejo_list_bot_repos)
 # Analysis set: every bot-accessible repo, in the same newline-delimited
 # JSON-object shape as VALIDATED_REPOS_JSON. Validation gates WORK
 # (issue pickup, PR pushes, site-work); it does NOT gate read-only
-# ANALYSIS (the weekly security/dep audit, which only files an issue and
+# ANALYSIS (the weekly security/dep audit, which only files tickets and
 # never commits). do_maintenance_tick loops this set so a repo that
 # fails validation -- or has an open onboarding ticket -- still gets its
-# dependencies audited.
+# dependencies audited; whether a finding becomes a PR (validated) or a
+# human triage ticket (not) is decided per-repo in do_maintenance_for_repo.
 ANALYSIS_REPOS_JSON=$(jq -c '.[]' <<<"$ALL_REPOS")
 VALIDATED_REPOS_JSON=""
 VAL_PASS=0
