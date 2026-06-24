@@ -28,18 +28,36 @@ _fj() {
   fi
 }
 
-# All open issues with label:Agent, no assignee, no Status/Blocked,
-# sorted oldest-first. Caller iterates and applies additional
-# filtering (in-flight PR check, rejected-PR strike count) to pick
-# the first issue that's actually workable.
+# All open issues with label:Agent, no Status/Blocked, and no
+# blocking assignee, sorted oldest-first. Caller iterates and applies
+# additional filtering (in-flight PR check, rejected-PR strike count)
+# to pick the first issue that's actually workable.
+#
+# $1  repo         -- <owner>/<name>
+# $2  reviewer     -- optional FORGEJO_REVIEWER login. When set, an
+#                     issue assigned solely to the reviewer is still
+#                     claimable (it means the bot blocked it and the
+#                     reviewer was notified, but the issue is the
+#                     bot's to claim once Status/Blocked is removed).
+#                     When empty, falls back to zero-assignees only.
+#
+# An issue is NOT claimable if it is assigned to the bot (in flight)
+# or to any user other than the reviewer.
 #
 # Returns a JSON array. Empty array if no candidates.
 forgejo_find_claimable() {
-  local repo="$1"
+  local repo="$1" reviewer="${2:-}"
   _fj GET "/repos/${repo}/issues?state=open&labels=Agent&type=issues&sort=oldest&limit=50" \
-    | jq -c '
+    | jq -c --arg reviewer "$reviewer" '
         [.[] | select(
-          ((.assignees // []) | length) == 0
+          (
+            ((.assignees // []) | length) == 0
+            or (
+              $reviewer != ""
+              and ((.assignees // []) | length) == 1
+              and (.assignees[0].login == $reviewer)
+            )
+          )
           and (([.labels[].name] | index("Status/Blocked")) == null)
         )] | sort_by(.created_at)
       '
