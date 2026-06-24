@@ -1014,7 +1014,7 @@ review_record() {
   [ -f "$state_file" ] || echo '{}' > "$state_file"
   tmp=$(mktemp)
   jq --arg k "$key" --arg s "$sha" --arg v "$verdict" --arg c "$ci" --argjson t "$at" --arg p "$patch_id" \
-    '.review //= {} | .review[$k] = {sha:$s, verdict:$v, ci:$c, at:$t, patch_id:$p}' \
+    '.review //= {} | .review[$k] = ((.review[$k] // {}) + {sha:$s, verdict:$v, ci:$c, at:$t, patch_id:$p})' \
     "$state_file" > "$tmp"
   mv "$tmp" "$state_file"
 }
@@ -1029,6 +1029,58 @@ review_update_sha() {
   tmp=$(mktemp)
   jq --arg k "$key" --arg s "$sha" \
     '.review //= {} | .review[$k].sha = $s' \
+    "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
+# Echo rework_rounds for a PR from review state, defaulting to 0.
+review_rework_rounds() {
+  local key="$1" state_file n
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || { echo 0; return; }
+  n=$(jq -r --arg k "$key" '.review[$k].rework_rounds // 0' "$state_file" 2>/dev/null)
+  [ -n "$n" ] && [ "$n" != "null" ] || n=0
+  echo "$n"
+}
+
+# Echo pending_rc_body for a PR from review state, or empty string.
+review_pending_rc_body() {
+  local key="$1" state_file
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || { printf ''; return; }
+  jq -r --arg k "$key" '.review[$k].pending_rc_body // ""' "$state_file" 2>/dev/null || printf ''
+}
+
+# Set rework_rounds for a PR (preserves all other review fields).
+review_set_rework_rounds() {
+  local key="$1" n="$2" state_file tmp
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg k "$key" --argjson n "$n" \
+    '.review //= {} | .review[$k].rework_rounds = $n' "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
+# Set pending_rc_body for a PR (preserves all other review fields).
+review_set_pending_rc_body() {
+  local key="$1" body="$2" state_file tmp
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg k "$key" --arg b "$body" \
+    '.review //= {} | .review[$k].pending_rc_body = $b' "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
+# Reset rework state: rework_rounds=0 and pending_rc_body="" (preserves other fields).
+review_reset_rework() {
+  local key="$1" state_file tmp
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || return 0
+  tmp=$(mktemp)
+  jq --arg k "$key" \
+    '.review //= {} | .review[$k].rework_rounds = 0 | .review[$k].pending_rc_body = ""' \
     "$state_file" > "$tmp"
   mv "$tmp" "$state_file"
 }
@@ -2514,11 +2566,39 @@ ${review_body}
     forgejo_log_time "$target_repo" "$target_num" "$elapsed" 2>/dev/null \
       || log "warning: shadow-review: could not log time on ${key}"
     log "shadow-review: ${key} head ${target_sha:0:8} -> ${verdict} (ci=${ci}, ${elapsed}s)"
-    if [ -n "${FORGEJO_REVIEWER:-}" ]; then
-      forgejo_request_review "$target_repo" "$target_num" "$FORGEJO_REVIEWER" 2>/dev/null \
-        || log "warning: shadow-review: review-request to ${FORGEJO_REVIEWER} failed on ${key} (verdict=${verdict})"
-      log "shadow-review: ${key} requested review from ${FORGEJO_REVIEWER} (verdict=${verdict})"
-    fi
+    local rc_rounds
+    rc_rounds=$(review_rework_rounds "$key")
+    case "$verdict" in
+      APPROVE|COMMENT)
+        review_reset_rework "$key"
+        if [ -n "${FORGEJO_REVIEWER:-}" ]; then
+          forgejo_request_review "$target_repo" "$target_num" "$FORGEJO_REVIEWER" 2>/dev/null \
+            || log "warning: shadow-review: review-request to ${FORGEJO_REVIEWER} failed on ${key} (verdict=${verdict})"
+          log "shadow-review: ${key} requested review from ${FORGEJO_REVIEWER} (verdict=${verdict})"
+        fi
+        ;;
+      REQUEST_CHANGES)
+        if [ "$rc_rounds" -ge 3 ]; then
+          log "shadow-review: ${key} REQUEST_CHANGES rework_rounds=${rc_rounds} >= 3 -- escalating to human"
+          if [ -n "${FORGEJO_REVIEWER:-}" ]; then
+            forgejo_comment "$target_repo" "$target_num" \
+              "Igor requested changes ${rc_rounds} times without converging -- handing this to you." 2>/dev/null \
+              || log "warning: shadow-review: escalation comment failed on ${key}"
+            forgejo_request_review "$target_repo" "$target_num" "$FORGEJO_REVIEWER" 2>/dev/null \
+              || log "warning: shadow-review: review-request to ${FORGEJO_REVIEWER} failed on ${key} (escalation)"
+            log "shadow-review: ${key} escalated to ${FORGEJO_REVIEWER} after ${rc_rounds} rework rounds"
+          fi
+        else
+          local new_rounds
+          new_rounds=$(( rc_rounds + 1 ))
+          review_set_rework_rounds "$key" "$new_rounds"
+          review_set_pending_rc_body "$key" "$review_body"
+          forgejo_assign "$target_repo" "$target_num" "$BOT_USER" 2>/dev/null \
+            || log "warning: shadow-review: bot assignment failed on ${key} (rework round ${new_rounds})"
+          log "shadow-review: ${key} REQUEST_CHANGES -> rework round ${new_rounds}/3, bot assigned"
+        fi
+        ;;
+    esac
     return 0
   fi
   log "warning: shadow-review: comment post failed on ${key} -- not recording (will retry next tick)"
@@ -2831,6 +2911,14 @@ if [ -n "$REVIEW_PR" ]; then
 
     log "PR-review: ${PR_REPO}#${PR_NUMBER} -- reopening (${REVIEW_PR_TRIGGER})"
 
+    # Binding-flow rework: do_review_tick assigns the bot and stores the
+    # requested-changes text in pending_rc_body. The normal comment-fetchers
+    # filter out bot comments (.user.login != bot), so without this injection
+    # the agent would rework blind on its own verdict. An empty body means
+    # this is a legacy human-assignment pickup.
+    REVIEW_KEY="${PR_REPO}#${PR_NUMBER}"
+    BINDING_RC_BODY=$(review_pending_rc_body "$REVIEW_KEY")
+
     PR_DETAILS=$(forgejo_get_pr "$PR_REPO" "$PR_NUMBER" 2>/dev/null || echo '{}')
     PR_HEAD=$(jq -r '.head.ref // ""' <<<"$PR_DETAILS")
     PR_BASE=$(jq -r '.base.ref // ""' <<<"$PR_DETAILS")
@@ -2967,7 +3055,55 @@ CONFLICT_EOF
 )
     fi
 
-    PR_USER_MSG=$(cat <<EOF
+    if [ -n "$BINDING_RC_BODY" ]; then
+      PR_USER_MSG=$(cat <<EOF
+You opened PR ${PR_REPO}#${PR_NUMBER}: ${PR_TITLE}
+
+The shadow reviewer (Igor's automated review pass) requested changes to this PR.
+Address the requested changes listed below with new commits on this branch (${PR_HEAD}),
+then exit. The harness will push your commits and the shadow reviewer will re-review
+the new head automatically. The human is only brought in on APPROVE or after 3 rework
+rounds without convergence.
+
+If the requested changes are not actionable -- a fundamental design disagreement,
+unclear requirements, or something you need the human to weigh in on -- exit without
+commits. The harness will escalate to the human reviewer.
+${PR_MERGE_CONFLICT_MSG}
+
+Base: ${PR_BASE}
+Branch: ${PR_HEAD}
+
+PR body:
+${PR_BODY}
+
+## Requested changes (shadow reviewer)
+
+${BINDING_RC_BODY}
+
+## Issue-level comments (the Conversation tab)
+
+${PR_ISSUE_COMMENTS:-(no issue-level comments on this PR)}
+
+## Inline review comments (file/line-tied)
+
+${PR_INLINE_COMMENTS:-(no inline review comments on this PR)}
+
+## How to address review feedback
+
+**MAKE SURGICAL EDITS, NOT REWRITES.** This PR exists to refine,
+not to restart. Each review comment is a targeted ask: incorporate
+the reviewer's specific information into the relevant spot. Don't
+restructure, simplify, or delete surrounding content beyond what
+the comment directly addresses.
+
+Same rules as PR mode (AGENTS.md): TDD where the repo supports it,
+project tests + lint must pass before exit, /security-review on your
+diff. Stay on this branch. Do not open a new PR -- this one already
+exists.
+EOF
+)
+    else
+      PR_USER_MSG=$(cat <<EOF
 You opened PR ${PR_REPO}#${PR_NUMBER}: ${PR_TITLE}
 
 The human reviewer assigned the PR back to you for revisions. Read
@@ -3046,6 +3182,7 @@ diff. Stay on this branch. Do not open a new PR -- this one already
 exists.
 EOF
 )
+    fi
 
     PR_SYSTEM_PROMPT=$(issue_system_prompt)
 
@@ -3154,12 +3291,20 @@ Review requested so a human can review/discard." 2>/dev/null \
         exit 0
       fi
 
-      log "PR-review: pushing $PR_NEW new commits and requesting review from $FORGEJO_REVIEWER"
       git push origin "$PR_HEAD" || log "warning: push failed on $PR_HEAD"
       forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
         || log "warning: unassign failed on ${PR_REPO}#${PR_NUMBER}"
-      forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null \
-        || log "warning: review-request-to-${FORGEJO_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
+      if [ -n "$BINDING_RC_BODY" ]; then
+        # Binding-flow rework: clear pending_rc_body and let do_review_tick
+        # re-review the new head. The changed head means a new patch-id,
+        # so the review fires next tick. Do NOT request the human.
+        review_set_pending_rc_body "$REVIEW_KEY" ""
+        log "PR-review: binding rework pushed -- cleared pending_rc_body, do_review_tick will re-review"
+      else
+        log "PR-review: pushing $PR_NEW new commits and requesting review from $FORGEJO_REVIEWER"
+        forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null \
+          || log "warning: review-request-to-${FORGEJO_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
+      fi
     else
       log "PR-review: no commits made -- requesting review from $FORGEJO_REVIEWER with a note"
       forgejo_comment "$PR_REPO" "$PR_NUMBER" \
@@ -3167,8 +3312,17 @@ Review requested so a human can review/discard." 2>/dev/null \
         || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
       forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
         || log "warning: unassign failed on ${PR_REPO}#${PR_NUMBER}"
-      forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null \
-        || log "warning: review-request-to-${FORGEJO_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
+      if [ -n "$BINDING_RC_BODY" ]; then
+        # Binding-flow rework produced no commits: clear the pending body and
+        # escalate to the human as a safety valve (the agent couldn't act).
+        review_set_pending_rc_body "$REVIEW_KEY" ""
+        forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null \
+          || log "warning: review-request-to-${FORGEJO_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER} (no-commit binding rework)"
+        log "PR-review: binding rework produced no commits -- escalating to ${FORGEJO_REVIEWER}"
+      else
+        forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null \
+          || log "warning: review-request-to-${FORGEJO_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
+      fi
     fi
 
     forgejo_log_time "$PR_REPO" "$PR_NUMBER" "$PR_ELAPSED" \
