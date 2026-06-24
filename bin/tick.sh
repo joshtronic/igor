@@ -975,6 +975,41 @@ sports_retry_ready() {
   [ "$((now - last))" -ge "$SPORTS_RETRY_COOLDOWN_SECS" ]
 }
 
+# -- Shadow review state ----------------------------------------
+#
+# Keyed per PR under ".review" in discretionary-state.json (same file
+# as .slots/.seo/.market/...), shaped { "<repo>#<num>": {sha, verdict,
+# ci, at} }. Dedup is by HEAD SHA, not by PR: the reviewer reviews each
+# distinct head once, so a PR that gets new commits (the author
+# addressed feedback, or the human pushed) is re-reviewed, but a PR
+# sitting idle isn't re-reviewed every minute. Regenerable -- losing it
+# just re-posts a verdict on heads it already covered (the per-sha
+# comment marker is the crash-safety net against a duplicate).
+
+# Echo the head sha the reviewer last recorded a verdict for on this
+# PR, or empty if never (or state missing). Caller compares to the live
+# head sha to decide whether this head still needs a review.
+review_reviewed_sha() {
+  local key="$1" state_file
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || { printf ''; return; }
+  jq -r --arg k "$key" '.review[$k].sha // ""' "$state_file" 2>/dev/null || printf ''
+}
+
+# Record the verdict for a PR's head. epoch `at` is passed in (the
+# caller already has `date +%s` from timing the review) so this stays a
+# pure read-modify-write with no clock of its own.
+review_record() {
+  local key="$1" sha="$2" verdict="$3" ci="$4" at="$5" state_file tmp
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg k "$key" --arg s "$sha" --arg v "$verdict" --arg c "$ci" --argjson t "$at" \
+    '.review //= {} | .review[$k] = {sha:$s, verdict:$v, ci:$c, at:$t}' \
+    "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
 # -- Validation pass cache --------------------------------------
 #
 # The validation sweep runs every tick. At a 1-minute cadence across
@@ -2261,6 +2296,191 @@ do_logwatch_tick() {
   return 0
 }
 
+# -- Shadow code review (non-binding) ---------------------------
+#
+# A step toward auto-merge. Convention-driven, NO env knob (like
+# logwatch, its closest sibling): once this is on master it just runs,
+# because the merge IS the opt-in and a non-binding comment's blast
+# radius is trivial. For each open bot PR whose CURRENT head hasn't been
+# reviewed yet, one review-tier model call produces an independent
+# verdict (APPROVE /
+# REQUEST_CHANGES / COMMENT) which is posted as a NON-BINDING comment --
+# a human still merges. The point is to collect the data that proves
+# the reviewer agrees with the human often enough to, eventually, let
+# its APPROVE be the merge signal on the safest repos. The review NEVER
+# merges, pushes, or labels anything; it only comments.
+#
+# Independence is the whole value: it runs on AGENT_MODEL_REVIEW (the
+# non-author, higher-stakes tier) from a fresh context with an
+# adversarial directive -- the thing under review does not get to audit
+# itself. The verdict is a label-line + ===BODY=== sentinel parsed
+# harness-side, never model-written JSON.
+
+# Parse the reviewer's response: a leading `VERDICT:` line and a
+# `===BODY===` sentinel before the markdown review. Echoes
+# {verdict, body} JSON; returns non-zero (unparseable -> retry) if the
+# sentinel is missing, the body is blank, or the verdict isn't one of
+# the three valid values. Mirrors sports_parse_response.
+review_parse_response() {
+  local raw="$1" head body verdict
+  case "$raw" in
+    *'===BODY==='*) ;;
+    *) return 1 ;;
+  esac
+  head="${raw%%===BODY===*}"
+  body="${raw#*===BODY===}"
+  printf '%s' "$body" | grep -q '[^[:space:]]' || return 1
+  verdict=$(printf '%s' "$head" | sed -n 's/^[[:space:]]*VERDICT:[[:space:]]*//p' | head -1)
+  # Normalize to a canonical token: uppercase, spaces->underscore, drop
+  # any stray punctuation (trailing periods, backticks the model adds).
+  verdict=$(printf '%s' "$verdict" | tr '[:lower:]' '[:upper:]' | tr ' ' '_' | tr -cd 'A-Z_')
+  case "$verdict" in
+    APPROVE|REQUEST_CHANGES|COMMENT) ;;
+    *) return 1 ;;
+  esac
+  # Trim blank lines off both ends (interior blanks survive).
+  body=$(printf '%s\n' "$body" | awk '
+    NF { if (started) for (i = 0; i < blanks; i++) print ""
+         blanks = 0; started = 1; print; next }
+    started { blanks++ }')
+  jq -n --arg v "$verdict" --arg b "$body" '{verdict:$v, body:$b}'
+}
+
+do_review_tick() {
+  # Find the first open bot PR -- across the ANALYSIS set, not the
+  # validated work set -- whose live head hasn't been shadow-reviewed
+  # yet. Analysis, not validated, because a verdict is pure information
+  # and useful on EVERY repo (this harness's own PRs included); the
+  # validation gate only matters once a verdict becomes a MERGE signal,
+  # which shadow mode never does. One review per tick; first un-reviewed
+  # head wins, then we exit the cascade like every other pass.
+  local repo_line repo prs pr_num pr_json head_sha key reviewed_sha
+  local target_repo="" target_num="" target_sha="" target_json=""
+  while IFS= read -r repo_line; do
+    [ -n "$target_repo" ] && break
+    [ -z "$repo_line" ] && continue
+    repo=$(jq -r '.full_name' <<<"$repo_line")
+    prs=$(forgejo_list_open_bot_prs "$repo" "$BOT_USER" 2>/dev/null || echo '[]')
+    while read -r pr_num; do
+      [ -n "$target_repo" ] && break
+      [ -z "$pr_num" ] && continue
+      pr_json=$(forgejo_get_pr "$repo" "$pr_num" 2>/dev/null || echo '{}')
+      head_sha=$(jq -r '.head.sha // ""' <<<"$pr_json")
+      [ -z "$head_sha" ] && continue
+      key="${repo}#${pr_num}"
+      reviewed_sha=$(review_reviewed_sha "$key")
+      [ "$reviewed_sha" = "$head_sha" ] && continue
+      target_repo="$repo"; target_num="$pr_num"; target_sha="$head_sha"; target_json="$pr_json"
+    done < <(jq -r '.[].number' <<<"$prs" 2>/dev/null)
+  done <<<"$ANALYSIS_REPOS_JSON"
+
+  # No open bot PR with an un-reviewed head -- the common idle case.
+  # Stay silent (this runs every tick); the cascade just falls through.
+  [ -n "$target_repo" ] || return 1
+  key="${target_repo}#${target_num}"
+
+  # Idempotency net: if a prior tick posted this exact head's verdict
+  # but died before recording state, the per-sha marker is already on
+  # the PR. Reconcile state and skip rather than double-post and re-burn
+  # a model call. (Primary dedup is the local .review sha above; this
+  # only catches the post-succeeded-state-write-crashed window.)
+  local marker="<!-- shadow-review sha=${target_sha}"
+  if [ "$(forgejo_pr_has_comment_containing "$target_repo" "$target_num" "$BOT_USER" "$marker" 2>/dev/null || echo 0)" -gt 0 ]; then
+    log "shadow-review: ${key} head ${target_sha:0:8} already carries a verdict comment -- reconciling state"
+    review_record "$key" "$target_sha" "unknown" "unknown" "$(date +%s)"
+    return 1
+  fi
+
+  local start ci title body diff truncated_note directive user
+  start=$(date +%s)
+  ci=$(forgejo_commit_status "$target_repo" "$target_sha" 2>/dev/null)
+  [ -n "$ci" ] || ci="unknown"
+  title=$(jq -r '.title // ""' <<<"$target_json")
+  body=$(jq -r '.body // ""' <<<"$target_json")
+
+  # Cap the diff so a runaway PR can't blow the model's input budget;
+  # tell the reviewer when it's truncated so an unreviewable diff
+  # becomes an explicit "can't confirm" rather than a false APPROVE.
+  # `|| true`: with pipefail, a failed diff fetch would otherwise abort
+  # the whole tick via set -e on the assignment. Empty -> skip + retry.
+  diff=$(forgejo_pr_diff "$target_repo" "$target_num" 2>/dev/null | head -c 200000 || true)
+  if [ -z "$diff" ]; then
+    log "shadow-review: ${key} empty/failed diff fetch -- skipping this tick (will retry)"
+    return 1
+  fi
+  truncated_note=""
+  [ "${#diff}" -ge 200000 ] && truncated_note=" (TRUNCATED at 200000 chars -- review what you can see and say so)"
+
+  directive=$(cat "$AGENT_HOME/bin/lib/shadow-review-directive.md")
+  user="PR under review: ${target_repo}#${target_num}
+Head commit: ${target_sha}
+CI status for head: ${ci}
+
+## PR title
+
+${title}
+
+## PR description
+
+${body:-(none)}
+
+## Unified diff${truncated_note}
+
+\`\`\`diff
+${diff}
+\`\`\`"
+
+  # max_tokens 8000: review prose is short, but thinking shares the CLI
+  # output budget -- size ~5x expected so a long think can't truncate
+  # the head off the result (which surfaces as a flaky parse failure).
+  # strip_fences=0: the body is markdown prose, not a JSON envelope.
+  local raw parsed attempt verdict review_body snippet tail_snip
+  parsed=""
+  for attempt in 1 2; do
+    raw=$(claude_call "$AGENT_MODEL_REVIEW" "shadow-review" 8000 "$directive" "$user" 0) || {
+      log "shadow-review: ${key} review call failed (attempt $attempt)"
+      continue
+    }
+    if parsed=$(review_parse_response "$raw"); then
+      break
+    fi
+    parsed=""
+    snippet=$(printf '%s' "$raw" | tr '\n' ' ')
+    tail_snip=""
+    [ "${#snippet}" -gt 160 ] && tail_snip=${snippet:$(( ${#snippet} - 160 ))}
+    log "shadow-review: ${key} unparseable response (attempt $attempt, ${#raw} chars; head: ${snippet:0:160} [...] tail: ${tail_snip})"
+  done
+  if [ -z "$parsed" ]; then
+    log "shadow-review: ${key} no parseable verdict after 2 attempts -- leaving head un-recorded (will retry next tick)"
+    return 1
+  fi
+
+  verdict=$(jq -r '.verdict' <<<"$parsed")
+  review_body=$(jq -r '.body' <<<"$parsed")
+
+  local elapsed comment
+  elapsed=$(( $(date +%s) - start ))
+  comment="### 🤖 Shadow review — \`${verdict}\` _(automated, non-binding)_
+
+CI for \`${target_sha:0:8}\`: **${ci}**
+
+${review_body}
+
+---
+<sub>Independent review by the harness on \`${AGENT_MODEL_REVIEW}\`. Non-binding: a human still merges. This is a trust-building step toward auto-merge on low-risk repos.</sub>
+<!-- shadow-review sha=${target_sha} verdict=${verdict} ci=${ci} -->"
+
+  if forgejo_comment "$target_repo" "$target_num" "$comment"; then
+    review_record "$key" "$target_sha" "$verdict" "$ci" "$(date +%s)"
+    forgejo_log_time "$target_repo" "$target_num" "$elapsed" 2>/dev/null \
+      || log "warning: shadow-review: could not log time on ${key}"
+    log "shadow-review: ${key} head ${target_sha:0:8} -> ${verdict} (ci=${ci}, ${elapsed}s)"
+    return 0
+  fi
+  log "warning: shadow-review: comment post failed on ${key} -- not recording (will retry next tick)"
+  return 1
+}
+
 # Worktree key: slash-free, unique per repo+issue.
 worktree_key() { printf '%s-%s' "${1//\//_}" "$2"; }
 
@@ -2985,6 +3205,17 @@ if [ -n "$WEBSITE_REPO" ]; then
     fi
     exit 0
   fi
+fi
+
+# Shadow code review (non-binding PR verdicts; no env knob -- runs like
+# logwatch). Sits below the health gate (it's a model call) and after Igor's own
+# slotted work, before maintenance: a blocking human review is more
+# time-sensitive than the dep-freshness grind, but Igor shipping his
+# daily post still comes first. Posts ONE non-binding verdict per tick
+# on an un-reviewed bot-PR head, then exits like any other pass. Never
+# merges or pushes -- comment only.
+if do_review_tick; then
+  exit 0
 fi
 
 # Scheduled maintenance/analysis (weekly dep-freshness + security
