@@ -213,6 +213,28 @@ forgejo_pr_files() {
   _fj GET "/repos/${repo}/pulls/${number}/files"
 }
 
+# Raw unified diff for a PR, as text/plain (NOT JSON -- the caller
+# feeds it straight to a model). Forgejo serves it off the `.diff`
+# suffix under the same pulls path. Big diffs are the caller's problem
+# to cap (the shadow reviewer head -c's it); a wedged fetch fails fast
+# via _fj's --max-time like every other call.
+forgejo_pr_diff() {
+  local repo="$1" number="$2"
+  _fj GET "/repos/${repo}/pulls/${number}.diff"
+}
+
+# Combined CI status for a commit sha: one of success|pending|failure|
+# error, or empty when the repo reports no statuses for the sha (no CI
+# wired, or checks haven't started). Mirrors what branch protection's
+# "required status checks" gate reads -- so a shadow verdict can record
+# the same CI signal the eventual auto-merge gate will key on. Empty/
+# unknown on API failure (NON-fatal: the caller treats it as "unknown").
+forgejo_commit_status() {
+  local repo="$1" sha="$2" resp
+  resp=$(_fj GET "/repos/${repo}/commits/${sha}/status" 2>/dev/null) || { printf ''; return; }
+  jq -r '.state // ""' <<<"$resp" 2>/dev/null || printf ''
+}
+
 # Number on the open PR with the given head branch, or empty if none.
 # Used to make PR-open idempotent across harness crashes: if a previous
 # tick pushed but died before opening, we find the orphan branch already
@@ -232,6 +254,19 @@ forgejo_count_bot_comments_matching() {
   _fj GET "/repos/${repo}/issues/${number}/comments" \
     | jq --arg u "$user" --arg p "$prefix" \
         '[.[] | select(.user.login == $u and (.body | startswith($p)))] | length'
+}
+
+# Count of comments by the given user whose body CONTAINS the substring
+# (vs startswith above). The shadow reviewer's dedup net: its per-sha
+# marker rides at the END of the comment, so startswith can't find it.
+# Crash-safety belt -- the primary dedup is the local .review state sha;
+# this catches the rare crash between posting the comment and recording
+# the state.
+forgejo_pr_has_comment_containing() {
+  local repo="$1" number="$2" user="$3" needle="$4"
+  _fj GET "/repos/${repo}/issues/${number}/comments" \
+    | jq --arg u "$user" --arg n "$needle" \
+        '[.[] | select(.user.login == $u and (.body | contains($n)))] | length'
 }
 
 # All label names defined on the repo, as a JSON array of strings. One
