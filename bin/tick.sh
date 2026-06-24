@@ -3297,7 +3297,7 @@ while IFS= read -r repo_line; do
   # one that's actually claimable (not in flight, not over the
   # rejected-PR strike count) becomes this repo's contender against
   # other repos' contenders.
-  CANDIDATES=$(forgejo_find_claimable "$R_NAME" || echo '[]')
+  CANDIDATES=$(forgejo_find_claimable "$R_NAME" "${FORGEJO_REVIEWER:-}" || echo '[]')
   REPO_CONTENDER=""
   while read -r candidate; do
     [ -z "$candidate" ] && continue
