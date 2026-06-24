@@ -3412,9 +3412,20 @@ if [ ! -d "$REPO_PATH/.git" ]; then
 fi
 
 # -- Preflight -------------------------------------------------
-
-if [ ! -f "$REPO_PATH/CLAUDE.md" ]; then
-  log "preflight: missing CLAUDE.md, blocking"
+#
+# CLAUDE.md must exist on the ref we actually branch from
+# (origin/$PR_BASE) -- NOT the clone's working tree. The clone is a
+# fetch-only anchor: nothing ever checks it out again, so a repo cloned
+# before its CLAUDE.md landed keeps a stale tree forever and reading the
+# tree here falsely blocks it -- the repo DOES have CLAUDE.md on its
+# default branch (it passes API validation, and the worktree below is
+# carved from origin/$PR_BASE, which is current). Fetch first so the
+# check sees current remote state; on a fetch failure fall back to the
+# last-known origin ref (still better than the local checkout).
+git -C "$REPO_PATH" fetch origin --prune --quiet \
+  || log "preflight: warning -- fetch failed; checking last-known origin/${PR_BASE}"
+if ! git -C "$REPO_PATH" cat-file -e "origin/${PR_BASE}:CLAUDE.md" 2>/dev/null; then
+  log "preflight: missing CLAUDE.md on origin/${PR_BASE}, blocking"
   agent-block.sh "The agent cannot work this repo: \`CLAUDE.md\` is missing at the repo root.
 
 The agent relies on \`CLAUDE.md\` for project conventions (test commands, code style, gotchas). Add one, remove \`Status/Blocked\`, and the next tick will re-claim this issue."
@@ -3437,7 +3448,7 @@ if [ -e "$WORKTREE" ]; then
 fi
 
 cd "$REPO_PATH"
-git fetch origin --prune
+# (origin refs already refreshed by the preflight fetch above)
 git worktree add -b "$BRANCH" "$WORKTREE" "origin/${PR_BASE}"
 init_igor_scratch "$WORKTREE"
 
