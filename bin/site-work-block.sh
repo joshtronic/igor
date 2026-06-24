@@ -334,8 +334,7 @@ git push -u origin "$BRANCH" || {
 
 PR_BODY_CONTENT=$(cat "$PR_BODY_FILE")
 PR_NUM=$(forgejo_open_pr "$WEBSITE_REPO" "$BRANCH" "master" \
-                          "$PR_TITLE" "$PR_BODY_CONTENT" \
-                          "${FORGEJO_REVIEWER:-}")
+                          "$PR_TITLE" "$PR_BODY_CONTENT")
 if [ -z "$PR_NUM" ]; then
   log "PR open via Forgejo API returned empty; branch is pushed -- inspect manually"
   exit 1

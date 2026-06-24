@@ -2469,7 +2469,7 @@ CI for \`${target_sha:0:8}\`: **${ci}**
 ${review_body}
 
 ---
-<sub>Independent review by the harness on \`${AGENT_MODEL_REVIEW}\`. Non-binding: a human still merges. This is a trust-building step toward auto-merge on low-risk repos.</sub>
+<sub>Independent review by the harness on \`${AGENT_MODEL_REVIEW}\`. The human reviewer is requested once Igor has reviewed; a human still merges.</sub>
 <!-- shadow-review sha=${target_sha} verdict=${verdict} ci=${ci} -->"
 
   if forgejo_comment "$target_repo" "$target_num" "$comment"; then
@@ -2477,6 +2477,11 @@ ${review_body}
     forgejo_log_time "$target_repo" "$target_num" "$elapsed" 2>/dev/null \
       || log "warning: shadow-review: could not log time on ${key}"
     log "shadow-review: ${key} head ${target_sha:0:8} -> ${verdict} (ci=${ci}, ${elapsed}s)"
+    if [ -n "${FORGEJO_REVIEWER:-}" ]; then
+      forgejo_request_review "$target_repo" "$target_num" "$FORGEJO_REVIEWER" 2>/dev/null \
+        || log "warning: shadow-review: review-request to ${FORGEJO_REVIEWER} failed on ${key} (verdict=${verdict})"
+      log "shadow-review: ${key} requested review from ${FORGEJO_REVIEWER} (verdict=${verdict})"
+    fi
     return 0
   fi
   log "warning: shadow-review: comment post failed on ${key} -- not recording (will retry next tick)"
@@ -3627,7 +3632,7 @@ Address it, then remove \`Status/Blocked\` to re-queue. (If the note above says 
     PR_BODY+=$(build_deps_section "$PR_BASE")
     PR_BODY+=$'\n\nCloses #'"$ISSUE_NUMBER"
 
-    NEW_PR_NUMBER=$(forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$PR_TITLE" "$PR_BODY" "${FORGEJO_REVIEWER:-}")
+    NEW_PR_NUMBER=$(forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$PR_TITLE" "$PR_BODY")
     log "PR opened${NEW_PR_NUMBER:+ (#$NEW_PR_NUMBER)}"
   fi
 
