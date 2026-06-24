@@ -996,16 +996,39 @@ review_reviewed_sha() {
   jq -r --arg k "$key" '.review[$k].sha // ""' "$state_file" 2>/dev/null || printf ''
 }
 
+# Echo the patch-id stored alongside the last verdict, or empty if none.
+review_reviewed_patchid() {
+  local key="$1" state_file
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || { printf ''; return; }
+  jq -r --arg k "$key" '.review[$k].patch_id // ""' "$state_file" 2>/dev/null || printf ''
+}
+
 # Record the verdict for a PR's head. epoch `at` is passed in (the
 # caller already has `date +%s` from timing the review) so this stays a
-# pure read-modify-write with no clock of its own.
+# pure read-modify-write with no clock of its own. patch_id is optional
+# (empty string is fine for recovery paths that don't have it).
 review_record() {
-  local key="$1" sha="$2" verdict="$3" ci="$4" at="$5" state_file tmp
+  local key="$1" sha="$2" verdict="$3" ci="$4" at="$5" patch_id="${6:-}" state_file tmp
   state_file=$(discretionary_state_file)
   [ -f "$state_file" ] || echo '{}' > "$state_file"
   tmp=$(mktemp)
-  jq --arg k "$key" --arg s "$sha" --arg v "$verdict" --arg c "$ci" --argjson t "$at" \
-    '.review //= {} | .review[$k] = {sha:$s, verdict:$v, ci:$c, at:$t}' \
+  jq --arg k "$key" --arg s "$sha" --arg v "$verdict" --arg c "$ci" --argjson t "$at" --arg p "$patch_id" \
+    '.review //= {} | .review[$k] = {sha:$s, verdict:$v, ci:$c, at:$t, patch_id:$p}' \
+    "$state_file" > "$tmp"
+  mv "$tmp" "$state_file"
+}
+
+# Update only the sha for a PR whose head advanced without a content
+# change (base-merge). Keeps verdict/ci/at/patch_id intact so the
+# recorded verdict still reflects the unchanged content.
+review_update_sha() {
+  local key="$1" sha="$2" state_file tmp
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || return
+  tmp=$(mktemp)
+  jq --arg k "$key" --arg s "$sha" \
+    '.review //= {} | .review[$k].sha = $s' \
     "$state_file" > "$tmp"
   mv "$tmp" "$state_file"
 }
@@ -2391,18 +2414,15 @@ do_review_tick() {
     return 1
   fi
 
-  local start ci title body diff truncated_note directive user
+  local start ci title body diff truncated_note directive user patch_id reviewed_patch_id
   start=$(date +%s)
-  ci=$(forgejo_commit_status "$target_repo" "$target_sha" 2>/dev/null)
-  [ -n "$ci" ] || ci="unknown"
-  title=$(jq -r '.title // ""' <<<"$target_json")
-  body=$(jq -r '.body // ""' <<<"$target_json")
 
-  # Cap the diff so a runaway PR can't blow the model's input budget;
-  # tell the reviewer when it's truncated so an unreviewable diff
-  # becomes an explicit "can't confirm" rather than a false APPROVE.
-  # `|| true`: with pipefail, a failed diff fetch would otherwise abort
-  # the whole tick via set -e on the assignment. Empty -> skip + retry.
+  # Fetch the diff first; used for patch-id dedup AND the review itself.
+  # Cap it so a runaway PR can't blow the model's input budget; tell the
+  # reviewer when truncated so an unreviewable diff becomes an explicit
+  # "can't confirm" rather than a false APPROVE.
+  # `|| true`: with pipefail, a failed fetch would abort the tick via
+  # set -e. Empty -> skip + retry next tick.
   diff=$(forgejo_pr_diff "$target_repo" "$target_num" 2>/dev/null | head -c 200000 || true)
   if [ -z "$diff" ]; then
     log "shadow-review: ${key} empty/failed diff fetch -- skipping this tick (will retry)"
@@ -2410,6 +2430,23 @@ do_review_tick() {
   fi
   truncated_note=""
   [ "${#diff}" -ge 200000 ] && truncated_note=" (TRUNCATED at 200000 chars -- review what you can see and say so)"
+
+  # Patch-id dedup: when the head sha changed but the net diff is the
+  # same (base-merge, rebase without content change), record the new sha
+  # so we don't re-fetch every tick, but do NOT re-review or re-request
+  # the human. Fall back to sha-only dedup if patch-id comes back empty.
+  patch_id=$(printf '%s' "$diff" | git patch-id --stable 2>/dev/null | awk '{print $1}')
+  reviewed_patch_id=$(review_reviewed_patchid "$key")
+  if [ -n "$patch_id" ] && [ -n "$reviewed_patch_id" ] && [ "$patch_id" = "$reviewed_patch_id" ]; then
+    log "shadow-review: ${key} head advanced to ${target_sha:0:8} but patch-id unchanged -- skipping re-review"
+    review_update_sha "$key" "$target_sha"
+    return 1
+  fi
+
+  ci=$(forgejo_commit_status "$target_repo" "$target_sha" 2>/dev/null)
+  [ -n "$ci" ] || ci="unknown"
+  title=$(jq -r '.title // ""' <<<"$target_json")
+  body=$(jq -r '.body // ""' <<<"$target_json")
 
   directive=$(cat "$AGENT_HOME/bin/lib/shadow-review-directive.md")
   user="PR under review: ${target_repo}#${target_num}
@@ -2473,7 +2510,7 @@ ${review_body}
 <!-- shadow-review sha=${target_sha} verdict=${verdict} ci=${ci} -->"
 
   if forgejo_comment "$target_repo" "$target_num" "$comment"; then
-    review_record "$key" "$target_sha" "$verdict" "$ci" "$(date +%s)"
+    review_record "$key" "$target_sha" "$verdict" "$ci" "$(date +%s)" "$patch_id"
     forgejo_log_time "$target_repo" "$target_num" "$elapsed" 2>/dev/null \
       || log "warning: shadow-review: could not log time on ${key}"
     log "shadow-review: ${key} head ${target_sha:0:8} -> ${verdict} (ci=${ci}, ${elapsed}s)"
