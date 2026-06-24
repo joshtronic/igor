@@ -141,14 +141,6 @@ if [ -n "$WEBSITE_REPO" ]; then
   export AGENT_WEBSITE_PATH="$AGENT_REPO_ROOT/${WEBSITE_REPO}"
 fi
 
-# Shadow code review is OPT-IN via SHADOW_REVIEW=1 (default off). When
-# on, the harness posts an independent, NON-BINDING review verdict as a
-# comment on each open bot PR (see do_review_tick) -- a step toward
-# auto-merge that ships dark so flipping it on is a deliberate host
-# `.env` change, not an automatic consequence of deploying this commit.
-# Unset/0 => the pass no-ops cleanly. The merge itself is never touched.
-export SHADOW_REVIEW="${SHADOW_REVIEW:-0}"
-
 # Email delivery (SMTP2GO) -- shared by every opt-in report subsystem
 # (SEO, market). All default to empty so referencing them under `set -u`
 # is safe when nothing is configured; each report tick no-ops cleanly if
@@ -2304,11 +2296,14 @@ do_logwatch_tick() {
   return 0
 }
 
-# -- Shadow code review (opt-in, non-binding) -------------------
+# -- Shadow code review (non-binding) ---------------------------
 #
-# A step toward auto-merge that ships dark (SHADOW_REVIEW=1 to arm).
-# For each open bot PR whose CURRENT head hasn't been reviewed yet, one
-# review-tier model call produces an independent verdict (APPROVE /
+# A step toward auto-merge. Convention-driven, NO env knob (like
+# logwatch, its closest sibling): once this is on master it just runs,
+# because the merge IS the opt-in and a non-binding comment's blast
+# radius is trivial. For each open bot PR whose CURRENT head hasn't been
+# reviewed yet, one review-tier model call produces an independent
+# verdict (APPROVE /
 # REQUEST_CHANGES / COMMENT) which is posted as a NON-BINDING comment --
 # a human still merges. The point is to collect the data that proves
 # the reviewer agrees with the human often enough to, eventually, let
@@ -2352,8 +2347,6 @@ review_parse_response() {
 }
 
 do_review_tick() {
-  [ "${SHADOW_REVIEW:-0}" = "1" ] || return 1
-
   # Find the first open bot PR -- across the ANALYSIS set, not the
   # validated work set -- whose live head hasn't been shadow-reviewed
   # yet. Analysis, not validated, because a verdict is pure information
@@ -2381,10 +2374,9 @@ do_review_tick() {
     done < <(jq -r '.[].number' <<<"$prs" 2>/dev/null)
   done <<<"$ANALYSIS_REPOS_JSON"
 
-  if [ -z "$target_repo" ]; then
-    log "shadow-review: no open bot PR with an un-reviewed head -- continuing"
-    return 1
-  fi
+  # No open bot PR with an un-reviewed head -- the common idle case.
+  # Stay silent (this runs every tick); the cascade just falls through.
+  [ -n "$target_repo" ] || return 1
   key="${target_repo}#${target_num}"
 
   # Idempotency net: if a prior tick posted this exact head's verdict
@@ -3215,8 +3207,8 @@ if [ -n "$WEBSITE_REPO" ]; then
   fi
 fi
 
-# Shadow code review (opt-in via SHADOW_REVIEW=1; no-ops otherwise).
-# Sits below the health gate (it's a model call) and after Igor's own
+# Shadow code review (non-binding PR verdicts; no env knob -- runs like
+# logwatch). Sits below the health gate (it's a model call) and after Igor's own
 # slotted work, before maintenance: a blocking human review is more
 # time-sensitive than the dep-freshness grind, but Igor shipping his
 # daily post still comes first. Posts ONE non-binding verdict per tick

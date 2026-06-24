@@ -5,7 +5,7 @@ claims one piece of work, ships it, sleeps. Each tick runs a
 strictly ordered cascade: recovery + validation, then PR-review
 pickup, then Igor's own work (daily reading + blog post, weekly
 /now refresh + site-work pass -- opt-in via `WEBSITE_REPO`), then
-the opt-in shadow code review (non-binding PR verdicts), then
+the shadow code review (non-binding PR verdicts), then
 scheduled maintenance, then the monthly GSC-driven SEO pass (opt-in),
 then the daily weekday market report (opt-in), then the daily
 sports digest (opt-in), then the daily logwatch self-report
@@ -248,10 +248,12 @@ respective tools on the host; install or skip.
   targets this repo, Igor PRs against its own harness -- safe only
   because a human-reviewed merge gates master (and master self-deploys
   in ~1 minute, so review those PRs accordingly).
-- The shadow code review (`do_review_tick`) is opt-in via
-  `SHADOW_REVIEW=1` (default off, ships dark -- a new model-call surface
-  must not auto-activate on a self-deploying commit). It's the first
-  step toward auto-merge and deliberately changes NO merge behavior: for
+- The shadow code review (`do_review_tick`) is convention-driven with
+  NO env knob -- like logwatch, its closest sibling, it just runs once
+  on master (the merge IS the opt-in; a non-binding comment's blast
+  radius is trivial, and a misbehaving pass is a one-PR revert like any
+  other harness bug). It's the first step toward auto-merge and
+  deliberately changes NO merge behavior: for
   the first open bot PR whose CURRENT head hasn't been reviewed, ONE
   `claude_call` on `AGENT_MODEL_REVIEW` (the non-author tier -- the thing
   under review doesn't audit itself, honoring the supply-chain trust
