@@ -2430,6 +2430,8 @@ ${body:-(none)}
 ${diff}
 \`\`\`"
 
+  log "shadow-review: examining ${key} head ${target_sha:0:8} (ci=${ci}, ${#diff} chars of diff${truncated_note:+, truncated})"
+
   # max_tokens 8000: review prose is short, but thinking shares the CLI
   # output budget -- size ~5x expected so a long think can't truncate
   # the head off the result (which surfaces as a flaky parse failure).
