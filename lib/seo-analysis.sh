@@ -120,10 +120,11 @@ seo_decay() {
   local cur="$1" prev="$2" floor="$3" topk="$4" pct="$5"
   local prev_rows
   prev_rows=$(jq -c '.rows // []' <<<"$prev" 2>/dev/null || printf '[]')
-  jq -c --argjson floor "$floor" --argjson k "$topk" \
-        --argjson pct "$pct" --argjson prev "$prev_rows" '
+  printf '%s\n%s\n' "$cur" "$prev_rows" \
+  | jq -cn --argjson floor "$floor" --argjson k "$topk" --argjson pct "$pct" '
+    (input) as $cur_data | (input) as $prev |
     ( $prev | map({key:.keys[0], value:.}) | from_entries ) as $pmap
-    | [ .rows[]?
+    | [ $cur_data.rows[]?
         | .keys[0] as $pg
         | ($pmap[$pg]) as $p
         | select($p != null and $p.impressions >= $floor)
@@ -133,7 +134,7 @@ seo_decay() {
             prev_impressions:$p.impressions, prev_clicks:$p.clicks,
             score: (($p.clicks - .clicks) | if . < 0 then 0 else . end) } ]
     | map(select(.score > 0)) | sort_by(-.score) | .[0:$k]
-  ' <<<"$cur" 2>/dev/null || printf '[]'
+  ' 2>/dev/null || printf '[]'
 }
 
 # seo_rising <cur_query_json> <prev_query_json> <floor> <topk>
@@ -144,10 +145,12 @@ seo_rising() {
   local cur="$1" prev="$2" floor="$3" topk="$4"
   local prev_rows
   prev_rows=$(jq -c '.rows // []' <<<"$prev" 2>/dev/null || printf '[]')
-  jq -c --argjson floor "$floor" --argjson k "$topk" --argjson prev "$prev_rows" "
+  printf '%s\n%s\n' "$cur" "$prev_rows" \
+  | jq -cn --argjson floor "$floor" --argjson k "$topk" "
     $SEO_ECTR_DEF
+    (input) as \$cur_data | (input) as \$prev |
     ( \$prev | map({key:.keys[0], value:.}) | from_entries ) as \$pmap
-    | [ .rows[]?
+    | [ \$cur_data.rows[]?
         | .keys[0] as \$q
         | (\$pmap[\$q].impressions // 0) as \$pi
         | select(.impressions >= \$floor)
@@ -158,7 +161,7 @@ seo_rising() {
             impressions:.impressions, clicks:.clicks, ctr:.ctr, position:.position,
             prev_impressions:\$pi, score: (\$growth * (ectr(.position))) } ]
     | map(select(.score > 0)) | sort_by(-.score) | .[0:\$k]
-  " <<<"$cur" 2>/dev/null || printf '[]'
+  " 2>/dev/null || printf '[]'
 }
 
 # seo_cannibalization <cur_query_page_json> <floor> <topk>

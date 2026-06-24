@@ -77,8 +77,9 @@ espn_news() {
 # source of a URL.
 espn_slim_league() {
   local league="$1" scoreboard="$2" news="$3"
-  jq -n --arg league "$league" \
-    --argjson sb "$scoreboard" --argjson nw "$news" '
+  printf '%s\n%s\n' "$scoreboard" "$news" \
+  | jq -n --arg league "$league" '
+    (input) as $sb | (input) as $nw |
     {
       league: $league,
       events: [($sb.events // [])[] | {
