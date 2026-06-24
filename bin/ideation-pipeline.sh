@@ -1021,8 +1021,7 @@ $angle${link_note}
 EOF
 )
   pr_num=$(forgejo_open_pr "$WEBSITE_REPO" "$branch" "master" \
-                            "feat: add post '$title'" "$pr_body" \
-                            "${FORGEJO_REVIEWER:-}")
+                            "feat: add post '$title'" "$pr_body")
   if [ -z "$pr_num" ]; then
     log "PR open via Forgejo API returned empty; branch is pushed -- inspect manually"
     return 1
