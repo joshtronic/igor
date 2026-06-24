@@ -96,6 +96,18 @@ the actual work.
   Test plan section can be `- [x] No manual verification needed; CI
   is the gate`.
 
+  **UI changes and repo-declared verify commands:** For changes that
+  affect rendered UI (CSS, templates, SVG, generated markup): if the
+  repo's `CLAUDE.md` names a verification command (e.g. a Playwright
+  or e2e script), run it before exit and convert the checks it covers
+  from `[ ]` to `[x]`, with a one-line note on what was confirmed;
+  reference any screenshots the command produced. Reserve `[ ]` for
+  checks that genuinely can't be automated -- subjective judgment
+  calls, comparisons against an external system -- NOT for "I didn't
+  run a browser." If the repo has no declared verify command, leaving
+  visual checks as manual `[ ]` is fine; say so explicitly in the
+  test plan.
+
   Example:
 
   ```markdown
