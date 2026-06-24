@@ -5,7 +5,7 @@ claims one piece of work, ships it, sleeps. Each tick runs a
 strictly ordered cascade: recovery + validation, then PR-review
 pickup, then Igor's own work (daily reading + blog post, weekly
 /now refresh + site-work pass -- opt-in via `WEBSITE_REPO`), then
-the shadow code review (non-binding PR verdicts), then
+the code review, then
 scheduled maintenance, then the monthly GSC-driven SEO pass (opt-in),
 then the daily weekday market report (opt-in), then the daily
 sports digest (opt-in), then the daily logwatch self-report
@@ -248,34 +248,33 @@ respective tools on the host; install or skip.
   targets this repo, Igor PRs against its own harness -- safe only
   because a human-reviewed merge gates master (and master self-deploys
   in ~1 minute, so review those PRs accordingly).
-- The shadow code review (`do_review_tick`) is convention-driven with
-  NO env knob -- like logwatch, its closest sibling, it just runs once
-  on master (the merge IS the opt-in; a non-binding comment's blast
-  radius is trivial, and a misbehaving pass is a one-PR revert like any
-  other harness bug). It's the first step toward auto-merge and
-  deliberately changes NO merge behavior: for
-  the first open bot PR whose CURRENT head hasn't been reviewed, ONE
-  `claude_call` on `AGENT_MODEL_REVIEW` (the non-author tier -- the thing
-  under review doesn't audit itself, honoring the supply-chain trust
-  boundary) produces a verdict (APPROVE/REQUEST_CHANGES/COMMENT) posted
-  as a NON-BINDING comment. A human still merges; the point is to collect
-  whether the reviewer's verdict tracks the human's actual merge/request-
-  changes decision, so the safest repos (the blog first -- build-verified,
-  no security surface, trivially revertible) can eventually graduate to
-  auto-merge on green-CI + APPROVE. Runs on the ANALYSIS set, not the
-  validated work set: a verdict is information, useful on every repo
-  (this harness's own PRs included); the validation gate only bites once
-  a verdict becomes a MERGE signal. Dedup is per HEAD SHA under `.review`
-  in `discretionary-state.json` (a new head -- author addressed feedback
-  -- is re-reviewed; an idle PR isn't re-hit every minute); the per-sha
-  comment marker (`<!-- shadow-review sha=... -->`) is the crash-safety
-  net against a duplicate post. The verdict is a `VERDICT:` label-line +
-  `===BODY===` sentinel parsed harness-side (`review_parse_response`),
-  never model-written JSON. CI status for the head rides into both the
-  prompt and the recorded verdict so the shape already matches the future
-  merge gate. NEVER auto-merge this harness's own repo -- self-deploy +
-  blast radius means it stays a human gate regardless of how good the
-  reviewer gets. Clear a PR's `.review` entry to force a re-review.
+- The code review (`do_review_tick`) is convention-driven with NO env
+  knob -- like logwatch, its closest sibling, the merge IS the opt-in;
+  a misbehaving pass is a one-PR revert like any other harness bug. Bot
+  PRs open with no reviewer assigned; `do_review_tick` finds the first
+  open bot PR whose head hasn't been reviewed yet. ONE `claude_call` on
+  `AGENT_MODEL_REVIEW` (the non-author tier -- the thing under review
+  doesn't audit itself, honoring the supply-chain trust boundary)
+  produces a verdict (APPROVE/REQUEST_CHANGES/COMMENT). APPROVE or
+  COMMENT requests the human reviewer; REQUEST_CHANGES assigns the bot
+  and drives Igor's rework loop, capped at 3 rounds then escalates to
+  the human. The requested-changes text rides in
+  `.review.pending_rc_body`; the PR-pickup filter reads it because
+  assignment is the turn marker (issue-type recovery and pull-type
+  pickup don't collide). Patch-id dedup: a head that is only a
+  base-merge (same net diff) is recorded as seen but NOT re-reviewed.
+  Runs on the ANALYSIS set, not the validated work set: a verdict is
+  information, useful on every repo (this harness's own PRs included);
+  the validation gate only bites once a verdict becomes a MERGE signal.
+  Per-SHA dedup under `.review` in `discretionary-state.json`; the
+  per-sha comment marker (`<!-- review sha=... -->`) is the crash-safety
+  net against a duplicate post on a crash-between-post-and-record. The
+  verdict is a `VERDICT:` label-line + `===BODY===` sentinel parsed
+  harness-side (`review_parse_response`), never model-written JSON. CI
+  status for the head rides into both the prompt and the recorded
+  verdict. NEVER auto-merge this harness's own repo -- self-deploy +
+  blast radius means it stays a human gate regardless of verdict. Clear
+  a PR's `.review` entry to force a re-review.
 
 ## Off-limits
 

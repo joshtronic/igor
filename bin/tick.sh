@@ -975,7 +975,7 @@ sports_retry_ready() {
   [ "$((now - last))" -ge "$SPORTS_RETRY_COOLDOWN_SECS" ]
 }
 
-# -- Shadow review state ----------------------------------------
+# -- Review state ----------------------------------------
 #
 # Keyed per PR under ".review" in discretionary-state.json (same file
 # as .slots/.seo/.market/...), shaped { "<repo>#<num>": {sha, verdict,
@@ -2423,12 +2423,12 @@ review_parse_response() {
 
 do_review_tick() {
   # Find the first open bot PR -- across the ANALYSIS set, not the
-  # validated work set -- whose live head hasn't been shadow-reviewed
-  # yet. Analysis, not validated, because a verdict is pure information
-  # and useful on EVERY repo (this harness's own PRs included); the
-  # validation gate only matters once a verdict becomes a MERGE signal,
-  # which shadow mode never does. One review per tick; first un-reviewed
-  # head wins, then we exit the cascade like every other pass.
+  # validated work set -- whose live head hasn't been reviewed yet.
+  # Analysis, not validated, because a verdict is pure information and
+  # useful on EVERY repo (this harness's own PRs included); the
+  # validation gate only matters once a verdict becomes a MERGE signal.
+  # One review per tick; first un-reviewed head wins, then we exit the
+  # cascade like every other pass.
   local repo_line repo prs pr_num pr_json head_sha key reviewed_sha
   local target_repo="" target_num="" target_sha="" target_json=""
   while IFS= read -r repo_line; do
@@ -2459,9 +2459,13 @@ do_review_tick() {
   # the PR. Reconcile state and skip rather than double-post and re-burn
   # a model call. (Primary dedup is the local .review sha above; this
   # only catches the post-succeeded-state-write-crashed window.)
-  local marker="<!-- shadow-review sha=${target_sha}"
-  if [ "$(forgejo_pr_has_comment_containing "$target_repo" "$target_num" "$BOT_USER" "$marker" 2>/dev/null || echo 0)" -gt 0 ]; then
-    log "shadow-review: ${key} head ${target_sha:0:8} already carries a verdict comment -- reconciling state"
+  local old_marker="<!-- shadow-review sha=${target_sha}"
+  local new_marker="<!-- review sha=${target_sha}"
+  local old_count new_count
+  old_count=$(forgejo_pr_has_comment_containing "$target_repo" "$target_num" "$BOT_USER" "$old_marker" 2>/dev/null || echo 0)
+  new_count=$(forgejo_pr_has_comment_containing "$target_repo" "$target_num" "$BOT_USER" "$new_marker" 2>/dev/null || echo 0)
+  if [ "$old_count" -gt 0 ] || [ "$new_count" -gt 0 ]; then
+    log "review: ${key} head ${target_sha:0:8} already carries a verdict comment -- reconciling state"
     review_record "$key" "$target_sha" "unknown" "unknown" "$(date +%s)"
     return 1
   fi
@@ -2477,7 +2481,7 @@ do_review_tick() {
   # set -e. Empty -> skip + retry next tick.
   diff=$(forgejo_pr_diff "$target_repo" "$target_num" 2>/dev/null | head -c 200000 || true)
   if [ -z "$diff" ]; then
-    log "shadow-review: ${key} empty/failed diff fetch -- skipping this tick (will retry)"
+    log "review: ${key} empty/failed diff fetch -- skipping this tick (will retry)"
     return 1
   fi
   truncated_note=""
@@ -2490,7 +2494,7 @@ do_review_tick() {
   patch_id=$(printf '%s' "$diff" | git patch-id --stable 2>/dev/null | awk '{print $1}')
   reviewed_patch_id=$(review_reviewed_patchid "$key")
   if [ -n "$patch_id" ] && [ -n "$reviewed_patch_id" ] && [ "$patch_id" = "$reviewed_patch_id" ]; then
-    log "shadow-review: ${key} head advanced to ${target_sha:0:8} but patch-id unchanged -- skipping re-review"
+    log "review: ${key} head advanced to ${target_sha:0:8} but patch-id unchanged -- skipping re-review"
     review_update_sha "$key" "$target_sha"
     return 1
   fi
@@ -2500,7 +2504,7 @@ do_review_tick() {
   title=$(jq -r '.title // ""' <<<"$target_json")
   body=$(jq -r '.body // ""' <<<"$target_json")
 
-  directive=$(cat "$AGENT_HOME/bin/lib/shadow-review-directive.md")
+  directive=$(cat "$AGENT_HOME/bin/lib/review-directive.md")
   user="PR under review: ${target_repo}#${target_num}
 Head commit: ${target_sha}
 CI status for head: ${ci}
@@ -2519,7 +2523,7 @@ ${body:-(none)}
 ${diff}
 \`\`\`"
 
-  log "shadow-review: examining ${key} head ${target_sha:0:8} (ci=${ci}, ${#diff} chars of diff${truncated_note:+, truncated})"
+  log "review: examining ${key} head ${target_sha:0:8} (ci=${ci}, ${#diff} chars of diff${truncated_note:+, truncated})"
 
   # max_tokens 8000: review prose is short, but thinking shares the CLI
   # output budget -- size ~5x expected so a long think can't truncate
@@ -2528,8 +2532,8 @@ ${diff}
   local raw parsed attempt verdict review_body snippet tail_snip
   parsed=""
   for attempt in 1 2; do
-    raw=$(claude_call "$AGENT_MODEL_REVIEW" "shadow-review" 8000 "$directive" "$user" 0) || {
-      log "shadow-review: ${key} review call failed (attempt $attempt)"
+    raw=$(claude_call "$AGENT_MODEL_REVIEW" "review" 8000 "$directive" "$user" 0) || {
+      log "review: ${key} review call failed (attempt $attempt)"
       continue
     }
     if parsed=$(review_parse_response "$raw"); then
@@ -2539,10 +2543,10 @@ ${diff}
     snippet=$(printf '%s' "$raw" | tr '\n' ' ')
     tail_snip=""
     [ "${#snippet}" -gt 160 ] && tail_snip=${snippet:$(( ${#snippet} - 160 ))}
-    log "shadow-review: ${key} unparseable response (attempt $attempt, ${#raw} chars; head: ${snippet:0:160} [...] tail: ${tail_snip})"
+    log "review: ${key} unparseable response (attempt $attempt, ${#raw} chars; head: ${snippet:0:160} [...] tail: ${tail_snip})"
   done
   if [ -z "$parsed" ]; then
-    log "shadow-review: ${key} no parseable verdict after 2 attempts -- leaving head un-recorded (will retry next tick)"
+    log "review: ${key} no parseable verdict after 2 attempts -- leaving head un-recorded (will retry next tick)"
     return 1
   fi
 
@@ -2551,7 +2555,7 @@ ${diff}
 
   local elapsed comment
   elapsed=$(( $(date +%s) - start ))
-  comment="### 🤖 Shadow review — \`${verdict}\` _(automated, non-binding)_
+  comment="### 🤖 Review — \`${verdict}\` _(automated)_
 
 CI for \`${target_sha:0:8}\`: **${ci}**
 
@@ -2559,13 +2563,13 @@ ${review_body}
 
 ---
 <sub>Independent review by the harness on \`${AGENT_MODEL_REVIEW}\`. The human reviewer is requested once Igor has reviewed; a human still merges.</sub>
-<!-- shadow-review sha=${target_sha} verdict=${verdict} ci=${ci} -->"
+<!-- review sha=${target_sha} verdict=${verdict} ci=${ci} -->"
 
   if forgejo_comment "$target_repo" "$target_num" "$comment"; then
     review_record "$key" "$target_sha" "$verdict" "$ci" "$(date +%s)" "$patch_id"
     forgejo_log_time "$target_repo" "$target_num" "$elapsed" 2>/dev/null \
-      || log "warning: shadow-review: could not log time on ${key}"
-    log "shadow-review: ${key} head ${target_sha:0:8} -> ${verdict} (ci=${ci}, ${elapsed}s)"
+      || log "warning: review: could not log time on ${key}"
+    log "review: ${key} head ${target_sha:0:8} -> ${verdict} (ci=${ci}, ${elapsed}s)"
     local rc_rounds
     rc_rounds=$(review_rework_rounds "$key")
     case "$verdict" in
@@ -2573,20 +2577,20 @@ ${review_body}
         review_reset_rework "$key"
         if [ -n "${FORGEJO_REVIEWER:-}" ]; then
           forgejo_request_review "$target_repo" "$target_num" "$FORGEJO_REVIEWER" 2>/dev/null \
-            || log "warning: shadow-review: review-request to ${FORGEJO_REVIEWER} failed on ${key} (verdict=${verdict})"
-          log "shadow-review: ${key} requested review from ${FORGEJO_REVIEWER} (verdict=${verdict})"
+            || log "warning: review: review-request to ${FORGEJO_REVIEWER} failed on ${key} (verdict=${verdict})"
+          log "review: ${key} requested review from ${FORGEJO_REVIEWER} (verdict=${verdict})"
         fi
         ;;
       REQUEST_CHANGES)
         if [ "$rc_rounds" -ge 3 ]; then
-          log "shadow-review: ${key} REQUEST_CHANGES rework_rounds=${rc_rounds} >= 3 -- escalating to human"
+          log "review: ${key} REQUEST_CHANGES rework_rounds=${rc_rounds} >= 3 -- escalating to human"
           if [ -n "${FORGEJO_REVIEWER:-}" ]; then
             forgejo_comment "$target_repo" "$target_num" \
               "Igor requested changes ${rc_rounds} times without converging -- handing this to you." 2>/dev/null \
-              || log "warning: shadow-review: escalation comment failed on ${key}"
+              || log "warning: review: escalation comment failed on ${key}"
             forgejo_request_review "$target_repo" "$target_num" "$FORGEJO_REVIEWER" 2>/dev/null \
-              || log "warning: shadow-review: review-request to ${FORGEJO_REVIEWER} failed on ${key} (escalation)"
-            log "shadow-review: ${key} escalated to ${FORGEJO_REVIEWER} after ${rc_rounds} rework rounds"
+              || log "warning: review: review-request to ${FORGEJO_REVIEWER} failed on ${key} (escalation)"
+            log "review: ${key} escalated to ${FORGEJO_REVIEWER} after ${rc_rounds} rework rounds"
           fi
         else
           local new_rounds
@@ -2594,14 +2598,14 @@ ${review_body}
           review_set_rework_rounds "$key" "$new_rounds"
           review_set_pending_rc_body "$key" "$review_body"
           forgejo_assign "$target_repo" "$target_num" "$BOT_USER" 2>/dev/null \
-            || log "warning: shadow-review: bot assignment failed on ${key} (rework round ${new_rounds})"
-          log "shadow-review: ${key} REQUEST_CHANGES -> rework round ${new_rounds}/3, bot assigned"
+            || log "warning: review: bot assignment failed on ${key} (rework round ${new_rounds})"
+          log "review: ${key} REQUEST_CHANGES -> rework round ${new_rounds}/3, bot assigned"
         fi
         ;;
     esac
     return 0
   fi
-  log "warning: shadow-review: comment post failed on ${key} -- not recording (will retry next tick)"
+  log "warning: review: comment post failed on ${key} -- not recording (will retry next tick)"
   return 1
 }
 
@@ -3059,9 +3063,9 @@ CONFLICT_EOF
       PR_USER_MSG=$(cat <<EOF
 You opened PR ${PR_REPO}#${PR_NUMBER}: ${PR_TITLE}
 
-The shadow reviewer (Igor's automated review pass) requested changes to this PR.
+The reviewer (Igor's automated review pass) requested changes to this PR.
 Address the requested changes listed below with new commits on this branch (${PR_HEAD}),
-then exit. The harness will push your commits and the shadow reviewer will re-review
+then exit. The harness will push your commits and the reviewer will re-review
 the new head automatically. The human is only brought in on APPROVE or after 3 rework
 rounds without convergence.
 
@@ -3076,7 +3080,7 @@ Branch: ${PR_HEAD}
 PR body:
 ${PR_BODY}
 
-## Requested changes (shadow reviewer)
+## Requested changes (reviewer)
 
 ${BINDING_RC_BODY}
 
