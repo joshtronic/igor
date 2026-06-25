@@ -2024,7 +2024,7 @@ do_sports_tick() {
 
 # -- CEO weekly board digest (weekly, per-repo, convention opt-in) ------
 #
-# For each analysis-set repo carrying a .agent/ceo.md mandate -- the
+# For each analysis-set repo carrying a CEO.md mandate -- the
 # mandate's mere presence IS the opt-in, like logwatch's systemd/ dir --
 # once per ISO week: read the mandate + gather the week's activity, one
 # claude_call writes the board digest, emailed to CEO_RECIPIENTS (falling
@@ -2051,7 +2051,7 @@ do_ceo_tick() {
     [ -n "$repo" ] || continue
     ceo_week_done "$repo" && continue              # already digested this ISO week
 
-    # Convention opt-in: the .agent/ceo.md mandate's mere presence. Reading it
+    # Convention opt-in: the CEO.md mandate's mere presence. Reading it
     # and testing non-empty IS the opt-in gate -- one GET, no separate probe.
     mandate=$(ceo_read_mandate "$repo")
     [ -n "$mandate" ] || continue
@@ -3569,7 +3569,7 @@ if do_sports_tick; then
 fi
 
 # Weekly CEO board digest. Convention opt-in, no env knob: any
-# analysis-set repo carrying a .agent/ceo.md mandate is under CEO
+# analysis-set repo carrying a CEO.md mandate is under CEO
 # management (the mandate's presence IS the opt-in). Once per ISO week
 # per repo, it reads the mandate + gathers the week and emails a board
 # digest to CEO_RECIPIENTS. A model call, so it's below the health gate;

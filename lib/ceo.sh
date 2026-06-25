@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ceo.sh -- the CEO pass's READ side: convention-driven opt-in via a repo's
-# .agent/ceo.md mandate, plus a weekly activity gather for the board digest.
+# CEO.md mandate, plus a weekly activity gather for the board digest.
 #
 # Opt-in is the mandate's mere presence -- exactly like logwatch keys off a
 # root systemd/ dir and the review tick keys off the merge. A repo that grows a
-# .agent/ceo.md is under autonomous CEO management; no env knob, no hardcoded
+# CEO.md is under autonomous CEO management; no env knob, no hardcoded
 # repo. (See the mandate itself: "the mandate's mere presence in the repo is
 # what opts [it] into autonomous CEO management.")
 #
@@ -15,13 +15,13 @@
 #
 # Sourced by tick.sh; depends on _fj (lib/forgejo.sh) + jq.
 
-CEO_MANDATE_PATH=".agent/ceo.md"
+CEO_MANDATE_PATH="CEO.md"
 # Stamped (HTML comment) into every CEO-proposed issue body so the next week's
 # pass can tell whether the last batch has been triaged -- the proposal throttle.
 CEO_PROPOSAL_MARKER="<!-- ceo-proposal -->"
 
 # ceo_read_mandate <repo> -- echo the mandate's raw content, empty if absent.
-# This IS the opt-in probe: a present .agent/ceo.md returns its body, a missing
+# This IS the opt-in probe: a present CEO.md returns its body, a missing
 # one 404s (_fj is `curl -sf` -> empty output, nonzero exit), so callers gate on
 # non-empty output (`[ -n "$mandate" ]`) and need no separate existence check.
 # The `|| true` swallows the 404's nonzero so the caller's `mandate=$(...)`
@@ -80,7 +80,7 @@ ceo_build_prompt() {
   local repo="$1" mandate="$2" activity="$3" since="$4"
   printf 'You are writing the weekly board digest for **%s**, covering activity since %s.
 
-## The mandate (.agent/ceo.md) -- your north-star
+## The mandate (CEO.md) -- your north-star
 
 %s
 
