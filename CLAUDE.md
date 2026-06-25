@@ -296,11 +296,18 @@ respective tools on the host; install or skip.
   so several managed repos digest over successive ticks); clear a repo's
   `.ceo` entry to force a re-send. The digest is a `SUBJECT:` label-line +
   `===BODY===` sentinel parsed harness-side (`ceo_parse_response`), never
-  model-written JSON. Phase 1 is STRICTLY read-only -- it reports, it does
-  not act: no issue-filing, no steering, no doc-edits. That agency is the
-  mandate's roadmap for later phases ("start tight, loosen as trust earns
-  it"); landing it is a deliberate, human-gated step, never an autonomous
-  expansion of what this pass writes.
+  model-written JSON. **Phase 2 adds proposing-as-agency:** the same model call
+  may append `===ISSUE===` proposal blocks, which the harness files as
+  **UNLABELED issues assigned to `FORGEJO_REVIEWER`** (each stamped
+  `CEO_PROPOSAL_MARKER`). `_ceo_parse_issues` **caps the count at two
+  harness-side** -- the limit is enforced, never left to model restraint. They become real work only when the human greenlights
+  them -- add the `Agent` label and unassign -- so the human merge/label gate is
+  intact and a poisoned mandate can at worst mis-propose, never ship code.
+  Throttle: a fresh batch is filed only when no proposal is still open
+  (`ceo_open_proposals_count` == 0), so they never pile up. STILL no direct
+  doc-edits or steering -- the CEO proposes, it does not commit; further agency
+  (auto-Agent-label, daily steering, mandate redlines) stays a deliberate,
+  human-gated step per the mandate's "start tight, loosen as trust earns it."
 
 ## Off-limits
 

@@ -16,6 +16,9 @@
 # Sourced by tick.sh; depends on _fj (lib/forgejo.sh) + jq.
 
 CEO_MANDATE_PATH=".agent/ceo.md"
+# Stamped (HTML comment) into every CEO-proposed issue body so the next week's
+# pass can tell whether the last batch has been triaged -- the proposal throttle.
+CEO_PROPOSAL_MARKER="<!-- ceo-proposal -->"
 
 # ceo_read_mandate <repo> -- echo the mandate's raw content, empty if absent.
 # This IS the opt-in probe: a present .agent/ceo.md returns its body, a missing
@@ -88,9 +91,44 @@ ceo_build_prompt() {
 ## Output format (mechanical contract -- repeated because it matters)
 
 Your VERY FIRST line must be `SUBJECT: <one-line subject>`. Your SECOND line
-must be exactly ===BODY===. Then the markdown digest. No preamble, no fences
-around the whole response, nothing after the digest.' \
+must be exactly ===BODY===. Then the markdown digest. Then, for each proposal
+(zero, one, or two), a ===ISSUE=== line, a `TITLE: <title>` line, and the issue
+body. No preamble, no fences around the whole response, nothing after the final
+block.' \
     "$repo" "$since" "$mandate" "$activity"
+}
+
+# _ceo_trim_blanks -- stdin->stdout: strip leading/trailing blank lines, keep
+# interior blanks. Shared by the digest body and each proposal body.
+_ceo_trim_blanks() {
+  awk 'NF { if (started) for (i = 0; i < blanks; i++) print ""
+            blanks = 0; started = 1; print; next }
+       started { blanks++ }'
+}
+
+# _ceo_parse_issues <rest-after-BODY> -- echo a JSON array [{title, body}] of the
+# proposal blocks appended after the digest. Each block is:
+#   ===ISSUE===
+#   TITLE: <single-line title>
+#   <body markdown...>
+# Empty array if there are no ===ISSUE=== blocks. Harness-built JSON, never
+# model-written -- the same anti-fragility rule as the digest body. A block
+# missing its TITLE: line is skipped.
+_ceo_parse_issues() {
+  local rest="$1" issues='[]' chunk title body
+  case "$rest" in *'===ISSUE==='*) ;; *) printf '[]'; return 0 ;; esac
+  while IFS= read -r -d '' chunk; do
+    title=$(printf '%s\n' "$chunk" | sed -n 's/^[[:space:]]*TITLE:[[:space:]]*//p' | head -1)
+    [ -n "$title" ] || continue
+    # Body = everything after the (first) TITLE: line, wherever it sits.
+    body=$(printf '%s\n' "$chunk" | awk 'p { print } /^[[:space:]]*TITLE:/ { p = 1 }' | _ceo_trim_blanks)
+    issues=$(jq -c --arg t "$title" --arg b "$body" '. + [{title:$t, body:$b}]' <<<"$issues")
+  done < <(printf '%s' "${rest#*===ISSUE===}" | awk 'BEGIN { RS = "===ISSUE===" } { printf "%s\0", $0 }')
+  # Cap at 2 harness-side -- enforce the directive's "up to two" rather than
+  # trusting model restraint. A misbehaving/poisoned model emitting N blocks
+  # would otherwise have N issues filed; the human label gate bounds the blast
+  # radius, but we enforce the limit regardless.
+  jq -c '.[:2]' <<<"$issues"
 }
 
 # ceo_parse_response <raw>
@@ -98,23 +136,24 @@ around the whole response, nothing after the digest.' \
 #   SUBJECT: <one-line subject>
 #   ===BODY===
 #   <markdown digest>
-# Echoes harness-built JSON {subject, body}; rc=1 if the sentinel or body is
-# missing (caller retries). Mirrors sports_parse_response.
+#   [ zero or more ===ISSUE=== proposal blocks -- see _ceo_parse_issues ]
+# Echoes harness-built JSON {subject, body, issues:[...]}; rc=1 if the sentinel
+# or body is missing (caller retries). Mirrors sports_parse_response.
 ceo_parse_response() {
-  local raw="$1" head body subject_line
+  local raw="$1" head rest body subject_line issues
   case "$raw" in
     *'===BODY==='*) ;;
     *) return 1 ;;
   esac
   head="${raw%%===BODY===*}"
-  body="${raw#*===BODY===}"
+  rest="${raw#*===BODY===}"
+  body="${rest%%===ISSUE===*}"            # digest = up to the first proposal block
   printf '%s' "$body" | grep -q '[^[:space:]]' || return 1
-  body=$(printf '%s\n' "$body" | awk '
-    NF { if (started) for (i = 0; i < blanks; i++) print ""
-         blanks = 0; started = 1; print; next }
-    started { blanks++ }')
+  body=$(printf '%s\n' "$body" | _ceo_trim_blanks)
   subject_line=$(printf '%s' "$head" | sed -n 's/^SUBJECT:[[:space:]]*//p' | head -1)
-  jq -n --arg s "$subject_line" --arg b "$body" '{subject:$s, body:$b}'
+  issues=$(_ceo_parse_issues "$rest")
+  jq -n --arg s "$subject_line" --arg b "$body" --argjson i "${issues:-[]}" \
+    '{subject:$s, body:$b, issues:$i}'
 }
 
 # ceo_render_html <<< <markdown>
@@ -164,4 +203,30 @@ ceo_mark_week_done() {  # <repo>
   else
     rm -f "$tmp"   # jq failed -- drop the temp instead of leaking it
   fi
+}
+
+# ---- Phase 2: proposing work (issues the board greenlights) ----
+# The CEO files up to two UNLABELED issues assigned to the human, each carrying
+# CEO_PROPOSAL_MARKER. They become real work only when the human adds the Agent
+# label (and unassigns). The throttle: a fresh batch is filed only once the
+# previous one is triaged (no open proposals), so they never pile up.
+
+# ceo_open_proposals_count <repo> -- count open issues carrying the marker.
+ceo_open_proposals_count() {
+  local repo="$1"
+  _fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" 2>/dev/null \
+    | jq -r --arg m "$CEO_PROPOSAL_MARKER" \
+        '[ .[]? | select(.pull_request == null) | select((.body // "") | contains($m)) ] | length' \
+        2>/dev/null || echo 0
+}
+
+# ceo_file_proposal <repo> <title> <body> <assignee> -- file an UNLABELED issue
+# assigned to <assignee>, stamped as a CEO proposal. Returns 0 on success.
+ceo_file_proposal() {
+  local repo="$1" title="$2" body="$3" assignee="$4" full payload
+  full=$(printf '%s\n\n---\n_Proposed by the CEO against the mandate priorities. **Greenlight:** add the `Agent` label and unassign. **Decline:** close._\n%s' \
+    "$body" "$CEO_PROPOSAL_MARKER")
+  payload=$(jq -n --arg t "$title" --arg b "$full" --arg a "$assignee" \
+    '{title: $t, body: $b, assignees: [$a]}')
+  _fj POST "/repos/${repo}/issues" "$payload" >/dev/null 2>&1
 }

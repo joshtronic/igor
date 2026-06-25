@@ -2075,6 +2075,29 @@ do_ceo_tick() {
     if email_send "$subject" "$html" "$body" "$recipients"; then
       ceo_mark_week_done "$repo"
       log "ceo: emailed board digest for ${repo} to ${recipients}"
+      # Phase 2: file the digest's proposals -- UNLABELED + assigned to the human
+      # for greenlight -- but only once the previous batch is triaged (no open
+      # CEO proposals on the repo), so they never pile up.
+      local proposals nprop open_props prop ptitle pbody filed
+      proposals=$(jq -c '.issues // []' <<<"$parsed")
+      nprop=$(jq 'length' <<<"$proposals" 2>/dev/null || echo 0)
+      if [ "${nprop:-0}" -gt 0 ] && [ -n "${FORGEJO_REVIEWER:-}" ]; then
+        open_props=$(ceo_open_proposals_count "$repo")
+        if [ "${open_props:-0}" -eq 0 ]; then
+          filed=0
+          while IFS= read -r prop; do
+            ptitle=$(jq -r '.title' <<<"$prop"); pbody=$(jq -r '.body' <<<"$prop")
+            if ceo_file_proposal "$repo" "$ptitle" "$pbody" "$FORGEJO_REVIEWER"; then
+              filed=$((filed + 1))
+            else
+              log "warning: ceo: failed to file a proposal on ${repo}"
+            fi
+          done < <(jq -c '.[]' <<<"$proposals")
+          [ "$filed" -gt 0 ] && log "ceo: filed ${filed} proposal(s) on ${repo} for ${FORGEJO_REVIEWER} to greenlight"
+        else
+          log "ceo: held ${nprop} proposal(s) on ${repo} -- ${open_props} still open for triage"
+        fi
+      fi
       return 0
     fi
     log "warning: ceo: email failed for ${repo} -- will retry next tick"
