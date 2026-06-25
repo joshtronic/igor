@@ -2055,7 +2055,7 @@ do_ceo_tick() {
     # and testing non-empty IS the opt-in gate -- one GET, no separate probe.
     mandate=$(ceo_read_mandate "$repo")
     [ -n "$mandate" ] || continue
-    activity=$(ceo_gather_week "$repo" "$since")
+    activity=$(ceo_gather_week "$repo" "$since"; ceo_proposal_outcomes "$repo")
     prompt=$(ceo_build_prompt "$repo" "$mandate" "$activity" "$since")
 
     parsed=""
@@ -2096,6 +2096,20 @@ do_ceo_tick() {
           [ "$filed" -gt 0 ] && log "ceo: filed ${filed} proposal(s) on ${repo} for ${FORGEJO_REVIEWER} to greenlight"
         else
           log "ceo: held ${nprop} proposal(s) on ${repo} -- ${open_props} still open for triage"
+        fi
+      fi
+      # Phase 3: if the model distilled decision guidance, open a redline PR to
+      # CEO.md (the CEO drafts, the board ratifies). One open guidance PR at a
+      # time so unratified redlines never stack.
+      local guidance
+      guidance=$(jq -r '.guidance // ""' <<<"$parsed")
+      if [ -n "$guidance" ] && [ -n "${FORGEJO_REVIEWER:-}" ]; then
+        if ceo_guidance_pr_open "$repo"; then
+          log "ceo: held a guidance redline for ${repo} -- one already open"
+        elif ceo_open_guidance_pr "$repo" "$guidance" "$FORGEJO_REVIEWER"; then
+          log "ceo: opened a decision-guidance redline PR on ${repo} for ${FORGEJO_REVIEWER}"
+        else
+          log "warning: ceo: failed to open the guidance redline on ${repo}"
         fi
       fi
       return 0
