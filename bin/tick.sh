@@ -155,18 +155,18 @@ export SMTP2GO_SENDER="${SMTP2GO_SENDER:-}"
 export GSC_OAUTH_CLIENT_ID="${GSC_OAUTH_CLIENT_ID:-}"
 export GSC_OAUTH_CLIENT_SECRET="${GSC_OAUTH_CLIENT_SECRET:-}"
 export GSC_OAUTH_REFRESH_TOKEN="${GSC_OAUTH_REFRESH_TOKEN:-}"
-export SEO_PRIMARY_EMAIL="${SEO_PRIMARY_EMAIL:-}"
-export SEO_EXTRA_RECIPIENTS="${SEO_EXTRA_RECIPIENTS:-}"
+export PRIMARY_RECIPIENTS="${PRIMARY_RECIPIENTS:-}"
+export SEO_RECIPIENTS="${SEO_RECIPIENTS:-}"
 export SEO_AGENTIC_SITES="${SEO_AGENTIC_SITES:-}"
 export SEO_IMPRESSION_FLOOR="${SEO_IMPRESSION_FLOOR:-50}"
 export SEO_TOP_K="${SEO_TOP_K:-10}"
 export SEO_DEBUG_DOMAIN="${SEO_DEBUG_DOMAIN:-}"
 
 # Claude health alerts -- where the once-daily "claude auth/usage is
-# broken" email goes (see do_health_tick). Optional; falls back to
-# SEO_PRIMARY_EMAIL, and with neither set (or no SMTP2GO creds) the
-# alert is log-only.
-export HEALTH_RECIPIENTS="${HEALTH_RECIPIENTS:-${SEO_PRIMARY_EMAIL:-}}"
+# broken" email goes (see do_health_tick). PRIMARY_RECIPIENTS always gets
+# it; HEALTH_RECIPIENTS adds extra subscribers. With no recipients at all
+# (or no SMTP2GO creds) the alert is log-only.
+export HEALTH_RECIPIENTS="${HEALTH_RECIPIENTS:-}"
 
 # Market report -- opt-in daily (Mon-Fri) previous-trading-day prices
 # email via the marketstack EOD API + SMTP2GO. do_market_tick no-ops
@@ -1573,11 +1573,11 @@ $MAINT_TRIAGE_MARKER" \
 SEO_TICKET_MARKER="<!-- agent:seo-opportunities -->"
 
 # Comma-separated extra recipients subscribed to this domain, parsed
-# from SEO_EXTRA_RECIPIENTS ("email=site1,site2|email2=site3").
+# from SEO_RECIPIENTS ("email=site1,site2|email2=site3").
 seo_extra_recipients_for() {
   local domain="$1" entry email sites out=""
   local IFS='|'
-  for entry in ${SEO_EXTRA_RECIPIENTS:-}; do
+  for entry in ${SEO_RECIPIENTS:-}; do
     [ -z "$entry" ] && continue
     email="${entry%%=*}"
     sites="${entry#*=}"
@@ -1588,15 +1588,11 @@ seo_extra_recipients_for() {
   printf '%s' "$out"
 }
 
-# Full recipient list for a domain: primary always, plus any subscribed
-# extras. Primary getting every domain means it's always copied, so no
-# separate CC is needed.
+# Full recipient list for an SEO domain: PRIMARY always, plus any extras
+# subscribed to this domain (PRIMARY gets every domain, so it's always
+# copied -- no separate CC needed).
 seo_recipients_for() {
-  local domain="$1" extras out
-  out="${SEO_PRIMARY_EMAIL:-}"
-  extras=$(seo_extra_recipients_for "$domain")
-  [ -n "$extras" ] && out="${out:+$out,}$extras"
-  printf '%s' "$out"
+  recipients_with_primary "$(seo_extra_recipients_for "$1")"
 }
 
 # The Forgejo repo mapped to an agentic domain, or empty. Parsed from
@@ -1651,7 +1647,7 @@ do_seo_tick() {
   # Opt-in gate: every required credential must be present.
   if [ -z "${GSC_OAUTH_CLIENT_ID:-}" ] || [ -z "${GSC_OAUTH_CLIENT_SECRET:-}" ] \
      || [ -z "${GSC_OAUTH_REFRESH_TOKEN:-}" ] || [ -z "${SMTP2GO_API_KEY:-}" ] \
-     || [ -z "${SMTP2GO_SENDER:-}" ] || [ -z "${SEO_PRIMARY_EMAIL:-}" ]; then
+     || [ -z "${SMTP2GO_SENDER:-}" ] || [ -z "${PRIMARY_RECIPIENTS:-}" ]; then
     return 1
   fi
 
@@ -1756,7 +1752,7 @@ do_seo_tick() {
 do_market_tick() {
   # Opt-in gate: every required credential/config must be present.
   if [ -z "${MARKETSTACK_API_KEY:-}" ] || [ -z "${MARKET_SYMBOLS:-}" ] \
-     || [ -z "${MARKET_RECIPIENTS:-}" ] || [ -z "${SMTP2GO_API_KEY:-}" ] \
+     || [ -z "${PRIMARY_RECIPIENTS:-}" ] || [ -z "${SMTP2GO_API_KEY:-}" ] \
      || [ -z "${SMTP2GO_SENDER:-}" ]; then
     return 1
   fi
@@ -1842,8 +1838,9 @@ do_market_tick() {
   html=$(market_render_html <<<"$report")
   formatted_today=$(market_format_date "$today")
   subject="[Market] ${formatted_today:-$today}"
-  if email_send "$subject" "$html" "$md" "$MARKET_RECIPIENTS"; then
-    log "market: emailed report (${session:-latest}, $count symbols) to $MARKET_RECIPIENTS"
+  local recipients; recipients=$(recipients_with_primary "${MARKET_RECIPIENTS:-}")
+  if email_send "$subject" "$html" "$md" "$recipients"; then
+    log "market: emailed report (${session:-latest}, $count symbols) to $recipients"
     market_mark_sent
     return 0
   fi
@@ -1888,7 +1885,7 @@ do_market_tick() {
 # (caller falls through).
 do_sports_tick() {
   # Opt-in gate: every required config must be present.
-  if [ -z "${SPORTS_RECIPIENTS:-}" ] || [ -z "${SPORTS_LEAGUES:-}" ] \
+  if [ -z "${PRIMARY_RECIPIENTS:-}" ] || [ -z "${SPORTS_LEAGUES:-}" ] \
      || [ -z "${SMTP2GO_API_KEY:-}" ] || [ -z "${SMTP2GO_SENDER:-}" ]; then
     return 1
   fi
@@ -2006,11 +2003,12 @@ do_sports_tick() {
   today=$(date +%Y-%m-%d)
   formatted=$(market_format_date "$today")
   subject="[Sports] ${formatted:-$today}"
-  if email_send "$subject" "$html" "$body" "$SPORTS_RECIPIENTS"; then
+  local recipients; recipients=$(recipients_with_primary "${SPORTS_RECIPIENTS:-}")
+  if email_send "$subject" "$html" "$body" "$recipients"; then
     sports_mark_sent
     sports_concepts_append "$concepts" "$(date +%Y-%m-%d)" \
       || log "warning: sports: curriculum ledger update failed (digest sent fine)"
-    log "sports: emailed digest for ${ydash} ($(jq 'length' <<<"$concepts") new concepts) to $SPORTS_RECIPIENTS"
+    log "sports: emailed digest for ${ydash} ($(jq 'length' <<<"$concepts") new concepts) to $recipients"
     return 0
   fi
   failures=$(sports_failure_inc)
@@ -2027,8 +2025,8 @@ do_sports_tick() {
 # For each analysis-set repo carrying a CEO.md mandate -- the
 # mandate's mere presence IS the opt-in, like logwatch's systemd/ dir --
 # once per ISO week: read the mandate + gather the week's activity, one
-# claude_call writes the board digest, emailed to CEO_RECIPIENTS (falling
-# back to SEO_PRIMARY_EMAIL). Phase 1 is strictly read-only -- no issue-
+# claude_call writes the board digest, emailed to PRIMARY_RECIPIENTS plus
+# any CEO_RECIPIENTS extras. Phase 1 is strictly read-only -- no issue-
 # filing/steering yet, per the mandate's "start tight, loosen as trust
 # earns it" rope.
 #
@@ -2038,7 +2036,7 @@ do_sports_tick() {
 # digest was sent, 1 otherwise.
 do_ceo_tick() {
   [ -n "${SMTP2GO_API_KEY:-}" ] && [ -n "${SMTP2GO_SENDER:-}" ] || return 1
-  local recipients="${CEO_RECIPIENTS:-${SEO_PRIMARY_EMAIL:-}}"
+  local recipients; recipients="$(recipients_with_primary "${CEO_RECIPIENTS:-}")"
   [ -n "$recipients" ] || return 1
 
   local since directive repo_line repo mandate activity prompt raw parsed subject body html attempt
@@ -2179,8 +2177,9 @@ do_health_tick() {
   detail=$(jq -r '.health.detail // ""' "$f" 2>/dev/null)
   since=$(date -d "@$first" +'%Y-%m-%d %H:%M %Z' 2>/dev/null || echo "$first")
 
-  if [ -z "$HEALTH_RECIPIENTS" ] || [ -z "$SMTP2GO_API_KEY" ] || [ -z "$SMTP2GO_SENDER" ]; then
-    log "health: $kind failure live since $since but alert email not configured (HEALTH_RECIPIENTS + SMTP2GO) -- log-only"
+  local recipients; recipients=$(recipients_with_primary "${HEALTH_RECIPIENTS:-}")
+  if [ -z "$recipients" ] || [ -z "$SMTP2GO_API_KEY" ] || [ -z "$SMTP2GO_SENDER" ]; then
+    log "health: $kind failure live since $since but alert email not configured (PRIMARY_RECIPIENTS + SMTP2GO) -- log-only"
     return 0
   fi
 
@@ -2199,11 +2198,11 @@ resets, or enable/raise extra usage on the plan.
 
 This alert is sent at most once per day; the agent recovers on its
 own once calls succeed again."
-  if email_send "$subject" "<pre>${body}</pre>" "$body" "$HEALTH_RECIPIENTS"; then
+  if email_send "$subject" "<pre>${body}</pre>" "$body" "$recipients"; then
     tmp=$(mktemp)
     jq --arg d "$today" '.health = ((.health // {}) + {emailed_on: $d})' \
       "$f" > "$tmp" && mv "$tmp" "$f"
-    log "health: $kind alert emailed to $HEALTH_RECIPIENTS"
+    log "health: $kind alert emailed to $recipients"
   else
     log "warning: health alert email failed -- will retry next tick"
   fi
@@ -3554,7 +3553,7 @@ if do_maintenance_tick; then
 fi
 
 # Scheduled SEO analysis (monthly, ONE domain per tick). Opt-in via the
-# Google Search Console + SMTP2GO + SEO_PRIMARY_EMAIL env; no-ops when
+# Google Search Console + SMTP2GO + PRIMARY_RECIPIENTS env; no-ops when
 # unconfigured. GSC-driven, not repo-driven: emails the owner a graded
 # report per domain, and for agentic sites files a deduped Agent-labeled
 # ticket the discovery step below picks up once that repo is validated.

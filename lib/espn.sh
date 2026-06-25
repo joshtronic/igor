@@ -4,7 +4,7 @@
 # marketstack. Sourced by bin/tick.sh.
 #
 # The sports digest is opt-in; callers gate on these being set:
-#   SPORTS_RECIPIENTS, SPORTS_LEAGUES
+#   PRIMARY_RECIPIENTS, SPORTS_LEAGUES   (SPORTS_RECIPIENTS adds extra subscribers)
 # Requires on PATH: curl, jq.
 #
 # No key, no auth: these are the unofficial-but-public JSON endpoints

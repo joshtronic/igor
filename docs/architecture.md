@@ -73,8 +73,8 @@ A timer fires `bin/tick.sh`. Per tick:
    bucket instead of over-crediting title fixes. It applies an impression
    floor + top-K cap, grades the batch
    (GOOD/INDIFFERENT by estimated click upside), and emails the owner
-   (`SEO_PRIMARY_EMAIL` always, plus selective extras per
-   `SEO_EXTRA_RECIPIENTS`) via SMTP2GO. For domains in
+   (`PRIMARY_RECIPIENTS` always, plus selective per-site extras from
+   `SEO_RECIPIENTS`) via SMTP2GO. For domains in
    `SEO_AGENTIC_SITES` it also files ONE curated, deduped,
    `Agent`-labeled ticket on the mapped repo -- which Discovery (next)
    picks up once that repo is validated. Surfaced opportunities are

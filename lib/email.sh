@@ -12,6 +12,18 @@ if ! declare -F log >/dev/null; then
   log() { printf '[agent] %s\n' "$*"; }
 fi
 
+# recipients_with_primary <extra_csv> -- the To line for any harness email:
+# PRIMARY_RECIPIENTS (the operator, always) plus the surface's extra
+# subscribers, comma-joined and deduped, empties dropped. Empty only if
+# PRIMARY_RECIPIENTS is unset and there are no extras. Every report surface
+# routes through this so PRIMARY is always copied and per-surface lists are
+# purely additive.
+recipients_with_primary() {
+  local extra="${1:-}"
+  printf '%s\n' "${PRIMARY_RECIPIENTS:-}" "$extra" \
+    | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -
+}
+
 EMAIL_API="https://api.smtp2go.com/v3/email/send"
 
 # email_send <subject> <html_body> <text_body> <to_csv> [cc_csv]

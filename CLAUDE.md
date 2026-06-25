@@ -92,7 +92,7 @@ respective tools on the host; install or skip.
   surface's problem). While a cooldown is live the tick skips ALL
   model work (scripted SEO/market emails still run); a daily probe
   covers idle days and a once-daily alert email goes to
-  `HEALTH_RECIPIENTS` (falls back to `SEO_PRIMARY_EMAIL`; log-only
+  `PRIMARY_RECIPIENTS` (plus any `HEALTH_RECIPIENTS` extras; log-only
   without SMTP2GO). Clear `.health` to reset. Side effect of
   subscription billing: the cost ledger's `usd` is dollars-EQUIVALENT
   consumed (a plan-usage meter), not dollars billed.
@@ -289,7 +289,7 @@ respective tools on the host; install or skip.
   mandate + gather that repo's week (PRs merged, issues opened/closed, the
   open `Agent` queue), ONE `claude_call` on `AGENT_MODEL` writes a board
   digest assessing the week against the mandate's priorities, emailed to
-  `CEO_RECIPIENTS` (falls back to `SEO_PRIMARY_EMAIL`; needs SMTP2GO). A
+  `PRIMARY_RECIPIENTS` (plus any `CEO_RECIPIENTS` extras; needs SMTP2GO). A
   model call, so it sits BELOW the health gate and goes dark in a Claude
   cooldown. Per-repo ISO-week stamp under `.ceo` in
   `discretionary-state.json` (self-healing; one digest per repo per week,
