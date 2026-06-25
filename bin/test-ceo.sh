@@ -56,6 +56,27 @@ run_parse "$(printf 'SUBJECT: t\n===BODY===\n\n\nAlpha.\n\nOmega.\n\n')"
 eq "blank-collapse: leading/trailing trimmed, interior kept" \
    "$(printf 'Alpha.\n\nOmega.')" "$(jq -r '.body' <<<"$OUT")"
 
+# ---- ceo_parse_response: proposals (===ISSUE=== blocks) -----------------
+echo "== ceo_parse_response proposals =="
+
+run_parse "$(printf 'SUBJECT: s\n===BODY===\nThe digest.')"
+eq "no proposals: issues == []" "[]" "$(jq -c '.issues' <<<"$OUT")"
+
+run_parse "$(printf 'SUBJECT: s\n===BODY===\nThe digest.\n===ISSUE===\nTITLE: Internal linking\nAdd related-games links.\nServes priority #1.\n===ISSUE===\nTITLE: Hub copy\nFlesh out category hubs.')"
+eq "two proposals: count"         2 "$(jq '.issues | length' <<<"$OUT")"
+eq "two proposals: title 1"       "Internal linking" "$(jq -r '.issues[0].title' <<<"$OUT")"
+eq "two proposals: body 1"        "$(printf 'Add related-games links.\nServes priority #1.')" "$(jq -r '.issues[0].body' <<<"$OUT")"
+eq "two proposals: title 2"       "Hub copy" "$(jq -r '.issues[1].title' <<<"$OUT")"
+eq "two proposals: digest body excludes the issues" "The digest." "$(jq -r '.body' <<<"$OUT")"
+
+run_parse "$(printf 'SUBJECT: s\n===BODY===\nD.\n===ISSUE===\nTITLE: Only one\nbody here')"
+eq "one proposal: count" 1 "$(jq '.issues | length' <<<"$OUT")"
+eq "one proposal: title" "Only one" "$(jq -r '.issues[0].title' <<<"$OUT")"
+
+run_parse "$(printf 'SUBJECT: s\n===BODY===\nD.\n===ISSUE===\nno title line\n===ISSUE===\nTITLE: Valid\nok')"
+eq "malformed block (no TITLE:) skipped: count" 1 "$(jq '.issues | length' <<<"$OUT")"
+eq "malformed block skipped: keeps the valid one" "Valid" "$(jq -r '.issues[0].title' <<<"$OUT")"
+
 # ---- ceo_render_html ----------------------------------------------------
 echo "== ceo_render_html =="
 html="$(ceo_render_html <<<"$(printf '## The win\n- ship **verify**\n\nA <tag> & co.')")"
