@@ -77,6 +77,10 @@ run_parse "$(printf 'SUBJECT: s\n===BODY===\nD.\n===ISSUE===\nno title line\n===
 eq "malformed block (no TITLE:) skipped: count" 1 "$(jq '.issues | length' <<<"$OUT")"
 eq "malformed block skipped: keeps the valid one" "Valid" "$(jq -r '.issues[0].title' <<<"$OUT")"
 
+run_parse "$(printf 'SUBJECT: s\n===BODY===\nD.\n===ISSUE===\nTITLE: One\na\n===ISSUE===\nTITLE: Two\nb\n===ISSUE===\nTITLE: Three\nc')"
+eq "clamp: 3 blocks capped to 2" 2     "$(jq '.issues | length' <<<"$OUT")"
+eq "clamp: keeps the first two"  "Two" "$(jq -r '.issues[1].title' <<<"$OUT")"
+
 # ---- ceo_render_html ----------------------------------------------------
 echo "== ceo_render_html =="
 html="$(ceo_render_html <<<"$(printf '## The win\n- ship **verify**\n\nA <tag> & co.')")"
@@ -130,6 +134,30 @@ hasnt "gather: pre-window PR excluded"   "$out" "#40"
 has   "gather: opened issue rendered"    "$out" "- #51 [open] Login bug (opened)"
 hasnt "gather: PR filtered from issues"  "$out" "#12"
 has   "gather: open Agent queue"         "$out" "- #51 Login bug"
+
+# ---- proposals: throttle (open count) + filing (unlabeled/assigned/marked) ---
+echo "== ceo proposals: throttle + file =="
+PROPOSAL_GET='[]'; POST_BODY=''
+_fj() {  # GET issues -> canned; POST issues -> capture the payload, succeed
+  case "$1 $2" in
+    "GET "*/issues*)  printf '%s' "$PROPOSAL_GET" ;;
+    "POST "*/issues*) POST_BODY="$3" ;;
+    *)                printf '%s' '{}' ;;
+  esac
+}
+PROPOSAL_GET=$(jq -c -n --arg m "$CEO_PROPOSAL_MARKER" '[
+  {number:1, pull_request:null, body:("proposal a\n"+$m)},
+  {number:2, pull_request:null, body:"human-filed, no marker"},
+  {number:3, pull_request:null, body:("proposal b\n"+$m)}]')
+eq "throttle: counts only marked proposals" 2 "$(ceo_open_proposals_count acme/x)"
+PROPOSAL_GET='[]'
+eq "throttle: none open -> 0"               0 "$(ceo_open_proposals_count acme/x)"
+
+ceo_file_proposal "acme/x" "Add related-games links" "scope + acceptance" "joshtronic"
+eq  "file: title in payload"      "Add related-games links" "$(jq -r '.title' <<<"$POST_BODY")"
+eq  "file: assigned to the human" "joshtronic"              "$(jq -r '.assignees[0]' <<<"$POST_BODY")"
+eq  "file: unlabeled"             "0"                       "$(jq -r '(.labels // []) | length' <<<"$POST_BODY")"
+has "file: body carries marker"   "$(jq -r '.body' <<<"$POST_BODY")" "$CEO_PROPOSAL_MARKER"
 
 # ---- summary ------------------------------------------------------------
 echo

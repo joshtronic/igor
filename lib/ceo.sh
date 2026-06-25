@@ -124,7 +124,11 @@ _ceo_parse_issues() {
     body=$(printf '%s\n' "$chunk" | awk 'p { print } /^[[:space:]]*TITLE:/ { p = 1 }' | _ceo_trim_blanks)
     issues=$(jq -c --arg t "$title" --arg b "$body" '. + [{title:$t, body:$b}]' <<<"$issues")
   done < <(printf '%s' "${rest#*===ISSUE===}" | awk 'BEGIN { RS = "===ISSUE===" } { printf "%s\0", $0 }')
-  printf '%s' "$issues"
+  # Cap at 2 harness-side -- enforce the directive's "up to two" rather than
+  # trusting model restraint. A misbehaving/poisoned model emitting N blocks
+  # would otherwise have N issues filed; the human label gate bounds the blast
+  # radius, but we enforce the limit regardless.
+  jq -c '.[:2]' <<<"$issues"
 }
 
 # ceo_parse_response <raw>
