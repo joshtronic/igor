@@ -2484,11 +2484,10 @@ review_parse_response() {
 }
 
 do_review_tick() {
-  # Find the first open bot PR -- across the ANALYSIS set, not the
-  # validated work set -- whose live head hasn't been reviewed yet.
-  # Analysis, not validated, because a verdict is pure information and
-  # useful on EVERY repo (this harness's own PRs included); the
-  # validation gate only matters once a verdict becomes a MERGE signal.
+  # Find the first open bot PR -- across the VALIDATED set -- whose live
+  # head hasn't been reviewed yet. Unvalidated repos (incl. onboarding-
+  # open) are skipped: a verdict there can never become a merge signal,
+  # so it's just bot footprint on a not-ready repo.
   # One review per tick; first un-reviewed head wins, then we exit the
   # cascade like every other pass.
   local repo_line repo prs pr_num pr_json head_sha key reviewed_sha
@@ -2497,6 +2496,7 @@ do_review_tick() {
     [ -n "$target_repo" ] && break
     [ -z "$repo_line" ] && continue
     repo=$(jq -r '.full_name' <<<"$repo_line")
+    maintenance_repo_validated "$repo" || continue
     prs=$(forgejo_list_open_bot_prs "$repo" "$BOT_USER" 2>/dev/null || echo '[]')
     while read -r pr_num; do
       [ -n "$target_repo" ] && break

@@ -268,9 +268,9 @@ respective tools on the host; install or skip.
   assignment is the turn marker (issue-type recovery and pull-type
   pickup don't collide). Patch-id dedup: a head that is only a
   base-merge (same net diff) is recorded as seen but NOT re-reviewed.
-  Runs on the ANALYSIS set, not the validated work set: a verdict is
-  information, useful on every repo (this harness's own PRs included);
-  the validation gate only bites once a verdict becomes a MERGE signal.
+  Runs on the VALIDATED set: unvalidated repos (including onboarding-
+  open repos) are skipped -- a verdict there can never graduate to a
+  merge signal, so it's just bot footprint on a not-ready repo.
   Per-SHA dedup under `.review` in `discretionary-state.json`; the
   per-sha comment marker (`<!-- review sha=... -->`) is the crash-safety
   net against a duplicate post on a crash-between-post-and-record. The
