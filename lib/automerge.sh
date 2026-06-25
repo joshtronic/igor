@@ -2,7 +2,9 @@
 # automerge.sh -- auto-merge-on-approve + the deploy barrier. Sourced by bin/tick.sh.
 #
 # "After you approve, your job ends." A repo opts in by CONVENTION: a root
-# AUTOMERGE_SMOKE_FILE holding its live URL marks it auto-merge-eligible. The
+# agent.json (AGENT_CONFIG_FILE) carrying a `.smoke.url` marks it
+# auto-merge-eligible -- agent.json is the shared per-repo machine-config dossier
+# (each feature reads its own key). The
 # harness merges a bot PR ONLY when the human (FORGEJO_REVIEWER) has submitted an
 # APPROVED review, CI is green on the head, it is cleanly mergeable, and the
 # shadow verdict is not REQUEST_CHANGES. On merge it stamps a pending deploy
@@ -19,7 +21,7 @@
 # self-deploy could crash the very tick meant to smoke-test it), so igor stays a
 # manual merge. No-ops cleanly when no repo opts in.
 
-AUTOMERGE_SMOKE_FILE="smoke-url"                              # repo root; presence = eligible
+AGENT_CONFIG_FILE="agent.json"                               # repo root; per-repo machine-config dossier (jq-parsed)
 AUTOMERGE_SMOKE_MAX_ATTEMPTS=5                                # propagation grace before a smoke alert
 AUTOMERGE_CI_MAX_ATTEMPTS=30                                  # ~30 ticks before a never-reporting deploy CI self-heals
 AUTOMERGE_SELF_REPO="${AUTOMERGE_SELF_REPO:-joshtronic/igor}" # never auto-merge the harness
@@ -29,13 +31,14 @@ if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*"; }; fi
 
 _deploy_state_file() { echo "${AGENT_STATE_DIR:-$HOME/.local/state/agent}/discretionary-state.json"; }
 
-# automerge_smoke_url <repo> -- the live URL declared in the repo's smoke-url
-# file (first http(s) token), or empty: not eligible, or the harness's own repo.
+# automerge_smoke_url <repo> -- the live URL from the repo's agent.json
+# `.smoke.url`, or empty: not eligible (no agent.json / no .smoke.url), or the
+# harness's own repo.
 automerge_smoke_url() {
   local repo="$1"
   [ "$repo" = "$AUTOMERGE_SELF_REPO" ] && return 0
-  forgejo_repo_get_file "$repo" "$AUTOMERGE_SMOKE_FILE" 2>/dev/null \
-    | grep -m1 -oE 'https?://[^[:space:]]+' || true
+  forgejo_repo_get_file "$repo" "$AGENT_CONFIG_FILE" 2>/dev/null \
+    | jq -r '.smoke.url // empty' 2>/dev/null || true
 }
 
 # automerge_approved_by <repo> <pr> <user> -- exit 0 if <user>'s CURRENT review

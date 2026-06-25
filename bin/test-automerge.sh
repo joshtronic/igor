@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test-automerge.sh -- unit tests for lib/automerge.sh: the smoke-url opt-in, the
+# test-automerge.sh -- unit tests for lib/automerge.sh: the agent.json opt-in, the
 # approval/CI/mergeable gates, the live-URL smoke, the deploy-barrier state
 # machine (the riskiest logic), and do_automerge_tick's merge decision. Skip-safe:
 # needs jq; exits 0 with a notice if absent, like the other bin/test-*.sh. Every
@@ -21,12 +21,14 @@ ok() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  + %s\n' "$d"
 no() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (expected rc!=0)\n' "$d"; FAIL=$((FAIL + 1)); else printf '  + %s\n' "$d"; fi; }
 eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
 
-echo "== smoke-url opt-in =="
-forgejo_repo_get_file() { printf '%s\n' "https://porksicle.com"; }
-eq "smoke_url: extracts the URL"          "https://porksicle.com" "$(automerge_smoke_url acme/site)"
-eq "smoke_url: self repo never eligible"  ""                      "$(automerge_smoke_url "$AUTOMERGE_SELF_REPO")"
+echo "== agent.json (.smoke.url) opt-in =="
+forgejo_repo_get_file() { printf '%s' '{"smoke":{"url":"https://porksicle.com"}}'; }
+eq "smoke_url: extracts .smoke.url"        "https://porksicle.com" "$(automerge_smoke_url acme/site)"
+eq "smoke_url: self repo never eligible"   ""                      "$(automerge_smoke_url "$AUTOMERGE_SELF_REPO")"
+forgejo_repo_get_file() { printf '%s' '{"feedback":{"csv":"x"}}'; }
+eq "smoke_url: agent.json without .smoke -> empty" ""              "$(automerge_smoke_url acme/site)"
 forgejo_repo_get_file() { return 1; }
-eq "smoke_url: no file -> empty"          ""                      "$(automerge_smoke_url acme/site)"
+eq "smoke_url: no agent.json -> empty"     ""                      "$(automerge_smoke_url acme/site)"
 
 echo "== approval / mergeable gates =="
 _fj() { printf '%s' "$FJ"; }
@@ -136,7 +138,7 @@ eq "automerge: RC records nothing"          ""        "$(jq -r '.deploy.repo // 
 
 echo "== do_automerge_tick multi-repo iteration (production stream shape) =="
 # VALIDATED_REPOS_JSON is a NEWLINE-DELIMITED STREAM, not an array. The loop must
-# iterate every line: skip the first repo (no smoke-url -> ineligible) and merge
+# iterate every line: skip the first repo (no agent.json -> ineligible) and merge
 # the eligible second one. A single-object stub can't catch a broken iteration.
 VALIDATED_REPOS_JSON="$(printf '%s\n%s\n' '{"full_name":"acme/first"}' '{"full_name":"acme/second"}')"
 automerge_smoke_url() { case "$1" in acme/second) echo "https://x" ;; *) echo "" ;; esac; }

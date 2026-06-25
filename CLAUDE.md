@@ -318,8 +318,10 @@ respective tools on the host; install or skip.
   "start tight, loosen as trust earns it."
 - The auto-merge + deploy barrier (`lib/automerge.sh`, Phase 1) is the "after you
   approve, your job ends" step -- convention opt-in like the CEO/logwatch: a repo
-  is auto-merge-eligible IFF it carries a root `smoke-url` file declaring its live
-  URL. `do_automerge_tick` merges a bot PR only when the human (`FORGEJO_REVIEWER`)
+  is auto-merge-eligible IFF its root `agent.json` (`AGENT_CONFIG_FILE` -- the
+  shared per-repo machine-config dossier, jq-parsed; each feature reads its own
+  key) carries a `.smoke.url` declaring its live URL. `do_automerge_tick` merges a
+  bot PR only when the human (`FORGEJO_REVIEWER`)
   has an APPROVED review, CI is green on the head, it's cleanly mergeable, AND the
   shadow verdict isn't `REQUEST_CHANGES` (an RC blocks the merge even past a human
   approve); it then stamps a pending deploy under `.deploy`. `do_deploy_barrier`
@@ -334,7 +336,7 @@ respective tools on the host; install or skip.
   auto-revert.** NEVER the harness's own repo: a watcher can't reliably watch
   itself (a broken self-deploy could crash the very tick meant to smoke-test it),
   so igor stays a manual merge -- enforced by `AUTOMERGE_SELF_REPO` AND by having
-  no `smoke-url`. Clear `.deploy` to abandon a stuck deploy.
+  no `agent.json` `.smoke.url`. Clear `.deploy` to abandon a stuck deploy.
 
 ## Off-limits
 
