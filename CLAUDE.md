@@ -277,7 +277,11 @@ respective tools on the host; install or skip.
   verdict is a `VERDICT:` label-line + `===BODY===` sentinel parsed
   harness-side (`review_parse_response`), never model-written JSON. CI
   status for the head rides into both the prompt and the recorded
-  verdict. NEVER auto-merge this harness's own repo -- self-deploy +
+  verdict -- and the pass WAITS for CI to settle (success/failure/error)
+  before reviewing at all: a pending build can't be assessed, so a
+  not-yet-settled head is skipped (re-checked next tick) rather than
+  burned on a useless "CI pending, re-run" verdict. NEVER auto-merge this
+  harness's own repo -- self-deploy +
   blast radius means it stays a human gate regardless of verdict. Clear
   a PR's `.review` entry to force a re-review.
 - The CEO board digest (`do_ceo_tick`) is convention-driven with NO env

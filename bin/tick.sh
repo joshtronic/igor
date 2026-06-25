@@ -2534,7 +2534,7 @@ do_review_tick() {
   # One review per tick; first un-reviewed head wins, then we exit the
   # cascade like every other pass.
   local repo_line repo prs pr_num pr_json head_sha key reviewed_sha
-  local target_repo="" target_num="" target_sha="" target_json=""
+  local target_repo="" target_num="" target_sha="" target_json="" target_ci=""
   while IFS= read -r repo_line; do
     [ -n "$target_repo" ] && break
     [ -z "$repo_line" ] && continue
@@ -2550,6 +2550,15 @@ do_review_tick() {
       key="${repo}#${pr_num}"
       reviewed_sha=$(review_reviewed_sha "$key")
       [ "$reviewed_sha" = "$head_sha" ] && continue
+      # Wait for CI to settle before reviewing: a pending build can't be
+      # assessed, and reviewing now burns the head on a useless "CI pending,
+      # re-run" verdict. Skip this candidate; re-check it (or a now-ready one)
+      # next tick.
+      target_ci=$(forgejo_commit_status "$repo" "$head_sha" 2>/dev/null)
+      case "$target_ci" in
+        success|failure|error) ;;
+        *) log "review: ${repo}#${pr_num} head ${head_sha:0:8} CI not settled (${target_ci:-none}) -- waiting"; continue ;;
+      esac
       target_repo="$repo"; target_num="$pr_num"; target_sha="$head_sha"; target_json="$pr_json"
     done < <(jq -r '.[].number' <<<"$prs" 2>/dev/null)
   done <<<"$ANALYSIS_REPOS_JSON"
@@ -2604,7 +2613,7 @@ do_review_tick() {
     return 1
   fi
 
-  ci=$(forgejo_commit_status "$target_repo" "$target_sha" 2>/dev/null)
+  ci="$target_ci"   # already fetched + confirmed settled during selection
   [ -n "$ci" ] || ci="unknown"
   title=$(jq -r '.title // ""' <<<"$target_json")
   body=$(jq -r '.body // ""' <<<"$target_json")
