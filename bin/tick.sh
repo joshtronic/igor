@@ -104,6 +104,7 @@ unset env_file_hint
 . "$AGENT_HOME/lib/espn.sh"
 # shellcheck source=lib/sports-digest.sh
 . "$AGENT_HOME/lib/sports-digest.sh"
+. "$AGENT_HOME/lib/ceo.sh"
 
 # Children invocations (agent-* helper scripts) share our tick id
 # so cost-ledger entries from child processes group with the
@@ -2021,6 +2022,66 @@ do_sports_tick() {
   return 1
 }
 
+# -- CEO weekly board digest (weekly, per-repo, convention opt-in) ------
+#
+# For each analysis-set repo carrying a .agent/ceo.md mandate -- the
+# mandate's mere presence IS the opt-in, like logwatch's systemd/ dir --
+# once per ISO week: read the mandate + gather the week's activity, one
+# claude_call writes the board digest, emailed to CEO_RECIPIENTS (falling
+# back to SEO_PRIMARY_EMAIL). Phase 1 is strictly read-only -- no issue-
+# filing/steering yet, per the mandate's "start tight, loosen as trust
+# earns it" rope.
+#
+# One repo per tick (return 0 exits the cascade), so several managed repos
+# digest over successive ticks; per-repo weekly stamp under .ceo. Uses
+# claude_call, so it's already below the tick's health gate. Returns 0 if a
+# digest was sent, 1 otherwise.
+do_ceo_tick() {
+  [ -n "${SMTP2GO_API_KEY:-}" ] && [ -n "${SMTP2GO_SENDER:-}" ] || return 1
+  local recipients="${CEO_RECIPIENTS:-${SEO_PRIMARY_EMAIL:-}}"
+  [ -n "$recipients" ] || return 1
+
+  local since directive repo_line repo mandate activity prompt raw parsed subject body html attempt
+  since=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)
+  directive=$(cat "$AGENT_HOME/bin/lib/ceo-digest-directive.md")
+
+  while IFS= read -r repo_line; do
+    [ -n "$repo_line" ] || continue
+    repo=$(jq -r '.full_name' <<<"$repo_line" 2>/dev/null)
+    [ -n "$repo" ] || continue
+    ceo_week_done "$repo" && continue              # already digested this ISO week
+    ceo_repo_has_mandate "$repo" || continue       # convention opt-in: .agent/ceo.md
+
+    mandate=$(ceo_read_mandate "$repo")
+    [ -n "$mandate" ] || continue
+    activity=$(ceo_gather_week "$repo" "$since")
+    prompt=$(ceo_build_prompt "$repo" "$mandate" "$activity" "$since")
+
+    parsed=""
+    for attempt in 1 2; do
+      raw=$(claude_call "$AGENT_MODEL" "ceo-digest" 8000 "$directive" "$prompt" 0) || {
+        log "ceo: digest call failed for ${repo} (attempt ${attempt})"; continue; }
+      if parsed=$(ceo_parse_response "$raw"); then break; fi
+      log "ceo: unparseable digest for ${repo} (attempt ${attempt})"
+      parsed=""
+    done
+    [ -n "$parsed" ] || { log "ceo: no usable digest for ${repo} this tick"; continue; }
+
+    subject=$(jq -r '.subject // ""' <<<"$parsed")
+    [ -n "$subject" ] && subject="[CEO] ${subject}" || subject="[CEO] ${repo} -- weekly board digest"
+    body=$(jq -r '.body' <<<"$parsed")
+    html=$(ceo_render_html <<<"$body")
+    if email_send "$subject" "$html" "$body" "$recipients"; then
+      ceo_mark_week_done "$repo"
+      log "ceo: emailed board digest for ${repo} to ${recipients}"
+      return 0
+    fi
+    log "warning: ceo: email failed for ${repo} -- will retry next tick"
+  done <<<"$ANALYSIS_REPOS_JSON"
+
+  return 1
+}
+
 # -- Claude auth/usage health canary -----------------------------
 #
 # Every model call now bills the operator's Claude subscription; if
@@ -3480,6 +3541,16 @@ fi
 # sits below the health gate and goes dark with the rest of the model
 # work during a cooldown.
 if do_sports_tick; then
+  exit 0
+fi
+
+# Weekly CEO board digest. Convention opt-in, no env knob: any
+# analysis-set repo carrying a .agent/ceo.md mandate is under CEO
+# management (the mandate's presence IS the opt-in). Once per ISO week
+# per repo, it reads the mandate + gathers the week and emails a board
+# digest to CEO_RECIPIENTS. A model call, so it's below the health gate;
+# Phase 1 is read-only (no issue-filing/steering yet).
+if do_ceo_tick; then
   exit 0
 fi
 
