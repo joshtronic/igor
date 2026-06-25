@@ -21,6 +21,7 @@
 
 AUTOMERGE_SMOKE_FILE="smoke-url"                              # repo root; presence = eligible
 AUTOMERGE_SMOKE_MAX_ATTEMPTS=5                                # propagation grace before a smoke alert
+AUTOMERGE_CI_MAX_ATTEMPTS=30                                  # ~30 ticks before a never-reporting deploy CI self-heals
 AUTOMERGE_SELF_REPO="${AUTOMERGE_SELF_REPO:-joshtronic/igor}" # never auto-merge the harness
 
 # Fallback logger so this module is sourceable standalone (tests).
@@ -37,12 +38,28 @@ automerge_smoke_url() {
     | grep -m1 -oE 'https?://[^[:space:]]+' || true
 }
 
-# automerge_approved_by <repo> <pr> <user> -- exit 0 if <user> has a current
-# APPROVED review on the PR (the human green-light).
+# automerge_approved_by <repo> <pr> <user> -- exit 0 if <user>'s CURRENT review
+# on the PR is an APPROVED (the human green-light). NOT "ever approved": Forgejo
+# keeps the full review history, so an old APPROVED followed by a later
+# REQUEST_CHANGES must NOT count as approval. We key on the user's LATEST
+# decision review (APPROVED / REQUEST_CHANGES -- a COMMENT review never changes
+# the verdict) and trust Forgejo's own `stale`/`dismissed` flags, the same way
+# the REQUEST_CHANGES pickup in tick.sh does. A dismissed review is dropped (it
+# was explicitly withdrawn); a stale APPROVED does not merge (the head moved past
+# what the human looked at). So a walked-back approval can never auto-merge.
 automerge_approved_by() {
   local repo="$1" pr="$2" user="$3"
   _fj GET "/repos/${repo}/pulls/${pr}/reviews" 2>/dev/null \
-    | jq -e --arg u "$user" 'any(.[]?; (.user.login == $u) and (.state == "APPROVED"))' >/dev/null 2>&1
+    | jq -e --arg u "$user" '
+        [ .[]?
+          | select(.user.login == $u)
+          | select((.dismissed // false) == false)
+          | select(.state == "APPROVED" or .state == "REQUEST_CHANGES")
+        ]
+        | sort_by(.submitted_at)
+        | last
+        | (. != null) and (.state == "APPROVED") and ((.stale // false) == false)
+      ' >/dev/null 2>&1
 }
 
 # automerge_mergeable <repo> <pr> -- exit 0 if the PR is open AND cleanly mergeable.
@@ -73,7 +90,7 @@ _deploy_record() {
   sf=$(_deploy_state_file); [ -f "$sf" ] || echo '{}' > "$sf"
   tmp=$(mktemp)
   jq --arg r "$repo" --arg p "$pr" --arg s "$sha" --arg u "$url" \
-    '.deploy = {repo:$r, pr:$p, sha:$s, url:$u, smoke_attempts:0}' "$sf" > "$tmp" && mv "$tmp" "$sf"
+    '.deploy = {repo:$r, pr:$p, sha:$s, url:$u, smoke_attempts:0, ci_attempts:0}' "$sf" > "$tmp" && mv "$tmp" "$sf"
 }
 
 # _deploy_clear -- drop the pending deploy.
@@ -109,12 +126,13 @@ and the live site."
 # pending, or once the deploy is verified healthy / has failed (alerted). Wire as
 # `do_deploy_barrier && exit 0` EARLY in the cascade.
 do_deploy_barrier() {
-  local sf repo sha url pr attempts ci tmp
+  local sf repo sha url pr attempts ci_attempts ci tmp
   sf=$(_deploy_state_file); [ -f "$sf" ] || return 1
   repo=$(jq -r '.deploy.repo // ""' "$sf" 2>/dev/null)
   [ -n "$repo" ] || return 1   # nothing deploying
   sha=$(jq -r '.deploy.sha // ""' "$sf"); url=$(jq -r '.deploy.url // ""' "$sf")
   pr=$(jq -r '.deploy.pr // ""' "$sf");  attempts=$(jq -r '.deploy.smoke_attempts // 0' "$sf")
+  ci_attempts=$(jq -r '.deploy.ci_attempts // 0' "$sf")
 
   ci=$(forgejo_commit_status "$repo" "$sha")
   case "$ci" in
@@ -122,8 +140,18 @@ do_deploy_barrier() {
     failure|error)
       _deploy_alert "$repo" "$pr" "$sha" "$url" "deploy CI reported ${ci}"
       _deploy_clear; return 1 ;;
-    *)            # pending / unknown -- still deploying
-      log "deploy: ${repo}#${pr} ${sha:0:8} CI=${ci:-unknown} -- still deploying, ending tick"
+    *)            # pending / unknown / no status posted -- still deploying, but bounded
+      ci_attempts=$((ci_attempts + 1))
+      if [ "$ci_attempts" -ge "$AUTOMERGE_CI_MAX_ATTEMPTS" ]; then
+        # A deploy whose SHA never gets a success/failure status (e.g. it posts a
+        # deployment, or a differently-named status context) would otherwise wedge
+        # the harness every minute forever. Alert + clear so it self-heals.
+        _deploy_alert "$repo" "$pr" "$sha" "$url" \
+          "deploy CI never reported success/failure after ${ci_attempts} checks (status=${ci:-none})"
+        _deploy_clear; return 1
+      fi
+      tmp=$(mktemp); jq --argjson a "$ci_attempts" '.deploy.ci_attempts = $a' "$sf" > "$tmp" && mv "$tmp" "$sf"
+      log "deploy: ${repo}#${pr} ${sha:0:8} CI=${ci:-unknown} (${ci_attempts}/${AUTOMERGE_CI_MAX_ATTEMPTS}) -- still deploying, ending tick"
       return 0 ;;
   esac
 
@@ -175,6 +203,11 @@ do_automerge_tick() {
       log "automerge: merged ${key} (approved by ${FORGEJO_REVIEWER}, CI green) -- watching deploy ${sha:0:8}"
       return 0
     done < <(jq -r '.[]?.number // empty' <<<"$prs")
+    # VALIDATED_REPOS_JSON is a NEWLINE-DELIMITED STREAM of repo objects (one per
+    # line), NOT a JSON array -- built that way in tick.sh and consumed the same
+    # way by maintenance_repo_validated. So `.full_name` runs per object; `.[]?`
+    # would error ("Cannot index string") on a stream. Multi-repo iteration is
+    # covered by test-automerge.sh.
   done < <(printf '%s' "${VALIDATED_REPOS_JSON:-}" | jq -r '.full_name // empty' 2>/dev/null)
   return 1
 }
