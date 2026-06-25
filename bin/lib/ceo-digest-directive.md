@@ -53,6 +53,22 @@ form of this digest's recommendations, against the TOP priorities. This is the
 - These are **proposals** a human greenlights or declines. Propose the single
   highest-leverage next step, not a wishlist.
 
+## Learning the board's calls — optional decision guidance
+
+The activity includes **the board's verdicts on your prior proposals** (greenlit
+/ declined / pending). When those reveal a clear, durable pattern in how the
+board decides — *not* a one-off — distill it into **one** short guidance entry to
+carry forward (e.g. "Greenlit growth/SEO leverage + the smoke test; declined
+catalog-padding — favor compounding-lever work over volume."). It's appended to
+the mandate's decision guidance, so future-you decides more like the board and
+asks less.
+
+- **Only on a real signal.** No clear pattern, too few verdicts, or nothing new
+  to add → emit nothing. One sharp line beats a vague one; never restate existing
+  mandate text.
+- It's a **proposal** the board ratifies by merging. Write it as standing
+  guidance, not a recap of this week.
+
 ## Output format — the harness parses this; match it exactly
 
 - The **first line** must be `SUBJECT: ` followed by a single-line subject that
@@ -63,7 +79,9 @@ form of this digest's recommendations, against the TOP priorities. This is the
 - Then, for each proposal (zero, one, or two), append a block: a line exactly
   `===ISSUE===`, then a line `TITLE: <single-line title>`, then the issue body in
   Markdown (scope, acceptance criteria, the priority it serves).
+- Finally, IF AND ONLY IF you have decision guidance to add, a line exactly
+  `===GUIDANCE===` followed by the single guidance line.
 
-Output nothing before `SUBJECT:`. Emit no `===ISSUE===` block when you are
-proposing nothing, and nothing after the final block. No code fence around the
-whole response.
+Output nothing before `SUBJECT:`. Emit no `===ISSUE===` block when proposing
+nothing and no `===GUIDANCE===` line when there's nothing to add; nothing after
+the final block. No code fence around the whole response.

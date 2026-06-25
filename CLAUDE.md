@@ -304,10 +304,18 @@ respective tools on the host; install or skip.
   them -- add the `Agent` label and unassign -- so the human merge/label gate is
   intact and a poisoned mandate can at worst mis-propose, never ship code.
   Throttle: a fresh batch is filed only when no proposal is still open
-  (`ceo_open_proposals_count` == 0), so they never pile up. STILL no direct
-  doc-edits or steering -- the CEO proposes, it does not commit; further agency
-  (auto-Agent-label, daily steering, mandate redlines) stays a deliberate,
-  human-gated step per the mandate's "start tight, loosen as trust earns it."
+  (`ceo_open_proposals_count` == 0), so they never pile up. **Phase 3 adds
+  decision-guidance redlines:** the same call may end with a `===GUIDANCE===`
+  line distilled from the board's verdicts on prior proposals (greenlit /
+  declined / pending, via `ceo_proposal_outcomes`); the harness **opens a PR**
+  appending it to a `## Decision guidance` section in `CEO.md`
+  (`ceo_open_guidance_pr` -- contents-API + new_branch, no clone) for the board
+  to merge. Append-only (it adds what it learned, never rewrites/erases),
+  throttled to one open guidance PR (`ceo_guidance_pr_open`), so `CEO.md` learns
+  how Josh decides over time. The CEO still never commits to `master` or merges --
+  it drafts (issues + redline PRs), the board ratifies; further agency
+  (auto-Agent-label, daily steering) stays a deliberate, human-gated step per
+  "start tight, loosen as trust earns it."
 
 ## Off-limits
 

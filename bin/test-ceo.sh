@@ -81,6 +81,16 @@ run_parse "$(printf 'SUBJECT: s\n===BODY===\nD.\n===ISSUE===\nTITLE: One\na\n===
 eq "clamp: 3 blocks capped to 2" 2     "$(jq '.issues | length' <<<"$OUT")"
 eq "clamp: keeps the first two"  "Two" "$(jq -r '.issues[1].title' <<<"$OUT")"
 
+# Phase 3: the ===GUIDANCE=== section
+run_parse "$(printf 'SUBJECT: s\n===BODY===\nThe digest.')"
+eq "guidance: absent -> empty" "" "$(jq -r '.guidance' <<<"$OUT")"
+run_parse "$(printf 'SUBJECT: s\n===BODY===\nThe digest.\n===GUIDANCE===\nFavor growth-lever work over volume.')"
+eq "guidance: parsed"           "Favor growth-lever work over volume." "$(jq -r '.guidance' <<<"$OUT")"
+eq "guidance: body excludes it" "The digest."                          "$(jq -r '.body' <<<"$OUT")"
+run_parse "$(printf 'SUBJECT: s\n===BODY===\nD.\n===ISSUE===\nTITLE: X\nbody\n===GUIDANCE===\nG line.')"
+eq "guidance: coexists with an issue (count)"    1        "$(jq '.issues | length' <<<"$OUT")"
+eq "guidance: coexists with an issue (guidance)" "G line." "$(jq -r '.guidance' <<<"$OUT")"
+
 # ---- ceo_render_html ----------------------------------------------------
 echo "== ceo_render_html =="
 html="$(ceo_render_html <<<"$(printf '## The win\n- ship **verify**\n\nA <tag> & co.')")"
@@ -158,6 +168,19 @@ eq  "file: title in payload"      "Add related-games links" "$(jq -r '.title' <<
 eq  "file: assigned to the human" "joshtronic"              "$(jq -r '.assignees[0]' <<<"$POST_BODY")"
 eq  "file: unlabeled"             "0"                       "$(jq -r '(.labels // []) | length' <<<"$POST_BODY")"
 has "file: body carries marker"   "$(jq -r '.body' <<<"$POST_BODY")" "$CEO_PROPOSAL_MARKER"
+
+# ---- ceo_proposal_outcomes (board verdicts -> the Phase-3 signal) --------
+echo "== ceo_proposal_outcomes =="
+PROPOSAL_GET=$(jq -c -n --arg m "$CEO_PROPOSAL_MARKER" '[
+  {title:"SEO links",   state:"open",   pull_request:null, labels:[{name:"Agent"}], body:("p\n"+$m)},
+  {title:"Catalog pad", state:"closed", pull_request:null, labels:[],               body:("p\n"+$m)},
+  {title:"Smoke test",  state:"open",   pull_request:null, labels:[],               body:("p\n"+$m)},
+  {title:"Human issue", state:"open",   pull_request:null, labels:[],               body:"no marker"}]')
+out="$(ceo_proposal_outcomes acme/x)"
+has   "outcomes: greenlit = Agent-labeled"    "$out" "- GREENLIT: SEO links"
+has   "outcomes: declined = closed, no label" "$out" "- DECLINED: Catalog pad"
+has   "outcomes: pending = open, no label"    "$out" "- PENDING: Smoke test"
+hasnt "outcomes: ignores non-proposals"       "$out" "Human issue"
 
 # ---- summary ------------------------------------------------------------
 echo

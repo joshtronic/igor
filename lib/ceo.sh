@@ -140,20 +140,29 @@ _ceo_parse_issues() {
 # Echoes harness-built JSON {subject, body, issues:[...]}; rc=1 if the sentinel
 # or body is missing (caller retries). Mirrors sports_parse_response.
 ceo_parse_response() {
-  local raw="$1" head rest body subject_line issues
+  local raw="$1" head rest body subject_line issues guidance
   case "$raw" in
     *'===BODY==='*) ;;
     *) return 1 ;;
   esac
   head="${raw%%===BODY===*}"
   rest="${raw#*===BODY===}"
+  # Phase 3: split off the optional ===GUIDANCE=== section (last, after any
+  # proposals) so body/issues parse from the remainder. Empty if absent.
+  guidance=""
+  case "$rest" in
+    *'===GUIDANCE==='*)
+      guidance=$(printf '%s\n' "${rest#*===GUIDANCE===}" | _ceo_trim_blanks)
+      rest="${rest%%===GUIDANCE===*}"
+      ;;
+  esac
   body="${rest%%===ISSUE===*}"            # digest = up to the first proposal block
   printf '%s' "$body" | grep -q '[^[:space:]]' || return 1
   body=$(printf '%s\n' "$body" | _ceo_trim_blanks)
   subject_line=$(printf '%s' "$head" | sed -n 's/^SUBJECT:[[:space:]]*//p' | head -1)
   issues=$(_ceo_parse_issues "$rest")
-  jq -n --arg s "$subject_line" --arg b "$body" --argjson i "${issues:-[]}" \
-    '{subject:$s, body:$b, issues:$i}'
+  jq -n --arg s "$subject_line" --arg b "$body" --argjson i "${issues:-[]}" --arg g "$guidance" \
+    '{subject:$s, body:$b, issues:$i, guidance:$g}'
 }
 
 # ceo_render_html <<< <markdown>
@@ -229,4 +238,66 @@ ceo_file_proposal() {
   payload=$(jq -n --arg t "$title" --arg b "$full" --arg a "$assignee" \
     '{title: $t, body: $b, assignees: [$a]}')
   _fj POST "/repos/${repo}/issues" "$payload" >/dev/null 2>&1
+}
+
+# ---- Phase 3: decision-guidance redlines (the CEO drafts, the board ratifies) ----
+# Weekly, the CEO observes how the board ruled on its prior proposals -- greenlit
+# (Agent-labeled), declined (closed, no label), pending -- distills ONE
+# decision-guidance entry, and opens a PR appending it to a "## Decision guidance"
+# section in CEO.md. APPEND-ONLY: it adds what it's learned, never rewrites or
+# erases existing guidance (a bad entry is at worst a bullet the board declines).
+# Josh prunes on merge. Throttled to one open PR so redlines never stack.
+CEO_GUIDANCE_MARKER="<!-- ceo-guidance -->"
+
+# ceo_proposal_outcomes <repo> -- markdown summary of the board's verdicts on the
+# CEO's prior proposals: the revealed-decision signal the model distills.
+ceo_proposal_outcomes() {
+  local repo="$1"
+  printf '### Board verdicts on prior CEO proposals\n'
+  _fj GET "/repos/${repo}/issues?state=all&type=issues&limit=50" 2>/dev/null \
+    | jq -r --arg m "$CEO_PROPOSAL_MARKER" '
+        [ .[]? | select(.pull_request == null) | select((.body // "") | contains($m)) ] as $p
+        | if ($p | length) == 0 then "- (no prior proposals yet)"
+          else ( $p[]
+            | (.labels // [] | map(.name)) as $l
+            | if ($l | index("Agent")) then "- GREENLIT: \(.title)"
+              elif .state == "closed" then "- DECLINED: \(.title)"
+              else "- PENDING: \(.title)" end ) end
+      ' 2>/dev/null || printf -- '- (none)\n'
+}
+
+# ceo_guidance_pr_open <repo> -- exit 0 if an open CEO guidance PR already exists
+# (head branch ceo-guidance-*), so we never stack unratified redlines.
+ceo_guidance_pr_open() {
+  local repo="$1"
+  forgejo_list_open_bot_prs "$repo" "$BOT_USER" 2>/dev/null \
+    | jq -e '[ .[]? | select((.head.ref // "") | startswith("ceo-guidance")) ] | length > 0' \
+        >/dev/null 2>&1
+}
+
+# ceo_open_guidance_pr <repo> <guidance> <reviewer> -- append <guidance> to the
+# "## Decision guidance" section of CEO.md (creating it if absent) and open a PR
+# assigned to <reviewer>. API-driven (contents PUT + new_branch, no clone).
+ceo_open_guidance_pr() {
+  local repo="$1" guidance="$2" reviewer="$3"
+  local meta sha content week branch base new_b64 put_body pr_body
+  meta=$(_fj GET "/repos/${repo}/contents/${CEO_MANDATE_PATH}" 2>/dev/null) || return 1
+  sha=$(jq -r '.sha // empty' <<<"$meta")
+  content=$(jq -r '.content // empty' <<<"$meta" | base64 -d 2>/dev/null)
+  [ -n "$sha" ] && [ -n "$content" ] || return 1
+  grep -q '^## Decision guidance' <<<"$content" \
+    || content="${content}"$'\n## Decision guidance\n'
+  week=$(date +%G-W%V)
+  content="${content}"$'\n- '"${week}: ${guidance}"
+  branch="ceo-guidance-${week}"
+  base=$(_fj GET "/repos/${repo}" 2>/dev/null | jq -r '.default_branch // "master"')
+  new_b64=$(printf '%s\n' "$content" | base64 -w0 2>/dev/null || printf '%s\n' "$content" | base64 | tr -d '\n')
+  put_body=$(jq -n --arg c "$new_b64" --arg m "chore(ceo): decision-guidance redline (${week})" \
+    --arg b "$base" --arg nb "$branch" --arg s "$sha" \
+    '{content:$c, message:$m, branch:$b, new_branch:$nb, sha:$s}')
+  _fj PUT "/repos/${repo}/contents/${CEO_MANDATE_PATH}" "$put_body" >/dev/null 2>&1 || return 1
+  pr_body=$(printf 'The CEO drafts; the board ratifies. Distilled from this week'"'"'s verdicts on its proposals -- proposed addition to **Decision guidance** in `%s`:\n\n> %s\n\nMerge to ratify, edit to refine, close to decline.\n%s' \
+    "$CEO_MANDATE_PATH" "$guidance" "$CEO_GUIDANCE_MARKER")
+  forgejo_open_pr "$repo" "$branch" "$base" \
+    "chore(ceo): decision-guidance redline (${week})" "$pr_body" "$reviewer" >/dev/null 2>&1
 }
