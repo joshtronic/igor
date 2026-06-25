@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# check-sync.sh -- Verify the AGENTS.md <-> tick.sh contract is in sync.
+# check-sync.sh -- Verify the AGENTS.md <-> tick.sh contract is in sync, then
+# run the repo's shell-function unit tests.
 #
 # Catches:
 #  1. Outcome sets diverge -- a branch in tick.sh marked with
@@ -7,9 +8,11 @@
 #     in AGENTS.md, and vice versa.
 #  2. Helper scripts referenced in AGENTS.md (anything matching
 #     `agent-*.sh`) must exist and be executable in `bin/`.
+#  3. Any bin/test-*.sh unit tests fail (each is self-contained and
+#     skip-safe -- a missing tool exits 0 -- so this stays the single CI gate).
 #
-# Exits 0 on success, 1 on any mismatch. Run by .forgejo/workflows/lint.yml
-# on every PR and push.
+# Exits 0 on success, 1 on any mismatch or test failure. Run by
+# .forgejo/workflows/lint.yml on every PR and push.
 
 set -euo pipefail
 
@@ -58,6 +61,18 @@ for h in $helpers; do
     FAIL=1
   else
     echo "+ bin/$h exists and is executable"
+  fi
+done
+
+# -- Unit tests -------------------------------------------------
+
+for t in bin/test-*.sh; do
+  [ -f "$t" ] || continue   # no matches -> the literal glob; skip it
+  if bash "$t"; then
+    echo "+ $t passed"
+  else
+    echo "x $t failed"
+    FAIL=1
   fi
 done
 

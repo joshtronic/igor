@@ -8,7 +8,8 @@ pickup, then Igor's own work (daily reading + blog post, weekly
 the code review, then
 scheduled maintenance, then the monthly GSC-driven SEO pass (opt-in),
 then the daily weekday market report (opt-in), then the daily
-sports digest (opt-in), then the daily logwatch self-report
+sports digest (opt-in), then the weekly CEO board digest
+(opt-in), then the daily logwatch self-report
 (opt-in), then the claimable-issue grind. Igor's own
 work comes first and is throttled (daily/weekly slots), so tickets
 soak up whatever time is left and roll over to the next day. The
@@ -50,6 +51,10 @@ sync check enforces the `AGENTS.md` <-> `tick.sh` contract: every
 `# OUTCOME: <label>` in tick.sh must have a matching
 `<!-- OUTCOME: <label> -->` in AGENTS.md, and every `agent-*.sh`
 referenced in AGENTS.md must exist and be executable in `bin/`.
+It then runs every `bin/test-*.sh` (shell-function unit tests, e.g.
+`bin/test-ceo.sh`); each is skip-safe, exiting 0 with a notice if a
+tool like `jq` is absent, so the single CI step covers the contract
+plus the units without going red on a minimal image.
 
 For deeper checks, `make lint` runs `shellcheck` on `bin/` + `lib/`
 and `markdownlint` on the markdown surface. Both require their
@@ -275,6 +280,27 @@ respective tools on the host; install or skip.
   verdict. NEVER auto-merge this harness's own repo -- self-deploy +
   blast radius means it stays a human gate regardless of verdict. Clear
   a PR's `.review` entry to force a re-review.
+- The CEO board digest (`do_ceo_tick`) is convention-driven with NO env
+  knob -- like logwatch and the review tick, the convention IS the opt-in:
+  any analysis-set repo carrying a root `.agent/ceo.md` mandate is under
+  autonomous CEO management (the mandate's mere presence opts it in, and
+  the mandate itself -- mission, ranked priorities, the authority "rope,"
+  guardrails -- is the system prompt). WEEKLY, one repo per tick: read the
+  mandate + gather that repo's week (PRs merged, issues opened/closed, the
+  open `Agent` queue), ONE `claude_call` on `AGENT_MODEL` writes a board
+  digest assessing the week against the mandate's priorities, emailed to
+  `CEO_RECIPIENTS` (falls back to `SEO_PRIMARY_EMAIL`; needs SMTP2GO). A
+  model call, so it sits BELOW the health gate and goes dark in a Claude
+  cooldown. Per-repo ISO-week stamp under `.ceo` in
+  `discretionary-state.json` (self-healing; one digest per repo per week,
+  so several managed repos digest over successive ticks); clear a repo's
+  `.ceo` entry to force a re-send. The digest is a `SUBJECT:` label-line +
+  `===BODY===` sentinel parsed harness-side (`ceo_parse_response`), never
+  model-written JSON. Phase 1 is STRICTLY read-only -- it reports, it does
+  not act: no issue-filing, no steering, no doc-edits. That agency is the
+  mandate's roadmap for later phases ("start tight, loosen as trust earns
+  it"); landing it is a deliberate, human-gated step, never an autonomous
+  expansion of what this pass writes.
 
 ## Off-limits
 
