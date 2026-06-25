@@ -282,7 +282,7 @@ respective tools on the host; install or skip.
   a PR's `.review` entry to force a re-review.
 - The CEO board digest (`do_ceo_tick`) is convention-driven with NO env
   knob -- like logwatch and the review tick, the convention IS the opt-in:
-  any analysis-set repo carrying a root `.agent/ceo.md` mandate is under
+  any analysis-set repo carrying a root `CEO.md` mandate is under
   autonomous CEO management (the mandate's mere presence opts it in, and
   the mandate itself -- mission, ranked priorities, the authority "rope,"
   guardrails -- is the system prompt). WEEKLY, one repo per tick: read the
