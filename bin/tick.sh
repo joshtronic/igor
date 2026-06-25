@@ -2050,8 +2050,9 @@ do_ceo_tick() {
     repo=$(jq -r '.full_name' <<<"$repo_line" 2>/dev/null)
     [ -n "$repo" ] || continue
     ceo_week_done "$repo" && continue              # already digested this ISO week
-    ceo_repo_has_mandate "$repo" || continue       # convention opt-in: .agent/ceo.md
 
+    # Convention opt-in: the .agent/ceo.md mandate's mere presence. Reading it
+    # and testing non-empty IS the opt-in gate -- one GET, no separate probe.
     mandate=$(ceo_read_mandate "$repo")
     [ -n "$mandate" ] || continue
     activity=$(ceo_gather_week "$repo" "$since")

@@ -17,16 +17,15 @@
 
 CEO_MANDATE_PATH=".agent/ceo.md"
 
-# ceo_read_mandate <repo> -- echo the mandate's raw content (empty if absent).
+# ceo_read_mandate <repo> -- echo the mandate's raw content, empty if absent.
+# This IS the opt-in probe: a present .agent/ceo.md returns its body, a missing
+# one 404s (_fj is `curl -sf` -> empty output, nonzero exit), so callers gate on
+# non-empty output (`[ -n "$mandate" ]`) and need no separate existence check.
+# The `|| true` swallows the 404's nonzero so the caller's `mandate=$(...)`
+# assignment doesn't trip `set -e` on every repo that hasn't opted in.
 ceo_read_mandate() {
   local repo="$1"
-  _fj GET "/repos/${repo}/raw/${CEO_MANDATE_PATH}" 2>/dev/null
-}
-
-# ceo_repo_has_mandate <repo> -- exit 0 iff the repo opts into CEO management.
-ceo_repo_has_mandate() {
-  local repo="$1"
-  _fj GET "/repos/${repo}/raw/${CEO_MANDATE_PATH}" >/dev/null 2>&1
+  _fj GET "/repos/${repo}/raw/${CEO_MANDATE_PATH}" 2>/dev/null || true
 }
 
 # ceo_gather_week <repo> <since_iso> -- echo a markdown summary of the repo's
@@ -159,6 +158,10 @@ ceo_mark_week_done() {  # <repo>
   f=$(ceo_state_file)
   [ -f "$f" ] || echo '{}' > "$f"
   tmp=$(mktemp)
-  jq --arg r "$repo" --arg w "$(date +%G-W%V)" \
-    '.ceo //= {} | .ceo[$r] = $w' "$f" > "$tmp" && mv "$tmp" "$f"
+  if jq --arg r "$repo" --arg w "$(date +%G-W%V)" \
+      '.ceo //= {} | .ceo[$r] = $w' "$f" > "$tmp"; then
+    mv "$tmp" "$f"
+  else
+    rm -f "$tmp"   # jq failed -- drop the temp instead of leaking it
+  fi
 }

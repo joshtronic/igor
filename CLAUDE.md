@@ -51,6 +51,10 @@ sync check enforces the `AGENTS.md` <-> `tick.sh` contract: every
 `# OUTCOME: <label>` in tick.sh must have a matching
 `<!-- OUTCOME: <label> -->` in AGENTS.md, and every `agent-*.sh`
 referenced in AGENTS.md must exist and be executable in `bin/`.
+It then runs every `bin/test-*.sh` (shell-function unit tests, e.g.
+`bin/test-ceo.sh`); each is skip-safe, exiting 0 with a notice if a
+tool like `jq` is absent, so the single CI step covers the contract
+plus the units without going red on a minimal image.
 
 For deeper checks, `make lint` runs `shellcheck` on `bin/` + `lib/`
 and `markdownlint` on the markdown surface. Both require their
