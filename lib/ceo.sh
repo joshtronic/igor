@@ -285,11 +285,17 @@ ceo_open_guidance_pr() {
   sha=$(jq -r '.sha // empty' <<<"$meta")
   content=$(jq -r '.content // empty' <<<"$meta" | base64 -d 2>/dev/null)
   [ -n "$sha" ] && [ -n "$content" ] || return 1
+  # Append-only: ensure the section exists, then append the bullet at the END of
+  # the file. Assumes "## Decision guidance" stays the LAST section of CEO.md (the
+  # harness only ever appends there); if a human moves it above other sections,
+  # new bullets would land under the wrong heading.
   grep -q '^## Decision guidance' <<<"$content" \
     || content="${content}"$'\n## Decision guidance\n'
   week=$(date +%G-W%V)
   content="${content}"$'\n- '"${week}: ${guidance}"
-  branch="ceo-guidance-${week}"
+  # week + epoch so a merged-but-undeleted same-week branch can't block a later
+  # redline on the new_branch PUT (the open-PR throttle doesn't cover that case).
+  branch="ceo-guidance-${week}-$(date +%s)"
   base=$(_fj GET "/repos/${repo}" 2>/dev/null | jq -r '.default_branch // "master"')
   new_b64=$(printf '%s\n' "$content" | base64 -w0 2>/dev/null || printf '%s\n' "$content" | base64 | tr -d '\n')
   put_body=$(jq -n --arg c "$new_b64" --arg m "chore(ceo): decision-guidance redline (${week})" \

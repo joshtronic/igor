@@ -182,6 +182,45 @@ has   "outcomes: declined = closed, no label" "$out" "- DECLINED: Catalog pad"
 has   "outcomes: pending = open, no label"    "$out" "- PENDING: Smoke test"
 hasnt "outcomes: ignores non-proposals"       "$out" "Human issue"
 
+# ---- ceo_open_guidance_pr (the redline builder -- the riskiest path) -----
+echo "== ceo_open_guidance_pr =="
+PUT_BODY=""
+GUIDANCE_CONTENTS=$(jq -c -n --arg c "$(printf '# CEO Mandate\n\n## Success metrics\n\nstuff\n' | base64 -w0)" '{content:$c, sha:"deadbeef"}')
+_fj() {  # GET contents -> canned; PUT contents -> capture the body; PR-open -> succeed
+  case "$1 $2" in
+    "GET "*/contents/*)  printf '%s' "$GUIDANCE_CONTENTS" ;;
+    "PUT "*/contents/*)  PUT_BODY="$3" ;;
+    "POST "*/pulls*)     printf '%s' '{"number":999}' ;;
+    "GET "*)             printf '%s' '{"default_branch":"master"}' ;;
+    *)                   printf '%s' '{}' ;;
+  esac
+}
+forgejo_open_pr() { return 0; }   # not under test here -- just succeed; we assert on the PUT body
+ceo_open_guidance_pr "acme/x" "Favor growth-lever work." "joshtronic" >/dev/null 2>&1 || true
+new="$(jq -r '.content' <<<"$PUT_BODY" | base64 -d 2>/dev/null)"
+has "redline: creates the Decision guidance header" "$new" "## Decision guidance"
+has "redline: appends the guidance bullet"          "$new" ": Favor growth-lever work."
+has "redline: new_branch is ceo-guidance-*"         "$(jq -r '.new_branch' <<<"$PUT_BODY")" "ceo-guidance-"
+eq  "redline: PUTs with the file sha"               "deadbeef" "$(jq -r '.sha' <<<"$PUT_BODY")"
+
+PUT_BODY=""
+GUIDANCE_CONTENTS=$(jq -c -n --arg c "$(printf '# CEO Mandate\n\n## Decision guidance\n\n- old entry\n' | base64 -w0)" '{content:$c, sha:"deadbeef"}')
+ceo_open_guidance_pr "acme/x" "Second entry." "joshtronic" >/dev/null 2>&1 || true
+new="$(jq -r '.content' <<<"$PUT_BODY" | base64 -d 2>/dev/null)"
+eq  "redline: header not duplicated when present" 1 "$(grep -c '## Decision guidance' <<<"$new")"
+has "redline: keeps the existing entry"           "$new" "- old entry"
+has "redline: appends the new entry"              "$new" ": Second entry."
+
+echo "== ceo_guidance_pr_open (throttle) =="
+BOT_USER="${BOT_USER:-igor}"   # ceo_guidance_pr_open passes it to the (stubbed) lister; bind it under set -u
+forgejo_list_open_bot_prs() { printf '%s' "$BOT_PRS"; }
+BOT_PRS='[{"head":{"ref":"ceo-guidance-2026-W26-1"}}]'
+if ceo_guidance_pr_open acme/x; then r=throttled; else r=open; fi
+eq "throttle: open ceo-guidance PR -> throttles" "throttled" "$r"
+BOT_PRS='[{"head":{"ref":"agent/12-fix"}}]'
+if ceo_guidance_pr_open acme/x; then r=throttled; else r=open; fi
+eq "throttle: no ceo-guidance PR -> proceeds"    "open"      "$r"
+
 # ---- summary ------------------------------------------------------------
 echo
 if [ "$fails" -eq 0 ]; then
