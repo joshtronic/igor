@@ -105,6 +105,8 @@ unset env_file_hint
 # shellcheck source=lib/sports-digest.sh
 . "$AGENT_HOME/lib/sports-digest.sh"
 . "$AGENT_HOME/lib/ceo.sh"
+# shellcheck source=lib/automerge.sh
+. "$AGENT_HOME/lib/automerge.sh"
 
 # Children invocations (agent-* helper scripts) share our tick id
 # so cost-ledger entries from child processes group with the
@@ -167,6 +169,11 @@ export SEO_DEBUG_DOMAIN="${SEO_DEBUG_DOMAIN:-}"
 # it; HEALTH_RECIPIENTS adds extra subscribers. With no recipients at all
 # (or no SMTP2GO creds) the alert is log-only.
 export HEALTH_RECIPIENTS="${HEALTH_RECIPIENTS:-}"
+
+# Auto-merge deploy alerts -- where the "auto-merged #N but the post-merge
+# deploy/smoke failed" email goes (see do_deploy_barrier). Additive like the
+# rest: PRIMARY_RECIPIENTS always gets it; ALERT_RECIPIENTS adds others.
+export ALERT_RECIPIENTS="${ALERT_RECIPIENTS:-}"
 
 # Market report -- opt-in daily (Mon-Fri) previous-trading-day prices
 # email via the marketstack EOD API + SMTP2GO. do_market_tick no-ops
@@ -2765,6 +2772,14 @@ build_deps_section() {
 # `|| true`: the canary must never kill a tick.
 
 do_health_tick || true
+
+# -- Deploy barrier + auto-merge (non-model: API + curl, so they run even
+# during a Claude health cooldown). The barrier watches an in-flight deploy and
+# ENDS the tick until it verifies -- so no long work starts mid-deploy; then
+# do_automerge_tick merges a human-approved PR on an opt-in repo and stamps the
+# next deploy. Both sit above the health gate, both one-thing-then-exit.
+do_deploy_barrier && exit 0
+do_automerge_tick && exit 0
 
 if claude_health_blocked; then
   log "claude health: backoff active (kind=$(claude_health_kind)) -- skipping all model work this tick"

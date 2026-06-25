@@ -316,6 +316,25 @@ respective tools on the host; install or skip.
   it drafts (issues + redline PRs), the board ratifies; further agency
   (auto-Agent-label, daily steering) stays a deliberate, human-gated step per
   "start tight, loosen as trust earns it."
+- The auto-merge + deploy barrier (`lib/automerge.sh`, Phase 1) is the "after you
+  approve, your job ends" step -- convention opt-in like the CEO/logwatch: a repo
+  is auto-merge-eligible IFF it carries a root `smoke-url` file declaring its live
+  URL. `do_automerge_tick` merges a bot PR only when the human (`FORGEJO_REVIEWER`)
+  has an APPROVED review, CI is green on the head, it's cleanly mergeable, AND the
+  shadow verdict isn't `REQUEST_CHANGES` (an RC blocks the merge even past a human
+  approve); it then stamps a pending deploy under `.deploy`. `do_deploy_barrier`
+  (run EARLY, above the health gate, as `do_deploy_barrier && exit 0`) watches it:
+  it polls CI, and while the deploy is still in flight it ENDS the tick -- the
+  1-minute cadence IS the polling loop, so no long work starts mid-deploy (one
+  deploy at a time, since the barrier sits above the work, including the
+  auto-merge step itself). On CI-green it smokes the live URL (a few ticks of
+  propagation grace before alerting), clearing on a 2xx/3xx and emailing
+  `ALERT_RECIPIENTS` on a failed CI or smoke. Both are non-model (API + curl), so
+  they run even during a Claude cooldown. **Phase 1 is alert-only -- NO
+  auto-revert.** NEVER the harness's own repo: a watcher can't reliably watch
+  itself (a broken self-deploy could crash the very tick meant to smoke-test it),
+  so igor stays a manual merge -- enforced by `AUTOMERGE_SELF_REPO` AND by having
+  no `smoke-url`. Clear `.deploy` to abandon a stuck deploy.
 
 ## Off-limits
 
