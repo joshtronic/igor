@@ -2582,7 +2582,19 @@ ${review_body}
         fi
         ;;
       REQUEST_CHANGES)
-        if [ "$rc_rounds" -ge 3 ]; then
+        local repo_validated=false
+        maintenance_repo_validated "$target_repo" && repo_validated=true
+        if [ "$repo_validated" = "false" ]; then
+          log "review: ${key} REQUEST_CHANGES on unvalidated repo -- requesting human instead of rework"
+          if [ -n "${FORGEJO_REVIEWER:-}" ]; then
+            forgejo_comment "$target_repo" "$target_num" \
+              "${target_repo} is not in the validated set (no CI / not validated), so autonomous rework cannot be CI-verified. Handing to you." 2>/dev/null \
+              || log "warning: review: unvalidated-repo comment failed on ${key}"
+            forgejo_request_review "$target_repo" "$target_num" "$FORGEJO_REVIEWER" 2>/dev/null \
+              || log "warning: review: review-request to ${FORGEJO_REVIEWER} failed on ${key} (unvalidated)"
+            log "review: ${key} requested review from ${FORGEJO_REVIEWER} (unvalidated repo)"
+          fi
+        elif [ "$rc_rounds" -ge 3 ]; then
           log "review: ${key} REQUEST_CHANGES rework_rounds=${rc_rounds} >= 3 -- escalating to human"
           if [ -n "${FORGEJO_REVIEWER:-}" ]; then
             forgejo_comment "$target_repo" "$target_num" \
@@ -2899,12 +2911,23 @@ while IFS= read -r repo_line; do
 done <<<"$VALIDATED_REPOS_JSON"
 
 # Signal 2: assignment dance (only if no request-changes signal fired)
+# Filter to validated repos only -- same rule as Signal 1. A bot-assigned
+# PR on an unvalidated repo must not be autonomously reworked+pushed.
 if [ -z "$REVIEW_PR" ] && [ -n "${FORGEJO_REVIEWER:-}" ]; then
   REVIEW_PRS=$(forgejo_my_assigned_prs 2>/dev/null || echo '[]')
   REVIEW_COUNT=$(jq 'length' <<<"$REVIEW_PRS")
   if [ "$REVIEW_COUNT" -gt 0 ]; then
-    REVIEW_PR=$(jq -c '.[0]' <<<"$REVIEW_PRS")
-    REVIEW_PR_TRIGGER="reassigned back to bot"
+    while read -r candidate_pr; do
+      [ -n "$REVIEW_PR" ] && break
+      [ -z "$candidate_pr" ] && continue
+      candidate_repo=$(jq -r '.repository.full_name' <<<"$candidate_pr")
+      if maintenance_repo_validated "$candidate_repo"; then
+        REVIEW_PR="$candidate_pr"
+        REVIEW_PR_TRIGGER="reassigned back to bot"
+      else
+        log "PR-review: skipping bot-assigned ${candidate_repo}#$(jq -r '.number' <<<"$candidate_pr") -- repo not validated"
+      fi
+    done < <(jq -c '.[]' <<<"$REVIEW_PRS" 2>/dev/null)
   fi
 fi
 
