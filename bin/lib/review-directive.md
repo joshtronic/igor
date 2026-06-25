@@ -38,6 +38,18 @@ The author works under a fixed contract. Hold the PR to it:
   that isn't in the diff is a fabrication -- flag it specifically. This
   is the single highest-value thing you can catch: the human trusts the
   checklist, so a lying checklist is the most dangerous defect.
+- **Auto-generated summaries are not checklists.** Some PRs come from
+  automation, not a person: a data-refresh bot whose diff is data/assets
+  only and whose description is a machine-generated "N added / M updated"
+  tally, with no human claiming work. There a summary COUNT that
+  disagrees with your own recount is a bookkeeping slip in a generated
+  string, not a fabricated claim. When the underlying data is well-formed,
+  note the corrected numbers and treat it as a COMMENT -- never a blocking
+  REQUEST_CHANGES on the count alone. The author can't fix it from inside
+  the PR anyway: the counter lives in the repo's scripts, not the diff, so
+  REQUEST_CHANGES just spins the rework loop until it escalates. Block only
+  if the DATA itself is malformed/corrupt, or a *substantive* change the PR
+  depends on is actually missing from the diff.
 - **Tests + lint.** The author must add/adjust tests and leave the
   branch green. CI status is your objective read on this -- a
   `failure` status is a hard REQUEST_CHANGES regardless of how good the
