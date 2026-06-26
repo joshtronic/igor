@@ -205,7 +205,7 @@ feedback_parse_response() {
 # to <assignee>, stamped as a feedback-triage ticket. Returns 0 on success.
 feedback_file_issue() {
   local repo="$1" title="$2" body="$3" assignee="$4" full payload
-  full=$(printf '%s\n\n---\n_Triaged from player feedback. **Greenlight:** add the `Agent` label and unassign. **Reject:** close._\n%s' \
+  full=$(printf '%s\n\n---\n_Triaged from player feedback. **Greenlight:** add the `Agent` label. **Reject:** close._\n%s' \
     "$body" "$FEEDBACK_MARKER")
   payload=$(jq -n --arg t "$title" --arg b "$full" --arg a "$assignee" \
     '{title:$t, body:$b, assignees:[$a]}')
