@@ -113,12 +113,16 @@ feedback_next_unprocessed() {
 # feedback_gather_context <repo> -- GENERIC dedup signal the model uses to judge
 # already-worked: recent CLOSED issues + recent commit subjects. No repo-specific
 # knowledge (no catalog, no file layout) -- the harness has none, and the model
-# takes the feedback's subject name as-given.
+# takes the feedback's subject name as-given. Our OWN feedback-triage tickets are
+# filtered out: a prior triage ticket (open or closed) is not evidence the bug was
+# fixed -- only a real fix (commit/PR) or a non-triage issue counts as done.
 feedback_gather_context() {
   local repo="$1"
   printf '### Recently CLOSED issues (was this already worked?)\n'
-  _fj GET "/repos/${repo}/issues?state=closed&type=issues&limit=30&sort=updated" 2>/dev/null \
-    | jq -r '.[]? | select(.pull_request == null) | "- #\(.number) \(.title)"' 2>/dev/null | head -30
+  _fj GET "/repos/${repo}/issues?state=closed&type=issues&limit=40&sort=updated" 2>/dev/null \
+    | jq -r '.[]? | select(.pull_request == null)
+        | select((.body // "") | test("agent:feedback-triage") | not)
+        | "- #\(.number) \(.title)"' 2>/dev/null | head -30
   printf '\n### Recent commits (was this already fixed?)\n'
   _fj GET "/repos/${repo}/commits?limit=30" 2>/dev/null \
     | jq -r '.[]? | "- \(.commit.message | split("\n")[0])"' 2>/dev/null | head -30
@@ -134,8 +138,10 @@ feedback_search_prior() {
   [ -n "$subject" ] && [ "$subject" != "(unknown)" ] || return 0
   q=$(jq -rn --arg s "$subject" '$s|@uri'); sl=$(printf '%s' "$subject" | tr '[:upper:]' '[:lower:]')
   printf '### Prior work mentioning "%s" (targeted search -- already done?)\n' "$subject"
-  _fj GET "/repos/${repo}/issues?state=closed&type=issues&q=${q}&limit=10" 2>/dev/null \
-    | jq -r '.[]? | select(.pull_request == null) | "- closed issue #\(.number): \(.title)"' 2>/dev/null | head -8
+  _fj GET "/repos/${repo}/issues?state=closed&type=issues&q=${q}&limit=15" 2>/dev/null \
+    | jq -r '.[]? | select(.pull_request == null)
+        | select((.body // "") | test("agent:feedback-triage") | not)
+        | "- closed issue #\(.number): \(.title)"' 2>/dev/null | head -8
   _fj GET "/repos/${repo}/commits?limit=120" 2>/dev/null \
     | jq -r --arg g "$sl" '.[]? | (.commit.message | split("\n")[0]) as $s
         | select(($s | ascii_downcase) | contains($g)) | "- commit: \($s)"' 2>/dev/null | head -8

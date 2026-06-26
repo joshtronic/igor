@@ -89,6 +89,21 @@ search_out=$(feedback_search_prior acme/x "Boar Dungeon")
 has "search: finds older prior work by name (commit grep)" "$search_out" "Boar Dungeon"
 eq  "search: empty subject -> nothing"  "" "$(feedback_search_prior acme/x "")"
 
+# A closed feedback-triage ticket is NOT proof of a fix -- it must be filtered out,
+# or the dedup drops real bugs as dupes of its own prior (or rejected) triage.
+_fj() {
+  case "$1 $2" in
+    "GET "*/issues*) printf '%s' '[{"number":99,"pull_request":null,"title":"Slide Swine: wrong tile","body":"x <!-- agent:feedback-triage -->"},{"number":12,"pull_request":null,"title":"Slide Swine real fix","body":"done"}]' ;;
+    *)               printf '%s' '[]' ;;
+  esac
+}
+sp=$(feedback_search_prior acme/x "Slide Swine")
+case "$sp" in
+  *"#99"*) printf '  x %s\n' "search: leaked our own feedback-triage ticket #99"; FAIL=$((FAIL + 1)) ;;
+  *)       printf '  + %s\n' "search: excludes our own feedback-triage ticket #99" ;;
+esac
+has "search: keeps the real (non-triage) closed issue #12" "$sp" "#12"
+
 echo "== file_issue (UNLABELED + assigned + marker) =="
 POST_BODY=""
 _fj() { case "$1 $2" in "POST "*/issues) POST_BODY="$3" ;; esac; }
