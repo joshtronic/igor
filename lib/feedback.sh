@@ -258,7 +258,7 @@ feedback_file_issue() {
 do_feedback_tick() {
   [ -n "${FORGEJO_REVIEWER:-}" ] || return 1
   command -v python3 >/dev/null 2>&1 || return 1   # CSV parsing needs it
-  local repo_line repo url rows row key context directive prompt raw parsed decision title body attempt
+  local repo_line repo url rows row_count row key context directive prompt raw parsed decision title body attempt
   local labels_json chosen label_ids
   while IFS= read -r repo_line; do
     [ -z "$repo_line" ] && continue
@@ -266,7 +266,8 @@ do_feedback_tick() {
     [ -n "$repo" ] || continue
     url=$(feedback_csv_url "$repo"); [ -n "$url" ] || continue          # not opted in
     rows=$(feedback_fetch_rows "$url")
-    [ "$(jq 'length' <<<"$rows" 2>/dev/null || echo 0)" -gt 0 ] || continue
+    row_count=$(jq 'length' <<<"$rows" 2>/dev/null | head -n1)
+    [ "${row_count:-0}" -gt 0 ] || continue
     row=$(feedback_next_unprocessed "$rows") || continue                # all triaged
     key=$(feedback_row_key "$row")
     labels_json=$(feedback_repo_labels "$repo")
