@@ -112,6 +112,12 @@ eq  "file: title in payload"    "T"    "$(jq -r '.title' <<<"$POST_BODY")"
 eq  "file: assigned to human"   "josh" "$(jq -r '.assignees[0]' <<<"$POST_BODY")"
 has "file: body carries marker" "$(jq -r '.body' <<<"$POST_BODY")" "$FEEDBACK_MARKER"
 eq  "file: UNLABELED at open"   "null" "$(jq -r '.labels // "null"' <<<"$POST_BODY")"
+# The greenlight footer must NOT tell the human to unassign -- the Agent label
+# alone is the claimable gate (find_claimable accepts assigned-to-reviewer).
+case "$(jq -r '.body' <<<"$POST_BODY")" in
+  *unassign*) printf '  x %s\n' "file: footer still instructs unassign"; FAIL=$((FAIL + 1)) ;;
+  *)          printf '  + %s\n' "file: footer does not instruct unassign" ;;
+esac
 
 echo "== do_feedback_tick decision =="
 export FORGEJO_REVIEWER=josh AGENT_MODEL_REVIEW=m

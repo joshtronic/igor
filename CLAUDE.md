@@ -246,8 +246,9 @@ respective tools on the host; install or skip.
   tickets per unit per day, filed on the owning repo UNLABELED and
   ASSIGNED to `FORGEJO_REVIEWER` with review time logged. The `Agent`
   label is the human's triage stamp, never the filing default:
-  greenlighting a ticket for Igor = add the label + unassign, and
-  until both happen claimable discovery can't see it. Stamped
+  greenlighting a ticket for Igor = add the label (that's the gate;
+  an Agent-labeled ticket still assigned to the reviewer is claimable,
+  so unassigning is optional cleanup, not required). Stamped
   attempted under `.logwatch` BEFORE any model call (slot semantics --
   no retry storm); clear `.logwatch` to re-run. When a greenlit ticket
   targets this repo, Igor PRs against its own harness -- safe only
@@ -305,7 +306,7 @@ respective tools on the host; install or skip.
   **UNLABELED issues assigned to `FORGEJO_REVIEWER`** (each stamped
   `CEO_PROPOSAL_MARKER`). `_ceo_parse_issues` **caps the count at two
   harness-side** -- the limit is enforced, never left to model restraint. They become real work only when the human greenlights
-  them -- add the `Agent` label and unassign -- so the human merge/label gate is
+  them -- add the `Agent` label (unassigning optional) -- so the human merge/label gate is
   intact and a poisoned mandate can at worst mis-propose, never ship code.
   Throttle: a fresh batch is filed only when no proposal is still open
   (`ceo_open_proposals_count` == 0), so they never pile up. **Phase 3 adds
@@ -357,7 +358,8 @@ respective tools on the host; install or skip.
   name is just a name, never "no such game"). It decides **DROP** (spam / vague /
   already-worked, judged from that context) or **FILE** (real + new), in which
   case the harness opens an UNLABELED issue assigned to `FORGEJO_REVIEWER`, who
-  greenlights (adds the `Agent` label, unassigns) or rejects (closes). Every row
+  greenlights (adds the `Agent` label; unassigning is optional) or rejects
+  (closes). Every row
   is stamped in a local seen-set (`.feedback.seen`, FIFO-capped) so it's triaged
   once; nothing is written back to the sheet (the issue tracker IS the status, so
   no status column). The human label gate bounds prompt-injection -- a poisoned

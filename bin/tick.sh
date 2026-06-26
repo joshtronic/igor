@@ -2243,8 +2243,10 @@ own once calls succeed again."
 # day. Tickets are filed on the owning repo UNLABELED and ASSIGNED to
 # FORGEJO_REVIEWER: the "Agent" label is the human's triage stamp,
 # never the filing default. Greenlighting a ticket for Igor = add the
-# Agent label + unassign; until both happen, claimable discovery
-# can't see it. Review time is logged on each filed ticket.
+# Agent label -- that's the gate. An Agent-labeled ticket still assigned
+# to the reviewer is claimable too (find_claimable accepts unassigned OR
+# assigned-to-reviewer), so unassigning is optional. Review time is
+# logged on each filed ticket.
 #
 # State: one ".logwatch" object {date} in discretionary-state.json.
 # Stamped once ATTEMPTED (slot semantics): a wedged pass must not
@@ -2417,9 +2419,10 @@ ${LOGWATCH_MARKER}"
       || { log "warning: logwatch ticket open failed on $repo (continuing)"; continue; }
     # Deliberately NO "Agent" label here: the label is the human's
     # triage stamp, not the filing default. The operator greenlights a
-    # ticket for Igor by adding the label AND unassigning -- until
-    # then it's doubly invisible to claimable discovery (which wants
-    # Agent-labeled AND unassigned).
+    # ticket for Igor by adding the label -- that's the gate. An
+    # Agent-labeled ticket still assigned to the reviewer is claimable
+    # (find_claimable accepts unassigned OR assigned-to-reviewer), so
+    # unassigning is optional, not required.
     forgejo_assign "$repo" "$num" "$FORGEJO_REVIEWER" 2>/dev/null \
       || log "warning: could not assign ${repo}#${num} to $FORGEJO_REVIEWER"
     forgejo_log_time "$repo" "$num" "$elapsed" 2>/dev/null \
@@ -3637,8 +3640,8 @@ fi
 # unit with entries; empty journal = runs elsewhere or didn't run =
 # skip). Hard-failure tickets land on the owning repo unlabeled and
 # assigned to FORGEJO_REVIEWER -- the human triages by adding the
-# Agent label and unassigning; until then the issue grind can't see
-# them.
+# Agent label (that's the gate; an Agent-labeled ticket still assigned
+# to the reviewer is claimable, so unassigning is optional).
 if do_logwatch_tick; then
   exit 0
 fi
