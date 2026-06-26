@@ -3819,7 +3819,14 @@ fi
 
 cd "$REPO_PATH"
 # (origin refs already refreshed by the preflight fetch above)
-git worktree add -b "$BRANCH" "$WORKTREE" "origin/${PR_BASE}"
+# -B (not -b) + prune: an orphaned prior tick can leave the branch behind, and
+# plain `-b` dies fatal (exit 255/EXCEPTION) on that collision -- crashing the
+# whole unit on a recoverable condition. -B reuses/resets the leftover branch to
+# the base; prune clears stale worktree registrations. The stale worktree *path*
+# is already guarded above; this guards the stale *branch* (matches the -B used
+# by the PR-rework and site-work worktree paths).
+git worktree prune 2>/dev/null || true
+git worktree add -B "$BRANCH" "$WORKTREE" "origin/${PR_BASE}"
 init_igor_scratch "$WORKTREE"
 
 # -- Invoke Claude ---------------------------------------------
