@@ -110,8 +110,10 @@ feedback_next_unprocessed() {
   return 1
 }
 
-# feedback_gather_context <repo> -- context the model uses to judge already-worked
-# + plausibility: recent CLOSED issues, recent commit subjects, the game list.
+# feedback_gather_context <repo> -- GENERIC dedup signal the model uses to judge
+# already-worked: recent CLOSED issues + recent commit subjects. No repo-specific
+# knowledge (no catalog, no file layout) -- the harness has none, and the model
+# takes the feedback's subject name as-given.
 feedback_gather_context() {
   local repo="$1"
   printf '### Recently CLOSED issues (was this already worked?)\n'
@@ -120,9 +122,23 @@ feedback_gather_context() {
   printf '\n### Recent commits (was this already fixed?)\n'
   _fj GET "/repos/${repo}/commits?limit=30" 2>/dev/null \
     | jq -r '.[]? | "- \(.commit.message | split("\n")[0])"' 2>/dev/null | head -30
-  printf '\n### Games in this repo\n'
-  forgejo_repo_get_file "$repo" "src/_data/games.json" 2>/dev/null \
-    | jq -r 'if type=="array" then .[]? else .games[]? end | "- \(.name // .title // .slug // .)"' 2>/dev/null | head -50
+}
+
+# feedback_search_prior <repo> <subject> -- targeted dedup signal: closed issues +
+# commits that MENTION the subject named in the feedback (e.g. a game title),
+# reaching past the recent-N window above. GENERIC: it searches the tracker by the
+# player's own term, not any repo layout -- this is what catches an already-fixed
+# report whose fix is old. Echoes a header + matches, or just the header if none.
+feedback_search_prior() {
+  local repo="$1" subject="$2" q sl
+  [ -n "$subject" ] && [ "$subject" != "(unknown)" ] || return 0
+  q=$(jq -rn --arg s "$subject" '$s|@uri'); sl=$(printf '%s' "$subject" | tr '[:upper:]' '[:lower:]')
+  printf '### Prior work mentioning "%s" (targeted search -- already done?)\n' "$subject"
+  _fj GET "/repos/${repo}/issues?state=closed&type=issues&q=${q}&limit=10" 2>/dev/null \
+    | jq -r '.[]? | select(.pull_request == null) | "- closed issue #\(.number): \(.title)"' 2>/dev/null | head -8
+  _fj GET "/repos/${repo}/commits?limit=120" 2>/dev/null \
+    | jq -r --arg g "$sl" '.[]? | (.commit.message | split("\n")[0]) as $s
+        | select(($s | ascii_downcase) | contains($g)) | "- commit: \($s)"' 2>/dev/null | head -8
 }
 
 # feedback_build_prompt <repo> <row_json> <context> -- the user message: repo
@@ -208,7 +224,7 @@ do_feedback_tick() {
     [ "$(jq 'length' <<<"$rows" 2>/dev/null || echo 0)" -gt 0 ] || continue
     row=$(feedback_next_unprocessed "$rows") || continue                # all triaged
     key=$(feedback_row_key "$row")
-    context=$(feedback_gather_context "$repo")
+    context=$(feedback_gather_context "$repo"; feedback_search_prior "$repo" "$(jq -r '.Game // ""' <<<"$row")")
     directive=$(cat "$AGENT_HOME/bin/lib/feedback-directive.md" 2>/dev/null)
     prompt=$(feedback_build_prompt "$repo" "$row" "$context")
     parsed=""

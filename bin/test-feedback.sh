@@ -78,6 +78,17 @@ eq "csv_url: extracts .feedback.csv" "https://x/pub?output=csv" "$(feedback_csv_
 forgejo_repo_get_file() { printf '%s' '{"smoke":{"url":"y"}}'; }
 eq "csv_url: no feedback key -> empty" "" "$(feedback_csv_url acme/x)"
 
+echo "== feedback_search_prior (generic targeted dedup search) =="
+_fj() {
+  case "$1 $2" in
+    "GET "*/commits*) printf '%s' '[{"commit":{"message":"fix(games): tap to start (Boar Dungeon + 4 more)\n\nbody"}}]' ;;
+    *)                printf '%s' '[]' ;;
+  esac
+}
+search_out=$(feedback_search_prior acme/x "Boar Dungeon")
+has "search: finds older prior work by name (commit grep)" "$search_out" "Boar Dungeon"
+eq  "search: empty subject -> nothing"  "" "$(feedback_search_prior acme/x "")"
+
 echo "== file_issue (UNLABELED + assigned + marker) =="
 POST_BODY=""
 _fj() { case "$1 $2" in "POST "*/issues) POST_BODY="$3" ;; esac; }
