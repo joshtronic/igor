@@ -167,6 +167,15 @@ ok "tick: DROP -> processed a row (rc0)" do_feedback_tick
 eq "tick: DROP filed nothing" "0" "$FILED"
 eq "tick: DROP stamped seen"  "1" "$(jq '(.feedback.seen // []) | length' "$STATE")"
 
+echo '{}' > "$STATE"; FILED=0
+# feedback_fetch_rows returning two JSON docs on separate lines used to make
+# jq 'length' output "0\n0", which [: -gt ] can't parse as an integer
+# ("integer expression expected"). The fix (head -n1 + ${:-0}) collapses it.
+feedback_fetch_rows() { printf '[]\n[]'; }
+no "tick: multiline rows output -> no crash (rc1 = nothing processed)" do_feedback_tick
+eq "tick: multiline rows output -> no issue filed" "0" "$FILED"
+feedback_fetch_rows() { echo '[{"Timestamp":"u1","Game":"g","Tell us more":"a real, specific bug"}]'; }
+
 if [ "$FAIL" -eq 0 ]; then echo "test-feedback: all checks passed"; exit 0; fi
 echo "test-feedback: $FAIL check(s) FAILED"
 exit 1
