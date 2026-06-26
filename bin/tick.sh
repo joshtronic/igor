@@ -2257,39 +2257,41 @@ own once calls succeed again."
 
 LOGWATCH_MARKER='<!-- agent:logwatch -->'
 
-logwatch_done_today() {
-  local state_file today
+logwatch_done_this_hour() {
+  local state_file hour
   state_file=$(discretionary_state_file)
   [ -f "$state_file" ] || return 1
-  today=$(date +%Y-%m-%d)
-  [ "$(jq -r '.logwatch.date // ""' "$state_file" 2>/dev/null)" = "$today" ]
+  hour=$(date -d '1 hour ago' +%Y-%m-%dT%H)   # the just-closed hour we review
+  [ "$(jq -r '.logwatch.hour // ""' "$state_file" 2>/dev/null)" = "$hour" ]
 }
 
 logwatch_mark_done() {
-  local state_file tmp today
+  local state_file tmp hour
   state_file=$(discretionary_state_file)
-  today=$(date +%Y-%m-%d)
+  hour=$(date -d '1 hour ago' +%Y-%m-%dT%H)
   [ -f "$state_file" ] || echo '{}' > "$state_file"
   tmp=$(mktemp)
-  jq --arg d "$today" '.logwatch = {date: $d}' "$state_file" > "$tmp"
+  jq --arg h "$hour" '.logwatch = {hour: $h}' "$state_file" > "$tmp"
   mv "$tmp" "$state_file"
 }
 
 # logwatch_review_unit <repo> <unit>
-# Review ONE unit's midnight-hour journal; file tickets on <repo>.
+# Review ONE unit's just-closed-hour journal; file tickets on <repo>.
 # Returns 0 if a model call ran (the tick did real work), 1 if the
 # unit was skipped (empty journal).
 logwatch_review_unit() {
   local repo="$1" unit="$2"
-  local today start journal
-  today=$(date +%F)
+  local win_start win_end win_label start journal
+  win_start=$(date -d '1 hour ago' '+%Y-%m-%d %H:00:00')   # the just-closed clock hour
+  win_end=$(date '+%Y-%m-%d %H:00:00')
+  win_label="$(date -d '1 hour ago' '+%Y-%m-%d %H:00')-$(date '+%H:00')"
   start=$(date +%s)
 
   journal=$(journalctl --user -u "$unit" \
-    --since "$today 00:00:00" --until "$today 01:00:00" \
+    --since "$win_start" --until "$win_end" \
     --no-pager 2>/dev/null | grep -v '^-- No entries --$' | tail -c 60000)
   if [ -z "$journal" ]; then
-    log "logwatch: ${unit}: no entries in the midnight hour -- skipping"
+    log "logwatch: ${unit}: no entries in the past hour -- skipping"
     return 1
   fi
 
@@ -2309,18 +2311,18 @@ Service-specific context -- this unit is the agent harness ITSELF
 ticket-worthy: market freshness holds / weekend / already-sent
 statuses; validation skips over open onboarding tickets; single
 "indeterminate (Forgejo API error)" validation lines; "no claimable
-work -- idle" ticks; cooldown waits; "midnight hour still open" /
-"already ran today" logwatch statuses. Claude auth/usage-limit
+work -- idle" ticks; cooldown waits; "already ran this hour" logwatch
+statuses. Claude auth/usage-limit
 backoffs and health alert emails ARE ticket-worthy.
 EOF
 )
   fi
 
   local system user
-  system="You are the nightly log reviewer for systemd services owned by an
+  system="You are the hourly log reviewer for systemd services owned by an
 unattended agent's operator. Each repo that runs as a service
 declares its unit files in-repo; you receive ONE service's journal
-for last night's batch window (00:00-01:00 local), plus dedup
+for the clock hour that just closed, plus dedup
 signals from the owning repo: open issue titles and recent commit
 subjects.
 
@@ -2368,7 +2370,7 @@ ${open_titles:-(none)}
 
 ${recent_commits:-(none)}
 
-## Journal: ${unit}, ${today} 00:00-01:00
+## Journal: ${unit}, ${win_label}
 
 ${journal}"
 
@@ -2413,7 +2415,7 @@ ${journal}"
 ---
 service: ${unit}
 severity: ${sev}
-window: ${today} 00:00-01:00 (filed by the nightly logwatch pass)
+window: ${win_label} (filed by the hourly logwatch pass)
 ${LOGWATCH_MARKER}"
     num=$(forgejo_open_issue "$repo" "$title" "$body") \
       || { log "warning: logwatch ticket open failed on $repo (continuing)"; continue; }
@@ -2434,25 +2436,20 @@ ${LOGWATCH_MARKER}"
 }
 
 do_logwatch_tick() {
-  # Window-completeness gate: the midnight hour must have closed.
-  # 10#: zero-padded %H must not parse as octal.
-  local hour; hour=$((10#$(date +%H)))
-  if [ "$hour" -lt 1 ]; then
-    log "logwatch: midnight hour still open -- continuing"
-    return 1
-  fi
-  if logwatch_done_today; then
-    log "logwatch: today's pass already ran -- continuing"
+  # We review the most recently CLOSED clock hour, so the window is always
+  # complete -- no partial reads, no midnight gate. Once per hour per unit.
+  if logwatch_done_this_hour; then
+    log "logwatch: this hour's pass already ran -- continuing"
     return 1
   fi
 
   if ! command -v journalctl >/dev/null 2>&1; then
-    log "logwatch: journalctl not available on this host -- marking done for today"
+    log "logwatch: journalctl not available on this host -- marking done for this hour"
     logwatch_mark_done
     return 1
   fi
 
-  # Attempted = done for the day, BEFORE any model call (see header).
+  # Attempted = done for this hour, BEFORE any model call (see header).
   logwatch_mark_done
 
   # Discovery: every bot-accessible repo that declares systemd units.
@@ -2474,7 +2471,7 @@ do_logwatch_tick() {
   done <<<"$ANALYSIS_REPOS_JSON"
 
   if [ "$reviewed" -eq 0 ]; then
-    log "logwatch: no service journals to review today -- continuing"
+    log "logwatch: no service journals to review this hour -- continuing"
     return 1
   fi
   log "logwatch: reviewed $reviewed service journal(s)"
@@ -3633,12 +3630,12 @@ if do_feedback_tick; then
   exit 0
 fi
 
-# Daily logwatch sweep (first tick after 01:00, once the midnight
-# batch hour has closed). Convention-driven, no env knob: every
-# bot-accessible repo declaring systemd/*.service gets each unit's
-# local midnight-hour journal reviewed (one review-tier call per
-# unit with entries; empty journal = runs elsewhere or didn't run =
-# skip). Hard-failure tickets land on the owning repo unlabeled and
+# Hourly logwatch sweep (once per clock hour, reviewing the hour that
+# just closed -- always a complete window, no midnight gate).
+# Convention-driven, no env knob: every bot-accessible repo declaring
+# systemd/*.service gets each unit's local past-hour journal reviewed
+# (one review-tier call per unit with entries; empty journal = runs
+# elsewhere or didn't run = skip). Hard-failure tickets land on the owning repo unlabeled and
 # assigned to FORGEJO_REVIEWER -- the human triages by adding the
 # Agent label (that's the gate; an Agent-labeled ticket still assigned
 # to the reviewer is claimable, so unassigning is optional).
