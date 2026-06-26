@@ -71,6 +71,8 @@ ALERTS=0
 export SMTP2GO_API_KEY=k SMTP2GO_SENDER=s
 recipients_with_primary() { printf 'josh@x'; }
 email_send() { ALERTS=$((ALERTS + 1)); return 0; }
+COMMENTS=0; COMMENT_BODY=""
+forgejo_comment() { COMMENTS=$((COMMENTS + 1)); COMMENT_BODY="$3"; return 0; }
 seed() { jq -n --arg r "$1" --argjson a "${2:-0}" --argjson c "${3:-0}" \
   '{deploy:{repo:$r,pr:"1",sha:"sha1",url:"https://x",smoke_attempts:$a,ci_attempts:$c}}' > "$STATE"; }
 
@@ -87,17 +89,21 @@ eq "barrier: CI-pending-exhausted alerted" "1"       "$ALERTS"
 eq "barrier: CI-pending-exhausted cleared" ""        "$(jq -r '.deploy.repo // ""' "$STATE")"
 
 forgejo_commit_status() { echo failure; }
-seed acme/x; ALERTS=0
+seed acme/x; ALERTS=0; COMMENTS=0; COMMENT_BODY=""
 no "barrier: CI failure -> falls through (rc1)"       do_deploy_barrier
 eq "barrier: CI failure alerted"           "1"       "$ALERTS"
+eq "barrier: CI failure posts a comment"   "1"       "$COMMENTS"
+has "barrier: failure comment says so"     "$COMMENT_BODY" "did NOT verify"
 eq "barrier: CI failure cleared .deploy"   ""        "$(jq -r '.deploy.repo // ""' "$STATE")"
 
 forgejo_commit_status() { echo success; }
 automerge_smoke() { return 0; }
-seed acme/x; ALERTS=0
+seed acme/x; ALERTS=0; COMMENTS=0; COMMENT_BODY=""
 no "barrier: CI green + smoke ok -> falls through"    do_deploy_barrier
 eq "barrier: healthy cleared .deploy"      ""        "$(jq -r '.deploy.repo // ""' "$STATE")"
 eq "barrier: healthy did not alert"        "0"       "$ALERTS"
+eq "barrier: healthy posts a confirm comment" "1"    "$COMMENTS"
+has "barrier: confirm comment says verified"  "$COMMENT_BODY" "verified"
 
 automerge_smoke() { return 1; }
 seed acme/x 0
@@ -111,6 +117,19 @@ eq "barrier: smoke-exhausted cleared"      ""        "$(jq -r '.deploy.repo // "
 
 echo '{}' > "$STATE"
 no "barrier: nothing pending -> falls through (rc1)"  do_deploy_barrier
+
+echo "== automerge_do_merge (merge body) =="
+MERGE_BODY=""
+_fj() {
+  case "$1 $2" in
+    "POST "*/merge) MERGE_BODY="$3" ;;
+    *) printf '%s' '{"merge_commit_sha":"deadbeef"}' ;;
+  esac
+}
+automerge_do_merge acme/x 5 > "$TMP/merge_sha"   # run in-shell (not $()) so MERGE_BODY persists
+eq  "do_merge: returns the merge sha"  "deadbeef" "$(cat "$TMP/merge_sha")"
+has "do_merge: Do=merge in the body"   "$MERGE_BODY" '"Do":"merge"'
+has "do_merge: deletes the branch"     "$MERGE_BODY" '"delete_branch_after_merge":true'
 
 echo "== do_automerge_tick merge decision =="
 export FORGEJO_REVIEWER=josh BOT_USER=igor

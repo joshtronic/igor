@@ -334,10 +334,13 @@ respective tools on the host; install or skip.
   1-minute cadence IS the polling loop, so no long work starts mid-deploy (one
   deploy at a time, since the barrier sits above the work, including the
   auto-merge step itself). On CI-green it smokes the live URL (a few ticks of
-  propagation grace before alerting), clearing on a 2xx/3xx and emailing
-  `ALERT_RECIPIENTS` on a failed CI or smoke. Both are non-model (API + curl), so
-  they run even during a Claude cooldown. **Phase 1 is alert-only -- NO
-  auto-revert.** NEVER the harness's own repo: a watcher can't reliably watch
+  propagation grace before alerting), clearing on a 2xx/3xx -- and posting a
+  **confirm comment on the merged PR** -- or emailing `ALERT_RECIPIENTS` (plus a
+  failure comment on the PR) on a failed CI or smoke. The merge itself passes
+  `delete_branch_after_merge` (the repo's "delete by default" is only a UI-form
+  default; an API merge must opt in explicitly), so the head branch is cleaned
+  up. Both are non-model (API + curl), so they run even during a Claude cooldown.
+  **Phase 1 is alert-only -- NO auto-revert.** NEVER the harness's own repo: a watcher can't reliably watch
   itself (a broken self-deploy could crash the very tick meant to smoke-test it),
   so igor stays a manual merge -- enforced by `AUTOMERGE_SELF_REPO` AND by having
   no `agent.json` `.smoke.url`. Clear `.deploy` to abandon a stuck deploy.

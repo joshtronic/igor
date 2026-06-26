@@ -76,7 +76,7 @@ automerge_mergeable() {
 # commit SHA on success; empty + nonzero on a failed merge API call.
 automerge_do_merge() {
   local repo="$1" pr="$2"
-  _fj POST "/repos/${repo}/pulls/${pr}/merge" '{"Do":"merge"}' >/dev/null 2>&1 || return 1
+  _fj POST "/repos/${repo}/pulls/${pr}/merge" '{"Do":"merge","delete_branch_after_merge":true}' >/dev/null 2>&1 || return 1
   _fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null | jq -r '.merge_commit_sha // empty'
 }
 
@@ -106,6 +106,9 @@ _deploy_clear() {
 _deploy_alert() {
   local repo="$1" pr="$2" sha="$3" url="$4" why="$5" recipients subject body
   log "deploy: ALERT ${repo}#${pr} ${sha:0:8}: ${why}"
+  forgejo_comment "$repo" "$pr" \
+    "⚠️ **Auto-merge deploy did NOT verify.** ${why}. Merge commit \`${sha:0:8}\`, URL ${url}. Phase 1 is alert-only (no auto-revert) -- needs eyes." \
+    2>/dev/null || true
   recipients=$(recipients_with_primary "${ALERT_RECIPIENTS:-}")
   [ -n "$recipients" ] && [ -n "${SMTP2GO_API_KEY:-}" ] && [ -n "${SMTP2GO_SENDER:-}" ] || return 0
   subject="[Agent] Auto-merge deploy needs you: ${repo}#${pr}"
@@ -160,6 +163,9 @@ do_deploy_barrier() {
 
   if automerge_smoke "$url"; then
     log "deploy: ${repo}#${pr} verified healthy (CI green, ${url} responds) -- resuming work"
+    forgejo_comment "$repo" "$pr" \
+      "🚀 **Auto-merge deploy verified.** Deploy CI is green and \`${url}\` responded — the site is live. Merge commit \`${sha:0:8}\`. (Posted by the harness deploy barrier; no action needed.)" \
+      2>/dev/null || log "warning: deploy: confirm-comment failed on ${repo}#${pr}"
     _deploy_clear; return 1
   fi
   attempts=$((attempts + 1))
