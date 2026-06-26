@@ -147,6 +147,40 @@ feedback_search_prior() {
         | select(($s | ascii_downcase) | contains($g)) | "- commit: \($s)"' 2>/dev/null | head -8
 }
 
+# feedback_repo_labels <repo> -- the repo's CLASSIFICATION labels as JSON
+# [{id,name}], EXCLUDING the harness's workflow labels (Agent = the greenlight
+# gate, onboarding, Status/*) so a model-chosen label can only ever DESCRIBE a
+# ticket, never bypass the human greenlight. Empty array on no labels / error.
+feedback_repo_labels() {
+  local raw; raw=$(_fj GET "/repos/${1}/labels?limit=100" 2>/dev/null)
+  printf '%s' "${raw:-[]}" | jq -c '[ .[]? | {id, name}
+      | select((.name | ascii_downcase) as $n
+          | $n != "agent" and $n != "onboarding"
+          and (($n | startswith("status/")) | not)) ]' 2>/dev/null \
+    || printf '[]'
+}
+
+# feedback_labels_section <labels_json> -- the prompt block listing the repo's
+# available labels for the model to pick from (loose classification, NOT a 1:1
+# type->label map). Echoes nothing when the repo has no usable labels.
+feedback_labels_section() {
+  local names; names=$(jq -r '[.[].name] | join(", ")' <<<"${1:-[]}" 2>/dev/null)
+  [ -n "$names" ] || return 0
+  printf '### Available labels (loose classification -- pick any that fit, or none)\n%s\n' "$names"
+}
+
+# feedback_resolve_labels <labels_json> <chosen_csv> -- map the model's chosen
+# label NAMES (comma-separated, case-insensitive) to numeric IDs, keeping only
+# names that actually exist in <labels_json>. Echoes a JSON array of IDs (the
+# issue API takes IDs, not names); [] when nothing matches. A hallucinated or
+# excluded name (e.g. "Agent") simply doesn't match and is dropped.
+feedback_resolve_labels() {
+  jq -cn --argjson L "${1:-[]}" --arg c "${2:-}" '
+    ($c | ascii_downcase | split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length > 0))) as $want
+    | [ $L[] | (.name | ascii_downcase) as $n | select($want | index($n)) | .id ] | unique' 2>/dev/null \
+    || printf '[]'
+}
+
 # feedback_build_prompt <repo> <row_json> <context> -- the user message: repo
 # context + the untrusted feedback, clearly fenced as DATA.
 feedback_build_prompt() {
@@ -182,21 +216,25 @@ EOF
 # Echoes {decision, reason, title, body}; rc=1 if DECISION is missing/invalid or
 # a FILE has no body.
 feedback_parse_response() {
-  local raw="$1" decision reason title body
+  local raw="$1" decision reason title body labels
   # First alpha word after DECISION: -- tolerates trailing text ("DROP -- dup").
   decision=$(printf '%s' "$raw" | sed -n 's/^DECISION:[[:space:]]*\([A-Za-z][A-Za-z]*\).*/\1/p' \
     | head -1 | tr '[:lower:]' '[:upper:]')
   case "$decision" in
     DROP)
       reason=$(printf '%s' "$raw" | sed -n 's/^REASON:[[:space:]]*//p' | head -1)
-      jq -n --arg r "$reason" '{decision:"DROP", reason:$r, title:"", body:""}' ;;
+      jq -n --arg r "$reason" '{decision:"DROP", reason:$r, title:"", body:"", labels:""}' ;;
     FILE)
       title=$(printf '%s' "$raw" | sed -n 's/^TITLE:[[:space:]]*//p' | head -1)
+      # Optional LABELS: line (header, before ===BODY===) -- the model's loose
+      # classification picks; resolved to repo label IDs harness-side.
+      labels=$(printf '%s' "$raw" | sed -n 's/^LABELS:[[:space:]]*//p' | head -1)
       case "$raw" in *'===BODY==='*) ;; *) return 1 ;; esac
       body="${raw#*===BODY===}"
       body="${body#"${body%%[![:space:]]*}"}"   # strip leading whitespace/newlines
       [ -n "$title" ] && [ -n "$body" ] || return 1
-      jq -n --arg t "$title" --arg b "$body" '{decision:"FILE", reason:"", title:$t, body:$b}' ;;
+      jq -n --arg t "$title" --arg b "$body" --arg l "$labels" \
+        '{decision:"FILE", reason:"", title:$t, body:$b, labels:$l}' ;;
     *) return 1 ;;
   esac
 }
@@ -204,11 +242,11 @@ feedback_parse_response() {
 # feedback_file_issue <repo> <title> <body> <assignee> -- UNLABELED issue assigned
 # to <assignee>, stamped as a feedback-triage ticket. Returns 0 on success.
 feedback_file_issue() {
-  local repo="$1" title="$2" body="$3" assignee="$4" full payload
+  local repo="$1" title="$2" body="$3" assignee="$4" label_ids="${5:-[]}" full payload
   full=$(printf '%s\n\n---\n_Triaged from player feedback. **Greenlight:** add the `Agent` label. **Reject:** close._\n%s' \
     "$body" "$FEEDBACK_MARKER")
-  payload=$(jq -n --arg t "$title" --arg b "$full" --arg a "$assignee" \
-    '{title:$t, body:$b, assignees:[$a]}')
+  payload=$(jq -n --arg t "$title" --arg b "$full" --arg a "$assignee" --argjson labels "$label_ids" \
+    '{title:$t, body:$b, assignees:[$a]} + (if ($labels | length) > 0 then {labels:$labels} else {} end)')
   _fj POST "/repos/${repo}/issues" "$payload" >/dev/null 2>&1
 }
 
@@ -221,6 +259,7 @@ do_feedback_tick() {
   [ -n "${FORGEJO_REVIEWER:-}" ] || return 1
   command -v python3 >/dev/null 2>&1 || return 1   # CSV parsing needs it
   local repo_line repo url rows row key context directive prompt raw parsed decision title body attempt
+  local labels_json chosen label_ids
   while IFS= read -r repo_line; do
     [ -z "$repo_line" ] && continue
     repo=$(jq -r '.full_name' <<<"$repo_line" 2>/dev/null)
@@ -230,7 +269,8 @@ do_feedback_tick() {
     [ "$(jq 'length' <<<"$rows" 2>/dev/null || echo 0)" -gt 0 ] || continue
     row=$(feedback_next_unprocessed "$rows") || continue                # all triaged
     key=$(feedback_row_key "$row")
-    context=$(feedback_gather_context "$repo"; feedback_search_prior "$repo" "$(jq -r '.Game // ""' <<<"$row")")
+    labels_json=$(feedback_repo_labels "$repo")
+    context=$(feedback_gather_context "$repo"; feedback_search_prior "$repo" "$(jq -r '.Game // ""' <<<"$row")"; feedback_labels_section "$labels_json")
     directive=$(cat "$AGENT_HOME/bin/lib/feedback-directive.md" 2>/dev/null)
     prompt=$(feedback_build_prompt "$repo" "$row" "$context")
     parsed=""
@@ -244,8 +284,10 @@ do_feedback_tick() {
     decision=$(jq -r '.decision' <<<"$parsed")
     if [ "$decision" = "FILE" ]; then
       title=$(jq -r '.title' <<<"$parsed"); body=$(jq -r '.body' <<<"$parsed")
-      if feedback_file_issue "$repo" "$title" "$body" "$FORGEJO_REVIEWER"; then
-        log "feedback: filed a ticket on ${repo} for ${FORGEJO_REVIEWER} to greenlight -- ${title}"
+      chosen=$(jq -r '.labels // ""' <<<"$parsed")
+      label_ids=$(feedback_resolve_labels "$labels_json" "$chosen")
+      if feedback_file_issue "$repo" "$title" "$body" "$FORGEJO_REVIEWER" "$label_ids"; then
+        log "feedback: filed a ticket on ${repo} for ${FORGEJO_REVIEWER} to greenlight -- ${title}$([ "$label_ids" = "[]" ] || printf ' [labels: %s]' "$chosen")"
       else
         _feedback_fail "$repo" "$key" "issue-file failed"; return $?
       fi

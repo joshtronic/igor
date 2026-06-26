@@ -42,12 +42,19 @@ name-detective work — an unfamiliar name is just a name. Judge only the
   device/browser if given, the reproduction or specifics the player provided, and
   a one-line **assessment** (is it plausible? does anything in the context bear on
   it?). Keep it tight — this is a starting point for the work, not an essay.
+- **Labels (optional):** if the prompt lists **Available labels**, you may add a
+  `LABELS:` line naming any that loosely fit — e.g. `bug` for a defect/glitch,
+  `enhancement` for an idea or request. Pick ONLY from the listed names,
+  comma-separated. This is loose classification, not a strict type→label mapping:
+  choose what fits, or omit the line entirely if nothing does. Never invent a
+  label that isn't on the list.
 
 ## Output format — the harness parses this; match it exactly
 
 - First line: `DECISION: DROP` or `DECISION: FILE`.
 - If DROP: a second line `REASON: <one short line>` and nothing else.
-- If FILE: a line `TITLE: <single-line title>`, then a line exactly `===BODY===`,
-  then the issue body in Markdown.
+- If FILE: a line `TITLE: <single-line title>`, then optionally a line
+  `LABELS: <comma-separated>`, then a line exactly `===BODY===`, then the issue
+  body in Markdown.
 
 Output nothing before `DECISION:`. No code fence around the whole response.

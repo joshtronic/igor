@@ -104,6 +104,30 @@ case "$sp" in
 esac
 has "search: keeps the real (non-triage) closed issue #12" "$sp" "#12"
 
+echo "== classification labels: repo_labels excludes the workflow labels =="
+_fj() { case "$1 $2" in "GET "*/labels*) printf '%s' '[{"id":1,"name":"Agent"},{"id":2,"name":"bug"},{"id":3,"name":"enhancement"},{"id":4,"name":"Status/Blocked"},{"id":5,"name":"onboarding"}]' ;; *) printf '%s' '[]' ;; esac; }
+rl=$(feedback_repo_labels acme/x)
+eq "repo_labels: keeps only descriptive labels" "bug,enhancement" "$(jq -r '[.[].name]|join(",")' <<<"$rl")"
+case "$rl" in
+  *Agent*) printf '  x %s\n' "repo_labels: leaked the Agent greenlight label"; FAIL=$((FAIL + 1)) ;;
+  *)       printf '  + %s\n' "repo_labels: excludes Agent (the greenlight gate)" ;;
+esac
+eq "repo_labels: no labels -> []" "[]" "$(_fj() { printf '%s' ''; }; feedback_repo_labels acme/x)"
+
+echo "== classification labels: resolve names -> ids (only what exists) =="
+LJ='[{"id":2,"name":"bug"},{"id":3,"name":"enhancement"}]'
+eq "resolve: maps names to ids"        "[2,3]" "$(feedback_resolve_labels "$LJ" "bug, Enhancement")"
+eq "resolve: case-insensitive + trims" "[2]"   "$(feedback_resolve_labels "$LJ" "  BUG ")"
+eq "resolve: unknown name dropped"     "[]"    "$(feedback_resolve_labels "$LJ" "wontfix")"
+eq "resolve: empty -> []"              "[]"    "$(feedback_resolve_labels "$LJ" "")"
+eq "resolve: a non-listed label (e.g. Agent) can't be applied" "[]" "$(feedback_resolve_labels "$LJ" "Agent")"
+
+echo "== parse: optional LABELS line =="
+run "$(printf 'DECISION: FILE\nTITLE: x\nLABELS: bug, enhancement\n===BODY===\nbody.')"
+eq "parse: FILE captures LABELS"          "bug, enhancement" "$(jq -r '.labels' <<<"$OUT")"
+run "$(printf 'DECISION: FILE\nTITLE: x\n===BODY===\nbody.')"
+eq "parse: FILE without LABELS -> empty"  "" "$(jq -r '.labels' <<<"$OUT")"
+
 echo "== file_issue (UNLABELED + assigned + marker) =="
 POST_BODY=""
 _fj() { case "$1 $2" in "POST "*/issues) POST_BODY="$3" ;; esac; }
@@ -118,6 +142,8 @@ case "$(jq -r '.body' <<<"$POST_BODY")" in
   *unassign*) printf '  x %s\n' "file: footer still instructs unassign"; FAIL=$((FAIL + 1)) ;;
   *)          printf '  + %s\n' "file: footer does not instruct unassign" ;;
 esac
+feedback_file_issue acme/x "T" "B" "josh" "[2,3]" >/dev/null 2>&1
+eq "file: applies resolved label ids to the payload" "[2,3]" "$(jq -c '.labels' <<<"$POST_BODY")"
 
 echo "== do_feedback_tick decision =="
 export FORGEJO_REVIEWER=josh AGENT_MODEL_REVIEW=m
