@@ -231,11 +231,14 @@ respective tools on the host; install or skip.
   `.sports` never wipes what the reader has been taught.
 - The logwatch pass (`do_logwatch_tick`) is convention-driven, NO env
   knob: a root-level `systemd/` directory in any bot-accessible repo
-  declares "I run as a service", and once a day (first tick after
-  01:00 -- window-completeness, not a send-hour: the 00:00-01:00
-  journal being read must have closed) each declared unit's LOCAL
-  user journal gets one `claude_call` on `AGENT_MODEL_REVIEW` hunting
-  hard failures. Empty journal = unit runs elsewhere or didn't run =
+  declares "I run as a service", and once per clock hour (reviewing the
+  hour that JUST CLOSED -- window-completeness, not a send-hour: the
+  window read must be complete, which the previous hour always is, so
+  there's no midnight gate) each declared unit's LOCAL user journal gets
+  one `claude_call` on `AGENT_MODEL_REVIEW` hunting hard failures. The
+  daily pass only ever read the 00:00-01:00 window -- 23 hours a day were
+  unwatched; hourly closes that blind spot. Dedup (open-issue titles +
+  recent commits) keeps a chronic failure to ONE ticket, not one/hour. Empty journal = unit runs elsewhere or didn't run =
   skip; no canary/uptime semantics, no news is good news. The harness
   discovers itself this way (`systemd/agent.service`); only its
   known-benign blurb is special-cased, keyed off the UNIT name. The
@@ -243,7 +246,7 @@ respective tools on the host; install or skip.
   expected holds, anything matching an open issue title, and symptoms
   covered by a recent commit (titles + subjects ride along per repo
   as dedup signals) are explicitly not ticket-worthy. At most 2
-  tickets per unit per day, filed on the owning repo UNLABELED and
+  tickets per unit per hour, filed on the owning repo UNLABELED and
   ASSIGNED to `FORGEJO_REVIEWER` with review time logged. The `Agent`
   label is the human's triage stamp, never the filing default:
   greenlighting a ticket for Igor = add the label (that's the gate;
