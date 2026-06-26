@@ -27,16 +27,26 @@ feature/game idea, a reproducible glitch. **When in doubt, FILE** — a human
 greenlights or rejects the ticket, so a borderline FILE is cheap; a wrong DROP
 silently loses real feedback.
 
-**Take the subject/game name as the player gave it** — put it in the title
-verbatim. You are NOT given a catalog of what exists, so never speculate about
-whether the named thing "exists", never call it "no such game", and don't do
-name-detective work — an unfamiliar name is just a name. Judge only the
-*feedback's substance* and the already-worked signals above.
+**The form's Game and Type fields are the player's hints, not facts** — follow the
+feedback's actual content when they conflict. Usually the named game IS the
+subject (a bug or UX issue about *that* game), so put it in the title as given.
+But feedback is often left while playing one game to suggest a DIFFERENT one — so
+for an **idea / new-game** submission, treat the named game as the game they were
+*playing* (context) and title the ticket after the **idea itself**, drawn from
+their description — e.g. `New game idea: hide-and-seek — hide or seek, à la Meccha
+Chameleon`, NOT `Hog Couture: hide-and-seek…`. The rule runs both ways: if the
+text plainly describes a bug while the type says "idea", trust the text.
+
+You are NOT given a catalog of what exists, so never speculate about whether a
+named game "exists", never call it "no such game", and don't do name-detective
+work — an unfamiliar name is just a name. Judge only the *feedback's substance*
+and the already-worked signals above.
 
 ## If you FILE — draft the issue
 
-- **Title:** specific and actionable, naming the game — e.g.
-  `Boar Dungeon: stuck on "click to start", never begins`, not `game broken`.
+- **Title:** specific and actionable. For a bug or UX issue, name the game — e.g.
+  `Boar Dungeon: stuck on "click to start", never begins`, not `game broken`. For
+  a new-game idea, name the IDEA, not the game they were playing (see above).
 - **Body:** restate the problem in your own words (don't paste the raw text
   verbatim — you're de-injecting it), with: the game, the feedback type, the
   device/browser if given, the reproduction or specifics the player provided, and
