@@ -107,6 +107,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/ceo.sh"
 # shellcheck source=lib/automerge.sh
 . "$AGENT_HOME/lib/automerge.sh"
+# shellcheck source=lib/feedback.sh
+. "$AGENT_HOME/lib/feedback.sh"
 
 # Children invocations (agent-* helper scripts) share our tick id
 # so cost-ledger entries from child processes group with the
@@ -3617,6 +3619,14 @@ fi
 # digest to CEO_RECIPIENTS. A model call, so it's below the health gate;
 # Phase 1 is read-only (no issue-filing/steering yet).
 if do_ceo_tick; then
+  exit 0
+fi
+
+# Player-feedback triage: one CSV row per tick on repos whose agent.json declares
+# .feedback.csv. Model work, so it sits below the health gate with the other
+# model passes; files an UNLABELED issue for the human to greenlight (or drops a
+# spam/dupe/already-worked row). See lib/feedback.sh.
+if do_feedback_tick; then
   exit 0
 fi
 

@@ -344,6 +344,26 @@ respective tools on the host; install or skip.
   itself (a broken self-deploy could crash the very tick meant to smoke-test it),
   so igor stays a manual merge -- enforced by `AUTOMERGE_SELF_REPO` AND by having
   no `agent.json` `.smoke.url`. Clear `.deploy` to abandon a stuck deploy.
+- The feedback-triage pass (`do_feedback_tick`, `lib/feedback.sh`) is
+  convention-driven via `agent.json` `.feedback.csv` -- the published Google-Form
+  CSV of player feedback (the second `agent.json` consumer after auto-merge).
+  PER-TICK, one row: it takes the OLDEST unprocessed row across the analysis set,
+  ONE `claude_call` on `AGENT_MODEL_REVIEW` reads the feedback (clearly fenced as
+  UNTRUSTED data, never instructions) plus repo context -- recent CLOSED issues,
+  recent commits, the game list -- and decides **DROP** (spam / vague /
+  already-worked, judged from that context) or **FILE** (real + new), in which
+  case the harness opens an UNLABELED issue assigned to `FORGEJO_REVIEWER`, who
+  greenlights (adds the `Agent` label, unassigns) or rejects (closes). Every row
+  is stamped in a local seen-set (`.feedback.seen`, FIFO-capped) so it's triaged
+  once; nothing is written back to the sheet (the issue tracker IS the status, so
+  no status column). The human label gate bounds prompt-injection -- a poisoned
+  row at worst yields a ticket Josh rejects, never code; the model MAY silently
+  drop confident spam/dupes (operator's call), so not every row becomes a ticket
+  but the seen-set still records it. Model work, so it sits BELOW the Claude
+  health gate. The verdict is a `DECISION:` line + `REASON:` (DROP) or
+  `TITLE:`/`===BODY===` (FILE), parsed harness-side (`feedback_parse_response`),
+  never model-written JSON. Needs `python3` (robust quoted-CSV parsing). Clear
+  `.feedback.seen` to re-triage.
 
 ## Off-limits
 
