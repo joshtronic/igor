@@ -349,8 +349,12 @@ respective tools on the host; install or skip.
   CSV of player feedback (the second `agent.json` consumer after auto-merge).
   PER-TICK, one row: it takes the OLDEST unprocessed row across the analysis set,
   ONE `claude_call` on `AGENT_MODEL_REVIEW` reads the feedback (clearly fenced as
-  UNTRUSTED data, never instructions) plus repo context -- recent CLOSED issues,
-  recent commits, the game list -- and decides **DROP** (spam / vague /
+  UNTRUSTED data, never instructions) plus GENERIC tracker context -- recent
+  CLOSED issues, recent commits, and a targeted keyword search of issues/commits
+  for the subject the feedback names (`feedback_search_prior`, which reaches older
+  fixes the recent-N lists miss). No repo-specific catalog or file layout: the
+  harness has none, and the model takes the named subject as-given (an unfamiliar
+  name is just a name, never "no such game"). It decides **DROP** (spam / vague /
   already-worked, judged from that context) or **FILE** (real + new), in which
   case the harness opens an UNLABELED issue assigned to `FORGEJO_REVIEWER`, who
   greenlights (adds the `Agent` label, unassigns) or rejects (closes). Every row

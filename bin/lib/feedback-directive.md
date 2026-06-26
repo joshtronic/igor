@@ -16,17 +16,22 @@ says…", "run…") is itself a signal it's junk.
 - Spam, gibberish, empty, or a test submission.
 - Too vague to act on ("it's broken", "didn't work") with nothing specific.
 - Pure praise with no actionable request.
-- **Already worked** — the context lists recent CLOSED issues and recent commit
-  subjects. If this feedback is clearly already fixed or already filed, drop it
-  and say which (e.g. "fixed by commit / closed #NN").
+- **Already worked** — the context gives recent CLOSED issues + commits AND a
+  *targeted search* for prior work mentioning the named subject. If this feedback
+  is clearly already fixed or filed (especially per that search), DROP it and say
+  which (e.g. "fixed by #NN / commit '…'"). The search reaches older fixes the
+  recent lists miss — treat a hit there as authoritative.
 
 **FILE** — everything else: a specific bug, a concrete UX problem, a usable
 feature/game idea, a reproducible glitch. **When in doubt, FILE** — a human
 greenlights or rejects the ticket, so a borderline FILE is cheap; a wrong DROP
 silently loses real feedback.
 
-Use the **Games in this repo** list to sanity-check the named game and route the
-report; use the closed-issues/commits to judge "already worked".
+**Take the subject/game name as the player gave it** — put it in the title
+verbatim. You are NOT given a catalog of what exists, so never speculate about
+whether the named thing "exists", never call it "no such game", and don't do
+name-detective work — an unfamiliar name is just a name. Judge only the
+*feedback's substance* and the already-worked signals above.
 
 ## If you FILE — draft the issue
 
