@@ -368,8 +368,17 @@ respective tools on the host; install or skip.
   but the seen-set still records it. Model work, so it sits BELOW the Claude
   health gate. The verdict is a `DECISION:` line + `REASON:` (DROP) or
   `TITLE:`/`===BODY===` (FILE), parsed harness-side (`feedback_parse_response`),
-  never model-written JSON. Needs `python3` (robust quoted-CSV parsing). Clear
-  `.feedback.seen` to re-triage.
+  never model-written JSON. Needs `python3` (robust quoted-CSV parsing). On FILE
+  the model may also emit an optional `LABELS:` line for **loose classification**,
+  chosen ONLY from the repo's OWN existing labels (`feedback_repo_labels` lists
+  them in the prompt and `feedback_resolve_labels` maps the picks back to IDs --
+  the issue API takes IDs, not names). It is deliberately NOT a 1:1 type→label
+  map: the model picks whatever fits, or nothing, and a name it invents simply
+  doesn't resolve. `feedback_repo_labels` EXCLUDES the harness's workflow labels
+  (`Agent` = the greenlight gate, plus `Status/*` and `onboarding`), so a
+  model-applied classification can never bypass the human greenlight. No label is
+  created and none is required -- repos without a label set just file unlabeled.
+  Clear `.feedback.seen` to re-triage.
 
 ## Off-limits
 
