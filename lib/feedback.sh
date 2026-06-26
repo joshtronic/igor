@@ -18,6 +18,7 @@
 # a ticket; the seen-set still records it so it isn't re-triaged.
 
 FEEDBACK_MAX_SEEN=500                       # ring-cap on the seen-set
+FEEDBACK_MAX_ATTEMPTS=3                      # give up on a row after N failed ticks (anti-livelock)
 FEEDBACK_MARKER="<!-- agent:feedback-triage -->"
 
 # Fallback logger so this module is sourceable standalone (tests).
@@ -59,13 +60,41 @@ feedback_seen() {
   jq -e --arg k "$1" '((.feedback.seen // []) | index($k)) != null' "$sf" >/dev/null 2>&1
 }
 
-# feedback_mark_seen <key> -- append the key, FIFO-capped at FEEDBACK_MAX_SEEN.
+# feedback_mark_seen <key> -- append the key, FIFO-capped at FEEDBACK_MAX_SEEN;
+# also drop any retry-attempt counter (the row is resolved now).
 feedback_mark_seen() {
   local key="$1" sf tmp; sf=$(_feedback_state_file); [ -f "$sf" ] || echo '{}' > "$sf"
   tmp=$(mktemp)
   jq --arg k "$key" --argjson cap "$FEEDBACK_MAX_SEEN" \
-    '.feedback.seen = (((.feedback.seen // []) + [$k]) | if length > $cap then .[-$cap:] else . end)' \
+    '.feedback.seen = (((.feedback.seen // []) + [$k]) | if length > $cap then .[-$cap:] else . end)
+     | del(.feedback.attempts[$k])' \
     "$sf" > "$tmp" && mv "$tmp" "$sf"
+}
+
+# feedback_bump_attempt <key> -- increment + echo the retry count for a row that
+# failed to triage/file this tick.
+feedback_bump_attempt() {
+  local key="$1" sf tmp; sf=$(_feedback_state_file); [ -f "$sf" ] || echo '{}' > "$sf"
+  tmp=$(mktemp)
+  jq --arg k "$key" '.feedback.attempts[$k] = ((.feedback.attempts[$k] // 0) + 1)' \
+    "$sf" > "$tmp" && mv "$tmp" "$sf"
+  jq -r --arg k "$key" '.feedback.attempts[$k] // 0' "$sf"
+}
+
+# _feedback_fail <repo> <key> <why> -- a row didn't process this tick. Bump its
+# attempt counter; after FEEDBACK_MAX_ATTEMPTS GIVE UP (mark it seen + warn) so a
+# persistently-bad row can't livelock the queue head and block every later row.
+# Returns 0 if it gave up (queue advanced), 1 if it'll retry next tick.
+_feedback_fail() {
+  local repo="$1" key="$2" why="$3" n
+  n=$(feedback_bump_attempt "$key")
+  if [ "${n:-0}" -ge "$FEEDBACK_MAX_ATTEMPTS" ]; then
+    log "warning: feedback: gave up on a ${repo} row after ${n} attempts (${why}) -- skipping it (clear .feedback to retry)"
+    feedback_mark_seen "$key"
+    return 0
+  fi
+  log "feedback: ${repo} row deferred (${why}, attempt ${n}/${FEEDBACK_MAX_ATTEMPTS}) -- retry next tick"
+  return 1
 }
 
 # feedback_next_unprocessed <rows_json> -- echo the oldest row not yet seen (the
@@ -132,8 +161,9 @@ EOF
 # a FILE has no body.
 feedback_parse_response() {
   local raw="$1" decision reason title body
-  decision=$(printf '%s' "$raw" | sed -n 's/^DECISION:[[:space:]]*//p' | head -1 \
-    | tr '[:lower:]' '[:upper:]' | tr -dc 'A-Z')
+  # First alpha word after DECISION: -- tolerates trailing text ("DROP -- dup").
+  decision=$(printf '%s' "$raw" | sed -n 's/^DECISION:[[:space:]]*\([A-Za-z][A-Za-z]*\).*/\1/p' \
+    | head -1 | tr '[:lower:]' '[:upper:]')
   case "$decision" in
     DROP)
       reason=$(printf '%s' "$raw" | sed -n 's/^REASON:[[:space:]]*//p' | head -1)
@@ -188,14 +218,14 @@ do_feedback_tick() {
       if parsed=$(feedback_parse_response "$raw"); then break; fi
       log "feedback: unparseable triage for a ${repo} row (attempt ${attempt})"; parsed=""
     done
-    [ -n "$parsed" ] || { log "feedback: no usable triage for a ${repo} row -- leaving it for next tick"; return 1; }
+    [ -n "$parsed" ] || { _feedback_fail "$repo" "$key" "unparseable triage"; return $?; }
     decision=$(jq -r '.decision' <<<"$parsed")
     if [ "$decision" = "FILE" ]; then
       title=$(jq -r '.title' <<<"$parsed"); body=$(jq -r '.body' <<<"$parsed")
       if feedback_file_issue "$repo" "$title" "$body" "$FORGEJO_REVIEWER"; then
         log "feedback: filed a ticket on ${repo} for ${FORGEJO_REVIEWER} to greenlight -- ${title}"
       else
-        log "warning: feedback: failed to file the ticket on ${repo} -- leaving the row for next tick"; return 1
+        _feedback_fail "$repo" "$key" "issue-file failed"; return $?
       fi
     else
       log "feedback: dropped a ${repo} row -- $(jq -r '.reason' <<<"$parsed")"

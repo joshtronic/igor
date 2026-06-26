@@ -40,6 +40,19 @@ no "seen: unknown key not seen" feedback_seen "$k"
 feedback_mark_seen "$k"
 ok "seen: marked key now seen"  feedback_seen "$k"
 
+echo "== attempt counter + give-up escape hatch (anti-livelock) =="
+echo '{}' > "$STATE"
+bk=$(feedback_row_key '{"Timestamp":"p","Game":"g","Tell us more":"poison"}')
+eq "bump: first attempt -> 1"  "1" "$(feedback_bump_attempt "$bk")"
+eq "bump: second attempt -> 2" "2" "$(feedback_bump_attempt "$bk")"
+echo '{}' > "$STATE"
+no "fail #1 -> defer (rc1), row not given up"  _feedback_fail acme/x "$bk" "bad"
+no "fail #2 -> defer (rc1)"                    _feedback_fail acme/x "$bk" "bad"
+no "give-up not yet -> row not seen"           feedback_seen "$bk"
+ok "fail #3 (>= MAX) -> give up (rc0)"         _feedback_fail acme/x "$bk" "bad"
+ok "give-up marks the poison row seen"         feedback_seen "$bk"
+eq "give-up cleared the attempt counter" "null" "$(jq -r --arg k "$bk" '.feedback.attempts[$k] // "null"' "$STATE")"
+
 echo "== next_unprocessed (oldest unseen) =="
 ROWS='[{"Timestamp":"t1","Game":"g","Tell us more":"a"},{"Timestamp":"t2","Game":"g","Tell us more":"b"}]'
 feedback_mark_seen "$(feedback_row_key '{"Timestamp":"t1","Game":"g","Tell us more":"a"}')"
@@ -50,6 +63,8 @@ run() { OUT=$(feedback_parse_response "$1"); }
 run "$(printf 'DECISION: DROP\nREASON: spam')"
 eq "parse: DROP decision" "DROP" "$(jq -r '.decision' <<<"$OUT")"
 eq "parse: DROP reason"   "spam" "$(jq -r '.reason' <<<"$OUT")"
+run "$(printf 'DECISION: DROP -- already worked\nREASON: dup of #5')"
+eq "parse: DROP with trailing text on the line" "DROP" "$(jq -r '.decision' <<<"$OUT")"
 run "$(printf 'DECISION: FILE\nTITLE: Slam Pig: freezes on level 2\n===BODY===\nThe pig freezes.')"
 eq "parse: FILE decision" "FILE" "$(jq -r '.decision' <<<"$OUT")"
 eq "parse: FILE title"    "Slam Pig: freezes on level 2" "$(jq -r '.title' <<<"$OUT")"
