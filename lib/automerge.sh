@@ -80,6 +80,28 @@ automerge_do_merge() {
   _fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null | jq -r '.merge_commit_sha // empty'
 }
 
+# automerge_behind_count <repo> <pr> -- how many base-branch commits the PR head
+# is missing (0 = up to date, which is exactly what require-up-to-date enforces).
+# Echoes -1 when it can't be determined, so the caller skips rather than guesses.
+automerge_behind_count() {
+  local repo="$1" pr="$2" obj head base cmp
+  obj=$(_fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null) || { echo -1; return; }
+  head=$(jq -r '.head.sha // empty' <<<"$obj"); base=$(jq -r '.base.ref // empty' <<<"$obj")
+  [ -n "$head" ] && [ -n "$base" ] || { echo -1; return; }
+  cmp=$(_fj GET "/repos/${repo}/compare/${head}...${base}" 2>/dev/null) || { echo -1; return; }
+  jq -r 'if type == "object" then (.total_commits // (.commits | length) // 0) else -1 end' <<<"$cmp" 2>/dev/null || echo -1
+}
+
+# automerge_update_branch <repo> <pr> -- merge the base branch into the PR head
+# (Forgejo "update branch") so a behind PR satisfies require-up-to-date. The
+# human's APPROVAL survives this base-merge (verified live on porksicle#81), and
+# the shadow review's patch-id dedup treats the base-merge as an already-seen net
+# diff, so it isn't re-reviewed. rc 0 on success.
+automerge_update_branch() {
+  local repo="$1" pr="$2"
+  _fj POST "/repos/${repo}/pulls/${pr}/update" >/dev/null 2>&1
+}
+
 # automerge_smoke <url> -- exit 0 if the live URL responds 2xx/3xx.
 automerge_smoke() {
   local url="$1" code
@@ -186,7 +208,8 @@ do_automerge_tick() {
   # one deploy at a time (the barrier guards this too, but belt + suspenders)
   [ -f "$sf" ] && [ -n "$(jq -r '.deploy.repo // ""' "$sf" 2>/dev/null)" ] && return 1
 
-  local repo url prs pr head verdict key ci sha
+  local repo url prs pr head verdict key ci sha behind
+  local behind_repo="" behind_pr="" behind_n=""
   while IFS= read -r repo; do
     [ -n "$repo" ] || continue
     url=$(automerge_smoke_url "$repo"); [ -n "$url" ] || continue   # not eligible
@@ -206,11 +229,25 @@ do_automerge_tick() {
         log "automerge: ${key} CI=${ci:-unknown} -- not merging"; continue
       fi
       automerge_mergeable "$repo" "$pr" || { log "automerge: ${key} not cleanly mergeable -- skipping"; continue; }
-      sha=$(automerge_do_merge "$repo" "$pr") || { log "warning: automerge: merge API failed on ${key}"; continue; }
-      [ -n "$sha" ] || sha="$head"   # fall back to the head if the merge SHA didn't come back
-      _deploy_record "$repo" "$pr" "$sha" "$url"
-      log "automerge: merged ${key} (approved by ${FORGEJO_REVIEWER}, CI green) -- watching deploy ${sha:0:8}"
-      return 0
+      # Require-up-to-date: the merge API rejects a behind-base PR, so check it
+      # OURSELVES rather than POST a doomed merge (the old "merge API failed"
+      # warning). 0 = current -> merge now; >0 = behind -> remember it; -1 =
+      # couldn't tell -> skip this tick.
+      behind=$(automerge_behind_count "$repo" "$pr")
+      if [ "$behind" = "0" ]; then
+        sha=$(automerge_do_merge "$repo" "$pr") || { log "warning: automerge: merge API failed on ${key}"; continue; }
+        [ -n "$sha" ] || sha="$head"   # fall back to the head if the merge SHA didn't come back
+        _deploy_record "$repo" "$pr" "$sha" "$url"
+        log "automerge: merged ${key} (approved by ${FORGEJO_REVIEWER}, CI green) -- watching deploy ${sha:0:8}"
+        return 0
+      elif [ "$behind" -gt 0 ] 2>/dev/null; then
+        # Ready but behind base. Prefer to merge a CURRENT pr this tick (so master
+        # advances just once); only if none is current do we update this one --
+        # one branch-update per tick, so a fast-moving master can't make us thrash.
+        [ -z "$behind_pr" ] && { behind_repo="$repo"; behind_pr="$pr"; behind_n="$behind"; }
+      else
+        log "automerge: ${key} up-to-date check inconclusive -- skipping this tick"
+      fi
     done < <(jq -r '.[]?.number // empty' <<<"$prs")
     # VALIDATED_REPOS_JSON is a NEWLINE-DELIMITED STREAM of repo objects (one per
     # line), NOT a JSON array -- built that way in tick.sh and consumed the same
@@ -218,5 +255,17 @@ do_automerge_tick() {
     # would error ("Cannot index string") on a stream. Multi-repo iteration is
     # covered by test-automerge.sh.
   done < <(printf '%s' "${VALIDATED_REPOS_JSON:-}" | jq -r '.full_name // empty' 2>/dev/null)
+
+  # No CURRENT pr merged this tick. If a ready one is only behind base, bring it up
+  # to date (merge base in) so it merges next cycle -- the approval survives, CI
+  # re-runs, and it's logged as info, never the old failed-merge warning.
+  if [ -n "$behind_pr" ]; then
+    if automerge_update_branch "$behind_repo" "$behind_pr"; then
+      log "automerge: ${behind_repo}#${behind_pr} behind base by ${behind_n} -- updated branch, will merge once CI is green"
+    else
+      log "warning: automerge: failed to update ${behind_repo}#${behind_pr} branch to base"
+    fi
+    return 0
+  fi
   return 1
 }

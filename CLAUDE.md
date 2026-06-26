@@ -329,7 +329,18 @@ respective tools on the host; install or skip.
   bot PR only when the human (`FORGEJO_REVIEWER`)
   has an APPROVED review, CI is green on the head, it's cleanly mergeable, AND the
   shadow verdict isn't `REQUEST_CHANGES` (an RC blocks the merge even past a human
-  approve); it then stamps a pending deploy under `.deploy`. `do_deploy_barrier`
+  approve); it then stamps a pending deploy under `.deploy`. **Require-up-to-date
+  is handled, not fought:** the gate also checks `automerge_behind_count` (the PR
+  head vs its base branch) -- the merge API rejects a behind PR, so rather than
+  POST a doomed merge (the old "merge API failed" warning), a ready-but-behind PR
+  gets its branch UPDATED (`automerge_update_branch`, Forgejo's base-merge) and
+  merges a cycle later once CI re-runs green. The human approval survives the
+  base-merge (Forgejo doesn't dismiss it) and the shadow review's patch-id dedup
+  skips re-reviewing the same net diff. To avoid thrashing a fast-moving master,
+  it prefers to merge a CURRENT pr each tick and only updates ONE behind pr when
+  none is current -- and the deploy barrier freezes master between deploys, giving
+  the update its window. An inconclusive up-to-date check (`-1`) just skips the
+  tick rather than guessing. `do_deploy_barrier`
   (run EARLY, above the health gate, as `do_deploy_barrier && exit 0`) watches it:
   it polls CI, and while the deploy is still in flight it ENDS the tick -- the
   1-minute cadence IS the polling loop, so no long work starts mid-deploy (one

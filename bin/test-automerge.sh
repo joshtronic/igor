@@ -131,6 +131,24 @@ eq  "do_merge: returns the merge sha"  "deadbeef" "$(cat "$TMP/merge_sha")"
 has "do_merge: Do=merge in the body"   "$MERGE_BODY" '"Do":"merge"'
 has "do_merge: deletes the branch"     "$MERGE_BODY" '"delete_branch_after_merge":true'
 
+echo "== automerge_behind_count (the require-up-to-date gate) =="
+_fj() {
+  case "$1 $2" in
+    "GET "*/compare/*) printf '%s' '{"total_commits":4}' ;;
+    *)                 printf '%s' '{"head":{"sha":"abc"},"base":{"ref":"master"}}' ;;
+  esac
+}
+eq "behind_count: reads total_commits" "4" "$(automerge_behind_count acme/x 7)"
+_fj() { case "$1 $2" in "GET "*/compare/*) printf '%s' '{"total_commits":0}' ;; *) printf '%s' '{"head":{"sha":"abc"},"base":{"ref":"master"}}' ;; esac; }
+eq "behind_count: up-to-date -> 0" "0" "$(automerge_behind_count acme/x 7)"
+_fj() { return 1; }
+eq "behind_count: API error -> -1" "-1" "$(automerge_behind_count acme/x 7)"
+
+echo "== automerge_update_branch (POSTs /pulls/N/update) =="
+UP=""; _fj() { case "$1 $2" in "POST "*/update) UP="$2" ;; esac; return 0; }
+automerge_update_branch acme/x 9 >/dev/null 2>&1
+has "update_branch: POSTs to /pulls/N/update" "$UP" "/pulls/9/update"
+
 echo "== do_automerge_tick merge decision =="
 export FORGEJO_REVIEWER=josh BOT_USER=igor
 export VALIDATED_REPOS_JSON='{"full_name":"acme/site"}'
@@ -138,6 +156,8 @@ automerge_smoke_url() { echo "https://x"; }
 forgejo_list_open_bot_prs() { echo '[{"number":7}]'; }
 forgejo_commit_status() { echo success; }
 automerge_mergeable() { return 0; }
+automerge_behind_count() { echo 0; }                       # up to date by default
+automerge_update_branch() { UPDATED="$1#$2"; return 0; }
 automerge_do_merge() { echo "mergesha7"; }
 _fj() { echo '{"head":{"sha":"headsha7"}}'; }
 
@@ -164,6 +184,23 @@ automerge_smoke_url() { case "$1" in acme/second) echo "https://x" ;; *) echo ""
 echo '{}' > "$STATE"; automerge_approved_by() { return 0; }
 ok "automerge: iterates stream, skips ineligible, merges 2nd"  do_automerge_tick
 eq "automerge: merged the eligible repo"   "acme/second" "$(jq -r '.deploy.repo // ""' "$STATE")"
+
+echo "== do_automerge_tick: behind base -> update branch, do NOT merge =="
+export VALIDATED_REPOS_JSON='{"full_name":"acme/site"}'
+automerge_smoke_url() { echo "https://x"; }
+forgejo_list_open_bot_prs() { echo '[{"number":7}]'; }
+echo '{}' > "$STATE"; automerge_approved_by() { return 0; }
+MERGED=0; automerge_do_merge() { MERGED=1; echo "sha"; }
+UPDATED=""; automerge_update_branch() { UPDATED="$1#$2"; return 0; }
+automerge_behind_count() { echo 3; }
+ok "automerge: behind base -> processes the tick (rc0)"          do_automerge_tick
+eq "automerge: behind base did NOT merge"        "0"             "$MERGED"
+eq "automerge: behind base updated the branch"   "acme/site#7"   "$UPDATED"
+eq "automerge: behind base recorded no deploy"   ""              "$(jq -r '.deploy.repo // ""' "$STATE")"
+automerge_behind_count() { echo -1; }   # can't determine -> skip, never blind-update
+UPDATED=""; echo '{}' > "$STATE"
+no "automerge: inconclusive up-to-date -> no merge/update (rc1)"  do_automerge_tick
+eq "automerge: inconclusive did not update"      ""              "$UPDATED"
 
 if [ "$FAIL" -eq 0 ]; then echo "test-automerge: all checks passed"; exit 0; fi
 echo "test-automerge: $FAIL check(s) FAILED"
