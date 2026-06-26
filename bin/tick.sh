@@ -2782,13 +2782,12 @@ build_deps_section() {
 
 do_health_tick || true
 
-# -- Deploy barrier + auto-merge (non-model: API + curl, so they run even
-# during a Claude health cooldown). The barrier watches an in-flight deploy and
-# ENDS the tick until it verifies -- so no long work starts mid-deploy; then
-# do_automerge_tick merges a human-approved PR on an opt-in repo and stamps the
-# next deploy. Both sit above the health gate, both one-thing-then-exit.
+# -- Deploy barrier (non-model: API + curl, so it runs even during a Claude
+# health cooldown). Watches an in-flight deploy and ENDS the tick until it
+# verifies -- so no long work starts mid-deploy. Sits above the health gate.
+# (do_automerge_tick is NOT here: it needs VALIDATED_REPOS_JSON, which the
+# validation sweep below builds -- so it runs right after that, not here.)
 do_deploy_barrier && exit 0
-do_automerge_tick && exit 0
 
 if claude_health_blocked; then
   log "claude health: backoff active (kind=$(claude_health_kind)) -- skipping all model work this tick"
@@ -2967,6 +2966,12 @@ if [ -z "$VALIDATED_REPOS_JSON" ]; then
   do_maintenance_tick || true
   exit 0
 fi
+
+# -- Auto-merge on approve (needs the validated set, just built above; non-model
+# -- API only). Merges a human-approved bot PR on an opt-in repo and stamps the
+# pending deploy that the barrier (top of the tick) then watches to healthy.
+# One-thing-then-exit, like the rest of the cascade.
+do_automerge_tick && exit 0
 
 # -- Scheduled maintenance (moved) -----------------------------
 #
