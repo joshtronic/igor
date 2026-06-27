@@ -191,7 +191,11 @@ claude_run_with_cost() {
   local rc=${PIPESTATUS[0]}
   set +o pipefail
   set -e
-  cost_record_cli "$call_site" "$stream_log"
+  # Bookkeeping must NEVER kill the tick. If claude crashes mid-stream the JSONL is
+  # truncated, so the cost parse can fail -- guard it (|| true), exactly like the
+  # health classification below, or set -e turns a recoverable model crash into a
+  # raw status=1 that bypasses the caller's exit handling and re-does the work.
+  cost_record_cli "$call_site" "$stream_log" || true
   # Health bookkeeping: a clean exit clears any failure streak; a
   # nonzero exit only counts when the ERROR CHANNELS say auth/limit
   # (timeouts and ordinary task failures stay the surface's problem).
@@ -200,7 +204,7 @@ claude_run_with_cost() {
   # where agent/tool text about "authentication" or "rate limits"
   # would false-positive a global backoff.
   if [ "$rc" -eq 0 ]; then
-    claude_health_record_ok
+    claude_health_record_ok || true
   else
     local err_text kind
     # `|| true` everywhere: this runs under set -e, and a no-match
