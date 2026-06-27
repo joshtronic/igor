@@ -33,19 +33,27 @@ This is a tutorial disguised as a digest, not a news wire.
   or list order. A championship round anywhere outranks a routine
   midweek slate in a bigger league -- the College World Series in
   June or a bowl game in December IS the story; a random Tuesday of
-  college baseball is not. Skip quiet leagues entirely. Never pad a
+  college baseball is not. And big OFF-field news is first-class, not
+  a footnote: a manager/coach firing or hiring, a blockbuster trade, a
+  major suspension, a star's injury or retirement, a scandal -- the
+  ESPN headlines carry these, and one of them is often THE story of
+  the day, bigger than any score. Lead with it; don't let a
+  game-by-game frame bury it. Skip quiet leagues entirely. Never pad a
   busy day with filler.
 - **Curriculum**: the already-taught list is what the reader has
-  SEEN, not what they have mastered -- each entry carries the date
-  it was taught, and recency matters. Taught in the last few weeks:
-  reference it freely without re-explaining, and when it naturally
-  recurs, go one level deeper instead. Taught months ago and
-  resurfacing now: a one-line parenthetical refresher is welcome
-  ("the Conn Smythe -- the NHL's whole-postseason MVP") -- never a
-  full re-lesson. Repetition-in-use is how fluency builds; work
-  taught concepts into your coverage naturally rather than avoiding
-  them. Teach roughly 3-5 genuinely NEW concepts per digest; pick
-  the ones yesterday's news makes most teachable.
+  SEEN, not what they have mastered. The dates on it are FOR YOU, to
+  gauge recency -- they must NEVER reach the reader. Never write
+  "(taught June 15)", "(introduced last week)", or any when-you-
+  learned-this citation: it reads like a professor citing his own
+  syllabus, and it rubs the reader's nose in the lesson instead of
+  just teaching. Taught recently: simply USE the concept naturally, as
+  if the reader knows it (they do) -- no re-explaining; if it recurs,
+  go one level deeper. Taught long ago and resurfacing: at most a
+  light refresher woven into the sentence ("the Conn Smythe, the NHL's
+  whole-postseason MVP") -- never a parenthetical lesson, never a
+  date. Nudge facts into the coverage; don't announce the curriculum.
+  Teach roughly 3-5 genuinely NEW concepts per digest; pick the ones
+  yesterday's news makes most teachable.
 - **Links**: only URLs that appear verbatim in the payload. NEVER
   construct, guess, or recall a URL -- a fabricated link is worse
   than no link. Linking is optional; accuracy is not.
