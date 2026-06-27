@@ -20,6 +20,7 @@ FAIL=0
 ok() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  + %s\n' "$d"; else printf '  x %s (expected rc0)\n' "$d"; FAIL=$((FAIL + 1)); fi; }
 no() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (expected rc!=0)\n' "$d"; FAIL=$((FAIL + 1)); else printf '  + %s\n' "$d"; fi; }
 eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
+has() { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
 
 echo "== agent.json (.smoke.url) opt-in =="
 forgejo_repo_get_file() { printf '%s' '{"smoke":{"url":"https://porksicle.com"}}'; }
@@ -117,6 +118,59 @@ eq "barrier: smoke-exhausted cleared"      ""        "$(jq -r '.deploy.repo // "
 
 echo '{}' > "$STATE"
 no "barrier: nothing pending -> falls through (rc1)"  do_deploy_barrier
+
+echo "== automerge_live_sha (extract the deploy-sha meta) =="
+curl() { printf '%s' "$LIVE_HTML"; }
+LIVE_HTML='<html><head><meta name="deploy-sha" content="abc123def"><title>x</title></head></html>'
+eq "live_sha: extracts the meta value" "abc123def" "$(automerge_live_sha https://x)"
+LIVE_HTML='<html><head><title>no marker here</title></head></html>'
+eq "live_sha: no meta -> empty"        "" "$(automerge_live_sha https://x)"
+
+echo "== automerge_sitemap_failures (walk + flag non-2xx) =="
+curl() {
+  local u="${@: -1}"
+  case "$u" in
+    */sitemap.xml) printf '<urlset><url><loc>https://x/ok</loc></url><url><loc>https://x/bad</loc></url></urlset>' ;;
+    */bad)         echo 500 ;;
+    *)             echo 200 ;;
+  esac
+}
+smf=$(automerge_sitemap_failures https://x)
+has "sitemap: flags the failing page"      "$smf" "/bad"
+has "sitemap: includes the status code"    "$smf" "500"
+case "$smf" in *"/ok"*) printf '  x %s\n' "sitemap: wrongly flagged the 200 page"; FAIL=$((FAIL + 1)) ;; *) printf '  + %s\n' "sitemap: leaves the 200 page alone" ;; esac
+curl() { return 1; }
+eq "sitemap: no sitemap.xml -> empty (skip)" "" "$(automerge_sitemap_failures https://x)"
+
+echo "== deploy barrier: propagation gate =="
+forgejo_commit_status() { echo success; }
+automerge_sitemap_failures() { return 0; }     # sitemap clean unless a test says otherwise
+seedsha() { jq -n --arg r "$1" --arg s "$2" --argjson a "${3:-0}" \
+  '{deploy:{repo:$r,pr:"1",sha:$s,url:"https://x",smoke_attempts:$a,ci_attempts:0}}' > "$STATE"; }
+automerge_live_sha() { echo "mergedsha"; }      # live build == merged commit
+seedsha acme/x mergedsha; ALERTS=0; COMMENTS=0; COMMENT_BODY=""
+no  "barrier: propagated (live==merged) -> verified (rc1)" do_deploy_barrier
+eq  "barrier: propagated cleared .deploy"  ""       "$(jq -r '.deploy.repo // ""' "$STATE")"
+eq  "barrier: propagated did not alert"    "0"      "$ALERTS"
+has "barrier: confirm cites the merged commit" "$COMMENT_BODY" "merged commit"
+automerge_live_sha() { echo "oldsha"; }         # old build still serving
+seedsha acme/x mergedsha 0; ALERTS=0
+ok  "barrier: stale build live -> grace (rc0)"  do_deploy_barrier
+eq  "barrier: stale bumped attempts"       "1"      "$(jq -r '.deploy.smoke_attempts' "$STATE")"
+eq  "barrier: stale did not alert yet"     "0"      "$ALERTS"
+eq  "barrier: stale keeps .deploy"         "acme/x" "$(jq -r '.deploy.repo // ""' "$STATE")"
+seedsha acme/x mergedsha $((AUTOMERGE_SMOKE_MAX_ATTEMPTS - 1)); ALERTS=0
+no  "barrier: stale exhausted -> alert (rc1)"  do_deploy_barrier
+eq  "barrier: stale-exhausted alerted"     "1"      "$ALERTS"
+
+echo "== deploy barrier: sitemap gate =="
+automerge_live_sha() { echo "mergedsha"; }          # propagation passes
+automerge_sitemap_failures() { echo "https://x/dead (500)"; }
+seedsha acme/x mergedsha; ALERTS=0
+no  "barrier: sitemap page failed -> alert (rc1)"  do_deploy_barrier
+eq  "barrier: sitemap-failure alerted"     "1"      "$ALERTS"
+eq  "barrier: sitemap-failure cleared"     ""       "$(jq -r '.deploy.repo // ""' "$STATE")"
+automerge_sitemap_failures() { return 0; }          # restore clean for any later use
 
 echo "== automerge_do_merge (merge body) =="
 MERGE_BODY=""

@@ -109,6 +109,34 @@ automerge_smoke() {
   case "$code" in 2??|3??) return 0 ;; *) return 1 ;; esac
 }
 
+# automerge_live_sha <url> -- the live page's <meta name="deploy-sha"> value, or
+# empty if the page carries no such marker (the barrier then falls back to a plain
+# liveness check). A build that stamps this lets us verify the SERVING build is the
+# merged commit, not just that something answered.
+automerge_live_sha() {
+  curl -fsSL --max-time 20 "$1" 2>/dev/null \
+    | grep -oiE '<meta[^>]*name="deploy-sha"[^>]*>' | head -1 \
+    | grep -oE 'content="[^"]*"' | head -1 | sed 's/^content="//; s/"$//'
+}
+
+# automerge_sitemap_failures <url> -- "sitemap-when-available": if <base>/sitemap.xml
+# exists, GET every <loc> and echo the ones that aren't 2xx/3xx (one per line, with
+# the code). Empty output = all good OR no sitemap. Capped at 500 urls; a larger
+# sitemap is noted on stderr (-> journal), never silently truncated.
+automerge_sitemap_failures() {
+  local base xml locs total loc code
+  base=$(printf '%s' "$1" | sed -E 's#^(https?://[^/]+).*#\1#')
+  xml=$(curl -fsSL --max-time 20 "${base}/sitemap.xml" 2>/dev/null) || return 0   # no sitemap -> skip
+  locs=$(printf '%s' "$xml" | grep -oE '<loc>[^<]+</loc>' | sed -E 's#</?loc>##g')
+  total=$(printf '%s\n' "$locs" | grep -c . || true)
+  [ "${total:-0}" -gt 500 ] && printf 'deploy: sitemap has %s urls, checking the first 500\n' "$total" >&2
+  printf '%s\n' "$locs" | head -500 | while IFS= read -r loc; do
+    [ -n "$loc" ] || continue
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -L "$loc" 2>/dev/null || echo 000)
+    case "$code" in 2??|3??) ;; *) printf '%s (%s)\n' "$loc" "$code" ;; esac
+  done
+}
+
 # _deploy_record <repo> <pr> <sha> <url> -- stamp a pending deploy under .deploy.
 _deploy_record() {
   local repo="$1" pr="$2" sha="$3" url="$4" sf tmp
@@ -183,21 +211,49 @@ do_deploy_barrier() {
       return 0 ;;
   esac
 
-  if automerge_smoke "$url"; then
-    log "deploy: ${repo}#${pr} verified healthy (CI green, ${url} responds) -- resuming work"
-    forgejo_comment "$repo" "$pr" \
-      "🚀 **Auto-merge deploy verified.** Deploy CI is green and \`${url}\` responded — the site is live. Merge commit \`${sha:0:8}\`. (Posted by the harness deploy barrier; no action needed.)" \
-      2>/dev/null || log "warning: deploy: confirm-comment failed on ${repo}#${pr}"
+  # -- Liveness / propagation / sitemap, all on the same grace counter ----------
+  # Propagation: the live page's <meta name="deploy-sha"> must equal the merged
+  # commit, so we KNOW the build that's serving is the one we merged -- not merely
+  # that the site is up (monit already owns up/down). No marker on the page ->
+  # fall back to a plain liveness curl, the legacy behaviour.
+  local live_sha live_ok=0 detail sm_fails
+  live_sha=$(automerge_live_sha "$url")
+  if [ -n "$live_sha" ]; then
+    case "$sha" in
+      "$live_sha"*) live_ok=1; detail="deploy-sha ${sha:0:8} is live" ;;
+      *)            detail="still serving an older build (deploy-sha ${live_sha:0:8}, want ${sha:0:8})" ;;
+    esac
+  elif automerge_smoke "$url"; then
+    live_ok=1; detail="${url} responds (no deploy-sha marker)"
+  else
+    detail="${url} did not respond"
+  fi
+
+  if [ "$live_ok" -ne 1 ]; then
+    # not the merged build yet (rsync/propagation lag, or down) -- grace, then alert
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge "$AUTOMERGE_SMOKE_MAX_ATTEMPTS" ]; then
+      _deploy_alert "$repo" "$pr" "$sha" "$url" "CI green but ${detail} after ${attempts} checks"
+      _deploy_clear; return 1
+    fi
+    tmp=$(mktemp); jq --argjson a "$attempts" '.deploy.smoke_attempts = $a' "$sf" > "$tmp" && mv "$tmp" "$sf"
+    log "deploy: ${repo}#${pr} ${detail} (${attempts}/${AUTOMERGE_SMOKE_MAX_ATTEMPTS}) -- ending tick"
+    return 0
+  fi
+
+  # The merged build is live. Sitemap-when-available: every <loc> must be 2xx/3xx.
+  sm_fails=$(automerge_sitemap_failures "$url")
+  if [ -n "$sm_fails" ]; then
+    _deploy_alert "$repo" "$pr" "$sha" "$url" \
+      "deploy live (${detail}) but sitemap pages failed: $(printf '%s' "$sm_fails" | tr '\n' ' ')"
     _deploy_clear; return 1
   fi
-  attempts=$((attempts + 1))
-  if [ "$attempts" -ge "$AUTOMERGE_SMOKE_MAX_ATTEMPTS" ]; then
-    _deploy_alert "$repo" "$pr" "$sha" "$url" "CI green but ${url} did not respond after ${attempts} checks"
-    _deploy_clear; return 1
-  fi
-  tmp=$(mktemp); jq --argjson a "$attempts" '.deploy.smoke_attempts = $a' "$sf" > "$tmp" && mv "$tmp" "$sf"
-  log "deploy: ${repo}#${pr} CI green but ${url} not live yet (${attempts}/${AUTOMERGE_SMOKE_MAX_ATTEMPTS}) -- ending tick"
-  return 0
+
+  log "deploy: ${repo}#${pr} verified healthy (CI green, ${detail}) -- resuming work"
+  forgejo_comment "$repo" "$pr" \
+    "🚀 **Auto-merge deploy verified.** CI green and the live build is the merged commit — ${detail}. Merge commit \`${sha:0:8}\`. (Posted by the harness deploy barrier; no action needed.)" \
+    2>/dev/null || log "warning: deploy: confirm-comment failed on ${repo}#${pr}"
+  _deploy_clear; return 1
 }
 
 # do_automerge_tick -- merge ONE human-approved bot PR on an auto-merge-eligible

@@ -348,10 +348,19 @@ respective tools on the host; install or skip.
   it polls CI, and while the deploy is still in flight it ENDS the tick -- the
   1-minute cadence IS the polling loop, so no long work starts mid-deploy (one
   deploy at a time, since the barrier sits above the work, including the
-  auto-merge step itself). On CI-green it smokes the live URL (a few ticks of
-  propagation grace before alerting), clearing on a 2xx/3xx -- and posting a
-  **confirm comment on the merged PR** -- or emailing `ALERT_RECIPIENTS` (plus a
-  failure comment on the PR) on a failed CI or smoke. The merge itself passes
+  auto-merge step itself). On CI-green it verifies the deploy actually LANDED, not
+  just that the site is up (monit owns up/down): it reads the live page's `<meta
+  name="deploy-sha">` and asserts it equals the merged commit -- **PROPAGATION**,
+  proving the build that's *serving* is the one we merged -- with a few ticks of
+  grace for rsync/propagation lag; a page carrying no marker degrades to a plain
+  2xx/3xx liveness curl. Then **sitemap-when-available**: if `<base>/sitemap.xml`
+  exists it GETs every `<loc>` and flags any non-2xx (capped at 500, logged if
+  exceeded). It clears + posts a **confirm comment on the merged PR** on success,
+  or emails `ALERT_RECIPIENTS` (plus a failure comment) on a failed CI, a
+  stale/unreachable build, or a broken sitemap page. The *build* emits the meta
+  itself (porksicle's `eleventy.config.js` stamps `git rev-parse HEAD`), so no CI
+  change is needed; correctness stays in CI (E2E pre-merge), the barrier owns
+  propagation, monit owns liveness. The merge itself passes
   `delete_branch_after_merge` (the repo's "delete by default" is only a UI-form
   default; an API merge must opt in explicitly), so the head branch is cleaned
   up. Both are non-model (API + curl), so they run even during a Claude cooldown.
