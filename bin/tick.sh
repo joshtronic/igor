@@ -1304,7 +1304,8 @@ maint_priority_label() {
 maint_file_deduped_issue() {
   local repo="$1" marker="$2" title="$3" body="$4" agent="$5" pri="$6"
   local existing
-  existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$marker" 2>/dev/null)
+  existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$marker" 2>/dev/null) \
+    || { log "warning: maintenance: can't check existing ticket on $repo (API error) -- skipping"; return 0; }
   if [ -n "$existing" ] && [ "$existing" != "null" ] \
      && [ "$(jq -r '.state' <<<"$existing" 2>/dev/null)" = "open" ]; then
     log "maintenance: $repo already has an open ticket #$(jq -r '.number' <<<"$existing") for ${marker} -- not refiling"
@@ -1631,7 +1632,8 @@ seo_file_ticket() {
   fi
   local marker existing
   marker="${SEO_TICKET_MARKER} ${domain}"
-  existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$marker" 2>/dev/null)
+  existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$marker" 2>/dev/null) \
+    || { log "warning: seo: can't check existing ticket on $repo (API error) -- skipping ticket"; return 0; }
   if [ -n "$existing" ] && [ "$existing" != "null" ] && [ "$existing" != "empty" ] \
      && [ "$(jq -r '.state' <<<"$existing" 2>/dev/null)" = "open" ]; then
     log "seo: $repo already has an open SEO ticket #$(jq -r '.number' <<<"$existing") for $domain -- not refiling"
@@ -2921,7 +2923,15 @@ while IFS= read -r repo_line; do
   # known-broken and the user hasn't told us it's fixed." Skip the
   # ~6-call validation pass and treat as failed. Closing the ticket
   # is the user's signal to re-validate.
+  set +e
   EXISTING=$(forgejo_find_marked_issue "$R_NAME" "$BOT_USER" "$ONBOARDING_MARKER" 2>/dev/null)
+  ONBOARDING_RC=$?
+  set -e
+  if [ "$ONBOARDING_RC" -ne 0 ]; then
+    log "validation: $R_NAME onboarding-check API error (rc=$ONBOARDING_RC) -- skipping this tick, will retry"
+    VAL_INDET=$((VAL_INDET + 1))
+    continue
+  fi
   if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ] && [ "$EXISTING" != "empty" ] \
       && [ "$(jq -r '.state' <<<"$EXISTING" 2>/dev/null)" = "open" ]; then
     EXISTING_NUM=$(jq -r '.number' <<<"$EXISTING" 2>/dev/null)
