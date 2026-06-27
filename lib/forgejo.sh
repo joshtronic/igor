@@ -455,9 +455,13 @@ forgejo_reopen_issue() {
 # onboarding tickets across ticks.
 forgejo_find_marked_issue() {
   local repo="$1" bot="$2" marker="$3"
-  _fj GET "/repos/${repo}/issues?state=all&type=issues&limit=50" \
-    | jq -c --arg b "$bot" --arg m "$marker" '
-        [.[] | select(.user.login == $b and ((.body // "") | contains($m)))]
-        | sort_by(.created_at) | reverse | first // empty
-      '
+  local issues
+  # Separate the _fj call so a curl timeout (exit 28) or other API
+  # failure returns exit 1 here rather than propagating the raw curl
+  # exit code through pipefail to the caller.
+  issues=$(_fj GET "/repos/${repo}/issues?state=all&type=issues&limit=50" 2>/dev/null) || return 1
+  jq -c --arg b "$bot" --arg m "$marker" '
+      [.[] | select(.user.login == $b and ((.body // "") | contains($m)))]
+      | sort_by(.created_at) | reverse | first // empty
+    ' <<<"$issues"
 }
