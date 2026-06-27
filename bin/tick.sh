@@ -1974,13 +1974,20 @@ do_sports_tick() {
   # final segment, which surfaces here as an "unparseable" response
   # whose head starts mid-sentence with no CONCEPTS/sentinel. Thinking
   # length varies run to run, which is exactly the flaky-parse shape.
+  #
+  # timeout 600s (SPORTS_CALL_TIMEOUT_SECS): busy-day payloads -- a
+  # full MLB slate plus concurrent playoff series (NHL/NBA/CWS in June)
+  # push thinking tokens high enough to timeout at the 300s default.
+  # espn_slim_league already caps events at 10 and headlines at 8, but
+  # 12 leagues * 10 events is still a large input. 600s gives the model
+  # room to finish without compromising the 900s retry cooldown.
   local covered prompt directive raw parsed attempt snippet tail_snip
   covered=$(sports_concepts_load)
   prompt=$(sports_build_prompt "$payload" "$covered" "$ydash")
   directive=$(cat "$AGENT_HOME/bin/lib/sports-digest-directive.md")
   parsed=""
   for attempt in 1 2; do
-    raw=$(claude_call "$AGENT_MODEL" "sports-digest" 16000 "$directive" "$prompt" 0) || {
+    raw=$(claude_call "$AGENT_MODEL" "sports-digest" 16000 "$directive" "$prompt" 0 "${SPORTS_CALL_TIMEOUT_SECS:-600}") || {
       log "sports: distill call failed (attempt $attempt)"
       continue
     }

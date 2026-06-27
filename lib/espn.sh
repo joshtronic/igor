@@ -70,9 +70,10 @@ espn_news() {
 #   { league,
 #     events:[{name,date,status,notes,competitors:[{team,score,winner}]}],
 #     headlines:[{headline,description,published,link}] }
-# Caps keep the prompt bounded with ~12 configured leagues: 10
-# competitors per event (golf/racing fields run to 150 entrants -- the
-# scoreboard order puts the leaders first) and 8 headlines per league.
+# Caps keep the prompt bounded with ~12 configured leagues: 10 events
+# per league (a full MLB Saturday slate runs to 15 games), 10 competitors
+# per event (golf/racing fields run to 150 entrants -- the scoreboard
+# order puts the leaders first), and 8 headlines per league.
 # Article links come from ESPN verbatim -- the model is never the
 # source of a URL.
 espn_slim_league() {
@@ -82,7 +83,7 @@ espn_slim_league() {
     (input) as $sb | (input) as $nw |
     {
       league: $league,
-      events: [($sb.events // [])[] | {
+      events: [($sb.events // [])[0:10][] | {
         name: .name,
         date: ((.date // "") | split("T")[0]),
         status: (.status.type.description // "unknown"),

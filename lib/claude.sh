@@ -224,7 +224,7 @@ claude_run_with_cost() {
 # One-shot, no-tools `claude -p` completion -- the subscription-billed
 # replacement for anthropic_call, same signature and contract:
 #
-#   claude_call <model> <call_site> <max_tokens> <system> <user> [strip_fences]
+#   claude_call <model> <call_site> <max_tokens> <system> <user> [strip_fences] [timeout_secs]
 #
 # Echoes the completion text; nonzero on any failure. strip_fences
 # (default "1") drops ``` fence lines, exactly like anthropic_call.
@@ -252,6 +252,7 @@ claude_run_with_cost() {
 claude_call() {
   local model="$1" call_site="$2" max_tokens="$3" system="$4" user="$5"
   local strip_fences="${6:-1}"
+  local timeout_secs="${7:-${CLAUDE_CALL_TIMEOUT_SECS:-300}}"
   local scratch envelope rc text err kind
 
   if claude_health_blocked; then
@@ -267,7 +268,7 @@ claude_call() {
   envelope=$(printf '%s' "$user" \
     | (cd "$scratch" && env -u ANTHROPIC_API_KEY \
         CLAUDE_CODE_MAX_OUTPUT_TOKENS="$max_tokens" \
-        timeout "${CLAUDE_CALL_TIMEOUT_SECS:-300}" \
+        timeout "$timeout_secs" \
         claude -p \
           --model "$model" \
           --system-prompt "$system" \
