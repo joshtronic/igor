@@ -160,6 +160,10 @@ claude_run_with_cost() {
   local stream_log="$scratch/claude-stream.jsonl"
   : > "$stream_log"
   : > "$display_log"
+  # Mark this call in-flight. cleanup() (via crashlog_preserve) keeps the raw
+  # stream for a post-mortem if the tick dies before we return here -- the #279
+  # signature (status=1, no "claude exited" line). Cleared on a clean return.
+  printf '%s\t%s\n' "$call_site" "$(date +%s)" > "$scratch/claude-in-flight" 2>/dev/null || true
   # stderr inline with stdout (old behavior); jq filter drops
   # non-JSON lines so stray stderr doesn't break the pipeline.
   # --verbose is required by Claude Code when using stream-json
@@ -222,6 +226,10 @@ claude_run_with_cost() {
       claude_health_record_failure "$kind" "$call_site: $(printf '%s' "$err_text" | tail -c 200)"
     fi
   fi
+  # Returned cleanly -- clear the in-flight marker so cleanup() won't treat this
+  # worktree as a crash. (If we never reach here, the marker lingers and the
+  # stream is preserved -- exactly the case we want to capture.)
+  rm -f "$scratch/claude-in-flight" 2>/dev/null || true
   return "$rc"
 }
 
