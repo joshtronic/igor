@@ -88,6 +88,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/cost.sh"
 # shellcheck source=lib/claude.sh
 . "$AGENT_HOME/lib/claude.sh"
+# shellcheck source=lib/crashlog.sh
+. "$AGENT_HOME/lib/crashlog.sh"
 # shellcheck source=../lib/security-gate.sh
 . "$AGENT_HOME/lib/security-gate.sh"
 # shellcheck source=lib/gsc.sh
@@ -3770,6 +3772,13 @@ WORKTREE=""
 
 cleanup() {
   local rc=$?
+  # Post-mortem: if a model call was in-flight when the tick died (the #279
+  # signature -- abnormal exit, no "claude exited" line), preserve its raw stream
+  # before the worktree is removed below or reused next tick. Best-effort; the
+  # `|| true` keeps a capture failure from ever changing the tick's exit.
+  if [ "$rc" -ne 0 ]; then
+    crashlog_preserve "$rc" "$AGENT_STATE_DIR" "${WORKTREE:-}" "${PR_WORKTREE:-}" 2>/dev/null || true
+  fi
   if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
     log "removing worktree $WORKTREE"
     (cd "$REPO_PATH" && git worktree remove "$WORKTREE" --force) 2>/dev/null || true
