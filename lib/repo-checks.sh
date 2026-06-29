@@ -260,6 +260,10 @@ EOF
       || log "warning: could not apply 'Status/Need More Info' on $repo (label missing?)"
     forgejo_add_label "$repo" "$num" "Priority/Critical" 2>/dev/null \
       || log "warning: could not apply 'Priority/Critical' on $repo (label missing?)"
+    # Onboarding is a human ticket -- the repo needs scaffolding only the operator
+    # can add -- so assign the reviewer to surface it in their queue.
+    forgejo_assign "$repo" "$num" "$FORGEJO_REVIEWER" 2>/dev/null \
+      || log "warning: could not assign onboarding ticket on $repo to $FORGEJO_REVIEWER"
     return
   fi
 

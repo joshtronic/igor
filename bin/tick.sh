@@ -1167,6 +1167,11 @@ maint_file_deduped_issue() {
   else
     forgejo_add_label "$repo" "$num" "Status/Need More Info" 2>/dev/null \
       || log "warning: could not apply 'Status/Need More Info' on $repo#$num"
+    # Human-triage tickets (maint-triage, maint-tooling) need to land in the
+    # reviewer's queue -- assign them, the same as logwatch/feedback. Agent work
+    # tickets (the if-branch) stay unassigned for the claimable grind to pick up.
+    forgejo_assign "$repo" "$num" "$FORGEJO_REVIEWER" 2>/dev/null \
+      || log "warning: could not assign $repo#$num to $FORGEJO_REVIEWER"
   fi
   if [ -n "$pri" ]; then
     forgejo_add_label "$repo" "$num" "$pri" 2>/dev/null \
