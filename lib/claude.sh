@@ -37,7 +37,7 @@
 # Durable record of whether `claude` can currently get a completion
 # on the subscription login. Lives under a ".health" key in
 # discretionary-state.json (same one-key-per-subsystem shape as
-# .slots/.seo/.market):
+# .slots/.seo):
 #   { last_ok, first_failure, kind, detail, cooldown_until,
 #     emailed_on, probed_on }
 # Only AUTH and USAGE-LIMIT failures count toward health -- an
@@ -45,7 +45,7 @@
 # calling surface's own problem and must not trip a global backoff.
 # Any successful call clears the failure state. tick.sh checks
 # claude_health_blocked at the top of the cascade and skips ALL
-# model work while a cooldown is live (scripted work -- SEO, market
+# model work while a cooldown is live (scripted work -- the SEO
 # report -- still runs); do_health_tick owns the daily probe and the
 # once-daily operator alert email.
 #

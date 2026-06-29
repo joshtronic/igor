@@ -190,7 +190,7 @@ ceo_render_html() {
 
 # ---- per-repo weekly slot state (.ceo in discretionary-state.json) ----
 # Dedicated .ceo object keyed by repo -> ISO week, matching the per-subsystem
-# shape of .seo/.market/.sports. Per-repo so several managed repos each get
+# shape of .seo/.sports. Per-repo so several managed repos each get
 # their own weekly stamp; one digest per repo per ISO week, self-healing.
 ceo_state_file() {
   printf '%s/discretionary-state.json' "${AGENT_STATE_DIR:-$HOME/.local/state/agent}"

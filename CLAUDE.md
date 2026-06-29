@@ -7,8 +7,7 @@ pickup, then Igor's own work (daily reading + blog post, weekly
 /now refresh + site-work pass -- opt-in via `WEBSITE_REPO`), then
 the code review, then
 scheduled maintenance, then the monthly GSC-driven SEO pass (opt-in),
-then the daily weekday market report (opt-in), then the daily
-sports digest (opt-in), then the weekly CEO board digest
+then the daily sports digest (opt-in), then the weekly CEO board digest
 (opt-in), then the daily logwatch self-report
 (opt-in), then the claimable-issue grind. Igor's own
 work comes first and is throttled (daily/weekly slots), so tickets
@@ -30,8 +29,7 @@ repo is everything that makes the cron beat real.
   Claude's system prompt per surface.
 - `lib/*.sh` -- sourced shell libraries (Forgejo API, repo checks,
   maintenance checks, cost tracking; the shared SMTP2GO sender
-  `email.sh`; the opt-in SEO pair `gsc.sh` + `seo-analysis.sh`; the
-  opt-in market-report pair `marketstack.sh` + `market-report.sh`; and
+  `email.sh`; the opt-in SEO pair `gsc.sh` + `seo-analysis.sh`; and
   the opt-in sports-digest pair `espn.sh` + `sports-digest.sh`).
 - `AGENTS.md` -- the universal agent rules appended to Claude's
   system prompt for issue work and PR review.
@@ -90,7 +88,7 @@ respective tools on the host; install or skip.
   under `.health` in `discretionary-state.json` (only auth and
   usage-limit failures count -- ordinary nonzero exits stay the
   surface's problem). While a cooldown is live the tick skips ALL
-  model work (scripted SEO/market emails still run); a daily probe
+  model work (the scripted SEO emails still run); a daily probe
   covers idle days and a once-daily alert email goes to
   `PRIMARY_RECIPIENTS` (plus any `HEALTH_RECIPIENTS` extras; log-only
   without SMTP2GO). Clear `.health` to reset. Side effect of
@@ -178,50 +176,25 @@ respective tools on the host; install or skip.
   that site (otherwise a normal day). State (incl. SEO monthly stamps
   under `.seo`, now `YYYY-MM`) lives in
   `~/.local/state/agent/discretionary-state.json`; clear a domain's
-  stamp there to re-run it.
-- The market report (`do_market_tick`) is opt-in via the marketstack
-  (v2 EOD API) + SMTP2GO env and is a sibling of the SEO pass: scripted
-  (no LLM), email-only, NOT repo-driven. It's the only DAILY-but-weekday-
-  gated schedule (`date +%u` <= 5), and unlike the slots it's independent
-  of `WEBSITE_REPO`. Sends one email per weekday on the first tick after
-  the midnight rollover -- no send-hour knob, matching the harness's
-  no-clock-gating design. It shares `email.sh` with SEO -- both now gate
-  on `SMTP2GO_API_KEY` + `SMTP2GO_SENDER` (renamed from
-  `SEO_SENDER_EMAIL`; if you change the code's email vars, the host
-  `.env` must change in lockstep or BOTH reports break). Because the
-  midnight tick can beat marketstack's EOD publish for the just-closed
-  session, the send is gated on a freshness check: it only emails once the
-  latest bar's date equals the expected previous trading day (yesterday,
-  or Friday on a Monday). Two concerns are decoupled in the `.market`
-  state object `{date, sent, failures, last_attempt}` (same
-  one-key-per-subsystem shape as `.slots`/`.seo`): `last_attempt` (epoch
-  secs) spaces EVERY marketstack hit by `MARKET_RETRY_COOLDOWN_SECS`
-  (default 15 min) so a stale/empty read doesn't poll the metered API every
-  minute; `failures` counts only HARD failures (API error, empty read, or
-  send failure) and is capped at a hardcoded 5/day so a bad key or outage
-  abandons the day instead of burning quota -- a successful fetch clears
-  it, and a stale-but-valid read ("not published yet") is NOT a failure, it
-  just holds and re-checks on the next cooldown. `sent` flips true only on
-  a successful send. The freshness gate is holiday-naive: on the trading
-  day *after* a market holiday the latest bar predates the expected
-  previous weekday, so the gate never matches and no report goes out that
-  day (logged each cooldown, not silent). Clear `.market` to force a
-  re-send. Keep it a single report until there's a real reason to split it.
+  stamp there to re-run it. The SEO, sports, CEO, and alert emails all
+  share `email.sh`, gating on `SMTP2GO_API_KEY` + `SMTP2GO_SENDER`
+  (renamed from `SEO_SENDER_EMAIL`); change the code's email vars and the
+  host `.env` must change in lockstep or those emails break.
 - The sports digest (`do_sports_tick`) is opt-in via `SPORTS_RECIPIENTS`
-  + `SPORTS_LEAGUES` + SMTP2GO and is the third email sibling -- but the
+  + `SPORTS_LEAGUES` + SMTP2GO and is another email sibling -- but the
   FIRST that uses the model (scripted ESPN fetch via `lib/espn.sh`, ONE
-  `claude_call` distill on `AGENT_MODEL`), so unlike SEO/market it sits
+  `claude_call` distill on `AGENT_MODEL`), so unlike SEO it sits
   below the health gate and goes dark during a Claude cooldown. Daily,
   7 days a week, first tick after 03:00 (window-completeness like
   logwatch: the digest covers YESTERDAY and west-coast games end past
   midnight CT). `SPORTS_LEAGUES` is one flat CSV of ESPN
   `{sport}/{league}` paths -- no tier var; the directive
   (`bin/lib/sports-digest-directive.md`) curates by significance.
-  Day-state is `.market`-shaped (`.sports = {date, sent, failures,
-  last_attempt}`, cooldown via `SPORTS_RETRY_COOLDOWN_SECS`, hardcoded
-  5-failure cap, sent flips only on a successful send; deliberately no
+  Day-state is `.sports = {date, sent, failures, last_attempt}`: a
+  cooldown via `SPORTS_RETRY_COOLDOWN_SECS`, a hardcoded 5-failure cap,
+  and `sent` flips only on a successful send. Deliberately no
   clear-on-good-fetch -- ESPN being up says nothing about the distill,
-  and clearing would let a parse-flaky day burn unbounded model calls).
+  and clearing would let a parse-flaky day burn unbounded model calls.
   Clear `.sports` to force a re-send. The model's output is label-line +
   `===BODY===` sentinel, parsed harness-side -- never model-written
   JSON; links must come from the ESPN payload verbatim. The taught-

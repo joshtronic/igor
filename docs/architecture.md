@@ -80,43 +80,20 @@ A timer fires `bin/tick.sh`. Per tick:
    picks up once that repo is validated. Surfaced opportunities are
    logged to `seo-opportunities.jsonl` with baselines for future
    outcome grading. Nothing above the floor -> no email, no ticket.
-9. **Market report** (opt-in via marketstack + SMTP2GO env; no-ops
-   when unconfigured). A daily Mon-Fri email of the previous trading
-   day's prices (company, high, low, close, volume) for the symbols in
-   `MARKET_SYMBOLS`, to `MARKET_RECIPIENTS`, as an HTML table.
-   Scripted (`lib/marketstack.sh` makes one v2 EOD
-   request for all symbols; `lib/market-report.sh` builds + renders the
-   table -- no LLM); email-only, NOT repo-driven (a sibling of the SEO
-   pass). Sends at most once per weekday, starting on the first tick
-   after the midnight rollover (no send-hour knob -- midnight is the day
-   boundary, same as the rest of the harness), but gated on a freshness
-   check: the midnight tick can beat marketstack's EOD publish, so it
-   only emails once the latest bar's date is the expected previous
-   trading day; a stale read holds and the next marketstack hit waits out
-   `MARKET_RETRY_COOLDOWN_SECS` (default 15 min) rather than polling the
-   metered API every minute. Stamped in a single `.market` object
-   `{date, sent, failures, last_attempt}` in `discretionary-state.json`:
-   `sent` flips true only on a successful send; `last_attempt` drives the
-   cooldown; `failures` counts only hard failures (API error, empty read,
-   send failure) and is capped at 5/day so a bad key or outage abandons
-   the day instead of burning quota, while a stale-but-valid read is not a
-   failure and just holds. The freshness gate is holiday-naive, so the
-   trading day after a market holiday holds all day and sends no report
-   (logged each cooldown). Weekends and already-sent ticks fall through.
-10. **Sports digest** (opt-in via `SPORTS_RECIPIENTS` + `SPORTS_LEAGUES`
+9. **Sports digest** (opt-in via `SPORTS_RECIPIENTS` + `SPORTS_LEAGUES`
    + SMTP2GO env; no-ops when unconfigured). A daily, 7-days-a-week
    email that teaches sports through yesterday's news: `lib/espn.sh`
    fetches each configured league's scoreboard (yesterday) + headlines
    from ESPN's free public JSON API, and ONE `claude_call` on
    `AGENT_MODEL` (directive: `bin/lib/sports-digest-directive.md`)
-   distills it into an ELI5 tutorial-digest. The third email sibling,
+   distills it into an ELI5 tutorial-digest. Another email sibling,
    but the first that uses the model -- a Claude health cooldown holds
-   it, unlike SEO/market. Fires on the first tick after 03:00: a
+   it, unlike SEO. Fires on the first tick after 03:00: a
    window-completeness gate, not a send-hour -- the digest covers
    yesterday and west-coast games end past midnight CT. `SPORTS_LEAGUES`
    is one flat CSV of ESPN `{sport}/{league}` paths; the directive
    curates by significance (a college championship outranks a routine
-   pro slate). Day-state mirrors `.market` (a `.sports` object, cooldown
+   pro slate). Day-state is a `.sports` object (cooldown
    via `SPORTS_RETRY_COOLDOWN_SECS`, 5-hard-failure/day cap). The model
    returns a `CONCEPTS:` label line + `===BODY===` sentinel + markdown,
    parsed harness-side (never model-written JSON; links only verbatim
@@ -124,27 +101,27 @@ A timer fires `bin/tick.sh`. Per tick:
    `~/.local/state/agent/sports-curriculum.json` (capped at 300) and
    ride into the next day's prompt, so the digest builds toward
    fluency instead of re-explaining -- a curriculum, not a loop.
-11. **Discovery.** For each validated repo, query for the oldest
+10. **Discovery.** For each validated repo, query for the oldest
    claimable issue (`Agent`-labeled, no assignee, not
    `Status/Blocked`). Skip repos with an open bot-authored PR --
    one PR at a time per repo so the human can review without a
    backlog forming behind them. Pick the globally oldest across
    all eligible repos.
-12. **Claim and clone.** Assign the issue to the bot. If the repo
+11. **Claim and clone.** Assign the issue to the bot. If the repo
     isn't cloned locally yet, clone it to
     `~/.local/state/agent/repos/<owner>/<repo>/` via SSH.
-13. **Preflight.** Verify `CLAUDE.md` exists at the repo root. If
+12. **Preflight.** Verify `CLAUDE.md` exists at the repo root. If
     not, block the issue with a clear comment and bail. (Same code
     path as Claude calling `agent-block.sh` from inside the
     worktree.)
-14. **Work.** Make a worktree, invoke Claude with `bin/lib/voice.md`
+13. **Work.** Make a worktree, invoke Claude with `bin/lib/voice.md`
     plus `AGENTS.md` (the project's `CLAUDE.md` is auto-loaded by
     Claude Code), react to whatever Claude leaves behind. If
     discovery turned up nothing, the tick is idle and exits.
 
 There is no shift window -- every tick runs the full cascade, 24/7.
 Midnight is just the local-day rollover for the daily slots
-(reading, post), the daily market report, and the daily sports
+(reading, post) and the daily sports
 digest (which additionally holds until 03:00 for window
 completeness); the weekly slots
 (/now, site-work), maintenance, and the per-domain SEO pass roll on
@@ -240,10 +217,8 @@ lib/
 |-- repo-checks.sh           # repo-readiness checks + onboarding ticket lifecycle
 |-- maintenance-checks.sh    # stack detection + audit tool dispatch
 |-- gsc.sh                   # Google Search Console API client (SEO, opt-in)
-|-- email.sh                 # SMTP2GO HTTP API sender (shared: SEO, market)
-|-- seo-analysis.sh          # scripted SEO analysis: score, grade, render (no LLM)
-|-- marketstack.sh           # marketstack EOD API client (market report, opt-in)
-`-- market-report.sh         # scripted market report: build + render price table (no LLM)
+|-- email.sh                 # SMTP2GO HTTP API sender (shared: SEO, sports, CEO)
+`-- seo-analysis.sh          # scripted SEO analysis: score, grade, render (no LLM)
 
 systemd/                     # user units (no @ instance)
 |-- agent.service
@@ -260,7 +235,7 @@ On the host (deployment-specific, not in the repo):
 ~/.local/share/agent/.env                      # secrets, chmod 600 -- the only config
 ~/.local/state/agent/lock                      # global flock
 ~/.local/state/agent/brain.sqlite              # seen URLs, sources, reflections
-~/.local/state/agent/discretionary-state.json  # daily/weekly slots + per-repo maintenance + per-domain SEO + daily market state
+~/.local/state/agent/discretionary-state.json  # daily/weekly slots + per-repo maintenance + per-domain SEO + daily sports state
 ~/.local/state/agent/seo-opportunities.jsonl   # surfaced SEO opportunities + baselines (for outcome grading)
 ~/.local/state/agent/worktrees/<key>/          # per-tick worktrees
 ~/.local/state/agent/repos/<owner>/<repo>/     # harness's per-repo clones
