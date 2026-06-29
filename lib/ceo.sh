@@ -279,6 +279,54 @@ ceo_mark_week_done() {  # <repo>
   fi
 }
 
+# ---- Phase 4: live product metrics (the data the CEO decides AGAINST) ----
+# Opt-in per repo via agent.json `.ceo.metrics_url` -- a public JSON endpoint.
+# Generic: nothing here knows the field names; the mandate explains what the
+# numbers mean. Each reading is stamped under .ceo_metrics[repo] so the NEXT cycle
+# can show the delta (the trend). A missing key or an unreachable endpoint is a
+# clean no-op / a one-line note -- never a crash.
+ceo_metrics_load() {  # <repo> -- echo the previously-stored reading JSON, empty if none
+  local repo="$1" f
+  f=$(ceo_state_file); [ -f "$f" ] || return 0
+  jq -c --arg r "$repo" '.ceo_metrics[$r].data // empty' "$f" 2>/dev/null || true
+}
+ceo_metrics_store() {  # <repo> <reading-json>
+  local repo="$1" data="$2" f tmp now
+  f=$(ceo_state_file); [ -f "$f" ] || echo '{}' > "$f"
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  tmp=$(mktemp)
+  if jq --arg r "$repo" --arg at "$now" --argjson d "$data" \
+      '.ceo_metrics //= {} | .ceo_metrics[$r] = {at: $at, data: $d}' "$f" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$f"
+  else
+    rm -f "$tmp"   # bad/oversized reading -- skip the store rather than corrupt state
+  fi
+}
+# ceo_read_metrics <repo> -- markdown of the current + prior reading from the repo's
+# agent.json `.ceo.metrics_url`. Empty (return 0) when no metrics_url is declared,
+# so repos without it digest exactly as before.
+ceo_read_metrics() {
+  local repo="$1" url cur prev
+  url=$(forgejo_repo_get_file "$repo" "${AGENT_CONFIG_FILE:-agent.json}" 2>/dev/null \
+    | jq -r '.ceo.metrics_url // empty' 2>/dev/null || true)
+  [ -n "$url" ] || return 0
+  printf '## Live metrics (judge yourself against THESE, not the prose)\n\n'
+  cur=$(curl -fsS --max-time 20 "$url" 2>/dev/null || true)
+  if [ -z "$cur" ] || ! jq -e . >/dev/null 2>&1 <<<"$cur"; then
+    printf -- '- metrics unavailable this cycle -- the endpoint did not answer with JSON. Note it; do NOT guess numbers.\n'
+    return 0
+  fi
+  prev=$(ceo_metrics_load "$repo")
+  printf '### Current reading (just fetched)\n```json\n%s\n```\n' \
+    "$(jq -S . <<<"$cur" 2>/dev/null || printf '%s' "$cur")"
+  if [ -n "$prev" ] && [ "$prev" != "null" ]; then
+    printf '\n### Previous reading -- the trend baseline; compute the delta\n```json\n%s\n```\n' "$prev"
+  else
+    printf '\n_(no prior reading -- this is the baseline data point)_\n'
+  fi
+  ceo_metrics_store "$repo" "$cur"
+}
+
 # ---- Phase 2: proposing work (issues the board greenlights) ----
 # The CEO files up to two UNLABELED issues assigned to the human, each carrying
 # CEO_PROPOSAL_MARKER. They become real work only when the human adds the Agent
