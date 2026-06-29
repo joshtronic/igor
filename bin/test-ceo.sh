@@ -296,6 +296,45 @@ eq "answered: only reviewer-unassigned questions" "$(printf '10\n12')" "$(ceo_an
 eq "cap: CEO_MAX_OPEN is 8" "8" "$CEO_MAX_OPEN"
 rm -f "$Q_POST_FILE"
 
+# ---- ceo_read_metrics (Phase 4: data-driven) ----------------------------
+echo "== ceo_read_metrics =="
+_M_TMP=$(mktemp -d); export AGENT_STATE_DIR="$_M_TMP"
+_M_SF="$AGENT_STATE_DIR/discretionary-state.json"
+_M_CFG=''   # what the agent.json read returns
+_M_BODY=''  # what the metrics endpoint returns (empty => curl "fails")
+forgejo_repo_get_file() { printf '%s' "$_M_CFG"; }
+curl() { [ -n "$_M_BODY" ] && printf '%s' "$_M_BODY" || return 1; }
+
+# no .ceo.metrics_url -> clean no-op (repo digests exactly as before)
+_M_CFG='{"smoke":{"url":"https://x"}}'
+eq "no metrics_url -> empty output" "" "$(ceo_read_metrics acme/x)"
+
+# metrics_url + good reading -> surfaces numbers, stores, notes no prior yet
+_M_CFG='{"ceo":{"metrics_url":"https://x/api/summary"}}'
+_M_BODY='{"players":42,"plays":100,"ms_played":3600000}'
+out=$(ceo_read_metrics acme/x)
+has "good reading: header"        "$out" "Live metrics"
+has "good reading: a live number" "$out" "42"
+has "good reading: current label" "$out" "Current reading"
+has "good reading: baseline note (no prior)" "$out" "baseline"
+eq  "good reading: stored players=42" "42" "$(jq -r '.ceo_metrics["acme/x"].data.players' "$_M_SF" 2>/dev/null)"
+
+# second call -> shows the PRIOR reading as the trend baseline
+_M_BODY='{"players":50,"plays":130,"ms_played":4000000}'
+out=$(ceo_read_metrics acme/x)
+has "second call: previous-reading section" "$out" "Previous reading"
+has "second call: prior number kept"        "$out" "42"
+has "second call: new number present"       "$out" "50"
+eq  "second call: stored advances to 50"     "50" "$(jq -r '.ceo_metrics["acme/x"].data.players' "$_M_SF" 2>/dev/null)"
+
+# endpoint down -> unavailable note, prior reading NOT overwritten
+_M_BODY=''
+out=$(ceo_read_metrics acme/x)
+has "endpoint down: unavailable note"        "$out" "unavailable"
+eq  "endpoint down: prior reading preserved" "50" "$(jq -r '.ceo_metrics["acme/x"].data.players' "$_M_SF" 2>/dev/null)"
+
+unset -f forgejo_repo_get_file curl; unset AGENT_STATE_DIR; rm -rf "$_M_TMP"
+
 # ---- summary ------------------------------------------------------------
 echo
 if [ "$fails" -eq 0 ]; then

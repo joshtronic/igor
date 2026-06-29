@@ -1903,9 +1903,11 @@ do_ceo_tick() {
 
     # --- Path 2: the weekly board digest (once per ISO week). ---
     ceo_week_done "$repo" && continue
-    # The activity base now includes the CEO's OPEN questions so the digest sees
-    # what it has already asked and won't re-ask a pending one.
-    activity=$(ceo_gather_week "$repo" "$since"; ceo_proposal_outcomes "$repo"; \
+    # The activity base opens with the live product metrics (Phase 4) so the digest
+    # decides against numbers, then the week's activity, then the CEO's OPEN
+    # questions so it won't re-ask a pending one.
+    activity=$(ceo_read_metrics "$repo"; ceo_gather_week "$repo" "$since"; \
+               ceo_proposal_outcomes "$repo"; \
                ceo_open_questions "$repo" "${FORGEJO_REVIEWER:-}")
     prompt=$(ceo_build_prompt "$repo" "$mandate" "$activity" "$since")
 
