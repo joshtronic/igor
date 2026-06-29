@@ -1781,12 +1781,80 @@ do_sports_tick() {
 # digest over successive ticks; per-repo weekly stamp under .ceo. Uses
 # claude_call, so it's already below the tick's health gate. Returns 0 if a
 # digest was sent, 1 otherwise.
+# _ceo_file_outputs <repo> <parsed-json> <allow_questions:yes|no>
+# Shared by both do_ceo_tick paths: file the parsed proposals (and, when allowed,
+# the board questions) up to the CEO_MAX_OPEN open-item cap, then open the
+# decision-guidance redline PR if one was distilled. The cap (Phase 4) replaces
+# the old "no new work until zero open" throttle so the CEO can actually grind.
+_ceo_file_outputs() {
+  local repo="$1" parsed="$2" allow_questions="${3:-yes}"
+  [ -n "${FORGEJO_REVIEWER:-}" ] || return 0
+
+  local proposals nprop prop ptitle pbody filed open_items
+  proposals=$(jq -c '.issues // []' <<<"$parsed")
+  nprop=$(jq 'length' <<<"$proposals" 2>/dev/null || echo 0)
+  if [ "${nprop:-0}" -gt 0 ]; then
+    filed=0
+    while IFS= read -r prop; do
+      open_items=$(ceo_open_items_count "$repo")
+      if [ "${open_items:-0}" -ge "$CEO_MAX_OPEN" ]; then
+        log "ceo: open-item cap (${CEO_MAX_OPEN}) reached on ${repo} -- holding remaining proposals"
+        break
+      fi
+      ptitle=$(jq -r '.title' <<<"$prop"); pbody=$(jq -r '.body' <<<"$prop")
+      if ceo_file_proposal "$repo" "$ptitle" "$pbody" "$FORGEJO_REVIEWER"; then
+        filed=$((filed + 1))
+      else
+        log "warning: ceo: failed to file a proposal on ${repo}"
+      fi
+    done < <(jq -c '.[]' <<<"$proposals")
+    [ "$filed" -gt 0 ] && log "ceo: filed ${filed} proposal(s) on ${repo} for ${FORGEJO_REVIEWER} to greenlight"
+  fi
+
+  if [ "$allow_questions" = "yes" ]; then
+    local questions nq q qtitle qbody qfiled
+    questions=$(jq -c '.questions // []' <<<"$parsed")
+    nq=$(jq 'length' <<<"$questions" 2>/dev/null || echo 0)
+    if [ "${nq:-0}" -gt 0 ]; then
+      qfiled=0
+      while IFS= read -r q; do
+        open_items=$(ceo_open_items_count "$repo")
+        if [ "${open_items:-0}" -ge "$CEO_MAX_OPEN" ]; then
+          log "ceo: open-item cap (${CEO_MAX_OPEN}) reached on ${repo} -- holding remaining questions"
+          break
+        fi
+        qtitle=$(jq -r '.title' <<<"$q"); qbody=$(jq -r '.body' <<<"$q")
+        if ceo_file_question "$repo" "$qtitle" "$qbody" "$FORGEJO_REVIEWER"; then
+          qfiled=$((qfiled + 1))
+        else
+          log "warning: ceo: failed to file a board question on ${repo}"
+        fi
+      done < <(jq -c '.[]' <<<"$questions")
+      [ "$qfiled" -gt 0 ] && log "ceo: asked ${qfiled} board question(s) on ${repo} for ${FORGEJO_REVIEWER}"
+    fi
+  fi
+
+  local guidance
+  guidance=$(jq -r '.guidance // ""' <<<"$parsed")
+  if [ -n "$guidance" ]; then
+    if ceo_guidance_pr_open "$repo"; then
+      log "ceo: held a guidance redline for ${repo} -- one already open"
+    elif ceo_open_guidance_pr "$repo" "$guidance" "$FORGEJO_REVIEWER"; then
+      log "ceo: opened a decision-guidance redline PR on ${repo} for ${FORGEJO_REVIEWER}"
+    else
+      log "warning: ceo: failed to open the guidance redline on ${repo}"
+    fi
+  fi
+  return 0
+}
+
 do_ceo_tick() {
   [ -n "${SMTP2GO_API_KEY:-}" ] && [ -n "${SMTP2GO_SENDER:-}" ] || return 1
   local recipients; recipients="$(recipients_with_primary "${CEO_RECIPIENTS:-}")"
   [ -n "$recipients" ] || return 1
 
   local since directive repo_line repo mandate activity prompt raw parsed subject body html attempt
+  local answered qblock n closed
   since=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)
   directive=$(cat "$AGENT_HOME/bin/lib/ceo-digest-directive.md")
 
@@ -1794,13 +1862,51 @@ do_ceo_tick() {
     [ -n "$repo_line" ] || continue
     repo=$(jq -r '.full_name' <<<"$repo_line" 2>/dev/null)
     [ -n "$repo" ] || continue
-    ceo_week_done "$repo" && continue              # already digested this ISO week
 
-    # Convention opt-in: the CEO.md mandate's mere presence. Reading it
-    # and testing non-empty IS the opt-in gate -- one GET, no separate probe.
+    # Convention opt-in: the CEO.md mandate's mere presence. Reading it and
+    # testing non-empty IS the opt-in gate -- one GET, no separate probe. Both
+    # paths below need the mandate, so it's read before either.
     mandate=$(ceo_read_mandate "$repo")
     [ -n "$mandate" ] || continue
-    activity=$(ceo_gather_week "$repo" "$since"; ceo_proposal_outcomes "$repo")
+
+    # --- Path 1 (Phase 4): act on ANSWERED questions -- EVERY tick, not
+    # week-gated. The board answered in a comment and unassigned themselves;
+    # turn each decision into the work it implies, then close the question.
+    if [ -n "${FORGEJO_REVIEWER:-}" ]; then
+      answered=$(ceo_answered_question_numbers "$repo" "$FORGEJO_REVIEWER")
+      if [ -n "$answered" ]; then
+        qblock=$(ceo_open_questions "$repo" "$FORGEJO_REVIEWER")
+        prompt=$(ceo_build_answer_prompt "$repo" "$mandate" "$qblock")
+        parsed=""
+        for attempt in 1 2; do
+          raw=$(claude_call "$AGENT_MODEL" "ceo-answer" 8000 "$directive" "$prompt" 0) \
+            || { log "ceo: answer call failed for ${repo} (attempt ${attempt})"; continue; }
+          if parsed=$(ceo_parse_response "$raw"); then break; fi
+          parsed=""
+        done
+        if [ -n "$parsed" ]; then
+          _ceo_file_outputs "$repo" "$parsed" "no"   # act path never asks NEW questions
+        else
+          log "ceo: unparseable answer-action for ${repo} -- closing answered questions anyway"
+        fi
+        # Input incorporated -- close the answered questions so they don't re-fire.
+        closed=0
+        while IFS= read -r n; do
+          [ -n "$n" ] || continue
+          _fj PATCH "/repos/${repo}/issues/${n}" '{"state":"closed"}' >/dev/null 2>&1 \
+            && closed=$((closed + 1))
+        done <<<"$answered"
+        log "ceo: acted on ${closed} answered board question(s) on ${repo}"
+        return 0   # one model-backed piece of work per tick
+      fi
+    fi
+
+    # --- Path 2: the weekly board digest (once per ISO week). ---
+    ceo_week_done "$repo" && continue
+    # The activity base now includes the CEO's OPEN questions so the digest sees
+    # what it has already asked and won't re-ask a pending one.
+    activity=$(ceo_gather_week "$repo" "$since"; ceo_proposal_outcomes "$repo"; \
+               ceo_open_questions "$repo" "${FORGEJO_REVIEWER:-}")
     prompt=$(ceo_build_prompt "$repo" "$mandate" "$activity" "$since")
 
     parsed=""
@@ -1820,43 +1926,7 @@ do_ceo_tick() {
     if email_send "$subject" "$html" "$body" "$recipients"; then
       ceo_mark_week_done "$repo"
       log "ceo: emailed board digest for ${repo} to ${recipients}"
-      # Phase 2: file the digest's proposals -- UNLABELED + assigned to the human
-      # for greenlight -- but only once the previous batch is triaged (no open
-      # CEO proposals on the repo), so they never pile up.
-      local proposals nprop open_props prop ptitle pbody filed
-      proposals=$(jq -c '.issues // []' <<<"$parsed")
-      nprop=$(jq 'length' <<<"$proposals" 2>/dev/null || echo 0)
-      if [ "${nprop:-0}" -gt 0 ] && [ -n "${FORGEJO_REVIEWER:-}" ]; then
-        open_props=$(ceo_open_proposals_count "$repo")
-        if [ "${open_props:-0}" -eq 0 ]; then
-          filed=0
-          while IFS= read -r prop; do
-            ptitle=$(jq -r '.title' <<<"$prop"); pbody=$(jq -r '.body' <<<"$prop")
-            if ceo_file_proposal "$repo" "$ptitle" "$pbody" "$FORGEJO_REVIEWER"; then
-              filed=$((filed + 1))
-            else
-              log "warning: ceo: failed to file a proposal on ${repo}"
-            fi
-          done < <(jq -c '.[]' <<<"$proposals")
-          [ "$filed" -gt 0 ] && log "ceo: filed ${filed} proposal(s) on ${repo} for ${FORGEJO_REVIEWER} to greenlight"
-        else
-          log "ceo: held ${nprop} proposal(s) on ${repo} -- ${open_props} still open for triage"
-        fi
-      fi
-      # Phase 3: if the model distilled decision guidance, open a redline PR to
-      # CEO.md (the CEO drafts, the board ratifies). One open guidance PR at a
-      # time so unratified redlines never stack.
-      local guidance
-      guidance=$(jq -r '.guidance // ""' <<<"$parsed")
-      if [ -n "$guidance" ] && [ -n "${FORGEJO_REVIEWER:-}" ]; then
-        if ceo_guidance_pr_open "$repo"; then
-          log "ceo: held a guidance redline for ${repo} -- one already open"
-        elif ceo_open_guidance_pr "$repo" "$guidance" "$FORGEJO_REVIEWER"; then
-          log "ceo: opened a decision-guidance redline PR on ${repo} for ${FORGEJO_REVIEWER}"
-        else
-          log "warning: ceo: failed to open the guidance redline on ${repo}"
-        fi
-      fi
+      _ceo_file_outputs "$repo" "$parsed" "yes"   # proposals + questions + guidance
       return 0
     fi
     log "warning: ceo: email failed for ${repo} -- will retry next tick"

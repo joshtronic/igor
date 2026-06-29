@@ -19,6 +19,15 @@ CEO_MANDATE_PATH="CEO.md"
 # Stamped (HTML comment) into every CEO-proposed issue body so the next week's
 # pass can tell whether the last batch has been triaged -- the proposal throttle.
 CEO_PROPOSAL_MARKER="<!-- ceo-proposal -->"
+# Phase 4: stamped into every CEO board QUESTION so the next tick can find its
+# own open questions -- the two-way channel AND the CEO's question-memory. A
+# question issue is assigned to the reviewer + labeled Status/Need More Info; the
+# reviewer answers in a comment and UNASSIGNS to hand it back (the act trigger).
+CEO_QUESTION_MARKER="<!-- ceo-question -->"
+# Upper bound on simultaneously-open CEO items (proposals + questions) before the
+# pass stops filing new ones -- a generous backstop against infinite pileup that
+# still lets the CEO grind, replacing the old "no new work until zero open" gate.
+CEO_MAX_OPEN=8
 
 # ceo_read_mandate <repo> -- echo the mandate's raw content, empty if absent.
 # This IS the opt-in probe: a present CEO.md returns its body, a missing
@@ -98,6 +107,31 @@ block.' \
     "$repo" "$since" "$mandate" "$activity"
 }
 
+# ceo_build_answer_prompt <repo> <mandate> <answered-questions-block>
+# Phase 4 act-on-answers prompt: the board answered open questions; turn each
+# decision into the work it implies (===ISSUE=== / ===GUIDANCE===), no digest.
+ceo_build_answer_prompt() {
+  local repo="$1" mandate="$2" qblock="$3"
+  printf 'The board has ANSWERED open questions you asked for **%s**. Read the replies and ACT on them -- turn each decision into the work it implies. This is NOT a weekly digest.
+
+## The mandate (CEO.md) -- your north-star
+
+%s
+
+## Your answered questions and the board replies
+
+%s
+
+## What to emit
+
+For each answered question, translate the decision into action: append an ===ISSUE=== block (TITLE: + body) for any work it greenlights, and/or a ===GUIDANCE=== line if the answer reveals a durable decision rule. Keep the body to a one-line acknowledgement; do NOT write a full digest and do NOT ask new questions.
+
+## Output format (mechanical contract -- match exactly)
+
+First line: `SUBJECT: <one-line>`. Second line: exactly ===BODY===. Then a one-line acknowledgement. Then, for each action, a ===ISSUE=== line, a `TITLE: <title>` line, and the body markdown. Finally, IF you have decision guidance, a ===GUIDANCE=== line. Nothing before SUBJECT, nothing after the final block.' \
+    "$repo" "$mandate" "$qblock"
+}
+
 # _ceo_trim_blanks -- stdin->stdout: strip leading/trailing blank lines, keep
 # interior blanks. Shared by the digest body and each proposal body.
 _ceo_trim_blanks() {
@@ -131,6 +165,21 @@ _ceo_parse_issues() {
   jq -c '.[:2]' <<<"$issues"
 }
 
+# _ceo_parse_questions <rest-region> -- echo a JSON array [{title, body}] of the
+# ===QUESTION=== blocks. Structurally identical to _ceo_parse_issues but for the
+# CEO's board questions (decisions it needs from the human), capped at 2.
+_ceo_parse_questions() {
+  local rest="$1" questions='[]' chunk title body
+  case "$rest" in *'===QUESTION==='*) ;; *) printf '[]'; return 0 ;; esac
+  while IFS= read -r -d '' chunk; do
+    title=$(printf '%s\n' "$chunk" | sed -n 's/^[[:space:]]*TITLE:[[:space:]]*//p' | head -1)
+    [ -n "$title" ] || continue
+    body=$(printf '%s\n' "$chunk" | awk 'p { print } /^[[:space:]]*TITLE:/ { p = 1 }' | _ceo_trim_blanks)
+    questions=$(jq -c --arg t "$title" --arg b "$body" '. + [{title:$t, body:$b}]' <<<"$questions")
+  done < <(printf '%s' "${rest#*===QUESTION===}" | awk 'BEGIN { RS = "===QUESTION===" } { printf "%s\0", $0 }')
+  jq -c '.[:2]' <<<"$questions"
+}
+
 # ceo_parse_response <raw>
 # Parses the model's label-line + sentinel response (never model-written JSON):
 #   SUBJECT: <one-line subject>
@@ -140,15 +189,14 @@ _ceo_parse_issues() {
 # Echoes harness-built JSON {subject, body, issues:[...]}; rc=1 if the sentinel
 # or body is missing (caller retries). Mirrors sports_parse_response.
 ceo_parse_response() {
-  local raw="$1" head rest body subject_line issues guidance
+  local raw="$1" head rest body subject_line issues questions guidance issues_part questions_part
   case "$raw" in
     *'===BODY==='*) ;;
     *) return 1 ;;
   esac
   head="${raw%%===BODY===*}"
   rest="${raw#*===BODY===}"
-  # Phase 3: split off the optional ===GUIDANCE=== section (last, after any
-  # proposals) so body/issues parse from the remainder. Empty if absent.
+  # Phase 3: split off the optional ===GUIDANCE=== section (last of all) first.
   guidance=""
   case "$rest" in
     *'===GUIDANCE==='*)
@@ -156,13 +204,30 @@ ceo_parse_response() {
       rest="${rest%%===GUIDANCE===*}"
       ;;
   esac
-  body="${rest%%===ISSUE===*}"            # digest = up to the first proposal block
+  # Phase 4: the contract is BODY, then ===ISSUE=== blocks, then ===QUESTION===
+  # blocks. Split issues (before the first question) from questions (from it on)
+  # so neither parser swallows the other's blocks.
+  case "$rest" in
+    *'===QUESTION==='*)
+      issues_part="${rest%%===QUESTION===*}"
+      questions_part="===QUESTION===${rest#*===QUESTION===}"
+      ;;
+    *)
+      issues_part="$rest"
+      questions_part=""
+      ;;
+  esac
+  # Digest body = up to the FIRST of ===ISSUE=== or ===QUESTION===.
+  body="${rest%%===ISSUE===*}"
+  body="${body%%===QUESTION===*}"
   printf '%s' "$body" | grep -q '[^[:space:]]' || return 1
   body=$(printf '%s\n' "$body" | _ceo_trim_blanks)
   subject_line=$(printf '%s' "$head" | sed -n 's/^SUBJECT:[[:space:]]*//p' | head -1)
-  issues=$(_ceo_parse_issues "$rest")
-  jq -n --arg s "$subject_line" --arg b "$body" --argjson i "${issues:-[]}" --arg g "$guidance" \
-    '{subject:$s, body:$b, issues:$i, guidance:$g}'
+  issues=$(_ceo_parse_issues "$issues_part")
+  questions=$(_ceo_parse_questions "$questions_part")
+  jq -n --arg s "$subject_line" --arg b "$body" --argjson i "${issues:-[]}" \
+        --argjson q "${questions:-[]}" --arg g "$guidance" \
+    '{subject:$s, body:$b, issues:$i, questions:$q, guidance:$g}'
 }
 
 # ceo_render_html <<< <markdown>
@@ -238,6 +303,86 @@ ceo_file_proposal() {
   payload=$(jq -n --arg t "$title" --arg b "$full" --arg a "$assignee" \
     '{title: $t, body: $b, assignees: [$a]}')
   _fj POST "/repos/${repo}/issues" "$payload" >/dev/null 2>&1
+}
+
+# ---- Phase 4: the two-way board-question channel ----
+# A board QUESTION is an issue assigned to the reviewer + labeled
+# Status/Need More Info + stamped CEO_QUESTION_MARKER. The reviewer answers in a
+# comment and UNASSIGNS themselves to hand it back; the next tick sees the
+# unassigned-but-still-open question, reads the thread, and acts on it. The open
+# question issues ARE the CEO's memory of what it asked.
+
+# ceo_file_question <repo> <title> <body> <reviewer> -- file the question issue
+# (assigned + Status/Need More Info label + marker). Returns 0 on a created issue
+# (label is best-effort), 1 if the create itself failed.
+ceo_file_question() {
+  local repo="$1" title="$2" body="$3" reviewer="$4" full payload resp num
+  full=$(printf '%s\n\n---\n_The CEO needs a decision. **Answer in a comment, then unassign yourself** to hand it back. **Decline / N-A:** close._\n%s' \
+    "$body" "$CEO_QUESTION_MARKER")
+  payload=$(jq -n --arg t "$title" --arg b "$full" --arg a "$reviewer" \
+    '{title: $t, body: $b, assignees: [$a]}')
+  resp=$(_fj POST "/repos/${repo}/issues" "$payload" 2>/dev/null) || return 1
+  num=$(jq -r '.number // empty' <<<"$resp" 2>/dev/null || true)
+  if [ -n "$num" ]; then
+    forgejo_add_label "$repo" "$num" "Status/Need More Info" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# ceo_answered_question_numbers <repo> <reviewer> -- newline list of open
+# question-issue numbers the reviewer has UNASSIGNED themselves from (their
+# go-signal: answered, hand it back). Empty when nothing is answered.
+ceo_answered_question_numbers() {
+  local repo="$1" reviewer="$2"
+  _fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" 2>/dev/null \
+    | jq -r --arg m "$CEO_QUESTION_MARKER" --arg r "$reviewer" '
+        .[]? | select(.pull_request == null) | select((.body // "") | contains($m))
+        | select(([.assignees[]?.login] | index($r)) | not) | .number' 2>/dev/null || true
+}
+
+# ceo_open_questions <repo> <reviewer> -- markdown the digest/answer prompt reads:
+# ANSWERED questions (reviewer unassigned -> title + body + every comment, the
+# board's reply) and PENDING questions (still assigned -> title only, so the CEO
+# knows not to re-ask). "- (no open questions)" when there are none.
+ceo_open_questions() {
+  local repo="$1" reviewer="$2" issues q answered pending num title body comments
+  issues=$(_fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" 2>/dev/null)
+  q=$(jq -c --arg m "$CEO_QUESTION_MARKER" \
+        '[ .[]? | select(.pull_request == null) | select((.body // "") | contains($m)) ]' \
+        <<<"${issues:-[]}" 2>/dev/null || echo '[]')
+  printf '### Your open board questions\n'
+  if [ "$(jq 'length' <<<"$q" 2>/dev/null || echo 0)" -eq 0 ]; then
+    printf -- '- (no open questions)\n'; return 0
+  fi
+  answered=$(jq -c --arg r "$reviewer" '[ .[] | select(([.assignees[]?.login] | index($r)) | not) ]' <<<"$q")
+  pending=$(jq -c  --arg r "$reviewer" '[ .[] | select(([.assignees[]?.login] | index($r))) ]' <<<"$q")
+  if [ "$(jq 'length' <<<"$answered")" -gt 0 ]; then
+    printf '\n#### ANSWERED -- act on these now\n'
+    while IFS= read -r num; do
+      [ -n "$num" ] || continue
+      title=$(jq -r --argjson n "$num" '.[] | select(.number==$n) | .title' <<<"$q")
+      body=$(jq -r  --argjson n "$num" '.[] | select(.number==$n) | .body'  <<<"$q")
+      comments=$(_fj GET "/repos/${repo}/issues/${num}/comments" 2>/dev/null \
+        | jq -r '.[]? | "  > [\(.user.login)] \(.body)"' 2>/dev/null || true)
+      printf '\n**#%s -- %s**\n%s\n\nBoard reply:\n%s\n' \
+        "$num" "$title" "$body" "${comments:-(answered with no comment text)}"
+    done < <(jq -r '.[].number' <<<"$answered")
+  fi
+  if [ "$(jq 'length' <<<"$pending")" -gt 0 ]; then
+    printf '\n#### PENDING -- already asked, do NOT re-ask\n'
+    jq -r '.[] | "- #\(.number) \(.title)"' <<<"$pending"
+  fi
+}
+
+# ceo_open_items_count <repo> -- open issues carrying EITHER CEO marker (proposals
+# + questions); the value the CEO_MAX_OPEN cap is checked against.
+ceo_open_items_count() {
+  local repo="$1"
+  _fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" 2>/dev/null \
+    | jq -r --arg p "$CEO_PROPOSAL_MARKER" --arg q "$CEO_QUESTION_MARKER" \
+        '[ .[]? | select(.pull_request == null)
+           | select(((.body // "") | contains($p)) or ((.body // "") | contains($q))) ] | length' \
+        2>/dev/null || echo 0
 }
 
 # ---- Phase 3: decision-guidance redlines (the CEO drafts, the board ratifies) ----
