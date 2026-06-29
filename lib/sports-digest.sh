@@ -3,7 +3,7 @@
 # prompt assembly, response parsing, markdown->HTML rendering, and the
 # taught-concepts curriculum ledger. No network (lib/espn.sh fetches;
 # tick.sh makes the model call) so the logic is unit-testable with
-# fixtures, mirroring lib/market-report.sh.
+# fixtures.
 #
 # The digest's purpose is education: each email teaches the reader a
 # few new sports concepts off the back of yesterday's news, building on
@@ -130,8 +130,8 @@ sports_parse_response() {
 
 # sports_render_html <<< <markdown>
 # Deliberately MINIMAL markdown->HTML for the email's html part (the
-# raw markdown ships as the text/plain part, like the market report's
-# table). Covers exactly what the directive allows the model to emit:
+# raw markdown ships as the text/plain part). Covers exactly what the
+# directive allows the model to emit:
 # #/##/### headings, **bold**, [links](url), "- " bullet lists, ---
 # rules, paragraphs. Anything else passes through escaped as text.
 sports_render_html() {

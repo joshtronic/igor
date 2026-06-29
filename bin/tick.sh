@@ -98,10 +98,6 @@ unset env_file_hint
 . "$AGENT_HOME/lib/email.sh"
 # shellcheck source=lib/seo-analysis.sh
 . "$AGENT_HOME/lib/seo-analysis.sh"
-# shellcheck source=lib/marketstack.sh
-. "$AGENT_HOME/lib/marketstack.sh"
-# shellcheck source=lib/market-report.sh
-. "$AGENT_HOME/lib/market-report.sh"
 # shellcheck source=lib/espn.sh
 . "$AGENT_HOME/lib/espn.sh"
 # shellcheck source=lib/sports-digest.sh
@@ -149,7 +145,7 @@ if [ -n "$WEBSITE_REPO" ]; then
 fi
 
 # Email delivery (SMTP2GO) -- shared by every opt-in report subsystem
-# (SEO, market). All default to empty so referencing them under `set -u`
+# (SEO, sports, CEO). All default to empty so referencing them under `set -u`
 # is safe when nothing is configured; each report tick no-ops cleanly if
 # its required creds (incl. these) are unset.
 export SMTP2GO_API_KEY="${SMTP2GO_API_KEY:-}"
@@ -179,17 +175,6 @@ export HEALTH_RECIPIENTS="${HEALTH_RECIPIENTS:-}"
 # rest: PRIMARY_RECIPIENTS always gets it; ALERT_RECIPIENTS adds others.
 export ALERT_RECIPIENTS="${ALERT_RECIPIENTS:-}"
 
-# Market report -- opt-in daily (Mon-Fri) previous-trading-day prices
-# email via the marketstack EOD API + SMTP2GO. do_market_tick no-ops
-# cleanly if any required one is unset. Tries on the first weekday tick
-# after the midnight rollover -- no send-hour knob, matching the rest of
-# the harness (midnight = a new day, no clock gating) -- but only emails
-# once the latest EOD bar is the session it expects; until then it holds
-# and re-checks on a cooldown (see MARKET_RETRY_COOLDOWN_SECS).
-export MARKETSTACK_API_KEY="${MARKETSTACK_API_KEY:-}"
-export MARKET_SYMBOLS="${MARKET_SYMBOLS:-}"
-export MARKET_RECIPIENTS="${MARKET_RECIPIENTS:-}"
-
 # Sports digest -- opt-in daily (7 days; sports don't take weekends off)
 # ELI5 sports-tutor email: scripted ESPN fetch, ONE distill call on
 # AGENT_MODEL, sent via SMTP2GO. do_sports_tick no-ops cleanly if any
@@ -198,8 +183,8 @@ export MARKET_RECIPIENTS="${MARKET_RECIPIENTS:-}"
 # football/college-football); one flat list -- the directive weights
 # coverage by significance, so a quiet league costs nothing and a
 # college championship outranks a routine pro slate on its own merits.
-# Unlike market, this pass USES the model, so it waits out a Claude
-# health cooldown like every other model surface.
+# Unlike the scripted SEO pass, this one USES the model, so it waits out
+# a Claude health cooldown like every other model surface.
 export SPORTS_RECIPIENTS="${SPORTS_RECIPIENTS:-}"
 export SPORTS_LEAGUES="${SPORTS_LEAGUES:-}"
 
@@ -729,149 +714,9 @@ seo_mark_done() {
   mv "$tmp" "$state_file"
 }
 
-# -- Market report daily send state -----------------------------
-#
-# One ".market" object in discretionary-state.json (same file as
-# .slots/.weekly/.maintenance/.seo), shaped { date, sent, failures,
-# last_attempt } -- mirroring how .slots carries its date + flags +
-# counters in a single namespaced key. The date drives a self-resetting
-# daily rollover for every field; each mutator normalizes to today before
-# touching it.
-#
-# The report sends at most once per local day (sent=true), and unlike
-# the slots this is independent of WEBSITE_REPO. Two distinct concerns,
-# decoupled on purpose:
-#   - last_attempt (epoch secs) spaces EVERY marketstack hit by
-#     MARKET_RETRY_COOLDOWN_SECS, so the midnight-boundary wait for fresh
-#     EOD data doesn't poll the metered API every minute.
-#   - failures counts only HARD failures (API error / empty read / send
-#     failure) -- a broken key or outage. It's capped so the day is
-#     abandoned rather than burning quota indefinitely; a successful fetch
-#     clears it. Stale-but-valid data ("not published yet") is NOT a
-#     failure: it just holds and re-checks on the next cooldown.
-# Regenerable -- losing it just re-opens today's send.
-
-# Space EVERY per-day marketstack hit so a stale/empty read (common at the
-# midnight boundary, before EOD data is published) doesn't re-hit the
-# metered API every tick. Override-with-default, mirroring
-# VALIDATION_COOLDOWN_SECS; the first attempt of the day is never delayed.
-MARKET_RETRY_COOLDOWN_SECS="${MARKET_RETRY_COOLDOWN_SECS:-900}"  # 15 min
-
-# jq fragment: normalize .market to today, resetting if the day rolled.
-# shellcheck disable=SC2016  # $d is a jq --arg, not shell -- must not expand
-MARKET_ROLL='(if (.market.date // "") == $d then .market
-              else {date:$d, sent:false, failures:0, last_attempt:0} end)'
-
-market_sent_today() {
-  local state_file today
-  state_file=$(discretionary_state_file)
-  [ -f "$state_file" ] || return 1
-  today=$(date +%Y-%m-%d)
-  [ "$(jq -r --arg d "$today" \
-        '(.market.date == $d) and (.market.sent == true)' \
-        "$state_file" 2>/dev/null)" = "true" ]
-}
-
-market_mark_sent() {
-  local state_file tmp today
-  state_file=$(discretionary_state_file)
-  today=$(date +%Y-%m-%d)
-  [ -f "$state_file" ] || echo '{}' > "$state_file"
-  tmp=$(mktemp)
-  jq --arg d "$today" ".market = ($MARKET_ROLL | .sent = true)" \
-    "$state_file" > "$tmp"
-  mv "$tmp" "$state_file"
-}
-
-# Echo today's failure count (0 if unset or the day rolled). Read-only --
-# the cap that consumes it lives in do_market_tick.
-market_failures() {
-  local state_file today n
-  state_file=$(discretionary_state_file)
-  [ -f "$state_file" ] || { echo 0; return; }
-  today=$(date +%Y-%m-%d)
-  n=$(jq -r --arg d "$today" \
-    'if (.market.date // "") == $d then (.market.failures // 0) else 0 end' \
-    "$state_file" 2>/dev/null)
-  [ -n "$n" ] && [ "$n" != "null" ] || n=0
-  echo "$n"
-}
-
-# Stamp last_attempt=now (resetting on a day rollover). Called once per
-# marketstack hit, before the request -- it's what the cooldown reads.
-market_mark_attempt() {
-  local state_file tmp today now
-  state_file=$(discretionary_state_file)
-  today=$(date +%Y-%m-%d)
-  now=$(date +%s)
-  [ -f "$state_file" ] || echo '{}' > "$state_file"
-  tmp=$(mktemp)
-  jq --arg d "$today" --argjson now "$now" \
-    ".market = ($MARKET_ROLL | .last_attempt = \$now)" \
-    "$state_file" > "$tmp"
-  mv "$tmp" "$state_file"
-}
-
-# Bump today's HARD-failure count (API error / empty read / send failure)
-# and echo the new value. Stale-but-valid reads do NOT call this.
-market_failure_inc() {
-  local state_file tmp today n
-  state_file=$(discretionary_state_file)
-  today=$(date +%Y-%m-%d)
-  [ -f "$state_file" ] || echo '{}' > "$state_file"
-  tmp=$(mktemp)
-  jq --arg d "$today" ".market = ($MARKET_ROLL | .failures += 1)" \
-    "$state_file" > "$tmp"
-  mv "$tmp" "$state_file"
-  n=$(jq -r '.market.failures' "$state_file" 2>/dev/null)
-  echo "$n"
-}
-
-# Clear today's failure streak -- a successful fetch proves the API works,
-# so any prior transient failures shouldn't count toward the cap.
-market_clear_failures() {
-  local state_file tmp today
-  state_file=$(discretionary_state_file)
-  [ -f "$state_file" ] || return 0
-  today=$(date +%Y-%m-%d)
-  tmp=$(mktemp)
-  jq --arg d "$today" ".market = ($MARKET_ROLL | .failures = 0)" \
-    "$state_file" > "$tmp"
-  mv "$tmp" "$state_file"
-}
-
-# True when it's OK to hit marketstack again today: either no attempt yet
-# today (first post-midnight tick fires immediately) or the cooldown since
-# the last attempt has elapsed. Keeps a stale/failed read from re-polling
-# the metered API every minute while we wait for fresh EOD data.
-market_retry_ready() {
-  local state_file today last now
-  state_file=$(discretionary_state_file)
-  [ -f "$state_file" ] || return 0
-  today=$(date +%Y-%m-%d)
-  last=$(jq -r --arg d "$today" \
-    'if (.market.date // "") == $d then (.market.last_attempt // 0) else 0 end' \
-    "$state_file" 2>/dev/null)
-  [ -n "$last" ] && [ "$last" != "null" ] || last=0
-  now=$(date +%s)
-  [ "$((now - last))" -ge "$MARKET_RETRY_COOLDOWN_SECS" ]
-}
-
-# Echo the most recent completed trading session we expect EOD data for:
-# the previous weekday (yesterday Tue-Fri, or Friday on a Monday). Holiday-
-# naive -- on the trading day after a market holiday the real last session
-# predates this, so the freshness gate won't match and the report holds for
-# the day (see do_market_tick).
-# Portable across GNU (Linux server) and BSD (macOS dev) date.
-market_prev_trading_day() {
-  local back=1
-  [ "$(date +%u)" -eq 1 ] && back=3  # Monday -> Friday
-  date -d "-${back} days" +%F 2>/dev/null || date -v-"${back}"d +%F 2>/dev/null
-}
-
-# market_format_date <YYYY-MM-DD>
+# format_report_date <YYYY-MM-DD>
 # Returns a human-readable date like "Tuesday, June 9th, 2026".
-market_format_date() {
+format_report_date() {
   local date_str="$1" day suffix weekday month year
   day="${date_str##*-}"; day="${day#0}"
   case "$day" in
@@ -888,8 +733,8 @@ market_format_date() {
 
 # -- Sports digest state (discretionary-state.json `.sports`) -----
 #
-# Same day-keyed shape and semantics as `.market` (one report per day,
-# retry-on-cooldown until it sends, bounded hard-failure budget):
+# A day-keyed object (one report per day, retry-on-cooldown until it
+# sends, bounded hard-failure budget):
 #   .sports = { date, sent, failures, last_attempt }
 # Here the metered resource being protected is the model call, not an
 # API quota -- ESPN is free, but a parse-flaky day must not re-run the
@@ -990,7 +835,7 @@ sports_retry_ready() {
 # -- Review state ----------------------------------------
 #
 # Keyed per PR under ".review" in discretionary-state.json (same file
-# as .slots/.seo/.market/...), shaped { "<repo>#<num>": {sha, verdict,
+# as .slots/.seo/...), shaped { "<repo>#<num>": {sha, verdict,
 # ci, at} }. Dedup is by HEAD SHA, not by PR: the reviewer reviews each
 # distinct head once, so a PR that gets new commits (the author
 # addressed feedback, or the human pushed) is re-reviewed, but a PR
@@ -1745,136 +1590,13 @@ do_seo_tick() {
   return 0
 }
 
-# One daily (Mon-Fri) market report: the previous trading day's prices
-# (high, low, close, volume) for MARKET_SYMBOLS, emailed to
-# MARKET_RECIPIENTS. Opt-in, scripted
-# (no LLM), email-only -- a sibling of do_seo_tick, not repo-driven.
-# Fires on the first weekday tick after midnight (no send-hour gate --
-# midnight is the day rollover, matching the rest of the harness), but
-# only emails once the latest EOD bar is the session we expect: at the
-# boundary marketstack often still has the prior session, and sending
-# that would email stale prices. A stale read just holds (no send) and
-# re-checks on the next cooldown; a HARD failure (API error / empty read /
-# send failure) bumps a small bounded counter so a broken key or outage
-# abandons the day instead of burning the metered quota. (Holiday-naive:
-# on the trading day after a market holiday the freshness gate never
-# matches, so no report goes out that day -- see market_prev_trading_day.)
-# Returns 0 if a report was sent (caller exits the tick), 1 if the
-# subsystem is unconfigured, it's the weekend, today's already sent, the
-# data isn't fresh yet, or the send failed (caller falls through).
-do_market_tick() {
-  # Opt-in gate: every required credential/config must be present.
-  if [ -z "${MARKETSTACK_API_KEY:-}" ] || [ -z "${MARKET_SYMBOLS:-}" ] \
-     || [ -z "${PRIMARY_RECIPIENTS:-}" ] || [ -z "${SMTP2GO_API_KEY:-}" ] \
-     || [ -z "${SMTP2GO_SENDER:-}" ]; then
-    return 1
-  fi
-
-  # Weekday only -- markets are closed Sat/Sun (date +%u: 1=Mon..7=Sun).
-  # Every configured-but-not-sending path below logs its status: the
-  # journal should say WHY market did nothing this tick, same as
-  # maintenance ("no repos eligible") and seo ("all domains analyzed").
-  local dow; dow=$(date +%u)
-  if [ "$dow" -ge 6 ]; then
-    log "market: weekend -- markets closed, no report today"
-    return 1
-  fi
-
-  # At most once per day (set only on a successful send).
-  if market_sent_today; then
-    log "market: report already sent today -- continuing"
-    return 1
-  fi
-
-  # Failure budget: once marketstack/SMTP has hard-failed too many times
-  # today, abandon the day rather than keep burning the metered quota
-  # (clear the .market object in discretionary-state.json to force a retry).
-  # Checked before the cooldown so an abandoned day stops cheaply, and
-  # before any API hit so we never re-fetch past the cap. Hardcoded, not an
-  # env knob -- keep the .env surface small.
-  local max_failures=5 failures
-  failures=$(market_failures)
-  if [ "$failures" -ge "$max_failures" ]; then
-    log "market: abandoned for the day (${failures}/${max_failures} hard failures; clear .market in discretionary-state.json to retry) -- continuing"
-    return 1
-  fi
-
-  # Cooldown gate: at most one marketstack hit per MARKET_RETRY_COOLDOWN_SECS.
-  # The first attempt of the day passes straight through (last_attempt=0);
-  # a stale or failed read then waits out the cooldown instead of polling
-  # the metered API every minute while EOD data is still being published.
-  if ! market_retry_ready; then
-    log "market: not sent yet today, waiting out the retry cooldown -- continuing"
-    return 1
-  fi
-  market_mark_attempt  # start the cooldown clock for this hit
-
-  log "market: fetching EOD for ${MARKET_SYMBOLS}"
-  local eod report count
-  eod=$(marketstack_eod_latest "$MARKET_SYMBOLS") || eod='{"data":[]}'
-  report=$(market_build_report "$eod" "$MARKET_SYMBOLS")
-  count=$(jq -r '.count // 0' <<<"$report" 2>/dev/null || echo 0)
-
-  if [ "${count:-0}" -eq 0 ]; then
-    # No bars at all -- a hard failure (transient API error or a bad key;
-    # a valid symbol always has a last EOD bar). Count it toward the cap.
-    failures=$(market_failure_inc)
-    if [ "$failures" -ge "$max_failures" ]; then
-      log "market: ${max_failures} consecutive failures today -- abandoning the report for the day"
-    else
-      log "market: no EOD rows returned -- not sending (failure ${failures}/${max_failures}, retry after cooldown)"
-    fi
-    return 1
-  fi
-
-  # Got data -- the API works, so clear any prior transient-failure streak.
-  market_clear_failures
-
-  # Freshness gate: the latest bar should be the most recent completed
-  # session (yesterday, or Friday on a Monday). At the midnight boundary
-  # marketstack often still has only the prior session -- hold for fresh
-  # data rather than emailing stale prices. This is NOT a failure (the API
-  # answered fine), so it doesn't touch the failure budget; the cooldown
-  # alone rate-limits the wait.
-  local session expected
-  session=$(jq -r '.session_date // ""' <<<"$report" 2>/dev/null || echo "")
-  expected=$(market_prev_trading_day)
-  if [ "$session" != "$expected" ]; then
-    log "market: latest bar is ${session:-none}, expected ${expected} -- holding for fresh data (retry after cooldown)"
-    return 1
-  fi
-
-  local md html subject today formatted_today
-  today=$(date +%Y-%m-%d)
-  report=$(jq --arg today "$today" '. + {report_date: $today}' <<<"$report")
-  md=$(market_render_markdown <<<"$report")
-  html=$(market_render_html <<<"$report")
-  formatted_today=$(market_format_date "$today")
-  subject="[Market] ${formatted_today:-$today}"
-  local recipients; recipients=$(recipients_with_primary "${MARKET_RECIPIENTS:-}")
-  if email_send "$subject" "$html" "$md" "$recipients"; then
-    log "market: emailed report (${session:-latest}, $count symbols) to $recipients"
-    market_mark_sent
-    return 0
-  fi
-  # Send failure -- count it toward the cap so a persistent SMTP outage
-  # abandons the day rather than re-fetching marketstack every cooldown.
-  failures=$(market_failure_inc)
-  if [ "$failures" -ge "$max_failures" ]; then
-    log "market: ${max_failures} consecutive failures today -- abandoning the report for the day"
-  else
-    log "warning: market email failed (failure ${failures}/${max_failures}) -- will retry after cooldown"
-  fi
-  return 1
-}
-
 # -- Sports digest (daily, opt-in) --------------------------------
 #
 # The ELI5 sports-tutor email: harness-side ESPN fetch (lib/espn.sh),
 # ONE claude_call distill on AGENT_MODEL, email via SMTP2GO. Email-only
-# and not repo-driven like market/SEO -- but unlike them it USES the
+# and not repo-driven, like the SEO pass -- but unlike SEO it USES the
 # model, so it lives below the global health gate (a blocked tick
-# skips it) and is the reason it can't join their blocked-tick
+# skips it) and is the reason it can't join the SEO blocked-tick
 # carve-out.
 #
 # Fires on the first tick after 03:00 -- a window-completeness gate
@@ -1882,10 +1604,10 @@ do_market_tick() {
 # west-coast NBA/NHL games routinely end past midnight CT. By 03:00
 # every previous-day event is final and recapped. Runs 7 days a week.
 #
-# Retry semantics are market's (.sports = {date, sent, failures,
-# last_attempt}): sent flips only on a successful send, attempts are
-# spaced by SPORTS_RETRY_COOLDOWN_SECS, and a hardcoded 5-hard-failure
-# cap abandons the day. Unlike market there is no clear-on-good-fetch:
+# Retry semantics (.sports = {date, sent, failures, last_attempt}):
+# sent flips only on a successful send, attempts are spaced by
+# SPORTS_RETRY_COOLDOWN_SECS, and a hardcoded 5-hard-failure cap
+# abandons the day. There is deliberately no clear-on-good-fetch:
 # ESPN being up says nothing about the distill call, and clearing
 # would let a parse-flaky day burn unbounded model calls -- the cap
 # must count every hard failure.
@@ -2013,15 +1735,15 @@ do_sports_tick() {
     return 1
   fi
 
-  # Subject carries TODAY's date, like the market report: it's today's
-  # digest of yesterday's action, and the body already frames the
-  # content as yesterday's highlights.
+  # Subject carries TODAY's date: it's today's digest of yesterday's
+  # action, and the body already frames the content as yesterday's
+  # highlights.
   local body concepts html subject today formatted
   body=$(jq -r '.body' <<<"$parsed")
   concepts=$(jq -c '.concepts' <<<"$parsed")
   html=$(sports_render_html <<<"$body")
   today=$(date +%Y-%m-%d)
-  formatted=$(market_format_date "$today")
+  formatted=$(format_report_date "$today")
   subject="[Sports] ${formatted:-$today}"
   local recipients; recipients=$(recipients_with_primary "${SPORTS_RECIPIENTS:-}")
   if email_send "$subject" "$html" "$body" "$recipients"; then
@@ -2154,8 +1876,7 @@ do_ceo_tick() {
 #   2. Once-daily alert email while a failure is live. Routed to
 #      HEALTH_RECIPIENTS via the shared SMTP2GO creds; without
 #      either, log-only. One email per local day, re-armed only
-#      after a day rollover (mirroring the market report's
-#      at-most-once-daily send).
+#      after a day rollover (at-most-once-daily).
 #
 # Runs every tick, before the backoff gate, so a blocked day still
 # probes (the inner claude_call fast-skips while blocked) and still
@@ -2263,8 +1984,7 @@ own once calls succeed again."
 # Stamped once ATTEMPTED (slot semantics): a wedged pass must not
 # retry model calls every tick for the rest of the day. The
 # after-01:00 gate is window-completeness (the hour being analyzed
-# must have closed), not a send-hour preference -- same flavor as the
-# market report's freshness gate.
+# must have closed), not a send-hour preference.
 
 LOGWATCH_MARKER='<!-- agent:logwatch -->'
 
@@ -2319,8 +2039,8 @@ logwatch_review_unit() {
 
 Service-specific context -- this unit is the agent harness ITSELF
 (a cron tick every minute). Additional known-benign patterns, never
-ticket-worthy: market freshness holds / weekend / already-sent
-statuses; validation skips over open onboarding tickets; single
+ticket-worthy: report already-sent statuses; validation skips over
+open onboarding tickets; single
 "indeterminate (Forgejo API error)" validation lines; "no claimable
 work -- idle" ticks; cooldown waits; "already ran this hour" logwatch
 statuses. Claude auth/usage-limit
@@ -2789,7 +2509,7 @@ build_deps_section() {
 # email -- see do_health_tick), then bail out of ALL model work if a
 # health cooldown is live (auth broken or subscription usage window
 # exhausted -- see lib/claude.sh). A blocked tick still runs the
-# scripted, no-LLM subsystems (SEO, market report) so their emails
+# scripted, no-LLM subsystems (the SEO report) so their emails
 # aren't held hostage by a usage limit; everything else waits.
 # `|| true`: the canary must never kill a tick.
 
@@ -2805,7 +2525,6 @@ do_deploy_barrier && exit 0
 if claude_health_blocked; then
   log "claude health: backoff active (kind=$(claude_health_kind)) -- skipping all model work this tick"
   do_seo_tick || true
-  do_market_tick || true
   exit 0
 fi
 
@@ -3612,20 +3331,12 @@ if do_seo_tick; then
   exit 0
 fi
 
-# Daily market report (Mon-Fri, one email per weekday, on the first
-# tick after midnight). Opt-in via the marketstack + SMTP2GO env;
-# no-ops when unconfigured, on weekends, or once today's already sent.
-# Scripted, email-only -- a sibling of the SEO pass, not repo-driven.
-if do_market_tick; then
-  exit 0
-fi
-
 # Daily sports digest (7 days a week, first tick after 03:00 -- by
 # then even west-coast games are final and recapped). Opt-in via
 # SPORTS_RECIPIENTS + SPORTS_LEAGUES + SMTP2GO; no-ops when
 # unconfigured or once today's already sent. ESPN fetch is scripted,
-# but the distill is a model call -- so unlike SEO/market this pass
-# sits below the health gate and goes dark with the rest of the model
+# but the distill is a model call -- so unlike the scripted SEO pass this
+# one sits below the health gate and goes dark with the rest of the model
 # work during a cooldown.
 if do_sports_tick; then
   exit 0

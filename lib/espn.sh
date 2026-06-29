@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # espn.sh -- ESPN public site API client for the daily sports digest.
-# Isolates every ESPN network call, the way lib/marketstack.sh does for
-# marketstack. Sourced by bin/tick.sh.
+# Isolates every ESPN network call. Sourced by bin/tick.sh.
 #
 # The sports digest is opt-in; callers gate on these being set:
 #   PRIMARY_RECIPIENTS, SPORTS_LEAGUES   (SPORTS_RECIPIENTS adds extra subscribers)
