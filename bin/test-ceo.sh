@@ -91,6 +91,41 @@ run_parse "$(printf 'SUBJECT: s\n===BODY===\nD.\n===ISSUE===\nTITLE: X\nbody\n==
 eq "guidance: coexists with an issue (count)"    1        "$(jq '.issues | length' <<<"$OUT")"
 eq "guidance: coexists with an issue (guidance)" "G line." "$(jq -r '.guidance' <<<"$OUT")"
 
+# ---- ceo_parse_response: questions (===QUESTION=== blocks, Phase 4) ------
+echo "== ceo_parse_response questions =="
+
+run_parse "$(printf 'SUBJECT: s\n===BODY===\nThe digest.')"
+eq "no questions: questions == []" "[]" "$(jq -c '.questions' <<<"$OUT")"
+
+run_parse "$(printf 'SUBJECT: s\n===BODY===\nThe digest.\n===QUESTION===\nTITLE: Pricing call\nAds or no ads?\n===QUESTION===\nTITLE: Brand\nRename the pig?')"
+eq "two questions: count"            2               "$(jq '.questions | length' <<<"$OUT")"
+eq "two questions: title 1"          "Pricing call"  "$(jq -r '.questions[0].title' <<<"$OUT")"
+eq "two questions: body 1"           "Ads or no ads?" "$(jq -r '.questions[0].body' <<<"$OUT")"
+eq "two questions: body excludes them" "The digest."  "$(jq -r '.body' <<<"$OUT")"
+
+run_parse "$(printf 'SUBJECT: s\n===BODY===\nD.\n===QUESTION===\nTITLE: Q1\na\n===QUESTION===\nTITLE: Q2\nb\n===QUESTION===\nTITLE: Q3\nc')"
+eq "questions: 3 blocks capped to 2" 2 "$(jq '.questions | length' <<<"$OUT")"
+
+# Issues AND questions together (contract order: issues, then questions).
+run_parse "$(printf 'SUBJECT: s\n===BODY===\nD.\n===ISSUE===\nTITLE: Work\nwork body\n===QUESTION===\nTITLE: Ask\nask body')"
+eq "mixed: issues count"    1      "$(jq '.issues | length' <<<"$OUT")"
+eq "mixed: issue body excludes the question" "work body" "$(jq -r '.issues[0].body' <<<"$OUT")"
+eq "mixed: questions count" 1      "$(jq '.questions | length' <<<"$OUT")"
+eq "mixed: question title"  "Ask"  "$(jq -r '.questions[0].title' <<<"$OUT")"
+eq "mixed: digest body"     "D."   "$(jq -r '.body' <<<"$OUT")"
+
+# Body must stop at a leading ===QUESTION=== even with no issues.
+run_parse "$(printf 'SUBJECT: s\n===BODY===\nJust the digest.\n===QUESTION===\nTITLE: Q\nq body')"
+eq "question-only: body stops at the question" "Just the digest." "$(jq -r '.body' <<<"$OUT")"
+eq "question-only: issues empty"               "[]"               "$(jq -c '.issues' <<<"$OUT")"
+eq "question-only: question parsed"            "Q"                "$(jq -r '.questions[0].title' <<<"$OUT")"
+
+# Questions coexist with guidance (order: issues, questions, guidance).
+run_parse "$(printf 'SUBJECT: s\n===BODY===\nD.\n===QUESTION===\nTITLE: Q\nqb\n===GUIDANCE===\nG.')"
+eq "q+guidance: question parsed" "Q"  "$(jq -r '.questions[0].title' <<<"$OUT")"
+eq "q+guidance: guidance parsed" "G." "$(jq -r '.guidance' <<<"$OUT")"
+eq "q+guidance: body clean"      "D." "$(jq -r '.body' <<<"$OUT")"
+
 # ---- ceo_render_html ----------------------------------------------------
 echo "== ceo_render_html =="
 html="$(ceo_render_html <<<"$(printf '## The win\n- ship **verify**\n\nA <tag> & co.')")"
@@ -220,6 +255,46 @@ eq "throttle: open ceo-guidance PR -> throttles" "throttled" "$r"
 BOT_PRS='[{"head":{"ref":"agent/12-fix"}}]'
 if ceo_guidance_pr_open acme/x; then r=throttled; else r=open; fi
 eq "throttle: no ceo-guidance PR -> proceeds"    "open"      "$r"
+
+# ---- Phase 4: ceo_file_question + ceo_open_items_count + answered ---------
+# (Last, so its _fj redefinition doesn't leak into the sections above.)
+echo "== ceo Phase 4: questions + open-item cap =="
+Q_POST_FILE="$(mktemp)"; LABEL_NUM=''; LABEL_NAME=''; ITEMS_GET='[]'
+_fj() {  # POST issues -> capture body to a FILE (survives the $() subshell in
+         # ceo_file_question) + return a number; GET issues -> canned.
+  case "$1 $2" in
+    "POST "*/issues*) printf '%s' "$3" > "$Q_POST_FILE"; printf '%s' '{"number":77}' ;;
+    "GET "*/issues*)  printf '%s' "$ITEMS_GET" ;;
+    *)                printf '%s' '{}' ;;
+  esac
+}
+forgejo_add_label() { LABEL_NUM="$2"; LABEL_NAME="$3"; }   # capture, succeed
+
+ceo_file_question "acme/x" "Ads or no ads?" "options A/B" "joshtronic"
+Q_POST_BODY="$(cat "$Q_POST_FILE")"
+eq  "question: title in payload"        "Ads or no ads?"        "$(jq -r '.title' <<<"$Q_POST_BODY")"
+eq  "question: assigned to reviewer"    "joshtronic"            "$(jq -r '.assignees[0]' <<<"$Q_POST_BODY")"
+has "question: body carries marker"     "$(jq -r '.body' <<<"$Q_POST_BODY")" "$CEO_QUESTION_MARKER"
+eq  "question: labels issue #77"        "77"                    "$LABEL_NUM"
+eq  "question: applies Status/Need More Info" "Status/Need More Info" "$LABEL_NAME"
+
+# open-item count: both markers, ignoring unmarked issues + PRs.
+ITEMS_GET=$(jq -c -n --arg p "$CEO_PROPOSAL_MARKER" --arg q "$CEO_QUESTION_MARKER" '[
+  {number:1, pull_request:null, body:("a\n"+$p)},
+  {number:2, pull_request:null, body:("b\n"+$q)},
+  {number:3, pull_request:null, body:"human, no marker"},
+  {number:4, pull_request:{},   body:("pr\n"+$p)}]')
+eq "open-items: counts proposals + questions, skips unmarked/PRs" 2 "$(ceo_open_items_count acme/x)"
+
+# answered = reviewer has unassigned themselves from the (still-open) question.
+ITEMS_GET=$(jq -c -n --arg q "$CEO_QUESTION_MARKER" '[
+  {number:10, pull_request:null, assignees:[],                     body:("answered\n"+$q)},
+  {number:11, pull_request:null, assignees:[{login:"joshtronic"}], body:("pending\n"+$q)},
+  {number:12, pull_request:null, assignees:[{login:"someone"}],    body:("also answered\n"+$q)}]')
+eq "answered: only reviewer-unassigned questions" "$(printf '10\n12')" "$(ceo_answered_question_numbers acme/x joshtronic)"
+
+eq "cap: CEO_MAX_OPEN is 8" "8" "$CEO_MAX_OPEN"
+rm -f "$Q_POST_FILE"
 
 # ---- summary ------------------------------------------------------------
 echo
