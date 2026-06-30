@@ -340,6 +340,57 @@ ceo_read_metrics() {
   ceo_metrics_store "$repo" "$cur"
 }
 
+# _ceo_gsc_totals <gsc-response-json> -- aggregate {clicks,impressions,ctr,position}
+# over the response rows. CTR = clicks/impressions; position = impression-weighted
+# average. Empty/garbage in -> all-zero totals (never errors).
+_ceo_gsc_totals() {
+  jq -c '
+    (.rows // []) as $r
+    | ($r | map(.impressions) | add // 0) as $imp
+    | ($r | map(.clicks)      | add // 0) as $clk
+    | { clicks: $clk, impressions: $imp,
+        ctr:      (if $imp > 0 then ($clk / $imp) else 0 end),
+        position: (if $imp > 0 then (($r | map(.position * .impressions) | add // 0) / $imp) else 0 end) }
+  ' <<<"$1" 2>/dev/null || printf '{"clicks":0,"impressions":0,"ctr":0,"position":0}'
+}
+
+# ceo_read_gsc <repo> -- markdown of the repo's Google Search Console scoreboard
+# (clicks / impressions / CTR / avg position), current 28-day window vs the prior
+# 28 days. Fetched ON DEMAND every time the CEO runs -- it does NOT wait for the
+# monthly SEO pass; the boss reads the scoreboard whenever it wants. Keyed on
+# agent.json `.seo.domain` (the same field the SEO pass uses); empty (return 0)
+# when no domain is declared, so non-SEO repos digest exactly as before. Reuses
+# the SEO window + the GSC client; both windows come from this one call, so the
+# trend is self-contained (no persisted state). A missing/failed fetch is a
+# "scoreboard dark, do NOT guess" note, never a crash.
+ceo_read_gsc() {
+  local repo="$1" domain token start end pstart pend cur prev ctot ptot
+  domain=$(forgejo_repo_get_file "$repo" "${AGENT_CONFIG_FILE:-agent.json}" 2>/dev/null \
+    | jq -r '.seo.domain // empty' 2>/dev/null || true)
+  [ -n "$domain" ] || return 0
+  printf '## Search Console -- the scoreboard (%s)\n\n' "$domain"
+  if [ -z "${GSC_OAUTH_CLIENT_ID:-}" ] || [ -z "${GSC_OAUTH_CLIENT_SECRET:-}" ] \
+     || [ -z "${GSC_OAUTH_REFRESH_TOKEN:-}" ]; then
+    printf -- '- GSC is not configured this run -- no numbers. Note it; do NOT guess.\n'
+    return 0
+  fi
+  token=$(gsc_access_token 2>/dev/null) || {
+    printf -- '- GSC token refresh failed -- no numbers this cycle. Note it; do NOT guess.\n'
+    return 0
+  }
+  read -r start end pstart pend <<<"$(seo_window)"
+  cur=$(gsc_query "$token" "$domain" "$start" "$end" "date" 2>/dev/null || printf '{"rows":[]}')
+  prev=$(gsc_query "$token" "$domain" "$pstart" "$pend" "date" 2>/dev/null || printf '{"rows":[]}')
+  ctot=$(_ceo_gsc_totals "$cur"); ptot=$(_ceo_gsc_totals "$prev")
+  printf '28-day window **%s -> %s** vs the prior 28 days (**%s -> %s**). Lead with these and the delta; lower avg position is better.\n\n' \
+    "$start" "$end" "$pstart" "$pend"
+  printf '| metric | current | prior |\n|---|---|---|\n'
+  printf '| clicks | %s | %s |\n'      "$(jq -r '.clicks'                   <<<"$ctot")" "$(jq -r '.clicks'                   <<<"$ptot")"
+  printf '| impressions | %s | %s |\n' "$(jq -r '.impressions'              <<<"$ctot")" "$(jq -r '.impressions'              <<<"$ptot")"
+  printf '| CTR | %s%% | %s%% |\n'     "$(jq -r '(.ctr * 10000 | round) / 100'  <<<"$ctot")" "$(jq -r '(.ctr * 10000 | round) / 100'  <<<"$ptot")"
+  printf '| avg position | %s | %s |\n' "$(jq -r '(.position * 100 | round) / 100' <<<"$ctot")" "$(jq -r '(.position * 100 | round) / 100' <<<"$ptot")"
+}
+
 # ---- Phase 2: proposing work (issues the board greenlights) ----
 # The CEO files up to two UNLABELED issues assigned to the human, each carrying
 # CEO_PROPOSAL_MARKER. They become real work only when the human adds the Agent
