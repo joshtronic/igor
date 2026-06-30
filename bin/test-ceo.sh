@@ -410,6 +410,36 @@ eq "terms call fails -> KEEP (fail-open)" "KEEP" "$(ceo_codecheck_proposal acme/
 claude_call() { case "$2" in *terms*) printf 'widget\n' ;; *) printf 'no verdict line here\n' ;; esac; }
 eq "unparseable verdict -> KEEP (fail-open)" "KEEP" "$(ceo_codecheck_proposal acme/x 'x' 'body')"
 
+# ---- ceo_revise_refile (gated REVISE re-file path) ----------------------
+echo "== ceo_revise_refile (gated REVISE) =="
+REVISE_POSTS=''; REVISE_FILED=''
+_fj() {
+  case "$1 $2" in
+    "POST "*/comments*) REVISE_POSTS="${REVISE_POSTS}|$(jq -r '.body' <<<"$3")" ;;
+    "POST "*/issues*)   REVISE_FILED="$3"; printf '%s' '{"number":99}' ;;
+    *)                  printf '%s' '{}' ;;
+  esac
+}
+RISSUE='{"title":"audit dupes first","body":"Scan, then fix only real dupes."}'
+
+# KEEP: gate passes -> ceo_file_proposal is called, comment NOT posted
+ceo_codecheck_proposal() { echo KEEP; }
+REVISE_FILED=''; REVISE_POSTS=''
+ceo_revise_refile "acme/x" "42" "$RISSUE" "joshtronic"
+eq  "revise KEEP: title filed"       "audit dupes first" "$(jq -r '.title' <<<"$REVISE_FILED")"
+eq  "revise KEEP: no comment posted" ""                  "$REVISE_POSTS"
+
+# DROP: gate rejects -> comment posted on old issue, proposal NOT filed
+ceo_codecheck_proposal() { echo DROP; }
+REVISE_FILED=''; REVISE_POSTS=''
+if ceo_revise_refile "acme/x" "42" "$RISSUE" "joshtronic"; then
+  bad "revise DROP: should return nonzero (skip re-file)"
+else
+  ok "revise DROP: returns nonzero (skip re-file)"
+fi
+eq  "revise DROP: nothing filed"    ""              "$REVISE_FILED"
+has "revise DROP: comment posted"   "$REVISE_POSTS" "code-check gate"
+
 # ---- summary ------------------------------------------------------------
 echo
 if [ "$fails" -eq 0 ]; then

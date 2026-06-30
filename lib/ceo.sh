@@ -586,6 +586,23 @@ ceo_codecheck_proposal() {
   fi
 }
 
+# ceo_revise_refile <repo> <rnum> <issue_json> <assignee>
+# REVISE reconsider path: runs the code-check gate on the revised title/body.
+# KEEP -> file the new proposal (returns 0); DROP -> post a one-line comment on
+# the old (already-closed) issue and skip re-file (returns 1). Fail-open: any
+# error inside the gate echoes KEEP so no real proposal is silently eaten.
+ceo_revise_refile() {
+  local repo="$1" rnum="$2" rissue_json="$3" assignee="$4" rtitle rbody
+  rtitle=$(jq -r '.title' <<<"$rissue_json")
+  rbody=$(jq -r '.body' <<<"$rissue_json")
+  if [ "$(ceo_codecheck_proposal "$repo" "$rtitle" "$rbody")" = "DROP" ]; then
+    _fj POST "/repos/${repo}/issues/${rnum}/comments" \
+      "$(jq -n '{body:"Revised proposal dropped by the code-check gate -- the work appears to already be covered in the code."}')" >/dev/null 2>&1 || true
+    return 1
+  fi
+  ceo_file_proposal "$repo" "$rtitle" "$rbody" "$assignee"
+}
+
 # ---- Phase 3: decision-guidance redlines (the CEO drafts, the board ratifies) ----
 # Weekly, the CEO observes how the board ruled on its prior proposals -- greenlit
 # (Agent-labeled), declined (closed, no label), pending -- distills ONE
