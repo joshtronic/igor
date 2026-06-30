@@ -28,6 +28,10 @@ CEO_QUESTION_MARKER="<!-- ceo-question -->"
 # pass stops filing new ones -- a generous backstop against infinite pileup that
 # still lets the CEO grind, replacing the old "no new work until zero open" gate.
 CEO_MAX_OPEN=8
+# Stamped into the weekly board digest, now a RESPONDABLE issue (the brief moved off
+# one-way email): the board comments to steer next week's read, closes to drop. Not a
+# work item (no Agent label) and NOT counted toward CEO_MAX_OPEN.
+CEO_DIGEST_MARKER="<!-- ceo-digest -->"
 
 # ceo_read_mandate <repo> -- echo the mandate's raw content, empty if absent.
 # This IS the opt-in probe: a present CEO.md returns its body, a missing
@@ -440,6 +444,50 @@ ceo_open_items_count() {
         '[ .[]? | select(.pull_request == null)
            | select(((.body // "") | contains($p)) or ((.body // "") | contains($q))) ] | length' \
         2>/dev/null || echo 0
+}
+
+# ---- Phase 4: the weekly digest as a respondable issue (retires the email) ----
+# The brief moved off one-way email to the same two-way Forgejo channel as the
+# questions/proposals: filed as an issue the board comments-to-steer / closes-to-drop,
+# and the next week's digest folds in those comments. One open digest at a time.
+
+# ceo_file_digest <repo> <title> <body> <reviewer> -- file the weekly board digest as
+# a RESPONDABLE issue assigned to the reviewer, stamped with the digest marker. NOT a
+# work item (no Agent label) and not counted toward CEO_MAX_OPEN.
+ceo_file_digest() {
+  local repo="$1" title="$2" body="$3" reviewer="$4" full payload
+  full=$(printf '%s\n\n---\n_The weekly board digest. **Comment to steer** next week'"'"'s read; **close** to acknowledge or drop._\n%s' \
+    "$body" "$CEO_DIGEST_MARKER")
+  payload=$(jq -n --arg t "$title" --arg b "$full" --arg a "$reviewer" \
+    '{title: $t, body: $b, assignees: [$a]}')
+  _fj POST "/repos/${repo}/issues" "$payload" >/dev/null 2>&1
+}
+
+# ceo_prior_digest_number <repo> -- the number of the open ceo-digest issue (last
+# week's, awaiting the board's steering), empty if none.
+ceo_prior_digest_number() {
+  local repo="$1"
+  _fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" 2>/dev/null \
+    | jq -r --arg m "$CEO_DIGEST_MARKER" \
+        '[ .[]? | select(.pull_request == null) | select((.body // "") | contains($m)) | .number ] | .[0] // empty' \
+        2>/dev/null || true
+}
+
+# ceo_prior_digest_steering <repo> -- last week's open digest body + the board's
+# comments, as a markdown block the next digest folds in. Empty if no prior digest.
+ceo_prior_digest_steering() {
+  local repo="$1" issues num title body comments
+  issues=$(_fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" 2>/dev/null)
+  num=$(jq -r --arg m "$CEO_DIGEST_MARKER" \
+    '[ .[]? | select(.pull_request == null) | select((.body // "") | contains($m)) | .number ] | .[0] // empty' \
+    <<<"${issues:-[]}" 2>/dev/null)
+  [ -n "$num" ] || return 0
+  title=$(jq -r --argjson n "$num" '[ .[]? | select(.number == $n) | .title ] | .[0] // ""' <<<"$issues" 2>/dev/null)
+  body=$(jq -r --argjson n "$num" '[ .[]? | select(.number == $n) | .body ] | .[0] // ""' <<<"$issues" 2>/dev/null)
+  comments=$(_fj GET "/repos/${repo}/issues/${num}/comments" 2>/dev/null \
+    | jq -r '.[]? | "> [\(.user.login)] \(.body)"' 2>/dev/null || true)
+  printf '## Last week'"'"'s digest + the board'"'"'s steering (incorporate this)\n\n### Your digest #%s -- %s\n\n%s\n\n### The board commented\n%s\n' \
+    "$num" "$title" "$body" "${comments:-(no comments -- the board read it without steering)}"
 }
 
 # ---- Phase 4 follow-up: reconsidering a proposal the board handed back ----

@@ -294,6 +294,27 @@ ITEMS_GET=$(jq -c -n --arg q "$CEO_QUESTION_MARKER" '[
 eq "answered: only reviewer-unassigned questions" "$(printf '10\n12')" "$(ceo_answered_question_numbers acme/x joshtronic)"
 
 eq "cap: CEO_MAX_OPEN is 8" "8" "$CEO_MAX_OPEN"
+
+# the weekly digest as a respondable issue (retires the email)
+echo "== ceo Phase 4: digest-as-issue =="
+ceo_file_digest "acme/x" "[CEO] Week 27" "the brief" "joshtronic"
+D_POST_BODY="$(cat "$Q_POST_FILE")"
+eq  "digest: title in payload"     "[CEO] Week 27" "$(jq -r '.title' <<<"$D_POST_BODY")"
+eq  "digest: assigned to reviewer" "joshtronic"    "$(jq -r '.assignees[0]' <<<"$D_POST_BODY")"
+eq  "digest: unlabeled (not work)" "0"             "$(jq -r '(.labels // []) | length' <<<"$D_POST_BODY")"
+has "digest: body carries marker"  "$(jq -r '.body' <<<"$D_POST_BODY")" "$CEO_DIGEST_MARKER"
+
+# prior-digest lookup: the open digest's number (for steering + close).
+ITEMS_GET=$(jq -c -n --arg d "$CEO_DIGEST_MARKER" '[
+  {number:42, pull_request:null, body:("last week\n"+$d)},
+  {number:43, pull_request:null, body:"no marker"}]')
+eq "prior-digest: finds the open digest number" "42" "$(ceo_prior_digest_number acme/x)"
+
+# digests must NOT count toward the open-item cap (reports, not work).
+ITEMS_GET=$(jq -c -n --arg p "$CEO_PROPOSAL_MARKER" --arg d "$CEO_DIGEST_MARKER" '[
+  {number:1, pull_request:null, body:("prop\n"+$p)},
+  {number:2, pull_request:null, body:("digest\n"+$d)}]')
+eq "open-items: ignores the digest marker" "1" "$(ceo_open_items_count acme/x)"
 rm -f "$Q_POST_FILE"
 
 # ---- ceo_read_metrics (Phase 4: data-driven) ----------------------------
