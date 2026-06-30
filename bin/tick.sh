@@ -107,6 +107,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/automerge.sh"
 # shellcheck source=lib/feedback.sh
 . "$AGENT_HOME/lib/feedback.sh"
+# shellcheck source=lib/deferred.sh
+. "$AGENT_HOME/lib/deferred.sh"
 
 # Children invocations (agent-* helper scripts) share our tick id
 # so cost-ledger entries from child processes group with the
@@ -3504,6 +3506,17 @@ fi
 # Agent label (that's the gate; an Agent-labeled ticket still assigned
 # to the reviewer is claimable, so unassigning is optional).
 if do_logwatch_tick; then
+  exit 0
+fi
+
+# Deferred-ticket pass: work gated on an external data source. Convention opt-in,
+# no env knob -- an OPEN issue carrying a <!-- gate --> block AND the
+# Status/Deferred label (the grind skips that label, so nothing works it early).
+# Once per ISO day per ticket it fetches the gate's url and asks (tool-free)
+# whether the condition is now met; on MET it drops the hold so the grind claims
+# it. A model call, so below the health gate; fails CLOSED (a flaky check leaves
+# the ticket deferred). See lib/deferred.sh.
+if do_deferred_tick; then
   exit 0
 fi
 

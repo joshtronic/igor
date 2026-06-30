@@ -59,6 +59,7 @@ forgejo_find_claimable() {
             )
           )
           and (([.labels[].name] | index("Status/Blocked")) == null)
+          and (([.labels[].name] | index("Status/Deferred")) == null)
         )] | sort_by(.created_at)
       '
 }
@@ -309,6 +310,19 @@ forgejo_add_label() {
   [ -n "$id" ] || { echo "label not found: $name" >&2; return 1; }
   _fj POST "/repos/${repo}/issues/${number}/labels" \
     "$(jq -n --argjson id "$id" '{labels: [$id]}')" >/dev/null
+}
+
+# forgejo_remove_label <repo> <number> <name> -- mirror of forgejo_add_label:
+# resolve the label name -> id, then DELETE it off the issue. rc=1 if the label
+# name does not resolve in the repo (caller decides whether that's fatal).
+forgejo_remove_label() {
+  local repo="$1" number="$2" name="$3"
+  local id
+  id=$(_fj GET "/repos/${repo}/labels" \
+       | jq -r --arg n "$name" '.[] | select(.name == $n) | .id' \
+       | head -1)
+  [ -n "$id" ] || { echo "label not found: $name" >&2; return 1; }
+  _fj DELETE "/repos/${repo}/issues/${number}/labels/${id}" >/dev/null
 }
 
 # Bot-authored PRs on this repo that reference this issue via
