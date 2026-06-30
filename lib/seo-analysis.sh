@@ -407,3 +407,48 @@ seo_record_opportunities() {
         score:.score }
   ' <<<"$report" >> "$out" 2>/dev/null || true
 }
+
+# The Forgejo repo mapped to an agentic SEO domain, or empty.
+#
+# PRIMARY source: a repo opts in via its agent.json (the per-repo dossier --
+# same place automerge reads `.smoke.url` and feedback reads `.feedback.csv`):
+#
+#     { "seo": { "domain": "<gsc-domain>", "agentic": true } }
+#
+# We scan bot-accessible repos for the one whose `.seo.domain` equals this GSC
+# domain AND whose `.seo.agentic` is true. Called at most once per agentic
+# domain per month (the SEO pass handles one domain per tick), so the per-repo
+# agent.json reads are cheap enough at that cadence.
+#
+# DEPRECATED FALLBACK: the legacy SEO_AGENTIC_SITES env map
+# ("domain=owner/repo|domain2=owner/repo2"). Used only when no agent.json `.seo`
+# matches, and it logs once when it fires -- so when that log goes quiet, every
+# agentic repo is on agent.json and the env (here, the export in tick.sh, and
+# the host `.env` line) can be deleted.
+seo_agentic_repo_for() {
+  local domain="$1" repos repo cfg d agentic
+  repos=$(forgejo_list_bot_repos 2>/dev/null | jq -r '.[].full_name' 2>/dev/null) || repos=""
+  while IFS= read -r repo; do
+    [ -z "$repo" ] && continue
+    cfg=$(forgejo_repo_get_file "$repo" "${AGENT_CONFIG_FILE:-agent.json}" 2>/dev/null) || continue
+    [ -z "$cfg" ] && continue
+    d=$(jq -r '.seo.domain // empty' <<<"$cfg" 2>/dev/null) || continue
+    agentic=$(jq -r '.seo.agentic // false' <<<"$cfg" 2>/dev/null) || continue
+    if [ "$d" = "$domain" ] && [ "$agentic" = "true" ]; then
+      printf '%s' "$repo"; return 0
+    fi
+  done <<<"$repos"
+
+  # Deprecated env fallback (see header).
+  local entry ed erepo
+  local IFS='|'
+  for entry in ${SEO_AGENTIC_SITES:-}; do
+    [ -z "$entry" ] && continue
+    ed="${entry%%=*}"; erepo="${entry#*=}"
+    if [ "$ed" = "$domain" ]; then
+      log "seo: DEPRECATED SEO_AGENTIC_SITES still resolves ${domain} -> ${erepo}; add agent.json .seo to that repo and drop the env entry" 2>/dev/null || true
+      printf '%s' "$erepo"; return 0
+    fi
+  done
+  return 0
+}
