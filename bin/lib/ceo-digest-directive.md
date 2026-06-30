@@ -15,6 +15,12 @@ You are given two things:
    trend), then what shipped (PRs merged), what moved (issues opened/closed), and
    what's queued (open `Agent` issues).
 
+**Your digest is now a respondable issue, not an email.** It's filed to the board's
+tracker; they **comment to steer** your next read and **close** to acknowledge or
+drop. When the inputs include a "Last week's digest + the board's steering" block,
+**incorporate their comments directly** — adjust where they pushed back, double down
+where they agreed, and don't relitigate a point they've already closed out.
+
 ## What the digest must do
 
 - **Open with the numbers.** When the inputs carry a live-metrics block, lead with

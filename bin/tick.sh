@@ -1945,11 +1945,9 @@ _ceo_file_outputs() {
 }
 
 do_ceo_tick() {
-  [ -n "${SMTP2GO_API_KEY:-}" ] && [ -n "${SMTP2GO_SENDER:-}" ] || return 1
-  local recipients; recipients="$(recipients_with_primary "${CEO_RECIPIENTS:-}")"
-  [ -n "$recipients" ] || return 1
-
-  local since directive repo_line repo mandate activity prompt raw parsed subject body html attempt
+  # The weekly digest is now a respondable Forgejo issue, not email -- no SMTP2GO
+  # gate; opt-in is purely the CEO.md mandate (read per-repo below).
+  local since directive repo_line repo mandate activity prompt raw parsed subject body attempt pdnum
   local answered qblock n closed
   since=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)
   directive=$(cat "$AGENT_HOME/bin/lib/ceo-digest-directive.md")
@@ -2054,12 +2052,14 @@ do_ceo_tick() {
 
     # --- Path 2: the weekly board digest (once per ISO week). ---
     ceo_week_done "$repo" && continue
-    # The activity base opens with the live product metrics (Phase 4) so the digest
-    # decides against numbers, then the week's activity, then the CEO's OPEN
-    # questions so it won't re-ask a pending one.
+    # The activity opens with live metrics, the week, the CEO's OPEN questions (so it
+    # won't re-ask a pending one), and last week's digest + the board's comments so the
+    # brief incorporates their steering. One open digest at a time.
+    pdnum=$(ceo_prior_digest_number "$repo")
     activity=$(ceo_read_metrics "$repo"; ceo_gather_week "$repo" "$since"; \
                ceo_proposal_outcomes "$repo"; \
-               ceo_open_questions "$repo" "${FORGEJO_REVIEWER:-}")
+               ceo_open_questions "$repo" "${FORGEJO_REVIEWER:-}"; \
+               ceo_prior_digest_steering "$repo")
     prompt=$(ceo_build_prompt "$repo" "$mandate" "$activity" "$since")
 
     parsed=""
@@ -2075,14 +2075,15 @@ do_ceo_tick() {
     subject=$(jq -r '.subject // ""' <<<"$parsed")
     [ -n "$subject" ] && subject="[CEO] ${subject}" || subject="[CEO] ${repo} -- weekly board digest"
     body=$(jq -r '.body' <<<"$parsed")
-    html=$(ceo_render_html <<<"$body")
-    if email_send "$subject" "$html" "$body" "$recipients"; then
+    if ceo_file_digest "$repo" "$subject" "$body" "${FORGEJO_REVIEWER:-}"; then
       ceo_mark_week_done "$repo"
-      log "ceo: emailed board digest for ${repo} to ${recipients}"
+      # One open digest at a time: close last week's now its steering is incorporated.
+      [ -n "$pdnum" ] && _fj PATCH "/repos/${repo}/issues/${pdnum}" '{"state":"closed"}' >/dev/null 2>&1
+      log "ceo: filed weekly board digest issue for ${repo} (closed prior #${pdnum:-none})"
       _ceo_file_outputs "$repo" "$parsed" "yes"   # proposals + questions + guidance
       return 0
     fi
-    log "warning: ceo: email failed for ${repo} -- will retry next tick"
+    log "warning: ceo: could not file the digest issue for ${repo} -- will retry next tick"
   done <<<"$ANALYSIS_REPOS_JSON"
 
   return 1
