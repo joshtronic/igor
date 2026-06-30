@@ -370,6 +370,43 @@ eq  "size-cap: prior reading preserved"      "50" "$(jq -r '.ceo_metrics["acme/x
 
 unset -f forgejo_repo_get_file curl; unset AGENT_STATE_DIR; rm -rf "$_M_TMP"
 
+# ---- ceo_read_gsc (Phase 4: the CEO pulls GSC on-demand) ----------------
+echo "== ceo_read_gsc =="
+_G_CFG=''   # what the agent.json read returns
+forgejo_repo_get_file() { printf '%s' "$_G_CFG"; }
+gsc_access_token() { printf 'tok'; }
+seo_window() { printf '2026-06-01 2026-06-28 2026-05-04 2026-05-31'; }
+# two rows -> clicks 15, impressions 200, CTR 7.5%, impression-weighted position 10
+gsc_query() { printf '%s' '{"rows":[{"clicks":10,"impressions":100,"position":5},{"clicks":5,"impressions":100,"position":15}]}'; }
+
+# no .seo.domain -> clean no-op (non-SEO repos digest exactly as before)
+_G_CFG='{"smoke":{"url":"https://x"}}'
+eq "gsc: no .seo.domain -> empty" "" \
+   "$(GSC_OAUTH_CLIENT_ID='' GSC_OAUTH_CLIENT_SECRET='' GSC_OAUTH_REFRESH_TOKEN='' ceo_read_gsc acme/x)"
+
+# .seo.domain set but GSC unconfigured -> scoreboard-dark note, no numbers
+_G_CFG='{"seo":{"domain":"vpsshowdown.com","agentic":true}}'
+out=$(GSC_OAUTH_CLIENT_ID='' GSC_OAUTH_CLIENT_SECRET='' GSC_OAUTH_REFRESH_TOKEN='' ceo_read_gsc acme/x)
+has   "gsc: unconfigured -> still names the domain" "$out" "vpsshowdown.com"
+has   "gsc: unconfigured -> 'not configured' note"  "$out" "not configured"
+hasnt "gsc: unconfigured -> no numbers table"       "$out" "avg position"
+
+# .seo.domain + GSC configured -> numbers block with aggregated totals + trend
+out=$(GSC_OAUTH_CLIENT_ID=a GSC_OAUTH_CLIENT_SECRET=b GSC_OAUTH_REFRESH_TOKEN=c ceo_read_gsc acme/x)
+has "gsc: scoreboard header"          "$out" "Search Console"
+has "gsc: clicks total (15)"          "$out" "clicks | 15"
+has "gsc: impressions total (200)"    "$out" "impressions | 200"
+has "gsc: CTR 7.5%"                   "$out" "7.5%"
+has "gsc: weighted avg position (10)" "$out" "avg position | 10"
+has "gsc: window dates surfaced"      "$out" "2026-06-01"
+
+# token refresh failure -> dark note, never a crash
+gsc_access_token() { return 1; }
+out=$(GSC_OAUTH_CLIENT_ID=a GSC_OAUTH_CLIENT_SECRET=b GSC_OAUTH_REFRESH_TOKEN=c ceo_read_gsc acme/x)
+has "gsc: token refresh fail -> note" "$out" "token refresh failed"
+
+unset -f forgejo_repo_get_file gsc_access_token gsc_query seo_window
+
 # ---- ceo_parse_reconsider (Phase 4 follow-up: proposal reconsider) -------
 echo "== ceo_parse_reconsider =="
 rc_parse() { if RPO=$(ceo_parse_reconsider "$1"); then RRC=0; else RRC=1; fi; }
