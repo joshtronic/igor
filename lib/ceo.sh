@@ -311,7 +311,16 @@ ceo_read_metrics() {
     | jq -r '.ceo.metrics_url // empty' 2>/dev/null || true)
   [ -n "$url" ] || return 0
   printf '## Live metrics (judge yourself against THESE, not the prose)\n\n'
-  cur=$(curl -fsS --max-time 20 "$url" 2>/dev/null || true)
+  # Harden this outbound fetch (a config-declared URL): https ONLY -- never let it
+  # reach file://, http://internal, or a cloud-metadata endpoint -- and cap the body
+  # so a huge/hostile response can't bloat the prompt (an oversize body that no longer
+  # parses as JSON falls through to the "unavailable" path below).
+  case "$url" in
+    https://*) ;;
+    *) printf -- '- metrics_url is not https -- refusing to fetch it. Fix agent.json; do NOT guess numbers.\n'
+       return 0 ;;
+  esac
+  cur=$(curl -fsS --max-time 20 "$url" 2>/dev/null | head -c 65536 || true)
   if [ -z "$cur" ] || ! jq -e . >/dev/null 2>&1 <<<"$cur"; then
     printf -- '- metrics unavailable this cycle -- the endpoint did not answer with JSON. Note it; do NOT guess numbers.\n'
     return 0
@@ -431,6 +440,94 @@ ceo_open_items_count() {
         '[ .[]? | select(.pull_request == null)
            | select(((.body // "") | contains($p)) or ((.body // "") | contains($q))) ] | length' \
         2>/dev/null || echo 0
+}
+
+# ---- Phase 4 follow-up: reconsidering a proposal the board handed back ----
+# A proposal is filed assigned to the reviewer. Greenlight = add the Agent label
+# (+ unassign); decline = close. A THIRD path: the reviewer comments feedback and
+# unassigns WITHOUT the Agent label -- handing it back to reconsider, not approving
+# and not killing. The CEO reads the feedback and WITHDRAWs / REVISEs / HOLDs. This
+# is NOT doing the proposed work (that stays the Agent-label-then-grind path).
+
+# ceo_responded_proposal_numbers <repo> <reviewer> -- newline list of open proposal
+# issues the reviewer unassigned themselves from, did NOT Agent-label, and left at
+# least one comment on (the "reconsider this with my feedback" signal).
+ceo_responded_proposal_numbers() {
+  local repo="$1" reviewer="$2"
+  _fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" 2>/dev/null \
+    | jq -r --arg m "$CEO_PROPOSAL_MARKER" --arg r "$reviewer" '
+        .[]? | select(.pull_request == null) | select((.body // "") | contains($m))
+        | select(([.assignees[]?.login] | index($r)) | not)
+        | select(([.labels[]?.name] | index("Agent")) | not)
+        | select((.comments // 0) > 0)
+        | .number' 2>/dev/null || true
+}
+
+# ceo_proposal_thread <repo> <number> -- the proposal body + the board's comment
+# thread, as the markdown the reconsider prompt reads.
+ceo_proposal_thread() {
+  local repo="$1" num="$2" issue title body comments
+  issue=$(_fj GET "/repos/${repo}/issues/${num}" 2>/dev/null)
+  title=$(jq -r '.title // ""' <<<"$issue" 2>/dev/null)
+  body=$(jq -r '.body // ""' <<<"$issue" 2>/dev/null)
+  comments=$(_fj GET "/repos/${repo}/issues/${num}/comments" 2>/dev/null \
+    | jq -r '.[]? | "> [\(.user.login)] \(.body)"' 2>/dev/null || true)
+  printf '### Your proposal #%s -- %s\n\n%s\n\n### The board handed it back with this feedback\n%s\n' \
+    "$num" "$title" "$body" "${comments:-(handed back with no comment text)}"
+}
+
+# ceo_build_reconsider_prompt <repo> <mandate> <thread> -- the user prompt for the
+# reconsider model call. Self-contained output contract (DECISION / ===REPLY=== /
+# optional ===ISSUE===), distinct from the digest format.
+ceo_build_reconsider_prompt() {
+  local repo="$1" mandate="$2" thread="$3"
+  printf 'You filed a proposal for **%s**; the board did NOT greenlight it -- they left feedback and handed it back to reconsider. A focused decision, not a digest.
+
+## Your mandate (CEO.md)
+
+%s
+
+## The proposal + the board feedback
+
+%s
+
+## Your call
+
+Reconsider it against the feedback and the mandate, and choose ONE:
+- WITHDRAW -- the board is right (redundant, wrong-premised, or not worth it). Close it gracefully.
+- REVISE -- the goal stands but the shape should change. Re-file a sharper version that answers the feedback.
+- HOLD -- you still back it as-is; make the case briefly.
+
+Be a real partner: concede when they are right, push back with reasons when you are. Conversational, in your own voice -- not a form letter, and never sign off (no `-- CEO` or closing signature).
+
+## Output format (parsed exactly)
+
+- First line: DECISION: WITHDRAW (or REVISE or HOLD).
+- Then a line exactly ===REPLY===, then your reply to the board in Markdown -- a few sentences addressed to them, acknowledging their point and explaining your call.
+- THEN, only for REVISE, a line exactly ===ISSUE===, then TITLE: <single-line title>, then the revised proposal body (your read first, then scope, acceptance criteria, the priority it serves).
+- Nothing else; no code fence around the whole response.' \
+    "$repo" "$mandate" "$thread"
+}
+
+# ceo_parse_reconsider <raw> -- parse the reconsider response into harness-built JSON
+# {decision, reply, issue:{title,body}|null}. rc=1 if the DECISION line or ===REPLY===
+# body is missing (caller retries). Never model-written JSON.
+ceo_parse_reconsider() {
+  local raw="$1" decision after reply issue
+  decision=$(printf '%s\n' "$raw" | sed -n 's/^[[:space:]]*DECISION:[[:space:]]*//p' \
+    | head -1 | tr '[:lower:]' '[:upper:]' | grep -oE 'WITHDRAW|REVISE|HOLD' | head -1)
+  [ -n "$decision" ] || return 1
+  case "$raw" in *'===REPLY==='*) ;; *) return 1 ;; esac
+  after="${raw#*===REPLY===}"
+  reply="${after%%===ISSUE===*}"
+  reply=$(printf '%s\n' "$reply" | _ceo_trim_blanks)
+  [ -n "$reply" ] || return 1
+  issue='null'
+  case "$after" in
+    *'===ISSUE==='*) issue=$(_ceo_parse_issues "$after" | jq -c '.[0] // null') ;;
+  esac
+  jq -n --arg d "$decision" --arg r "$reply" --argjson i "${issue:-null}" \
+    '{decision:$d, reply:$r, issue:$i}'
 }
 
 # ---- Phase 3: decision-guidance redlines (the CEO drafts, the board ratifies) ----

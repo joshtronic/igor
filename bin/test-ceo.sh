@@ -333,7 +333,57 @@ out=$(ceo_read_metrics acme/x)
 has "endpoint down: unavailable note"        "$out" "unavailable"
 eq  "endpoint down: prior reading preserved" "50" "$(jq -r '.ceo_metrics["acme/x"].data.players' "$_M_SF" 2>/dev/null)"
 
+# hardening: a non-https metrics_url is refused outright (no fetch, no guess)
+_M_CFG='{"ceo":{"metrics_url":"http://x/api/summary"}}'
+_M_BODY='{"players":1}'
+out=$(ceo_read_metrics acme/x)
+has   "https-only: refuses a non-https url" "$out" "not https"
+hasnt "https-only: never fetched"           "$out" "Current reading"
+
+# hardening: an oversize body is truncated past valid JSON -> unavailable, prior kept
+_M_CFG='{"ceo":{"metrics_url":"https://x/api/summary"}}'
+_M_BODY=$(jq -c -n --arg p "$(printf '%*s' 70000 '' | tr ' ' x)" '{players:42,pad:$p}')
+out=$(ceo_read_metrics acme/x)
+has "size-cap: oversize body -> unavailable" "$out" "unavailable"
+eq  "size-cap: prior reading preserved"      "50" "$(jq -r '.ceo_metrics["acme/x"].data.players' "$_M_SF" 2>/dev/null)"
+
 unset -f forgejo_repo_get_file curl; unset AGENT_STATE_DIR; rm -rf "$_M_TMP"
+
+# ---- ceo_parse_reconsider (Phase 4 follow-up: proposal reconsider) -------
+echo "== ceo_parse_reconsider =="
+rc_parse() { if RPO=$(ceo_parse_reconsider "$1"); then RRC=0; else RRC=1; fi; }
+
+rc_parse "$(printf 'DECISION: WITHDRAW\n===REPLY===\nFair -- it is already done. Closing.')"
+eq "withdraw: rc 0"       0          "$RRC"
+eq "withdraw: decision"   "WITHDRAW" "$(jq -r '.decision' <<<"$RPO")"
+eq "withdraw: reply kept" "Fair -- it is already done. Closing." "$(jq -r '.reply' <<<"$RPO")"
+eq "withdraw: no issue"   "null"     "$(jq -r '.issue' <<<"$RPO")"
+
+rc_parse "$(printf 'DECISION: revise\n===REPLY===\nGood point, tightening scope.\n===ISSUE===\nTITLE: audit dupes first\nScan, then fix only real dupes.')"
+eq "revise: decision (case-folded)" "REVISE" "$(jq -r '.decision' <<<"$RPO")"
+eq "revise: issue title"   "audit dupes first" "$(jq -r '.issue.title' <<<"$RPO")"
+eq "revise: reply excludes the issue block" "Good point, tightening scope." "$(jq -r '.reply' <<<"$RPO")"
+
+rc_parse "$(printf 'DECISION: HOLD\n===REPLY===\nStill the right call -- here is why.')"
+eq "hold: decision" "HOLD"  "$(jq -r '.decision' <<<"$RPO")"
+eq "hold: no issue" "null"  "$(jq -r '.issue' <<<"$RPO")"
+
+rc_parse "$(printf 'no decision line\n===REPLY===\nx')";        eq "missing DECISION: rc 1"      1 "$RRC"
+rc_parse "$(printf 'DECISION: WITHDRAW\nno reply sentinel')";   eq "missing ===REPLY===: rc 1"   1 "$RRC"
+rc_parse "$(printf 'DECISION: WITHDRAW\n===REPLY===\n   ')";    eq "whitespace-only reply: rc 1" 1 "$RRC"
+
+# ---- ceo_responded_proposal_numbers (commented + unassigned + not greenlit) ---
+# (Last _fj redefinition, so it doesn't leak into the sections above.)
+echo "== ceo_responded_proposal_numbers =="
+RP_GET='[]'
+_fj() { case "$1 $2" in "GET "*/issues*) printf '%s' "$RP_GET" ;; *) printf '%s' '{}' ;; esac; }
+RP_GET=$(jq -c -n --arg m "$CEO_PROPOSAL_MARKER" '[
+  {number:20, pull_request:null, comments:1, assignees:[],                     labels:[],               body:("reconsider me\n"+$m)},
+  {number:21, pull_request:null, comments:1, assignees:[{login:"joshtronic"}], labels:[],               body:("still assigned\n"+$m)},
+  {number:22, pull_request:null, comments:1, assignees:[],                     labels:[{name:"Agent"}], body:("greenlit\n"+$m)},
+  {number:23, pull_request:null, comments:0, assignees:[],                     labels:[],               body:("no comment\n"+$m)},
+  {number:24, pull_request:null, comments:1, assignees:[],                     labels:[],               body:"no marker"}]')
+eq "responded: only unassigned+commented+unlabeled+marked" "20" "$(ceo_responded_proposal_numbers acme/x joshtronic)"
 
 # ---- summary ------------------------------------------------------------
 echo
