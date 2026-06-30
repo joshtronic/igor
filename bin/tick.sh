@@ -1196,22 +1196,40 @@ maint_priority_label() {
   esac
 }
 
-# maint_file_deduped_issue <repo> <marker> <title> <body> <agent-bool> <priority-label|"">
-# Files <body> (which MUST already contain <marker>) as an issue, unless
-# an open issue carrying <marker> already exists (skip-if-open dedup).
+# maint_file_deduped_issue <repo> <marker> <title> <body> <agent-bool> <priority-label|""> [fingerprint]
+# Files <body> (which MUST already contain <marker>) as an issue, deduped.
+# Without a fingerprint: skip-if-OPEN (re-files once the prior ticket closes --
+# right for work tickets, whose ticket closes when their PR merges -> re-audit).
+# WITH a fingerprint (maint-triage): skip if ANY issue, OPEN or CLOSED, already
+# carries that finding-set's fingerprint -- so a judged-and-dismissed (closed)
+# finding-set STAYS dismissed, while a genuinely-new finding-set (new fingerprint)
+# still surfaces. The fingerprint marker is appended to <body> so future audits
+# recognize it.
 # agent-bool=true -> Agent-labeled + left UNASSIGNED so claimable
 # discovery works it into a PR; false -> Status/Need More Info for a
 # human. No-op-safe: logs and returns 0 on any Forgejo hiccup so the
 # audit loop continues.
 maint_file_deduped_issue() {
-  local repo="$1" marker="$2" title="$3" body="$4" agent="$5" pri="$6"
+  local repo="$1" marker="$2" title="$3" body="$4" agent="$5" pri="$6" fp="${7:-}"
   local existing
-  existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$marker" 2>/dev/null) \
-    || { log "warning: maintenance: can't check existing ticket on $repo (API error) -- skipping"; return 0; }
-  if [ -n "$existing" ] && [ "$existing" != "null" ] \
-     && [ "$(jq -r '.state' <<<"$existing" 2>/dev/null)" = "open" ]; then
-    log "maintenance: $repo already has an open ticket #$(jq -r '.number' <<<"$existing") for ${marker} -- not refiling"
-    return 0
+  if [ -n "$fp" ]; then
+    local fpmarker; fpmarker=$(maint_fp_marker "$fp")
+    existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$fpmarker" 2>/dev/null) \
+      || { log "warning: maintenance: can't check fingerprint on $repo (API error) -- skipping"; return 0; }
+    if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+      log "maintenance: $repo finding-set already filed/dismissed (#$(jq -r '.number' <<<"$existing") [$(jq -r '.state' <<<"$existing")]) -- not refiling ${marker}"
+      return 0
+    fi
+    body="${body}
+${fpmarker}"
+  else
+    existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$marker" 2>/dev/null) \
+      || { log "warning: maintenance: can't check existing ticket on $repo (API error) -- skipping"; return 0; }
+    if [ -n "$existing" ] && [ "$existing" != "null" ] \
+       && [ "$(jq -r '.state' <<<"$existing" 2>/dev/null)" = "open" ]; then
+      log "maintenance: $repo already has an open ticket #$(jq -r '.number' <<<"$existing") for ${marker} -- not refiling"
+      return 0
+    fi
   fi
   local num
   num=$(forgejo_open_issue "$repo" "$title" "$body") \
@@ -1387,9 +1405,19 @@ Steps:
          Same work-ticket shape, grouping the routine patch/minor DRIFT
          bumps into one ticket. Same worker instructions.
        .agent/AGENT_MAINTENANCE_FINDINGS.md
-         The human-triage report: JUDGMENT items, plus -- when
-         VALIDATED=false -- everything actionable. Lead with what
-         matters, bury noise. Prose for a human, not a work spec.
+         The triage report: JUDGMENT items, plus -- when VALIDATED=false --
+         everything actionable. Lead with what matters, bury noise. Be
+         specific enough to act on (a validated repo's triage is worked by
+         the agent; an unvalidated one's is read by a human).
+       .agent/AGENT_MAINTENANCE_FINDINGS_KEYS   (write WHENEVER you write FINDINGS.md)
+         One STABLE dedup key per JUDGMENT finding in FINDINGS.md, one per
+         line: the advisory ID (CVE-..., GHSA-..., RUSTSEC-..., PYSEC-...,
+         GO-...) when it has one; else the bare package name; append
+         "@<major>" ONLY when the finding is specifically about moving to a
+         new MAJOR version. Lowercase, nothing else -- no prose, severity,
+         dates, or patch/minor versions. The SAME findings MUST yield the
+         SAME keys every run: this is what lets a dismissed finding-set stay
+         dismissed instead of being re-filed every week.
        .agent/AGENT_MAINTENANCE_PRIORITY
          One word -- critical | high | medium | low -- severity of the
          most serious finding overall:
@@ -1458,12 +1486,20 @@ $MAINT_BUMPS_MARKER" \
     filed=1
   fi
   if [ -s "$findings_file" ]; then
+    # Re-file-on-close fix: fingerprint the judgment findings so a dismissed
+    # (closed) finding-set stays quiet while a genuinely-new one still surfaces.
+    # Validated routing: a validated repo can be worked by the grind, so route
+    # triage to the agent there (it works-or-judges, the human gates the PR/close);
+    # human-only (assigned) when unvalidated, where the grind can't open a
+    # CI-verifiable PR.
+    local m_fp
+    m_fp=$(maint_findings_fingerprint "$m_worktree/.agent/AGENT_MAINTENANCE_FINDINGS_KEYS")
     maint_file_deduped_issue "$target" "$MAINT_TRIAGE_MARKER" \
       "[maintenance] findings needing triage for $target" \
       "$(cat "$findings_file")
 
 $MAINT_TRIAGE_MARKER" \
-      false "$m_pri_label"
+      "$validated" "$m_pri_label" "$m_fp"
     filed=1
   fi
 
