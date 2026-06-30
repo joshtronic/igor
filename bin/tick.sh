@@ -1944,8 +1944,11 @@ do_ceo_tick() {
             rissue=$(jq -c '.issue // empty' <<<"$rparsed")
             if [ -n "$rissue" ] && [ "$rissue" != "null" ] \
                && [ "$(ceo_open_items_count "$repo")" -lt "$CEO_MAX_OPEN" ]; then
-              ceo_file_proposal "$repo" "$(jq -r '.title' <<<"$rissue")" "$(jq -r '.body' <<<"$rissue")" "$FORGEJO_REVIEWER" \
-                && log "ceo: revised + re-filed proposal (was ${repo}#${rnum})"
+              if ceo_revise_refile "$repo" "$rnum" "$rissue" "$FORGEJO_REVIEWER"; then
+                log "ceo: revised + re-filed proposal (was ${repo}#${rnum})"
+              else
+                log "ceo: REVISE on ${repo}#${rnum} -- code-check dropped revised proposal"
+              fi
             else
               log "ceo: REVISE on ${repo}#${rnum} -- closed the old; no re-file (no issue block or cap reached)"
             fi ;;
