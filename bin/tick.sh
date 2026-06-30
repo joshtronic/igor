@@ -3430,19 +3430,32 @@ Review requested so a human can review/discard." 2>/dev/null \
         exit 0
       fi
 
-      git push origin "$PR_HEAD" || log "warning: push failed on $PR_HEAD"
-      forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
-        || log "warning: unassign failed on ${PR_REPO}#${PR_NUMBER}"
-      if [ -n "$BINDING_RC_BODY" ]; then
-        # Binding-flow rework: clear pending_rc_body and let do_review_tick
-        # re-review the new head. The changed head means a new patch-id,
-        # so the review fires next tick. Do NOT request the human.
-        review_set_pending_rc_body "$REVIEW_KEY" ""
-        log "PR-review: binding rework pushed -- cleared pending_rc_body, do_review_tick will re-review"
+      # A failed push -- commonly a non-fast-forward because the remote branch
+      # advanced after we checked it out -- must NOT be treated as a completed
+      # rework. Clearing the rework state on a failed push silently drops the
+      # work AND the round: the committed rework only lives in this (about-to-be-
+      # removed) worktree, the remote head is unchanged, yet pending_rc_body gets
+      # cleared and the PR unassigned (igor#301). So gate ALL the "rework landed"
+      # bookkeeping on a CONFIRMED push. On failure, leave the bot assigned and
+      # pending_rc_body intact; the next tick re-attempts the rework against the
+      # now-current remote head. (A push is in an `if` condition, so set -e does
+      # not abort on the rejection.)
+      if git push origin "$PR_HEAD"; then
+        forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
+          || log "warning: unassign failed on ${PR_REPO}#${PR_NUMBER}"
+        if [ -n "$BINDING_RC_BODY" ]; then
+          # Binding-flow rework: clear pending_rc_body and let do_review_tick
+          # re-review the new head. The changed head means a new patch-id,
+          # so the review fires next tick. Do NOT request the human.
+          review_set_pending_rc_body "$REVIEW_KEY" ""
+          log "PR-review: binding rework pushed -- cleared pending_rc_body, do_review_tick will re-review"
+        else
+          log "PR-review: pushing $PR_NEW new commits and requesting review from $FORGEJO_REVIEWER"
+          forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null \
+            || log "warning: review-request-to-${FORGEJO_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
+        fi
       else
-        log "PR-review: pushing $PR_NEW new commits and requesting review from $FORGEJO_REVIEWER"
-        forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null \
-          || log "warning: review-request-to-${FORGEJO_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
+        log "PR-review: rework push REJECTED on ${PR_REPO}#${PR_NUMBER} (remote advanced -- non-fast-forward); leaving the bot assigned + pending_rc_body intact so the next tick retries against the current head"
       fi
     else
       log "PR-review: no commits made -- requesting review from $FORGEJO_REVIEWER with a note"
