@@ -130,6 +130,35 @@ export BOT_USER
 export FORGEJO_REVIEWER
 export AGENT_HOME
 
+# -- Cleanup on exit (installed EARLY) -------------------------
+# Set here, before ANY worktree-creating stage, so a crash in the PR-review/rework
+# or maintenance paths -- not just issue-work -- still fires crashlog capture and
+# worktree cleanup. The trap used to be installed just before the issue-work
+# worktree (far below), so the earlier model-call stages ran uninstrumented: a tick
+# that died mid-PR-rework (igor#291) left NO crash trap to preserve its stream.
+# Vars are pre-initialized + AGENT_STATE_DIR is guarded so the handler is a safe
+# no-op on early/clean exits.
+WORKTREE=""
+PR_WORKTREE=""
+cleanup() {
+  local rc=$?
+  # Post-mortem: if a model call was in-flight when the tick died (the #279
+  # signature -- abnormal exit, no "claude exited" line), preserve its raw stream
+  # before the worktree is removed below or reused next tick. Best-effort.
+  if [ "$rc" -ne 0 ]; then
+    crashlog_preserve "$rc" "${AGENT_STATE_DIR:-}" "${WORKTREE:-}" "${PR_WORKTREE:-}" 2>/dev/null || true
+  fi
+  if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
+    log "removing worktree $WORKTREE"
+    (cd "$REPO_PATH" && git worktree remove "$WORKTREE" --force) 2>/dev/null || true
+  fi
+  if [ -n "${ISSUE_NUMBER:-}" ] && [ -d "$REPO_PATH/.git" ]; then
+    cleanup_agent_branches "$ISSUE_NUMBER" "$REPO_PATH"
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
+
 # (Phase 6 of the refactor retired AGENT_BRAIN_PATH and the brain
 # repo bootstrap. The agent's memory now lives in
 # ~/.local/state/agent/brain.sqlite; no markdown repo to clone.)
@@ -900,6 +929,30 @@ review_rework_rounds() {
   n=$(jq -r --arg k "$key" '.review[$k].rework_rounds // 0' "$state_file" 2>/dev/null)
   [ -n "$n" ] && [ "$n" != "null" ] || n=0
   echo "$n"
+}
+
+# Echo rework_crashes (ticks that died mid-rework without reaching a verdict) for a
+# PR. Distinct from rework_rounds (rejections): a crash never completes, so it is
+# counted crash-safely -- stamped BEFORE the rework call, reset only on a clean
+# return -- and once it caps, the rework is escalated instead of looping (igor#291).
+review_rework_crashes() {
+  local key="$1" state_file n
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || { echo 0; return; }
+  n=$(jq -r --arg k "$key" '.review[$k].rework_crashes // 0' "$state_file" 2>/dev/null)
+  [ -n "$n" ] && [ "$n" != "null" ] || n=0
+  echo "$n"
+}
+
+# Set rework_crashes for a PR (preserves all other review fields).
+review_set_rework_crashes() {
+  local key="$1" n="$2" state_file tmp
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg k "$key" --argjson n "$n" \
+    '.review //= {} | .review[$k].rework_crashes = $n' "$state_file" > "$tmp" \
+    && mv "$tmp" "$state_file" || rm -f "$tmp"
 }
 
 # Echo pending_rc_body for a PR from review state, or empty string.
@@ -2962,6 +3015,27 @@ if [ -n "$REVIEW_PR" ]; then
       exit 0
     fi
 
+    # Crash-loop break (igor#291): a rework that keeps dying mid-run -- the heavy
+    # in-worktree test suite taking the tick down before a verdict -- must not be
+    # re-attempted forever; it starves the whole downstream cascade. Count crashes
+    # crash-safely (stamp BEFORE the work, reset only on a clean return past the
+    # claude call below); once capped, escalate to the human instead of looping.
+    REWORK_CRASH_CAP=2
+    RC_CRASHES=$(review_rework_crashes "$REVIEW_KEY")
+    if [ "$RC_CRASHES" -ge "$REWORK_CRASH_CAP" ]; then
+      log "PR-review: ${REVIEW_KEY} rework crashed ${RC_CRASHES}x without completing -- escalating to ${FORGEJO_REVIEWER}, not re-attempting"
+      forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+        "Igor's automated rework has crashed ${RC_CRASHES} times on this PR without producing a result -- most likely the in-worktree test run is taking the tick down. Handing this to you rather than loop on it." 2>/dev/null \
+        || log "warning: rework-crash escalation comment failed on ${REVIEW_KEY}"
+      forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
+      forgejo_assign "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
+      review_set_rework_crashes "$REVIEW_KEY" 0
+      exit 0
+    fi
+    # Stamp this attempt up front so a mid-rework crash is counted (the reset only
+    # fires on a clean return past the claude call).
+    review_set_rework_crashes "$REVIEW_KEY" "$(( RC_CRASHES + 1 ))"
+
     ensure_repo_local "$PR_REPO"
     PR_REPO_PATH=$(repo_path_for "$PR_REPO")
 
@@ -3234,6 +3308,10 @@ EOF
     set -e
     PR_ELAPSED=$(( $(date +%s) - PR_START ))
     log "claude exited $PR_EXIT after ${PR_ELAPSED}s"
+    # Clean return past the claude call -- the rework didn't take the tick down, so
+    # clear the crash counter (the crash-loop break above only fires on repeated
+    # mid-run deaths, not on an ordinary failed-but-completed rework).
+    review_set_rework_crashes "$REVIEW_KEY" 0
 
     normalize_worktree_dashes "$PR_WORKTREE"
 
@@ -3627,29 +3705,10 @@ log "branch: ${BRANCH}"
 # all Claude invocations -- not just tier-1 -- find the harness bin.
 export ISSUE_NUMBER ISSUE_TITLE FORGEJO_REPO PR_BASE
 
-# -- Cleanup on exit (set before worktree creation) ------------
-
-WORKTREE=""
-
-cleanup() {
-  local rc=$?
-  # Post-mortem: if a model call was in-flight when the tick died (the #279
-  # signature -- abnormal exit, no "claude exited" line), preserve its raw stream
-  # before the worktree is removed below or reused next tick. Best-effort; the
-  # `|| true` keeps a capture failure from ever changing the tick's exit.
-  if [ "$rc" -ne 0 ]; then
-    crashlog_preserve "$rc" "$AGENT_STATE_DIR" "${WORKTREE:-}" "${PR_WORKTREE:-}" 2>/dev/null || true
-  fi
-  if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
-    log "removing worktree $WORKTREE"
-    (cd "$REPO_PATH" && git worktree remove "$WORKTREE" --force) 2>/dev/null || true
-  fi
-  if [ -n "${ISSUE_NUMBER:-}" ] && [ -d "$REPO_PATH/.git" ]; then
-    cleanup_agent_branches "$ISSUE_NUMBER" "$REPO_PATH"
-  fi
-  exit "$rc"
-}
-trap cleanup EXIT
+# -- Cleanup on exit is installed EARLY (near the top, right after the bot-identity
+# -- exports) so the PR-review/rework + maintenance stages above are covered too,
+# -- not just issue-work below. WORKTREE was already initialized there; nothing to
+# -- re-install here.
 
 # -- Claim -----------------------------------------------------
 
