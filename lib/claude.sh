@@ -160,6 +160,15 @@ claude_run_with_cost() {
   local stream_log="$scratch/claude-stream.jsonl"
   : > "$stream_log"
   : > "$display_log"
+  # Remember the caller's errexit so our internal toggling never leaks back to
+  # it. Every caller wraps this call in `set +e` to capture and handle a nonzero
+  # exit (a recoverable model crash mid-stream). If we restore errexit with an
+  # unconditional `set -e` below, that ON state is the shell's state when this
+  # function returns -- so a nonzero `return` trips errexit in the CALLER and
+  # takes the whole tick down (status=1, no "claude exited" line) BEFORE it can
+  # capture our exit. That is the igor#291 / #279 crash: the very `set -e` added
+  # to protect the bookkeeping is what defeats the caller's guard.
+  local _caller_errexit=0; case $- in *e*) _caller_errexit=1 ;; esac
   # Mark this call in-flight. cleanup() (via crashlog_preserve) keeps the raw
   # stream for a post-mortem if the tick dies before we return here -- the #279
   # signature (status=1, no "claude exited" line). Cleared on a clean return.
@@ -194,7 +203,11 @@ claude_run_with_cost() {
     | tee "$display_log"
   local rc=${PIPESTATUS[0]}
   set +o pipefail
-  set -e
+  # Restore the caller's errexit -- NOT an unconditional `set -e`, which leaks
+  # into the caller and aborts it on our nonzero `return` (igor#291). The
+  # bookkeeping below is `|| true`-guarded throughout, so it is safe to run with
+  # errexit off when the caller had it off.
+  if [ "$_caller_errexit" -eq 1 ]; then set -e; else set +e; fi
   # Bookkeeping must NEVER kill the tick. If claude crashes mid-stream the JSONL is
   # truncated, so the cost parse can fail -- guard it (|| true), exactly like the
   # health classification below, or set -e turns a recoverable model crash into a
