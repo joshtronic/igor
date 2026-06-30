@@ -1899,6 +1899,58 @@ do_ceo_tick() {
         log "ceo: acted on ${closed} answered board question(s) on ${repo}"
         return 0   # one model-backed piece of work per tick
       fi
+
+      # --- Path 1b (Phase 4 follow-up): reconsider a PROPOSAL the board commented
+      # on + handed back (unassigned, NOT Agent-labeled). Read the feedback and
+      # WITHDRAW / REVISE / HOLD -- distinct from doing the work (the Agent-label path).
+      local responded rnum rparsed rdecision rreply rissue
+      responded=$(ceo_responded_proposal_numbers "$repo" "$FORGEJO_REVIEWER")
+      if [ -n "$responded" ]; then
+        rnum=$(printf '%s\n' "$responded" | head -1)   # one per tick
+        prompt=$(ceo_build_reconsider_prompt "$repo" "$mandate" "$(ceo_proposal_thread "$repo" "$rnum")")
+        rparsed=""
+        for attempt in 1 2; do
+          raw=$(claude_call "$AGENT_MODEL" "ceo-reconsider" 8000 \
+            "You are the CEO reconsidering your own proposal after the board handed it back. Be a real partner -- concede when they are right, argue back with reasons when you are not. Conversational, in your own voice. Follow the output format in the prompt exactly." \
+            "$prompt" 0) \
+            || { log "ceo: reconsider call failed for ${repo}#${rnum} (attempt ${attempt})"; continue; }
+          if rparsed=$(ceo_parse_reconsider "$raw"); then break; fi
+          rparsed=""
+        done
+        if [ -z "$rparsed" ]; then
+          # Re-assign so it leaves the responded-set (no per-tick reconsider loop)
+          # and lands back in the reviewer's queue.
+          forgejo_assign "$repo" "$rnum" "$FORGEJO_REVIEWER" 2>/dev/null || true
+          log "ceo: unparseable reconsider for ${repo}#${rnum} -- handed back to the reviewer"
+          return 0
+        fi
+        rdecision=$(jq -r '.decision' <<<"$rparsed")
+        rreply=$(jq -r '.reply' <<<"$rparsed")
+        _fj POST "/repos/${repo}/issues/${rnum}/comments" \
+          "$(jq -n --arg b "$rreply" '{body:$b}')" >/dev/null 2>&1 || true
+        case "$rdecision" in
+          WITHDRAW)
+            _fj PATCH "/repos/${repo}/issues/${rnum}" '{"state":"closed"}' >/dev/null 2>&1 || true
+            log "ceo: withdrew proposal ${repo}#${rnum} after board feedback" ;;
+          REVISE)
+            _fj PATCH "/repos/${repo}/issues/${rnum}" '{"state":"closed"}' >/dev/null 2>&1 || true
+            rissue=$(jq -c '.issue // empty' <<<"$rparsed")
+            if [ -n "$rissue" ] && [ "$rissue" != "null" ] \
+               && [ "$(ceo_open_items_count "$repo")" -lt "$CEO_MAX_OPEN" ]; then
+              ceo_file_proposal "$repo" "$(jq -r '.title' <<<"$rissue")" "$(jq -r '.body' <<<"$rissue")" "$FORGEJO_REVIEWER" \
+                && log "ceo: revised + re-filed proposal (was ${repo}#${rnum})"
+            else
+              log "ceo: REVISE on ${repo}#${rnum} -- closed the old; no re-file (no issue block or cap reached)"
+            fi ;;
+          *)
+            # HOLD: made the case, hand the call back to the board. Re-assigning
+            # also drops it out of the responded-set so it can't reconsider-loop;
+            # a fresh comment + unassign from the board re-opens the dialogue.
+            forgejo_assign "$repo" "$rnum" "$FORGEJO_REVIEWER" 2>/dev/null || true
+            log "ceo: holding proposal ${repo}#${rnum} -- replied + handed back to the board" ;;
+        esac
+        return 0   # one model-backed action per tick
+      fi
     fi
 
     # --- Path 2: the weekly board digest (once per ISO week). ---
