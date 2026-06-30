@@ -385,6 +385,31 @@ RP_GET=$(jq -c -n --arg m "$CEO_PROPOSAL_MARKER" '[
   {number:24, pull_request:null, comments:1, assignees:[],                     labels:[],               body:"no marker"}]')
 eq "responded: only unassigned+commented+unlabeled+marked" "20" "$(ceo_responded_proposal_numbers acme/x joshtronic)"
 
+# (Last section -- the stubs below shadow log/git/claude_call, so keep it last.)
+echo "== ceo_codecheck_proposal (the code-check gate) =="
+log() { :; }   # the gate logs the drop reason locally; silence it here
+
+# No clone for this repo -> fail-OPEN (KEEP) so a real proposal is never eaten.
+CC_STATE=$(mktemp -d)
+eq "no clone -> KEEP (fail-open)" "KEEP" \
+  "$(AGENT_STATE_DIR="$CC_STATE" ceo_codecheck_proposal acme/x 'add a thing' 'body')"
+
+# From here pretend a clone exists and stub the model + git (tool-free gate).
+ceo_codecheck_clone_path() { printf '%s' "$CC_STATE"; }
+git() { case "$*" in *grep*) printf 'src/x.js:1: existing meta\n' ;; *) return 0 ;; esac; }
+
+claude_call() { case "$2" in *terms*) printf 'meta\ntitle\n' ;; *) printf 'VERDICT: DROP\nREASON: already in src/x.js\n' ;; esac; }
+eq "verdict DROP -> DROP" "DROP" "$(ceo_codecheck_proposal acme/x 'add meta tags' 'body')"
+
+claude_call() { case "$2" in *terms*) printf 'sparklewidget\n' ;; *) printf 'VERDICT: KEEP\nREASON: not present\n' ;; esac; }
+eq "verdict KEEP -> KEEP" "KEEP" "$(ceo_codecheck_proposal acme/x 'add sparklewidget' 'body')"
+
+claude_call() { case "$2" in *terms*) return 1 ;; *) printf 'VERDICT: DROP\n' ;; esac; }
+eq "terms call fails -> KEEP (fail-open)" "KEEP" "$(ceo_codecheck_proposal acme/x 'x' 'body')"
+
+claude_call() { case "$2" in *terms*) printf 'widget\n' ;; *) printf 'no verdict line here\n' ;; esac; }
+eq "unparseable verdict -> KEEP (fail-open)" "KEEP" "$(ceo_codecheck_proposal acme/x 'x' 'body')"
+
 # ---- summary ------------------------------------------------------------
 echo
 if [ "$fails" -eq 0 ]; then

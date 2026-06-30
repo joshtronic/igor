@@ -530,6 +530,62 @@ ceo_parse_reconsider() {
     '{decision:$d, reply:$r, issue:$i}'
 }
 
+# ---- Phase 4 follow-up: code-check gate (vet a proposal against the real code) ----
+# The CEO drafts proposals BLIND to the code (mandate + metrics + tracker activity,
+# never the repo), so it can pitch already-done work (porksicle #101: per-game SEO
+# meta that already existed). Before filing, vet each proposal against the repo's
+# CURRENT code and DROP what's already implemented -- the sharp dev going "you know
+# we already do that, right?"
+#
+# TOOL-FREE by design: two `claude_call` passes (keywords, then verdict) + a
+# `git grep` -- NO agentic tools, so the gate can never be an exfiltration channel
+# (see the #241 "read-only != safe" finding). Its ONLY outward effect is the
+# keep/drop decision; the reason is logged LOCALLY and never posted, emailed, or fed
+# into any model call whose output escapes. Fail-OPEN (KEEP) on any error or
+# uncertainty -- the gate suppresses busywork, it must never silently eat a real
+# proposal.
+
+# ceo_codecheck_clone_path <repo> -- the harness's local clone path, empty if absent.
+ceo_codecheck_clone_path() {
+  local repo="$1" p="${AGENT_STATE_DIR:-$HOME/.local/state/agent}/repos/${repo}"
+  [ -d "$p/.git" ] && printf '%s' "$p"
+}
+
+# ceo_codecheck_proposal <repo> <title> <body> -- echo KEEP or DROP. DROP only when
+# confident the work already exists in the code; KEEP on any error or uncertainty.
+ceo_codecheck_proposal() {
+  local repo="$1" title="$2" body="$3" clone model terms grepout verdict decision reason
+  clone=$(ceo_codecheck_clone_path "$repo")
+  [ -n "$clone" ] || { echo KEEP; return 0; }   # no clone -> can't vet -> file it
+  model="${AGENT_MODEL_REVIEW:-${AGENT_MODEL:-}}"
+  git -C "$clone" fetch -q origin 2>/dev/null || true
+  # 1) derive distinctive search keywords (tool-free).
+  terms=$(claude_call "$model" "ceo-codecheck-terms" 400 \
+    "Output ONLY search keywords, one per line. No prose, no numbering, no explanation." \
+    "$(printf 'A CEO proposed this work for %s:\n\nTITLE: %s\n\n%s\n\nGive 4-6 short, distinctive keywords (plain words or paths, no regex) that grepped against the codebase would reveal whether this is ALREADY implemented.' "$repo" "$title" "$body")" \
+    1 90) || { echo KEEP; return 0; }
+  terms=$(printf '%s\n' "$terms" | grep -oE '[[:alnum:]_./-]{3,}' | head -6 || true)
+  [ -n "$terms" ] || { echo KEEP; return 0; }
+  # 2) grep origin/master directly (reads the ref, not a stale working tree).
+  local args=() t
+  while IFS= read -r t; do [ -n "$t" ] && args+=( -e "$t" ); done <<<"$terms"
+  [ "${#args[@]}" -gt 0 ] || { echo KEEP; return 0; }
+  grepout=$(git -C "$clone" grep -nI -i "${args[@]}" origin/master 2>/dev/null | head -c 8000 || true)
+  # 3) verdict (tool-free).
+  verdict=$(claude_call "$model" "ceo-codecheck" 500 \
+    "You are a sharp engineer vetting a CEO proposal against the real codebase. Reply with EXACTLY two lines: 'VERDICT: KEEP' or 'VERDICT: DROP', then 'REASON: <short>'. DROP only if the proposal is ALREADY implemented in the code shown, or clearly redundant/invalid. If the evidence is thin or ambiguous, KEEP. Nothing else." \
+    "$(printf 'Proposal for %s:\nTITLE: %s\n\n%s\n\n--- codebase grep (origin/master), relevant keywords ---\n%s\n--- end ---\n\nAlready implemented? KEEP (worth doing) or DROP (already done / redundant).' "$repo" "$title" "$body" "${grepout:-(no matches found)}")" \
+    1 120) || { echo KEEP; return 0; }
+  decision=$(printf '%s\n' "$verdict" | sed -n 's/.*VERDICT:[[:space:]]*//p' | grep -oiE 'KEEP|DROP' | head -1 | tr '[:lower:]' '[:upper:]' || true)
+  if [ "$decision" = "DROP" ]; then
+    reason=$(printf '%s\n' "$verdict" | sed -n 's/.*REASON:[[:space:]]*//p' | head -1)
+    log "ceo: code-check DROPPED proposal '${title}' on ${repo} -- ${reason:-already implemented in the code}"
+    echo DROP
+  else
+    echo KEEP
+  fi
+}
+
 # ---- Phase 3: decision-guidance redlines (the CEO drafts, the board ratifies) ----
 # Weekly, the CEO observes how the board ruled on its prior proposals -- greenlit
 # (Agent-labeled), declined (closed, no label), pending -- distills ONE

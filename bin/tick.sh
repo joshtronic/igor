@@ -1802,6 +1802,11 @@ _ceo_file_outputs() {
         break
       fi
       ptitle=$(jq -r '.title' <<<"$prop"); pbody=$(jq -r '.body' <<<"$prop")
+      # Code-check gate: vet against the real code; DROP already-done work (the
+      # reason is logged locally inside the gate, never posted). Fail-open = KEEP.
+      if [ "$(ceo_codecheck_proposal "$repo" "$ptitle" "$pbody")" = "DROP" ]; then
+        continue
+      fi
       if ceo_file_proposal "$repo" "$ptitle" "$pbody" "$FORGEJO_REVIEWER"; then
         filed=$((filed + 1))
       else
