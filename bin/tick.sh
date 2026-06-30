@@ -190,13 +190,8 @@ export GSC_OAUTH_CLIENT_SECRET="${GSC_OAUTH_CLIENT_SECRET:-}"
 export GSC_OAUTH_REFRESH_TOKEN="${GSC_OAUTH_REFRESH_TOKEN:-}"
 export PRIMARY_RECIPIENTS="${PRIMARY_RECIPIENTS:-}"
 export SEO_RECIPIENTS="${SEO_RECIPIENTS:-}"
-# DEPRECATED: agentic SEO sites are now declared per-repo in agent.json
-# (`.seo.domain` + `.seo.agentic`); see seo_agentic_repo_for in
-# lib/seo-analysis.sh. This env map is a transitional fallback only -- once
-# every agentic repo carries agent.json `.seo` (and the deprecation log in
-# seo_agentic_repo_for stops firing), delete this export, the fallback branch,
-# and the host `.env` line.
-export SEO_AGENTIC_SITES="${SEO_AGENTIC_SITES:-}"
+# Agentic SEO sites are declared per-repo in agent.json (`.seo.domain` +
+# `.seo.agentic`); see seo_agentic_repo_for in lib/seo-analysis.sh.
 export SEO_IMPRESSION_FLOOR="${SEO_IMPRESSION_FLOOR:-50}"
 export SEO_TOP_K="${SEO_TOP_K:-10}"
 export SEO_DEBUG_DOMAIN="${SEO_DEBUG_DOMAIN:-}"
@@ -1554,9 +1549,8 @@ seo_recipients_for() {
   recipients_with_primary "$(seo_extra_recipients_for "$1")"
 }
 
-# seo_agentic_repo_for() now lives in lib/seo-analysis.sh -- it resolves the
-# agentic domain->repo from each repo's agent.json `.seo`, with the legacy
-# SEO_AGENTIC_SITES env map kept only as a deprecated fallback.
+# seo_agentic_repo_for() lives in lib/seo-analysis.sh -- it resolves the agentic
+# domain->repo from each repo's agent.json `.seo`.
 
 # File ONE curated SEO ticket per domain, one open at a time. Dedup is
 # check-then-act on a per-domain marker: if an OPEN ticket already
