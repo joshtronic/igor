@@ -11,6 +11,40 @@ if ! declare -F log >/dev/null; then
   log() { printf '[agent] %s\n' "$*"; }
 fi
 
+# -- Re-file-on-close fingerprint (maintenance redesign) ---------
+#
+# The maint-triage (human-judgment) lane must STAY QUIET on a finding-set that was
+# already judged + dismissed (its ticket closed), while still surfacing genuinely
+# NEW findings. The triage pass writes one stable key per JUDGMENT finding (an
+# advisory ID / package name -- the identifying FACT, never the model's prose body,
+# which isn't stable). We hash those keys into a fingerprint stamped in the ticket;
+# a later audit that produces the same fingerprint skips (open match = in-progress,
+# closed match = dismissed).
+
+# maint_findings_fingerprint <keys-file> -- echo a stable, order-independent
+# SHA-256 over the judgment-finding keys. Same findings -> same hash every run,
+# regardless of order / case / surrounding whitespace. Empty output (rc 0) when the
+# file is missing/empty, has no usable keys, or sha256sum is unavailable -- the
+# caller then falls back to the plain skip-if-open dedup.
+maint_findings_fingerprint() {
+  local keys_file="$1" canon
+  [ -s "$keys_file" ] || return 0
+  command -v sha256sum >/dev/null 2>&1 || return 0
+  canon=$(tr '[:upper:]' '[:lower:]' < "$keys_file" \
+            | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+            | grep -v '^$' \
+            | sort -u)
+  [ -n "$canon" ] || return 0
+  printf '%s\n' "$canon" | sha256sum | awk '{print $1}'
+}
+
+# maint_fp_marker <fingerprint> -- the HTML-comment marker stamped into a triage
+# ticket body so a future audit recognizes the same finding-set (open OR closed)
+# and stays quiet. Empty fingerprint -> empty marker (no-op).
+maint_fp_marker() {
+  [ -n "$1" ] && printf '<!-- maint-fp:%s -->' "$1"
+}
+
 # -- Stack detection --------------------------------------------
 #
 # Echoes one stack name per line for every manifest detected at

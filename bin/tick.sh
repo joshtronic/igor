@@ -130,6 +130,35 @@ export BOT_USER
 export FORGEJO_REVIEWER
 export AGENT_HOME
 
+# -- Cleanup on exit (installed EARLY) -------------------------
+# Set here, before ANY worktree-creating stage, so a crash in the PR-review/rework
+# or maintenance paths -- not just issue-work -- still fires crashlog capture and
+# worktree cleanup. The trap used to be installed just before the issue-work
+# worktree (far below), so the earlier model-call stages ran uninstrumented: a tick
+# that died mid-PR-rework (igor#291) left NO crash trap to preserve its stream.
+# Vars are pre-initialized + AGENT_STATE_DIR is guarded so the handler is a safe
+# no-op on early/clean exits.
+WORKTREE=""
+PR_WORKTREE=""
+cleanup() {
+  local rc=$?
+  # Post-mortem: if a model call was in-flight when the tick died (the #279
+  # signature -- abnormal exit, no "claude exited" line), preserve its raw stream
+  # before the worktree is removed below or reused next tick. Best-effort.
+  if [ "$rc" -ne 0 ]; then
+    crashlog_preserve "$rc" "${AGENT_STATE_DIR:-}" "${WORKTREE:-}" "${PR_WORKTREE:-}" 2>/dev/null || true
+  fi
+  if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
+    log "removing worktree $WORKTREE"
+    (cd "$REPO_PATH" && git worktree remove "$WORKTREE" --force) 2>/dev/null || true
+  fi
+  if [ -n "${ISSUE_NUMBER:-}" ] && [ -d "$REPO_PATH/.git" ]; then
+    cleanup_agent_branches "$ISSUE_NUMBER" "$REPO_PATH"
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
+
 # (Phase 6 of the refactor retired AGENT_BRAIN_PATH and the brain
 # repo bootstrap. The agent's memory now lives in
 # ~/.local/state/agent/brain.sqlite; no markdown repo to clone.)
@@ -902,6 +931,30 @@ review_rework_rounds() {
   echo "$n"
 }
 
+# Echo rework_crashes (ticks that died mid-rework without reaching a verdict) for a
+# PR. Distinct from rework_rounds (rejections): a crash never completes, so it is
+# counted crash-safely -- stamped BEFORE the rework call, reset only on a clean
+# return -- and once it caps, the rework is escalated instead of looping (igor#291).
+review_rework_crashes() {
+  local key="$1" state_file n
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || { echo 0; return; }
+  n=$(jq -r --arg k "$key" '.review[$k].rework_crashes // 0' "$state_file" 2>/dev/null)
+  [ -n "$n" ] && [ "$n" != "null" ] || n=0
+  echo "$n"
+}
+
+# Set rework_crashes for a PR (preserves all other review fields).
+review_set_rework_crashes() {
+  local key="$1" n="$2" state_file tmp
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  jq --arg k "$key" --argjson n "$n" \
+    '.review //= {} | .review[$k].rework_crashes = $n' "$state_file" > "$tmp" \
+    && mv "$tmp" "$state_file" || rm -f "$tmp"
+}
+
 # Echo pending_rc_body for a PR from review state, or empty string.
 review_pending_rc_body() {
   local key="$1" state_file
@@ -1143,22 +1196,40 @@ maint_priority_label() {
   esac
 }
 
-# maint_file_deduped_issue <repo> <marker> <title> <body> <agent-bool> <priority-label|"">
-# Files <body> (which MUST already contain <marker>) as an issue, unless
-# an open issue carrying <marker> already exists (skip-if-open dedup).
+# maint_file_deduped_issue <repo> <marker> <title> <body> <agent-bool> <priority-label|""> [fingerprint]
+# Files <body> (which MUST already contain <marker>) as an issue, deduped.
+# Without a fingerprint: skip-if-OPEN (re-files once the prior ticket closes --
+# right for work tickets, whose ticket closes when their PR merges -> re-audit).
+# WITH a fingerprint (maint-triage): skip if ANY issue, OPEN or CLOSED, already
+# carries that finding-set's fingerprint -- so a judged-and-dismissed (closed)
+# finding-set STAYS dismissed, while a genuinely-new finding-set (new fingerprint)
+# still surfaces. The fingerprint marker is appended to <body> so future audits
+# recognize it.
 # agent-bool=true -> Agent-labeled + left UNASSIGNED so claimable
 # discovery works it into a PR; false -> Status/Need More Info for a
 # human. No-op-safe: logs and returns 0 on any Forgejo hiccup so the
 # audit loop continues.
 maint_file_deduped_issue() {
-  local repo="$1" marker="$2" title="$3" body="$4" agent="$5" pri="$6"
+  local repo="$1" marker="$2" title="$3" body="$4" agent="$5" pri="$6" fp="${7:-}"
   local existing
-  existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$marker" 2>/dev/null) \
-    || { log "warning: maintenance: can't check existing ticket on $repo (API error) -- skipping"; return 0; }
-  if [ -n "$existing" ] && [ "$existing" != "null" ] \
-     && [ "$(jq -r '.state' <<<"$existing" 2>/dev/null)" = "open" ]; then
-    log "maintenance: $repo already has an open ticket #$(jq -r '.number' <<<"$existing") for ${marker} -- not refiling"
-    return 0
+  if [ -n "$fp" ]; then
+    local fpmarker; fpmarker=$(maint_fp_marker "$fp")
+    existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$fpmarker" 2>/dev/null) \
+      || { log "warning: maintenance: can't check fingerprint on $repo (API error) -- skipping"; return 0; }
+    if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+      log "maintenance: $repo finding-set already filed/dismissed (#$(jq -r '.number' <<<"$existing") [$(jq -r '.state' <<<"$existing")]) -- not refiling ${marker}"
+      return 0
+    fi
+    body="${body}
+${fpmarker}"
+  else
+    existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$marker" 2>/dev/null) \
+      || { log "warning: maintenance: can't check existing ticket on $repo (API error) -- skipping"; return 0; }
+    if [ -n "$existing" ] && [ "$existing" != "null" ] \
+       && [ "$(jq -r '.state' <<<"$existing" 2>/dev/null)" = "open" ]; then
+      log "maintenance: $repo already has an open ticket #$(jq -r '.number' <<<"$existing") for ${marker} -- not refiling"
+      return 0
+    fi
   fi
   local num
   num=$(forgejo_open_issue "$repo" "$title" "$body") \
@@ -1334,9 +1405,19 @@ Steps:
          Same work-ticket shape, grouping the routine patch/minor DRIFT
          bumps into one ticket. Same worker instructions.
        .agent/AGENT_MAINTENANCE_FINDINGS.md
-         The human-triage report: JUDGMENT items, plus -- when
-         VALIDATED=false -- everything actionable. Lead with what
-         matters, bury noise. Prose for a human, not a work spec.
+         The triage report: JUDGMENT items, plus -- when VALIDATED=false --
+         everything actionable. Lead with what matters, bury noise. Be
+         specific enough to act on (a validated repo's triage is worked by
+         the agent; an unvalidated one's is read by a human).
+       .agent/AGENT_MAINTENANCE_FINDINGS_KEYS   (write WHENEVER you write FINDINGS.md)
+         One STABLE dedup key per JUDGMENT finding in FINDINGS.md, one per
+         line: the advisory ID (CVE-..., GHSA-..., RUSTSEC-..., PYSEC-...,
+         GO-...) when it has one; else the bare package name; append
+         "@<major>" ONLY when the finding is specifically about moving to a
+         new MAJOR version. Lowercase, nothing else -- no prose, severity,
+         dates, or patch/minor versions. The SAME findings MUST yield the
+         SAME keys every run: this is what lets a dismissed finding-set stay
+         dismissed instead of being re-filed every week.
        .agent/AGENT_MAINTENANCE_PRIORITY
          One word -- critical | high | medium | low -- severity of the
          most serious finding overall:
@@ -1405,12 +1486,20 @@ $MAINT_BUMPS_MARKER" \
     filed=1
   fi
   if [ -s "$findings_file" ]; then
+    # Re-file-on-close fix: fingerprint the judgment findings so a dismissed
+    # (closed) finding-set stays quiet while a genuinely-new one still surfaces.
+    # Validated routing: a validated repo can be worked by the grind, so route
+    # triage to the agent there (it works-or-judges, the human gates the PR/close);
+    # human-only (assigned) when unvalidated, where the grind can't open a
+    # CI-verifiable PR.
+    local m_fp
+    m_fp=$(maint_findings_fingerprint "$m_worktree/.agent/AGENT_MAINTENANCE_FINDINGS_KEYS")
     maint_file_deduped_issue "$target" "$MAINT_TRIAGE_MARKER" \
       "[maintenance] findings needing triage for $target" \
       "$(cat "$findings_file")
 
 $MAINT_TRIAGE_MARKER" \
-      false "$m_pri_label"
+      "$validated" "$m_pri_label" "$m_fp"
     filed=1
   fi
 
@@ -2963,6 +3052,27 @@ if [ -n "$REVIEW_PR" ]; then
       exit 0
     fi
 
+    # Crash-loop break (igor#291): a rework that keeps dying mid-run -- the heavy
+    # in-worktree test suite taking the tick down before a verdict -- must not be
+    # re-attempted forever; it starves the whole downstream cascade. Count crashes
+    # crash-safely (stamp BEFORE the work, reset only on a clean return past the
+    # claude call below); once capped, escalate to the human instead of looping.
+    REWORK_CRASH_CAP=2
+    RC_CRASHES=$(review_rework_crashes "$REVIEW_KEY")
+    if [ "$RC_CRASHES" -ge "$REWORK_CRASH_CAP" ]; then
+      log "PR-review: ${REVIEW_KEY} rework crashed ${RC_CRASHES}x without completing -- escalating to ${FORGEJO_REVIEWER}, not re-attempting"
+      forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+        "Igor's automated rework has crashed ${RC_CRASHES} times on this PR without producing a result -- most likely the in-worktree test run is taking the tick down. Handing this to you rather than loop on it." 2>/dev/null \
+        || log "warning: rework-crash escalation comment failed on ${REVIEW_KEY}"
+      forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
+      forgejo_assign "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
+      review_set_rework_crashes "$REVIEW_KEY" 0
+      exit 0
+    fi
+    # Stamp this attempt up front so a mid-rework crash is counted (the reset only
+    # fires on a clean return past the claude call).
+    review_set_rework_crashes "$REVIEW_KEY" "$(( RC_CRASHES + 1 ))"
+
     ensure_repo_local "$PR_REPO"
     PR_REPO_PATH=$(repo_path_for "$PR_REPO")
 
@@ -3235,6 +3345,10 @@ EOF
     set -e
     PR_ELAPSED=$(( $(date +%s) - PR_START ))
     log "claude exited $PR_EXIT after ${PR_ELAPSED}s"
+    # Clean return past the claude call -- the rework didn't take the tick down, so
+    # clear the crash counter (the crash-loop break above only fires on repeated
+    # mid-run deaths, not on an ordinary failed-but-completed rework).
+    review_set_rework_crashes "$REVIEW_KEY" 0
 
     normalize_worktree_dashes "$PR_WORKTREE"
 
@@ -3628,29 +3742,10 @@ log "branch: ${BRANCH}"
 # all Claude invocations -- not just tier-1 -- find the harness bin.
 export ISSUE_NUMBER ISSUE_TITLE FORGEJO_REPO PR_BASE
 
-# -- Cleanup on exit (set before worktree creation) ------------
-
-WORKTREE=""
-
-cleanup() {
-  local rc=$?
-  # Post-mortem: if a model call was in-flight when the tick died (the #279
-  # signature -- abnormal exit, no "claude exited" line), preserve its raw stream
-  # before the worktree is removed below or reused next tick. Best-effort; the
-  # `|| true` keeps a capture failure from ever changing the tick's exit.
-  if [ "$rc" -ne 0 ]; then
-    crashlog_preserve "$rc" "$AGENT_STATE_DIR" "${WORKTREE:-}" "${PR_WORKTREE:-}" 2>/dev/null || true
-  fi
-  if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
-    log "removing worktree $WORKTREE"
-    (cd "$REPO_PATH" && git worktree remove "$WORKTREE" --force) 2>/dev/null || true
-  fi
-  if [ -n "${ISSUE_NUMBER:-}" ] && [ -d "$REPO_PATH/.git" ]; then
-    cleanup_agent_branches "$ISSUE_NUMBER" "$REPO_PATH"
-  fi
-  exit "$rc"
-}
-trap cleanup EXIT
+# -- Cleanup on exit is installed EARLY (near the top, right after the bot-identity
+# -- exports) so the PR-review/rework + maintenance stages above are covered too,
+# -- not just issue-work below. WORKTREE was already initialized there; nothing to
+# -- re-install here.
 
 # -- Claim -----------------------------------------------------
 
