@@ -51,7 +51,7 @@ ceo_read_mandate() {
 # against the mandate's priorities.
 ceo_gather_week() {
   local repo="$1" since="$2"
-  local prs issues_recent agent_queue
+  local prs issues_recent open_prs all_open
 
   printf '## Activity on %s since %s\n\n' "$repo" "$since"
 
@@ -75,12 +75,28 @@ ceo_gather_week() {
   ' <<<"${issues_recent:-[]}" 2>/dev/null || printf -- '- (none)\n'
   printf '\n'
 
-  printf '### Open Agent queue\n'
-  agent_queue=$(_fj GET "/repos/${repo}/issues?state=open&type=issues&labels=Agent&limit=50" 2>/dev/null)
+  printf '### Open PRs (in flight -- in review or awaiting merge)\n'
+  open_prs=$(_fj GET "/repos/${repo}/pulls?state=open&limit=50" 2>/dev/null)
+  jq -r '
+    [ .[]? ]
+    | if length==0 then "- (none)" else (.[] | "- #\(.number) \(.title) (by \(.user.login))") end
+  ' <<<"${open_prs:-[]}" 2>/dev/null || printf -- '- (none)\n'
+  printf '\n'
+
+  # The WHOLE open board, not just the Agent queue -- the CEO sees everything
+  # (onboarding, maintenance triage, its own pending proposals, blockers awaiting
+  # the human), labels and all. This is the dedup surface: do NOT propose work an
+  # open ticket already owns, and if the repo is blocked on one (e.g. onboarding),
+  # say so rather than re-filing the blocker as new work.
+  printf '### Open issues -- the WHOLE board (dedup against this)\n'
+  all_open=$(_fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" 2>/dev/null)
   jq -r '
     [ (.[]? | select(.pull_request == null)) ]
-    | if length==0 then "- (none)" else (.[] | "- #\(.number) \(.title)") end
-  ' <<<"${agent_queue:-[]}" 2>/dev/null || printf -- '- (none)\n'
+    | if length==0 then "- (none)"
+      else (.[] | "- #\(.number) \(.title)"
+            + (if ([.labels[]?.name] | length) > 0
+               then "  [\([.labels[]?.name] | join(","))]" else "  [unlabeled]" end)) end
+  ' <<<"${all_open:-[]}" 2>/dev/null || printf -- '- (none)\n'
 }
 
 # ---- digest assembly: prompt, parse, render (mirrors sports-digest.sh) ----

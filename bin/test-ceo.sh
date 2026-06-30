@@ -160,25 +160,26 @@ if ceo_week_done "$repo"; then ok "re-mark: done again"; else bad "re-mark: done
 echo "== ceo_gather_week =="
 _fj() {  # override forgejo.sh's API caller: route canned JSON by URL path
   case "$2" in
-    */pulls*)        printf '%s' "$STUB_PULLS" ;;
-    *labels=Agent*)  printf '%s' "$STUB_AGENT" ;;
-    */issues*)       printf '%s' "$STUB_ISSUES" ;;
-    *)               printf '[]' ;;
+    *pulls*state=open*) printf '%s' "$STUB_OPEN_PULLS" ;;
+    */pulls*)           printf '%s' "$STUB_PULLS" ;;
+    */issues*)          printf '%s' "$STUB_ISSUES" ;;
+    *)                  printf '[]' ;;
   esac
 }
 since="2026-06-18T00:00:00Z"
 STUB_PULLS='[{"number":46,"title":"Add verify","merged_at":"2026-06-20T00:00:00Z","user":{"login":"igor"}},
              {"number":40,"title":"Stale","merged_at":"2026-01-01T00:00:00Z","user":{"login":"igor"}}]'
-STUB_ISSUES='[{"number":51,"title":"Login bug","state":"open","created_at":"2026-06-19T00:00:00Z","closed_at":null,"pull_request":null},
+STUB_OPEN_PULLS='[{"number":99,"title":"WIP feature","user":{"login":"igor"}}]'
+STUB_ISSUES='[{"number":51,"title":"Login bug","state":"open","created_at":"2026-06-19T00:00:00Z","closed_at":null,"pull_request":null,"labels":[]},
               {"number":12,"title":"PR in disguise","created_at":"2026-06-19T00:00:00Z","pull_request":{"merged":false}}]'
-STUB_AGENT='[{"number":51,"title":"Login bug","pull_request":null}]'
 
 out="$(ceo_gather_week "$repo" "$since")"
-has   "gather: merged PR in window"      "$out" "- #46 Add verify (by igor)"
-hasnt "gather: pre-window PR excluded"   "$out" "#40"
-has   "gather: opened issue rendered"    "$out" "- #51 [open] Login bug (opened)"
-hasnt "gather: PR filtered from issues"  "$out" "#12"
-has   "gather: open Agent queue"         "$out" "- #51 Login bug"
+has   "gather: merged PR in window"        "$out" "- #46 Add verify (by igor)"
+hasnt "gather: stale PR excluded entirely" "$out" "#40"
+has   "gather: open PR in flight"          "$out" "- #99 WIP feature (by igor)"
+has   "gather: opened issue rendered"      "$out" "- #51 [open] Login bug (opened)"
+hasnt "gather: PR filtered from issues"    "$out" "#12"
+has   "gather: whole board shows issue + label" "$out" "- #51 Login bug  [unlabeled]"
 
 # ---- proposals: throttle (open count) + filing (unlabeled/assigned/marked) ---
 echo "== ceo proposals: throttle + file =="
