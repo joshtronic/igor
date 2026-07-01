@@ -3412,6 +3412,18 @@ EOF
     PR_NEW=$(git rev-list --count "origin/${PR_HEAD}..HEAD" 2>/dev/null || echo 0)
 
     if [ "$PR_NEW" -gt 0 ]; then
+      # igor#310: audit trail -- record this rework round (model + effort +
+      # commits) on the PR so the ticket tells its own story, paired with the
+      # review comments that log model+effort+verdict. One comment per round
+      # reads as the journey: review -> rework -> review -> ...
+      forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+"### 🔧 Rework — round ${PR_REWORK_ROUND} _(automated)_
+
+Addressed the review on \`${AGENT_MODEL_REVIEW}\` at **effort ${PR_REWORK_EFFORT}** — ${PR_NEW} new commit(s).
+
+<!-- audit:rework round=${PR_REWORK_ROUND} effort=${PR_REWORK_EFFORT} -->" 2>/dev/null \
+        || log "warning: PR-review: rework audit comment failed on ${PR_REPO}#${PR_NUMBER}"
+
       # Conflict-marker gate before push. If the harness staged a base
       # merge and it conflicted, the agent (or the auto-commit above,
       # which `git add -A`s and completes a half-resolved merge) may have
