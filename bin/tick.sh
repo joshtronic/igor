@@ -335,7 +335,7 @@ issue_system_prompt() {
 # Hits the API directly with curl so we don't pay the Claude Code
 # overhead.
 #
-# Normalize Unicode dashes that Claude/Haiku tend to emit. Forgejo
+# Normalize Unicode dashes that Claude tends to emit. Forgejo
 # highlights U+2013 (en-dash) as an "ambiguous code point" because
 # it looks like a hyphen but isn't; the warning fires on every
 # PR/file that has one, which becomes constant background noise
@@ -383,8 +383,8 @@ normalize_worktree_dashes() {
 #   1. First "What this PR does" checklist item from PR_BODY.md,
 #      normalized to ensure a conventional-commit prefix. Claude
 #      writes the item with full context -- best signal.
-#   2. API-generated subject from the staged diff (Haiku call,
-#      ~$0.005, ~1-2s latency). Used when PR_BODY is missing or
+#   2. Model-generated subject from the staged diff ($AGENT_MODEL
+#      one-shot call). Used when PR_BODY is missing or
 #      empty. Response must match conventional-commit shape or
 #      it's rejected (catches "I'm ready to generate..." chat
 #      replies the API sometimes returns on empty input).
@@ -504,7 +504,7 @@ Rules:
     "$diff_summary")
 
   # Strip leading/trailing whitespace and any fenced-code wrappers
-  # Haiku occasionally adds despite instructions.
+  # the model occasionally adds despite instructions.
   body=$(printf '%s' "$body" \
     | sed -E '/^```/d' \
     | awk 'NF || found { found=1; print }' \
@@ -3861,13 +3861,27 @@ DIRTY_PATHS=$(git status --porcelain 2>/dev/null \
   | awk '$2 !~ /^\.agent\// { print $2 }')
 if [ -n "$DIRTY_PATHS" ]; then
   DIRTY_COUNT=$(echo "$DIRTY_PATHS" | wc -l | tr -d ' ')
-  # Stage first so derive_commit_subject can see new files via
-  # `git diff --cached`. See tier-3 comment for the failure mode
-  # without this.
-  git add -A
-  COMMIT_SUBJECT=$(derive_commit_subject "$WORKTREE/.agent/PR_BODY.md" "$WORKTREE" "chore: issue #${ISSUE_NUMBER} -- ${ISSUE_TITLE}")
-  log "harness-commit: $DIRTY_COUNT file(s), subject: $COMMIT_SUBJECT"
-  git commit --quiet -m "$COMMIT_SUBJECT" || log "warning: harness commit failed"
+  if [ "$CLAUDE_EXIT" -ne 0 ]; then
+    # Ship-safety gate (porksicle#114). A nonzero claude exit means the
+    # run died mid-workflow -- before it restored any `git stash` it took
+    # (e.g. to grab "before" screenshots) and before it wrote PR_BODY.md.
+    # The leftover worktree is NOT a trustworthy diff: committing whatever
+    # remains has shipped a scratch file OVER the real, stashed-away edits
+    # and auto-merged it, silently dropping the requested change. The
+    # worktree is disposable and the issue re-queues, so refuse to commit
+    # a partial tree. Control falls through to the noop/blocked path
+    # (COMMITS stays 0) for a clean retry next tick; a run that keeps
+    # crashing gets Status/Blocked there so it can't loop.
+    log "ship-safety: claude exited $CLAUDE_EXIT mid-run -- NOT committing partial worktree ($DIRTY_COUNT dirty file(s)); re-queuing"
+  else
+    # Stage first so derive_commit_subject can see new files via
+    # `git diff --cached`. See tier-3 comment for the failure mode
+    # without this.
+    git add -A
+    COMMIT_SUBJECT=$(derive_commit_subject "$WORKTREE/.agent/PR_BODY.md" "$WORKTREE" "chore: issue #${ISSUE_NUMBER} -- ${ISSUE_TITLE}")
+    log "harness-commit: $DIRTY_COUNT file(s), subject: $COMMIT_SUBJECT"
+    git commit --quiet -m "$COMMIT_SUBJECT" || log "warning: harness commit failed"
+  fi
 fi
 
 # -- Determine outcome -----------------------------------------
@@ -3979,12 +3993,12 @@ Address it, then remove \`Status/Blocked\` to re-queue. (If the note above says 
     if [ -f .agent/PR_BODY.md ]; then
       PR_BODY=$(cat .agent/PR_BODY.md)
     else
-      log "WARNING: PR_BODY.md was NOT written by claude this tick. AGENTS.md requires it on every ship; this is not optional. Attempting harness-side fallback via Haiku."
+      log "WARNING: PR_BODY.md was NOT written by claude this tick. AGENTS.md requires it on every ship; this is not optional. Attempting harness-side fallback via $AGENT_MODEL."
       PR_BODY=$(derive_pr_body "$WORKTREE" "$PR_BASE")
       if [ -n "$PR_BODY" ]; then
-        log "harness-side PR body synthesized via Haiku from diff"
+        log "harness-side PR body synthesized via $AGENT_MODEL from diff"
       else
-        log "WARNING: Haiku fallback also failed; using git-log-derived body. PR description will be thin."
+        log "WARNING: fallback body synthesis failed; using git-log-derived body. PR description will be thin."
         PR_BODY=$(git log "origin/${PR_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
       fi
     fi
