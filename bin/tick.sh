@@ -3861,7 +3861,7 @@ DIRTY_PATHS=$(git status --porcelain 2>/dev/null \
   | awk '$2 !~ /^\.agent\// { print $2 }')
 if [ -n "$DIRTY_PATHS" ]; then
   DIRTY_COUNT=$(echo "$DIRTY_PATHS" | wc -l | tr -d ' ')
-  if [ "$CLAUDE_EXIT" -ne 0 ]; then
+  if [ "${CLAUDE_EXIT:-1}" -ne 0 ]; then
     # Ship-safety gate (porksicle#114). A nonzero claude exit means the
     # run died mid-workflow -- before it restored any `git stash` it took
     # (e.g. to grab "before" screenshots) and before it wrote PR_BODY.md.
@@ -3871,7 +3871,10 @@ if [ -n "$DIRTY_PATHS" ]; then
     # worktree is disposable and the issue re-queues, so refuse to commit
     # a partial tree. Control falls through to the noop/blocked path
     # (COMMITS stays 0) for a clean retry next tick; a run that keeps
-    # crashing gets Status/Blocked there so it can't loop.
+    # crashing gets Status/Blocked there so it can't loop. The `:-1`
+    # default fails SAFE: an unset/empty CLAUDE_EXIT is treated as a crash
+    # (don't ship) rather than falling through to the commit branch -- so
+    # the gate stays correct even if a refactor ever moves the assignment.
     log "ship-safety: claude exited $CLAUDE_EXIT mid-run -- NOT committing partial worktree ($DIRTY_COUNT dirty file(s)); re-queuing"
   else
     # Stage first so derive_commit_subject can see new files via
