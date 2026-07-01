@@ -225,6 +225,188 @@ validate_repo_via_api() {
 
 ONBOARDING_MARKER='<!-- agent:onboarding -->'
 
+# -- Auto-scaffold agent-authorable gaps (igor#304) -------------
+#
+# When a repo fails onboarding on gaps the AGENT can author -- CLAUDE.md,
+# a package.json "test" script, a lint config -- open a scaffold PR
+# instead of dumping the whole setup on the human. Additive and fully
+# GUARDED: unrecognized stack or any API failure returns empty and
+# handle_onboarding_failure falls through to the plain ticket, so worst
+# case is exactly the pre-#304 behavior. CI (.forgejo/workflows/) is
+# off-limits to the agent and stays a human residual; README + labels
+# aren't auto-scaffolded.
+
+SCAFFOLD_BRANCH='agent-scaffold'
+
+# scaffold_parse_gaps <report> -- echo the agent-authorable gaps still OPEN
+# in the checklist, one per line, from {claude_md,test,lint}. Reads the
+# '- [ ] <name> -- ...' failure lines validate_repo_via_api emits. Pure.
+scaffold_parse_gaps() {
+  local report="$1"
+  grep -q '^- \[ \] CLAUDE\.md present'  <<<"$report" && printf 'claude_md\n'
+  grep -q '^- \[ \] Test setup detected' <<<"$report" && printf 'test\n'
+  grep -q '^- \[ \] Lint setup detected' <<<"$report" && printf 'lint\n'
+  return 0
+}
+
+# scaffold_detect_stack <package_json> -- echo the recognized stack or empty.
+# v1: 'eleventy' when package.json names eleventy in (dev)dependencies or an
+# npm script. Empty -> caller bails to ticket-only. Pure.
+scaffold_detect_stack() {
+  local pkg="$1"
+  [ -n "$pkg" ] || return 0
+  if jq -e '((.dependencies // {}) + (.devDependencies // {})) | keys | any(test("eleventy|11ty"))' <<<"$pkg" >/dev/null 2>&1 \
+     || jq -e '(.scripts // {}) | to_entries | any(.value | test("eleventy|11ty"))' <<<"$pkg" >/dev/null 2>&1; then
+    printf 'eleventy\n'
+  fi
+  return 0
+}
+
+# scaffold_test_script <stack> -- echo the package.json "test" script value.
+# 11ty: a clean dry-run build is the gate. Pure.
+scaffold_test_script() {
+  case "$1" in
+    eleventy) printf 'npx @11ty/eleventy --dryrun' ;;
+    *) return 0 ;;
+  esac
+}
+
+# scaffold_markdownlint -- echo a lenient .markdownlint.json. Pure.
+scaffold_markdownlint() {
+  cat <<'JSON'
+{
+  "default": true,
+  "MD013": false,
+  "MD033": false,
+  "MD041": false
+}
+JSON
+}
+
+# scaffold_claude_md <repo> <package_json> -- echo a templated CLAUDE.md from
+# package.json (name/description). Deterministic v1. Pure. (Backtick-bearing
+# body is a quoted heredoc; the dynamic header is printf'd so no command
+# substitution fires.)
+scaffold_claude_md() {
+  local repo="$1" pkg="$2" name desc
+  name=$(jq -r '.name // empty' <<<"$pkg" 2>/dev/null); [ -n "$name" ] || name="${repo##*/}"
+  desc=$(jq -r '.description // empty' <<<"$pkg" 2>/dev/null); [ -n "$desc" ] || desc="Static site built with Eleventy."
+  printf '# %s\n\n%s\n\n' "$name" "$desc"
+  cat <<'EOF'
+## Build & test
+
+```sh
+npm ci
+npm run build   # if defined
+npm test        # a clean Eleventy dry-run build is the gate
+```
+
+## Conventions
+
+- Eleventy input lives under `src/`; the build writes `_site/` (generated -- don't edit by hand).
+- Keep changes small and scoped; everything ships via a reviewed PR to the default branch.
+- Markdown is linted (`.markdownlint.json`); long prose lines are fine (MD013 off).
+
+## Off-limits
+
+- `.forgejo/workflows/` -- CI is operator-managed.
+- Secrets, `.env`, and the live deploy host.
+
+_Scaffolded by the agent (igor#304); refine as the project grows._
+EOF
+}
+
+# scaffold_pr_body <newline-separated-gaps> -- echo the scaffold PR body. Pure.
+scaffold_pr_body() {
+  local gaps="$1"
+  printf '## What this PR does\n\n'
+  printf -- '- [x] chore: scaffold agent-authorable repo setup so the repo can validate\n\n'
+  printf 'The onboarding checks flagged scaffolding the **agent** can author. Added:\n\n'
+  grep -qx claude_md <<<"$gaps" && printf -- '- `CLAUDE.md` -- project orientation for the agent\n'
+  grep -qx lint      <<<"$gaps" && printf -- '- `.markdownlint.json` -- lenient markdown lint config\n'
+  grep -qx test      <<<"$gaps" && printf -- '- `package.json` `test` script -- a clean Eleventy dry-run build\n'
+  printf '\nStill on the human: CI (`.forgejo/workflows/`) is off-limits to the agent -- add it (and merge this) to finish onboarding.\n\n'
+  printf '## Test plan\n\n'
+  printf -- '- [x] `npm test` is a clean Eleventy dry-run build (the validation gate)\n'
+  printf -- '- [ ] Reviewer: merge, then confirm the repo validates (or add the CI workflow if none exists)\n'
+}
+
+# _scaffold_put <repo> <path> <content> <sha> -- PUT a file onto the scaffold
+# branch (create when sha empty, update when set). Impure.
+_scaffold_put() {
+  local repo="$1" path="$2" content="$3" sha="$4" b64 body
+  b64=$(printf '%s' "$content" | base64 -w0) || return 1
+  if [ -n "$sha" ]; then
+    body=$(jq -n --arg m "chore: scaffold ${path} (igor#304)" --arg c "$b64" --arg s "$sha" --arg br "$SCAFFOLD_BRANCH" \
+      '{message:$m, content:$c, sha:$s, branch:$br}')
+  else
+    body=$(jq -n --arg m "chore: scaffold ${path} (igor#304)" --arg c "$b64" --arg br "$SCAFFOLD_BRANCH" \
+      '{message:$m, content:$c, branch:$br}')
+  fi
+  _fj PUT "/repos/${repo}/contents/${path}" "$body" >/dev/null
+}
+
+# scaffold_try_open_pr <repo> <report> -- open (or reuse) the scaffold PR for
+# the agent-authorable gaps. Echoes the PR number on success, empty on any
+# reason to fall through (no agent-doable gaps, unrecognized stack, a
+# mid-scaffold branch already present, or any API failure). Impure + guarded;
+# idempotent (an already-open scaffold PR is reused, never duplicated).
+scaffold_try_open_pr() {
+  local repo="$1" report="$2"
+  local gaps stack pkg base existing wrote=0
+
+  gaps=$(scaffold_parse_gaps "$report")
+  [ -n "$gaps" ] || return 0
+
+  pkg=$(forgejo_repo_get_file "$repo" package.json 2>/dev/null) || pkg=""
+  stack=$(scaffold_detect_stack "$pkg")
+  [ -n "$stack" ] || return 0
+
+  # Idempotency: reuse an already-open scaffold PR.
+  existing=$(forgejo_find_pr_by_head "$repo" "$SCAFFOLD_BRANCH" 2>/dev/null || true)
+  if [ -n "$existing" ]; then printf '%s' "$existing"; return 0; fi
+  # A leftover scaffold branch with no open PR (crash mid-scaffold) -- don't
+  # recreate it; skip to ticket-only this tick.
+  if _fj GET "/repos/${repo}/branches/${SCAFFOLD_BRANCH}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  base=$(_fj GET "/repos/${repo}" 2>/dev/null | jq -r '.default_branch // "master"') || base="master"
+  [ -n "$base" ] || base="master"
+
+  # Create the scaffold branch off the default branch, then PUT each file
+  # onto it (uniform branch target -- no first-PUT special-casing).
+  _fj POST "/repos/${repo}/branches" \
+    "$(jq -n --arg n "$SCAFFOLD_BRANCH" --arg o "$base" '{new_branch_name:$n, old_ref_name:$o}')" >/dev/null 2>&1 || return 0
+
+  if grep -qx claude_md <<<"$gaps"; then
+    _scaffold_put "$repo" "CLAUDE.md" "$(scaffold_claude_md "$repo" "$pkg")" "" && wrote=1
+  fi
+  if grep -qx lint <<<"$gaps"; then
+    _scaffold_put "$repo" ".markdownlint.json" "$(scaffold_markdownlint)" "" && wrote=1
+  fi
+  if grep -qx test <<<"$gaps"; then
+    local ts newpkg pkgsha
+    ts=$(scaffold_test_script "$stack")
+    newpkg=$(jq --arg t "$ts" '.scripts = ((.scripts // {}) + {test: $t})' <<<"$pkg" 2>/dev/null) || newpkg=""
+    pkgsha=$(_fj GET "/repos/${repo}/contents/package.json?ref=${SCAFFOLD_BRANCH}" 2>/dev/null | jq -r '.sha // empty')
+    if [ -n "$ts" ] && [ -n "$newpkg" ] && [ -n "$pkgsha" ]; then
+      _scaffold_put "$repo" "package.json" "$newpkg" "$pkgsha" && wrote=1
+    fi
+  fi
+
+  [ "$wrote" -eq 1 ] || return 0
+
+  # Open UNASSIGNED: the repo is unvalidated, so the shadow-review tick
+  # skips it -- surfacing rides on the onboarding ticket (assigned to the
+  # reviewer) which links this PR, rather than a review request here.
+  local prnum
+  prnum=$(forgejo_open_pr "$repo" "$SCAFFOLD_BRANCH" "$base" \
+    "chore: scaffold agent-authorable repo setup (igor#304)" \
+    "$(scaffold_pr_body "$gaps")" 2>/dev/null) || return 0
+  printf '%s' "$prnum"
+}
+
 # handle_onboarding_failure <repo> <bot-user> <markdown-report>
 #
 # Idempotent: existing open ticket -> silent skip; existing closed
@@ -233,8 +415,34 @@ ONBOARDING_MARKER='<!-- agent:onboarding -->'
 handle_onboarding_failure() {
   local repo="$1" bot="$2" report="$3"
 
+  # igor#304: try to auto-scaffold the agent-authorable gaps first. On
+  # success the ticket is narrowed to the human residual (CI); on any
+  # failure scaffold_pr is empty and we file the full ticket as before.
+  local scaffold_pr=""
+  scaffold_pr=$(scaffold_try_open_pr "$repo" "$report" 2>/dev/null) || scaffold_pr=""
+  [ -n "$scaffold_pr" ] && log "onboarding: scaffold PR #${scaffold_pr} open on $repo (agent-authorable gaps)"
+
   local body
-  body=$(cat <<EOF
+  if [ -n "$scaffold_pr" ]; then
+    body=$(cat <<EOF
+${ONBOARDING_MARKER}
+
+The agent scaffolded the setup it can author in **PR #${scaffold_pr}** (CLAUDE.md /
+test / lint, as applicable). Review and merge it, then add anything only you can --
+notably the CI workflow (\`.forgejo/workflows/\`), which is off-limits to the agent.
+Current checklist:
+
+${report}
+
+Once the rest is in, close this ticket -- the next tick re-validates and either
+proceeds or reopens with what's still missing.
+
+This ticket is auto-managed by the agent. Do not edit the title or remove the
+HTML comment marker at the top of the body.
+EOF
+)
+  else
+    body=$(cat <<EOF
 ${ONBOARDING_MARKER}
 
 The agent refuses to clone this repo until it has the scaffolding to support
@@ -249,6 +457,7 @@ This ticket is auto-managed by the agent. Do not edit the title or remove the
 HTML comment marker at the top of the body.
 EOF
 )
+  fi
 
   local existing num state
   existing=$(forgejo_find_marked_issue "$repo" "$bot" "$ONBOARDING_MARKER")
