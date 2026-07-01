@@ -404,13 +404,16 @@ scaffold_try_open_pr() {
 
   [ "$wrote" -eq 1 ] || return 0
 
-  # Open UNASSIGNED: the repo is unvalidated, so the shadow-review tick
-  # skips it -- surfacing rides on the onboarding ticket (assigned to the
-  # reviewer) which links this PR, rather than a review request here.
+  # Request the reviewer directly. The repo is UNVALIDATED, so the
+  # shadow-review tick skips it entirely -- there is no flow that would
+  # otherwise surface this PR to the human. So the scaffold PR asks for
+  # review explicitly: the one place a bot PR must, precisely because
+  # there's no shadow pass to defer to (the onboarding ticket links it,
+  # but a review request puts it in the reviewer's queue). igor#304.
   local prnum
   prnum=$(forgejo_open_pr "$repo" "$SCAFFOLD_BRANCH" "$base" \
     "chore: scaffold agent-authorable repo setup (igor#304)" \
-    "$(scaffold_pr_body "$gaps")" 2>/dev/null) || return 0
+    "$(scaffold_pr_body "$gaps")" "${FORGEJO_REVIEWER:-}" 2>/dev/null) || return 0
   printf '%s' "$prnum"
 }
 
