@@ -279,6 +279,13 @@ claude_call() {
   local strip_fences="${6:-1}"
   local timeout_secs="${7:-${CLAUDE_CALL_TIMEOUT_SECS:-300}}"
   local scratch envelope rc text err kind
+  # Optional `model:effort` suffix (e.g. "claude-opus-4-8:high") sets the CLI
+  # reasoning effort (igor#308). Model ids carry no colon, so the split is
+  # unambiguous; a bare model passes no --effort (unchanged behavior).
+  local -a effort_args=()
+  case "$model" in
+    *:*) effort_args=(--effort "${model##*:}"); model="${model%:*}" ;;
+  esac
 
   if claude_health_blocked; then
     log "claude $call_site: health backoff active -- skipping call"
@@ -296,6 +303,7 @@ claude_call() {
         timeout "$timeout_secs" \
         claude -p \
           --model "$model" \
+          "${effort_args[@]}" \
           --system-prompt "$system" \
           --tools "" \
           --strict-mcp-config \

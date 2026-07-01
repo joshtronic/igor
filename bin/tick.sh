@@ -998,6 +998,37 @@ review_reset_rework() {
   mv "$tmp" "$state_file"
 }
 
+# Every level these two ladders emit -- high, xhigh, max -- is a member of the
+# CLI's --effort enum (`claude --help`: low, medium, high, xhigh, max), so a
+# bad-token failure that would silently kill the merge gate can't arise from
+# the values below. Verified against the enum and by a clean live -p run of
+# each of the three deployed tokens (igor#308).
+#
+# reviewer_effort <rework_rounds> -- reasoning effort for the shadow review
+# at this rework round (igor#308). FLAT ("high") during the loop -- a stable
+# bar the worker can converge on (a reviewer that got pickier every round
+# would move the goalposts and the PR would never land) -- then "max" for the
+# LAST look before the human takes over (the "final boss": rare, and the
+# alternative is Josh's time, so max effort is the cheap bet). Escalation to
+# the human fires at rounds >= 3 (see the REQUEST_CHANGES handler), so the
+# review at rounds>=3 is the one that maxes. Hardcoded, not a knob.
+reviewer_effort() {
+  local rounds="${1:-0}"
+  if [ "${rounds:-0}" -ge 3 ]; then printf 'max'; else printf 'high'; fi
+}
+
+# worker_effort <rework_rounds> -- reasoning effort for the bot's PR rework
+# at this round (igor#308). Climbs each pass -- try harder as the problem
+# proves hard: high -> xhigh -> max (round 3 is the last rework before the
+# reviewer escalates to the human). Hardcoded, not a knob.
+worker_effort() {
+  case "${1:-0}" in
+    0|1) printf 'high' ;;
+    2)   printf 'xhigh' ;;
+    *)   printf 'max' ;;
+  esac
+}
+
 # -- Validation pass cache --------------------------------------
 #
 # The validation sweep runs every tick. At a 1-minute cadence across
@@ -2597,9 +2628,14 @@ ${diff}
   # the head off the result (which surfaces as a flaky parse failure).
   # strip_fences=0: the body is markdown prose, not a JSON envelope.
   local raw parsed attempt verdict review_body snippet tail_snip
+  # igor#308: run the shadow review at an escalating effort -- flat "high"
+  # during the rework loop, "max" for the final look before escalation.
+  local rev_rounds rev_effort
+  rev_rounds=$(review_rework_rounds "$key")
+  rev_effort=$(reviewer_effort "$rev_rounds")
   parsed=""
   for attempt in 1 2; do
-    raw=$(claude_call "$AGENT_MODEL_REVIEW" "review" 8000 "$directive" "$user" 0) || {
+    raw=$(claude_call "${AGENT_MODEL_REVIEW}:${rev_effort}" "review" 8000 "$directive" "$user" 0) || {
       log "review: ${key} review call failed (attempt $attempt)"
       continue
     }
@@ -2629,7 +2665,7 @@ CI for \`${target_sha:0:8}\`: **${ci}**
 ${review_body}
 
 ---
-<sub>Independent review by the harness on \`${AGENT_MODEL_REVIEW}\`. The human reviewer is requested once Igor has reviewed; a human still merges.</sub>
+<sub>Independent review by the harness on \`${AGENT_MODEL_REVIEW}\` (effort: ${rev_effort}). The human reviewer is requested once Igor has reviewed; a human still merges.</sub>
 <!-- review sha=${target_sha} verdict=${verdict} ci=${ci} -->"
 
   if forgejo_comment "$target_repo" "$target_num" "$comment"; then
@@ -3325,9 +3361,15 @@ EOF
     log "invoking claude for PR review (timeout ${TICK_TIMEOUT})"
     PR_LOG="$PR_WORKTREE/.agent/claude-output.log"
     PR_START=$(date +%s)
+    # igor#308: escalate the rework effort each round (high -> xhigh -> max).
+    # Cache the round once -- it can in principle move between reads.
+    PR_REWORK_ROUND=$(review_rework_rounds "$REVIEW_KEY")
+    PR_REWORK_EFFORT=$(worker_effort "$PR_REWORK_ROUND")
+    log "PR-review: rework effort ${PR_REWORK_EFFORT} (round ${PR_REWORK_ROUND})"
     set +e
     claude_run_with_cost "pr-review" "$PR_LOG" "$TICK_TIMEOUT" \
       --model "$AGENT_MODEL_REVIEW" \
+      --effort "$PR_REWORK_EFFORT" \
       --append-system-prompt "$PR_SYSTEM_PROMPT" \
       --settings "$AGENT_HOME/agent-settings.json" \
       --max-turns 50 \
