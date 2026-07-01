@@ -998,6 +998,12 @@ review_reset_rework() {
   mv "$tmp" "$state_file"
 }
 
+# Every level these two ladders emit -- high, xhigh, max -- is a member of the
+# CLI's --effort enum (`claude --help`: low, medium, high, xhigh, max), so a
+# bad-token failure that would silently kill the merge gate can't arise from
+# the values below. Verified against the enum and by a clean live -p run of
+# each of the three deployed tokens (igor#308).
+#
 # reviewer_effort <rework_rounds> -- reasoning effort for the shadow review
 # at this rework round (igor#308). FLAT ("high") during the loop -- a stable
 # bar the worker can converge on (a reviewer that got pickier every round
@@ -3356,8 +3362,10 @@ EOF
     PR_LOG="$PR_WORKTREE/.agent/claude-output.log"
     PR_START=$(date +%s)
     # igor#308: escalate the rework effort each round (high -> xhigh -> max).
-    PR_REWORK_EFFORT=$(worker_effort "$(review_rework_rounds "$REVIEW_KEY")")
-    log "PR-review: rework effort ${PR_REWORK_EFFORT} (round $(review_rework_rounds "$REVIEW_KEY"))"
+    # Cache the round once -- it can in principle move between reads.
+    PR_REWORK_ROUND=$(review_rework_rounds "$REVIEW_KEY")
+    PR_REWORK_EFFORT=$(worker_effort "$PR_REWORK_ROUND")
+    log "PR-review: rework effort ${PR_REWORK_EFFORT} (round ${PR_REWORK_ROUND})"
     set +e
     claude_run_with_cost "pr-review" "$PR_LOG" "$TICK_TIMEOUT" \
       --model "$AGENT_MODEL_REVIEW" \
