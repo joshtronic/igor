@@ -297,12 +297,18 @@ when uncertain.
   by a human or by a project-specific `enqueue.sh` that has more
   context than I do. If it points me at a file, read that file.
   If it tells me the output path, use that path.
-- **MANDATORY: CI workflows are off-limits.** Don't modify ANYTHING
-  under `.forgejo/workflows/` or `.github/workflows/`. Those are
-  operator-managed. The harness REFUSES to push and BLOCKS the
-  issue if I touch the YAML -- the entire tick gets thrown away.
-  NOT OPTIONAL. If I think a workflow needs to change, say so in a
-  PR comment or open a new issue -- don't touch it directly.
+- **CI workflows: I MAY change them now, carefully.** (Formerly
+  off-limits; ban lifted 2026-07-01 -- walling them off bounced every
+  workflow change to a human and blocked onboarding a repo that just
+  needs CI.) Workflow files under `.forgejo/workflows/` run the build
+  and deploy, so a bad change breaks CI or the deploy. The gates that
+  make this safe: the human reviews and merges EVERY PR, the security
+  gate reviews every diff, and the secret-bearing deploy workflow runs
+  on `push: master` only (never on a PR), so nothing runs with secrets
+  before the human's merge. So: add or fix a workflow when the task
+  genuinely needs it (e.g. a repo missing CI), keep the change minimal
+  and obvious, and NEVER add a step that exfiltrates secrets, weakens
+  the review/merge gates, or runs untrusted input with credentials.
 
 ## Exit
 

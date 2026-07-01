@@ -530,9 +530,17 @@ Rules:
 # Claude shouldn't be modifying CI from inside a tick. Callers should
 # abandon (don't push) when this returns non-empty.
 list_offlimits_violations() {
-  local base="$1"
-  git diff --name-only "origin/${base}..HEAD" 2>/dev/null \
-    | grep -E '^\.(forgejo|github)/workflows/' || true
+  # WORKFLOW BAN LIFTED (2026-07-01, Josh's call). The agent may now touch
+  # `.forgejo/workflows/` -- so onboarding can add CI and the agent can
+  # maintain workflows, instead of bouncing every workflow change to a human
+  # ticket. What still guards it: the security_gate reviews every diff before
+  # it ships, the human reviews and merges every PR, and the secret-bearing
+  # deploy workflow runs on `push: master` only (never on a PR), so a
+  # workflow change can't run with secrets before the human's merge gates it.
+  # Returns empty (nothing off-limits); the callers keep their guard blocks so
+  # re-enabling the ban is a one-line revert of this function.
+  : "${1:-}"   # base ref -- unused now (kept for signature stability)
+  return 0
 }
 
 # Conflict-marker gate. When the harness stages a base-branch merge into
