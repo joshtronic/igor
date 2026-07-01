@@ -334,16 +334,23 @@ scaffold_pr_body() {
 # _scaffold_put <repo> <path> <content> <sha> -- PUT a file onto the scaffold
 # branch (create when sha empty, update when set). Impure.
 _scaffold_put() {
-  local repo="$1" path="$2" content="$3" sha="$4" b64 body
+  local repo="$1" path="$2" content="$3" sha="$4" b64 body method
   b64=$(printf '%s' "$content" | base64 -w0) || return 1
+  # Forgejo's contents API: POST creates a new file, PUT updates an existing
+  # one (and requires its blob sha). Using PUT to CREATE returns 422
+  # "[SHA]: Required" -- which is why scaffolding a repo that needs CLAUDE.md
+  # or a lint config (a create) failed, while a package.json test-script bump
+  # (an update, with sha) succeeded. igor#304 follow-up.
   if [ -n "$sha" ]; then
+    method=PUT
     body=$(jq -n --arg m "chore: scaffold ${path} (igor#304)" --arg c "$b64" --arg s "$sha" --arg br "$SCAFFOLD_BRANCH" \
       '{message:$m, content:$c, sha:$s, branch:$br}')
   else
+    method=POST
     body=$(jq -n --arg m "chore: scaffold ${path} (igor#304)" --arg c "$b64" --arg br "$SCAFFOLD_BRANCH" \
       '{message:$m, content:$c, branch:$br}')
   fi
-  _fj PUT "/repos/${repo}/contents/${path}" "$body" >/dev/null
+  _fj "$method" "/repos/${repo}/contents/${path}" "$body" >/dev/null
 }
 
 # scaffold_try_open_pr <repo> <report> -- open (or reuse) the scaffold PR for
