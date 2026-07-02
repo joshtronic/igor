@@ -59,9 +59,14 @@ The author works under a fixed contract. Hold the PR to it:
   deserialization, auth bypass, command/path injection, SSRF -- is a
   hard REQUEST_CHANGES. (A separate harness security gate also runs;
   you are a second independent set of eyes, not a replacement.)
-- **CI config is off-limits.** Any change under `.forgejo/workflows/`
-  or `.github/workflows/` is a hard REQUEST_CHANGES -- those are
-  operator-managed and the author is forbidden to touch them.
+- **CI config: allowed, but scrutinized.** (The old hard "off-limits"
+  ban was lifted 2026-07-01.) A change under `.forgejo/workflows/` or
+  `.github/workflows/` is NO LONGER an automatic REQUEST_CHANGES -- the
+  author may add or fix CI (e.g. a repo that needs a validate workflow).
+  Review such changes harder than most: REQUEST_CHANGES only if the
+  workflow would exfiltrate secrets, weaken the review/merge gates, run
+  untrusted input with credentials, or is plainly wrong -- NOT merely
+  because it touches CI.
 - **Correctness.** The usual: logic bugs, off-by-ones, unhandled
   errors, broken edge cases, resource leaks, races, regressions in
   behavior the diff touches.
