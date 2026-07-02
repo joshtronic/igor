@@ -59,7 +59,6 @@ forgejo_find_claimable() {
             )
           )
           and (([.labels[].name] | index("Status/Blocked")) == null)
-          and (([.labels[].name] | index("Status/Deferred")) == null)
         )] | sort_by(.created_at)
       '
 }

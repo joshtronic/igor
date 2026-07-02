@@ -3,13 +3,17 @@
 # that auto-activates when a condition becomes true.
 #
 # Convention opt-in, NO env knob (like logwatch/CEO): an OPEN issue carrying a
-# `<!-- gate -->` block in its body AND the `Status/Deferred` label is deferred
-# work. The claimable grind skips `Status/Deferred` (see forgejo_find_claimable),
-# so nothing tries to work it early. Once per ISO day this pass fetches the gate's
-# data source and asks (tool-free) whether its condition is now met; on MET it
-# drops the `Status/Deferred` label so the grind picks the ticket up, and comments
-# the evidence. The ticket stays `Agent`-labeled the whole time -- the gate is the
-# HOLD, not the approval (the human already greenlit by adding Agent).
+# `<!-- gate -->` block in its body AND the built-in `Status/Blocked` label is
+# deferred work. The claimable grind already skips `Status/Blocked`, so nothing
+# works it early -- no custom label needed (the old `Status/Deferred` is retired;
+# we use only Forgejo's built-in labels + the `Agent` greenlight). Once per ISO day
+# this pass fetches the gate's data source and asks (tool-free) whether its
+# condition is now met. On MET it does NOT hand the ticket to the grind -- the gate
+# check can false-positive (it did on vps-showdown#20), so it removes `Status/Blocked`
+# AND the `Agent` greenlight and ASSIGNS the ticket to FORGEJO_REVIEWER for
+# confirmation. The human re-adds `Agent` once they've confirmed the gate really
+# cleared, and only then does the grind claim it. On UNMET the ticket stays
+# `Status/Blocked` and re-checks the next day.
 #
 # The gate block (first match wins; whitespace-tolerant):
 #   <!-- gate
@@ -29,7 +33,7 @@
 # claude_call (lib/claude.sh), log (tick.sh), jq, curl. do_deferred_tick lives
 # here (self-contained), like do_automerge_tick lives in lib/automerge.sh.
 
-DEFERRED_LABEL="Status/Deferred"
+# A gated ticket = built-in `Status/Blocked` + this gate block in its body.
 DEFERRED_GATE_OPEN="<!-- gate"
 
 # deferred_parse_gate_url / deferred_parse_gate_condition <body> -- extract the
@@ -101,21 +105,43 @@ deferred_parse_evidence() {
   printf '%s\n' "$1" | sed -n 's/^[[:space:]]*EVIDENCE:[[:space:]]*//p' | head -1
 }
 
+# deferred_release_to_reviewer <repo> <num> <reviewer> <evidence> -- gate cleared:
+# hand the ticket to the HUMAN for confirmation, not straight to the grind. The
+# auto gate-check can false-positive (it did on vps-showdown#20), so a machine MET
+# is NOT trusted to auto-work: drop the `Status/Blocked` hold AND the `Agent`
+# greenlight, assign the reviewer, and comment how to release it. The human re-adds
+# `Agent` once they've confirmed. Impure (label/assign/comment via _fj).
+deferred_release_to_reviewer() {
+  local repo="$1" num="$2" reviewer="$3" evidence="$4"
+  forgejo_remove_label "$repo" "$num" "Status/Blocked" 2>/dev/null \
+    || log "deferred: warning -- could not drop Status/Blocked on ${repo}#${num}"
+  forgejo_remove_label "$repo" "$num" "Agent" 2>/dev/null \
+    || log "deferred: warning -- could not drop Agent on ${repo}#${num}"
+  if [ -n "$reviewer" ]; then
+    forgejo_assign "$repo" "$num" "$reviewer" 2>/dev/null \
+      || log "deferred: warning -- could not assign ${repo}#${num} to ${reviewer}"
+  fi
+  _fj POST "/repos/${repo}/issues/${num}/comments" \
+    "$(jq -n --arg b "Gate cleared -- ${evidence:-condition met}. Removed \`Status/Blocked\` + \`Agent\` and assigned to ${reviewer:-a reviewer} for confirmation. This auto gate-check can false-positive, so the ticket is NOT auto-worked: **re-add the \`Agent\` label** once you've confirmed the gate really cleared, and the grind will pick it up." '{body:$b}')" \
+    >/dev/null 2>&1 || true
+}
+
 # do_deferred_tick -- walk the analysis set for deferred-gated tickets; check the
 # first one not yet checked today; on MET drop the hold so the grind claims it.
 # Returns 0 when it checks a ticket (the tick's one piece of work), 1 when nothing
 # is due. A model call, so the cascade places it below the Claude health gate.
 do_deferred_tick() {
-  local repo_line repo issues n body url condition key page model raw verdict evidence
+  local repo_line repo issues n body url condition key page model raw verdict evidence reviewer
   model="${AGENT_MODEL_REVIEW:-${AGENT_MODEL:-}}"
   [ -n "$model" ] || return 1
+  reviewer="${FORGEJO_REVIEWER:-}"
 
   while IFS= read -r repo_line; do
     [ -n "$repo_line" ] || continue
     repo=$(jq -r '.full_name' <<<"$repo_line" 2>/dev/null)
     [ -n "$repo" ] || continue
 
-    issues=$(_fj GET "/repos/${repo}/issues?state=open&type=issues&labels=${DEFERRED_LABEL}&limit=50" 2>/dev/null) || continue
+    issues=$(_fj GET "/repos/${repo}/issues?state=open&type=issues&labels=Status/Blocked&limit=50" 2>/dev/null) || continue
     [ -n "$issues" ] || continue
 
     while IFS= read -r n; do
@@ -128,7 +154,7 @@ do_deferred_tick() {
       url=$(deferred_parse_gate_url "$body")
       condition=$(deferred_parse_gate_condition "$body")
       if [ -z "$url" ] || [ -z "$condition" ]; then
-        log "deferred: ${key} carries ${DEFERRED_LABEL} but has no usable gate block -- skipping"
+        log "deferred: ${key} gate block has no usable url/condition -- skipping"
         continue
       fi
 
@@ -143,12 +169,8 @@ do_deferred_tick() {
       verdict=$(deferred_parse_verdict "$raw")
       if [ "$verdict" = "MET" ]; then
         evidence=$(deferred_parse_evidence "$raw")
-        forgejo_remove_label "$repo" "$n" "$DEFERRED_LABEL" 2>/dev/null \
-          || log "deferred: warning -- could not drop ${DEFERRED_LABEL} on ${key}"
-        _fj POST "/repos/${repo}/issues/${n}/comments" \
-          "$(jq -n --arg b "Gate cleared -- ${evidence:-condition met}. Deferred hold lifted; Agent work can proceed." '{body:$b}')" \
-          >/dev/null 2>&1 || true
-        log "deferred: ${key} gate MET -- dropped ${DEFERRED_LABEL}, the grind can claim it now"
+        deferred_release_to_reviewer "$repo" "$n" "$reviewer" "$evidence"
+        log "deferred: ${key} gate MET -- held for ${reviewer:-reviewer} triage (dropped Status/Blocked + Agent)"
       else
         log "deferred: ${key} gate still UNMET -- re-check tomorrow"
       fi

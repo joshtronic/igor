@@ -3684,12 +3684,13 @@ if do_logwatch_tick; then
 fi
 
 # Deferred-ticket pass: work gated on an external data source. Convention opt-in,
-# no env knob -- an OPEN issue carrying a <!-- gate --> block AND the
-# Status/Deferred label (the grind skips that label, so nothing works it early).
-# Once per ISO day per ticket it fetches the gate's url and asks (tool-free)
-# whether the condition is now met; on MET it drops the hold so the grind claims
-# it. A model call, so below the health gate; fails CLOSED (a flaky check leaves
-# the ticket deferred). See lib/deferred.sh.
+# no env knob -- an OPEN issue carrying a <!-- gate --> block AND the built-in
+# Status/Blocked label (the grind already skips Status/Blocked, so nothing works it
+# early -- no custom label). Once per ISO day per ticket it fetches the gate's url
+# and asks (tool-free) whether the condition is now met; on MET it removes
+# Status/Blocked + the Agent greenlight and assigns the ticket to the reviewer for
+# confirmation (the check can false-positive, so it isn't auto-worked). A model
+# call, so below the health gate; fails CLOSED. See lib/deferred.sh.
 if do_deferred_tick; then
   exit 0
 fi
