@@ -73,8 +73,14 @@ check_readme() {
 }
 
 check_test_signal() {
-  # package.json with a "test" script
-  [ -n "$_RC_PACKAGE_JSON" ] && jq -e '.scripts.test // empty' <<<"$_RC_PACKAGE_JSON" >/dev/null 2>&1 && return 0
+  # package.json with a REAL "test" script -- reject the failing npm default
+  # stub (`echo "Error: no test specified" && exit 1`). The old existence-only
+  # check passed the stub, so a repo looked tested when `npm test` just errors.
+  if [ -n "$_RC_PACKAGE_JSON" ]; then
+    local t
+    t=$(jq -r '.scripts.test // empty' <<<"$_RC_PACKAGE_JSON" 2>/dev/null)
+    [ -n "$t" ] && ! grep -qiF 'no test specified' <<<"$t" && return 0
+  fi
   # pytest config (own file or pyproject section)
   rc_root_has pytest.ini && return 0
   [ -n "$_RC_PYPROJECT" ] && grep -qE '^\[tool\.pytest' <<<"$_RC_PYPROJECT" && return 0
@@ -129,12 +135,23 @@ check_lint_signal() {
 }
 
 check_ci_workflow() {
-  local repo="$1" dir
+  local repo="$1" dir f content
   for dir in .forgejo/workflows .gitea/workflows; do
     # workflow dirs live under a dotdir; skip the listing when that
     # parent isn't even present at the root.
     rc_root_has "${dir%%/*}" || continue
-    forgejo_repo_dir_has_match "$repo" "$dir" '\.ya?ml$' && return 0
+    # A REAL CI workflow must run ON pull_request AND actually verify the
+    # change (a build/test/lint step) -- a deploy-only workflow (push:master +
+    # rsync) doesn't. The old "any .yml exists" check passed deploy-only
+    # workflows, which is how a repo with no CI looked validated (parsley).
+    # Fetch each workflow and require BOTH signals.
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      content=$(forgejo_repo_get_file "$repo" "${dir}/${f}" 2>/dev/null) || continue
+      grep -q 'pull_request' <<<"$content" || continue
+      grep -qiE 'test|lint|build|dry-?run|eleventy|pytest|cargo|go test|npm (ci|run|test)|markdownlint|shellcheck' \
+        <<<"$content" && return 0
+    done < <(forgejo_repo_list_dir "$repo" "$dir" 2>/dev/null | grep -E '\.ya?ml$')
   done
   return 1
 }
