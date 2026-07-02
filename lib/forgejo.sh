@@ -288,17 +288,6 @@ forgejo_pr_has_comment_containing() {
         '[.[] | select(.user.login == $u and (.body | contains($n)))] | length'
 }
 
-# All label names defined on the repo, as a JSON array of strings. One
-# call answers every "does label X exist?" check the validator makes,
-# instead of a GET /labels per name. Empty array on miss.
-# NON-ZERO on API failure, same contract (and reason) as
-# forgejo_repo_list_root above.
-forgejo_list_labels() {
-  local repo="$1" resp
-  resp=$(_fj GET "/repos/${repo}/labels" 2>/dev/null) || return 1
-  jq -c '[.[]?.name]' <<<"$resp" 2>/dev/null || printf '[]'
-}
-
 # Add a label by name. Forgejo's API takes label IDs, so this resolves
 # name -> id with a single API call.
 forgejo_add_label() {
@@ -380,22 +369,9 @@ forgejo_repo_exists() {
 
 # -- File reads (no clone) --------------------------------------
 #
-# These let onboarding validation inspect a repo without cloning it.
-# All take <repo> = "<owner>/<name>".
-
-# Lists the names of entries at the repo root (files + dirs) as a JSON
-# array of strings. One call answers every root-level existence probe
-# the validator makes, instead of a GET /contents/<path> per candidate
-# file. Empty array for a genuinely empty repo; NON-ZERO when the API
-# call itself fails -- "couldn't read the repo" must stay
-# distinguishable from "the repo has no files", or one network hiccup
-# fails every existence check at once (and files a bogus onboarding
-# ticket; see rc_cache_init).
-forgejo_repo_list_root() {
-  local repo="$1" resp
-  resp=$(_fj GET "/repos/${repo}/contents" 2>/dev/null) || return 1
-  jq -c '[.[]?.name]' <<<"$resp" 2>/dev/null || printf '[]'
-}
+# Read a repo's files/dirs over the API without cloning it (used for the
+# per-repo agent.json config and logwatch's systemd/ discovery). All take
+# <repo> = "<owner>/<name>".
 
 # Prints raw file contents on stdout (base64-decoded). NON-ZERO when
 # the API call fails (incl. 404) -- callers gate on the file existing

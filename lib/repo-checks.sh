@@ -1,191 +1,182 @@
 #!/usr/bin/env bash
-# repo-checks.sh -- repo-readiness checks + onboarding ticket lifecycle.
-# Sourced by bin/tick.sh (gates the clone) and bin/validate-repo.sh
-# (operator audit tool). All checks run via the Forgejo API; no clone
-# is required.
+# repo-checks.sh -- repo-readiness checks. Sourced by bin/tick.sh (which
+# decides which repos get agentic WORK) and bin/validate-repo.sh (the
+# operator audit tool).
 #
-# Requires lib/forgejo.sh sourced first.
+# All checks read a LOCAL fetched clone at origin/<default-branch> -- never
+# the working tree, never the Forgejo API. The tick clones every accessible
+# repo up front (ensure_repo_local) and validates that clone. A `git fetch`
+# is atomic: a network blip fails the whole fetch (-> the repo is skipped and
+# retried next tick) instead of making a single file look absent, which is how
+# the old per-file API validation filed bogus "not ready" tickets on healthy
+# repos. Onboarding is now a manual, ~1-minute operator step; a repo that
+# isn't ready is simply skipped for work, silently -- run
+# `bin/validate-repo.sh <repo>` to see what's missing.
+#
+# Requires lib/forgejo.sh sourced first (for repo enumeration in the --all
+# path of validate-repo.sh; the checks themselves are pure git reads).
 
-# Fallback logger so this module is sourceable outside tick.sh. When
-# sourced into tick.sh, bash's dynamic function lookup picks up tick's
-# richer definition at call time.
+# Fallback logger so this module is sourceable outside tick.sh. When sourced
+# into tick.sh, bash's dynamic function lookup picks up tick's richer
+# definition at call time.
 if ! declare -F log >/dev/null; then
   log() { printf '[agent] %s\n' "$*"; }
 fi
 
-# -- Per-repo fetch cache ---------------------------------------
+# -- Local clone reader -----------------------------------------
 #
-# The checks below would otherwise hit the Forgejo API once per
-# candidate file (~25 GETs) and once per required label (4 GETs) per
-# repo per tick. Instead rc_cache_init does ONE root-contents listing
-# and ONE labels listing up front, and the checks consult those in
-# memory. The few files whose CONTENT (not just existence) is inspected
-# are fetched once each, only when present at the root.
-#
-# rc_cache_init <repo> MUST run before any check_* -- it does, at the
-# top of validate_repo_via_api, which is the only entry point.
+# rc_local_init <clone-path> resolves the default-branch ref ONCE; the
+# check_* helpers below read files/dirs from it. Returns non-zero when the
+# clone is missing or its refs are unreadable (the fetch likely failed) --
+# the caller MUST treat that as INDETERMINATE and skip the repo for this tick,
+# never as a check failure.
 
-_RC_ROOT_NAMES=""    # newline-separated names of root entries (files + dirs)
-_RC_LABELS=""        # newline-separated label names
-_RC_PACKAGE_JSON=""  # root files whose content we inspect; fetched once if present
-_RC_PYPROJECT=""
-_RC_MAKEFILE=""
-_RC_CARGO=""
+_RC_REPO_PATH=""   # the initialised clone
+_RC_REF=""         # origin/<default-branch>, e.g. origin/master
 
-# Whole-line fixed-string membership tests against the cached listings.
-rc_root_has()  { grep -qxF "$1" <<<"$_RC_ROOT_NAMES"; }
-rc_has_label() { grep -qxF "$1" <<<"$_RC_LABELS"; }
-
-# Returns non-zero when any underlying API call fails -- the caller
-# must treat that as INDETERMINATE (can't read the repo right now),
-# never as a check failure. Before this distinction existed, one
-# Forgejo hiccup emptied the cache, failed every check at once, and
-# filed a bogus onboarding ticket on a healthy repo -- which then
-# short-circuited validation until a human closed it.
-rc_cache_init() {
-  local repo="$1" root_json labels_json
-  root_json=$(forgejo_repo_list_root "$repo") || return 1
-  labels_json=$(forgejo_list_labels "$repo") || return 1
-  _RC_ROOT_NAMES=$(jq -r '.[]' <<<"$root_json" 2>/dev/null)
-  _RC_LABELS=$(jq -r '.[]' <<<"$labels_json" 2>/dev/null)
-  _RC_PACKAGE_JSON=""; _RC_PYPROJECT=""; _RC_MAKEFILE=""; _RC_CARGO=""
-  if rc_root_has package.json;   then _RC_PACKAGE_JSON=$(forgejo_repo_get_file "$repo" package.json)   || return 1; fi
-  if rc_root_has pyproject.toml; then _RC_PYPROJECT=$(forgejo_repo_get_file "$repo" pyproject.toml)    || return 1; fi
-  if rc_root_has Makefile;       then _RC_MAKEFILE=$(forgejo_repo_get_file "$repo" Makefile)           || return 1; fi
-  if rc_root_has Cargo.toml;     then _RC_CARGO=$(forgejo_repo_get_file "$repo" Cargo.toml)            || return 1; fi
+rc_local_init() {
+  local path="$1" head
+  [ -n "$path" ] && [ -d "$path/.git" ] || return 1
+  _RC_REPO_PATH="$path"
+  # Default branch via origin/HEAD; fall back to master/main if it isn't set
+  # (a fetch-only clone may not carry the symbolic ref).
+  head=$(git -C "$path" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || head=""
+  if [ -z "$head" ]; then
+    if   git -C "$path" rev-parse --verify -q refs/remotes/origin/master >/dev/null 2>&1; then head="origin/master"
+    elif git -C "$path" rev-parse --verify -q refs/remotes/origin/main   >/dev/null 2>&1; then head="origin/main"
+    else return 1; fi
+  fi
+  _RC_REF="$head"
+  git -C "$path" rev-parse --verify -q "$_RC_REF" >/dev/null 2>&1 || return 1
 }
+
+# Read helpers, all scoped to _RC_REF on the initialised clone.
+# rc_file_read / rc_dir_list print empty (never fail) on absence so callers
+# gate on content; rc_file_exists is the boolean existence test.
+rc_file_exists() { git -C "$_RC_REPO_PATH" cat-file -e "${_RC_REF}:$1" 2>/dev/null; }
+rc_file_read()   { git -C "$_RC_REPO_PATH" show     "${_RC_REF}:$1" 2>/dev/null || true; }
+rc_dir_list()    { git -C "$_RC_REPO_PATH" ls-tree --name-only "${_RC_REF}:$1" 2>/dev/null || true; }
 
 # -- Individual checks ------------------------------------------
 #
-# Each returns 0 on pass, non-zero on fail. Pure reads of the per-repo
-# cache (rc_cache_init) -- no logging, no API calls. check_ci_workflow
-# is the one exception: workflow dirs aren't at the root, so it still
-# does a (guarded) directory listing.
+# Each returns 0 on pass, non-zero on fail. Pure reads of the initialised
+# clone -- no logging, no API calls.
 
-check_claude_md() { rc_root_has CLAUDE.md; }
+check_claude_md() { rc_file_exists CLAUDE.md; }
 
 check_readme() {
   local f
   for f in README.md README.rst README.txt README readme.md; do
-    rc_root_has "$f" && return 0
+    rc_file_exists "$f" && return 0
   done
   return 1
 }
 
 check_test_signal() {
   # package.json with a REAL "test" script -- reject the failing npm default
-  # stub (`echo "Error: no test specified" && exit 1`). The old existence-only
-  # check passed the stub, so a repo looked tested when `npm test` just errors.
-  if [ -n "$_RC_PACKAGE_JSON" ]; then
-    local t
-    t=$(jq -r '.scripts.test // empty' <<<"$_RC_PACKAGE_JSON" 2>/dev/null)
+  # stub (`echo "Error: no test specified" && exit 1`), which is a test setup
+  # in name only.
+  local pkg t pyproject makefile
+  pkg=$(rc_file_read package.json)
+  if [ -n "$pkg" ]; then
+    t=$(jq -r '.scripts.test // empty' <<<"$pkg" 2>/dev/null)
     [ -n "$t" ] && ! grep -qiF 'no test specified' <<<"$t" && return 0
   fi
   # pytest config (own file or pyproject section)
-  rc_root_has pytest.ini && return 0
-  [ -n "$_RC_PYPROJECT" ] && grep -qE '^\[tool\.pytest' <<<"$_RC_PYPROJECT" && return 0
+  rc_file_exists pytest.ini && return 0
+  pyproject=$(rc_file_read pyproject.toml)
+  [ -n "$pyproject" ] && grep -qE '^\[tool\.pytest' <<<"$pyproject" && return 0
   # Makefile with a test target
-  [ -n "$_RC_MAKEFILE" ] && grep -qE '^test[[:space:]]*:' <<<"$_RC_MAKEFILE" && return 0
+  makefile=$(rc_file_read Makefile)
+  [ -n "$makefile" ] && grep -qE '^test[[:space:]]*:' <<<"$makefile" && return 0
   # Cargo / Go projects -- test runners are implicit
-  rc_root_has Cargo.toml && return 0
-  rc_root_has go.mod && return 0
+  rc_file_exists Cargo.toml && return 0
+  rc_file_exists go.mod && return 0
   return 1
 }
 
 check_lint_signal() {
-  local f
+  local f pkg pyproject cargo
   # ESLint variants
   for f in .eslintrc.json .eslintrc.js .eslintrc.cjs .eslintrc.yml \
            .eslintrc.yaml .eslintrc eslint.config.js eslint.config.mjs \
            eslint.config.cjs; do
-    rc_root_has "$f" && return 0
+    rc_file_exists "$f" && return 0
   done
-  [ -n "$_RC_PACKAGE_JSON" ] && jq -e '.eslintConfig // empty' <<<"$_RC_PACKAGE_JSON" >/dev/null 2>&1 && return 0
+  pkg=$(rc_file_read package.json)
+  [ -n "$pkg" ] && jq -e '.eslintConfig // empty' <<<"$pkg" >/dev/null 2>&1 && return 0
 
   # Markdownlint
   for f in .markdownlint.json .markdownlint.yaml .markdownlint.yml \
            .markdownlint-cli2.jsonc; do
-    rc_root_has "$f" && return 0
+    rc_file_exists "$f" && return 0
   done
 
   # Stylelint
   for f in .stylelintrc .stylelintrc.json .stylelintrc.js stylelint.config.js; do
-    rc_root_has "$f" && return 0
+    rc_file_exists "$f" && return 0
   done
 
   # Python linters (own file or pyproject section)
   for f in .flake8 .pylintrc; do
-    rc_root_has "$f" && return 0
+    rc_file_exists "$f" && return 0
   done
-  [ -n "$_RC_PYPROJECT" ] && grep -qE '^\[tool\.(ruff|black|flake8|pylint|mypy)' <<<"$_RC_PYPROJECT" && return 0
+  pyproject=$(rc_file_read pyproject.toml)
+  [ -n "$pyproject" ] && grep -qE '^\[tool\.(ruff|black|flake8|pylint|mypy)' <<<"$pyproject" && return 0
 
   # Go
   for f in .golangci.yml .golangci.yaml; do
-    rc_root_has "$f" && return 0
+    rc_file_exists "$f" && return 0
   done
 
   # Rust clippy (own file or Cargo.toml lints section)
-  rc_root_has clippy.toml && return 0
-  [ -n "$_RC_CARGO" ] && grep -qE '^\[lints' <<<"$_RC_CARGO" && return 0
+  rc_file_exists clippy.toml && return 0
+  cargo=$(rc_file_read Cargo.toml)
+  [ -n "$cargo" ] && grep -qE '^\[lints' <<<"$cargo" && return 0
 
   # Shell
-  rc_root_has .shellcheckrc && return 0
+  rc_file_exists .shellcheckrc && return 0
 
   return 1
 }
 
 check_ci_workflow() {
-  local repo="$1" dir f content
+  # A REAL CI workflow must run ON pull_request AND actually verify the change
+  # (a build/test/lint step) -- a deploy-only workflow (push:master + rsync)
+  # doesn't. Read each workflow file and require BOTH signals.
+  local dir f content listing
   for dir in .forgejo/workflows .gitea/workflows; do
-    # workflow dirs live under a dotdir; skip the listing when that
-    # parent isn't even present at the root.
-    rc_root_has "${dir%%/*}" || continue
-    # A REAL CI workflow must run ON pull_request AND actually verify the
-    # change (a build/test/lint step) -- a deploy-only workflow (push:master +
-    # rsync) doesn't. The old "any .yml exists" check passed deploy-only
-    # workflows, which is how a repo with no CI looked validated (parsley).
-    # Fetch each workflow and require BOTH signals.
+    listing=$(rc_dir_list "$dir")
+    [ -n "$listing" ] || continue
     while IFS= read -r f; do
       [ -z "$f" ] && continue
-      content=$(forgejo_repo_get_file "$repo" "${dir}/${f}" 2>/dev/null) || continue
+      [[ "$f" =~ \.ya?ml$ ]] || continue
+      content=$(rc_file_read "${dir}/${f}")
+      [ -n "$content" ] || continue
       grep -q 'pull_request' <<<"$content" || continue
       grep -qiE 'test|lint|build|dry-?run|eleventy|pytest|cargo|go test|npm (ci|run|test)|markdownlint|shellcheck' \
         <<<"$content" && return 0
-    done < <(forgejo_repo_list_dir "$repo" "$dir" 2>/dev/null | grep -E '\.ya?ml$')
+    done <<<"$listing"
   done
   return 1
 }
 
-# Returns 0 if all four labels the agent uses exist on the repo, 1 if any
-# are missing. Prints a comma-separated list of missing labels to
-# stdout (empty on full pass), so the orchestrator can include the
-# specifics in the onboarding ticket.
-check_labels() {
-  local name missing=""
-  for name in "Agent" "Status/Blocked" "Status/Need More Info" "Priority/Critical"; do
-    if ! rc_has_label "$name"; then
-      missing="${missing:+$missing, }\`$name\`"
-    fi
-  done
-  printf '%s' "$missing"
-  [ -z "$missing" ]
-}
-
 # -- Main validator ---------------------------------------------
 #
-# Runs all checks, prints a markdown checklist to stdout. Returns:
-#   0 -- every required check passed
-#   1 -- one or more checks definitively FAILED (file/reopen the
-#        onboarding ticket; the repo really is missing scaffolding)
-#   2 -- INDETERMINATE: the Forgejo API errored while reading the
-#        repo, so no check result is trustworthy. Do NOT file a
-#        ticket; skip the repo for work this tick and re-check next
-#        tick (failures are never cached).
-# The checklist is safe to drop straight into an issue body.
-
-validate_repo_via_api() {
-  local repo="$1"
-  local fail=0
+# validate_repo_local <repo-label> <clone-path>
+#
+# Runs all checks against the fetched clone and prints a markdown checklist
+# (safe to drop into an issue body or print for the operator). Returns:
+#   0 -- every required check passed; the repo is ready for agentic WORK
+#   1 -- one or more checks FAILED; the repo genuinely lacks scaffolding and
+#        is skipped for work this tick, SILENTLY (no ticket is filed --
+#        onboarding is a manual operator step)
+#   2 -- INDETERMINATE: the clone is missing or its refs are unreadable (the
+#        fetch likely failed), so no check actually ran -- skip and retry.
+#
+# <repo-label> is only for the checklist header; every read is local.
+validate_repo_local() {
+  local repo="$1" path="$2" fail=0
 
   _emit() {
     # _emit <status> <name> <hint>
@@ -197,8 +188,8 @@ validate_repo_via_api() {
     fi
   }
 
-  if ! rc_cache_init "$repo"; then
-    printf 'validation indeterminate: the Forgejo API errored while reading the repo -- no check was actually evaluated\n'
+  if ! rc_local_init "$path"; then
+    printf 'validation indeterminate: no readable clone at %s -- the fetch may have failed; skipping this tick\n' "$path"
     return 2
   fi
 
@@ -218,357 +209,9 @@ validate_repo_via_api() {
   _emit $? "Lint setup detected" \
     "add a linter config: \`.eslintrc*\`, \`.markdownlint*\`, \`.stylelintrc*\`, \`.flake8\`, \`[tool.ruff]\` in pyproject.toml, \`.golangci.yml\`, Cargo \`[lints]\`, \`.shellcheckrc\`"
 
-  check_ci_workflow "$repo"
+  check_ci_workflow
   _emit $? "CI workflow present" \
-    "add a Forgejo Actions workflow at \`.forgejo/workflows/<name>.yml\` that runs lint + tests"
-
-  local labels_missing
-  labels_missing=$(check_labels)
-  if [ -z "$labels_missing" ]; then
-    _emit 0 "Required labels present (Agent, Status/Blocked, Status/Need More Info, Priority/Critical)" ""
-  else
-    _emit 1 "Required labels present" \
-      "create missing label(s): ${labels_missing} -- the Status/* and Priority/* labels come from Forgejo's Advanced label template (Settings -> Labels -> load template); the \`Agent\` label is custom"
-  fi
+    "add a Forgejo Actions workflow at \`.forgejo/workflows/<name>.yml\` that runs on \`pull_request\` and executes lint + tests"
 
   [ "$fail" -eq 0 ]
-}
-
-# -- Onboarding ticket lifecycle --------------------------------
-#
-# Filed when a repo fails validation, closed by the human when fixed,
-# reopened on re-validation failure. The marker keeps it auto-
-# discoverable across ticks without needing a title prefix.
-
-ONBOARDING_MARKER='<!-- agent:onboarding -->'
-
-# -- Auto-scaffold agent-authorable gaps (igor#304) -------------
-#
-# When a repo fails onboarding on gaps the AGENT can author -- CLAUDE.md,
-# a package.json "test" script, a lint config, and the CI workflow that
-# runs them -- open a scaffold PR instead of dumping the whole setup on
-# the human. Additive and fully GUARDED: unrecognized stack or any API
-# failure returns empty and handle_onboarding_failure falls through to
-# the plain ticket, so worst case is exactly the pre-#304 behavior. CI
-# (.forgejo/workflows/validate.yml) is scaffolded now that the workflow
-# ban is lifted (igor#315/#318), so a recognized stack onboards with no
-# human residual; README + labels aren't auto-scaffolded.
-
-SCAFFOLD_BRANCH='agent-scaffold'
-
-# scaffold_parse_gaps <report> -- echo the agent-authorable gaps still OPEN
-# in the checklist, one per line, from {claude_md,test,lint,ci}. Reads the
-# '- [ ] <name> -- ...' failure lines validate_repo_via_api emits. Pure.
-# (`ci` became agent-authorable once the workflow ban was lifted, igor#315/#318.)
-scaffold_parse_gaps() {
-  local report="$1"
-  grep -q '^- \[ \] CLAUDE\.md present'  <<<"$report" && printf 'claude_md\n'
-  grep -q '^- \[ \] Test setup detected' <<<"$report" && printf 'test\n'
-  grep -q '^- \[ \] Lint setup detected' <<<"$report" && printf 'lint\n'
-  grep -q '^- \[ \] CI workflow present' <<<"$report" && printf 'ci\n'
-  return 0
-}
-
-# scaffold_detect_stack <package_json> -- echo the recognized stack or empty.
-# v1: 'eleventy' when package.json names eleventy in (dev)dependencies or an
-# npm script. Empty -> caller bails to ticket-only. Pure.
-scaffold_detect_stack() {
-  local pkg="$1"
-  [ -n "$pkg" ] || return 0
-  if jq -e '((.dependencies // {}) + (.devDependencies // {})) | keys | any(test("eleventy|11ty"))' <<<"$pkg" >/dev/null 2>&1 \
-     || jq -e '(.scripts // {}) | to_entries | any(.value | test("eleventy|11ty"))' <<<"$pkg" >/dev/null 2>&1; then
-    printf 'eleventy\n'
-  fi
-  return 0
-}
-
-# scaffold_test_script <stack> -- echo the package.json "test" script value.
-# 11ty: a clean dry-run build is the gate. Pure.
-scaffold_test_script() {
-  case "$1" in
-    eleventy) printf 'npx @11ty/eleventy --dryrun' ;;
-    *) return 0 ;;
-  esac
-}
-
-# scaffold_validate_yml <stack> <default_branch> <install_cmd> -- echo a CI
-# workflow that runs the build/test on every PR (and on push to the default
-# branch). This is what makes a scaffolded repo GENUINELY validate: the
-# hardened check_ci_workflow requires a PR-triggered build/test/lint job, not
-# just any .yml. `pull_request:` carries no branch filter so it fires on PRs
-# regardless of whether the default is master/main. Adding CI became possible
-# once the workflow ban was lifted (igor#315/#318). Pure.
-scaffold_validate_yml() {
-  local stack="$1" branch="$2" install="$3"
-  case "$stack" in
-    eleventy)
-      cat <<EOF
-name: Validate
-
-on:
-  pull_request:
-  push:
-    branches:
-      - ${branch}
-
-jobs:
-  validate:
-    runs-on: docker
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '24'
-
-      - name: Install dependencies
-        run: ${install}
-
-      - name: Build & test
-        run: npm test
-EOF
-      ;;
-    *) return 0 ;;
-  esac
-}
-
-# scaffold_markdownlint -- echo a lenient .markdownlint.json. Pure.
-scaffold_markdownlint() {
-  cat <<'JSON'
-{
-  "default": true,
-  "MD013": false,
-  "MD033": false,
-  "MD041": false
-}
-JSON
-}
-
-# scaffold_claude_md <repo> <package_json> -- echo a templated CLAUDE.md from
-# package.json (name/description). Deterministic v1. Pure. (Backtick-bearing
-# body is a quoted heredoc; the dynamic header is printf'd so no command
-# substitution fires.)
-scaffold_claude_md() {
-  local repo="$1" pkg="$2" name desc
-  name=$(jq -r '.name // empty' <<<"$pkg" 2>/dev/null); [ -n "$name" ] || name="${repo##*/}"
-  desc=$(jq -r '.description // empty' <<<"$pkg" 2>/dev/null); [ -n "$desc" ] || desc="Static site built with Eleventy."
-  printf '# %s\n\n%s\n\n' "$name" "$desc"
-  cat <<'EOF'
-## Build & test
-
-```sh
-npm ci
-npm run build   # if defined
-npm test        # a clean Eleventy dry-run build is the gate
-```
-
-## Conventions
-
-- Eleventy input lives under `src/`; the build writes `_site/` (generated -- don't edit by hand).
-- Keep changes small and scoped; everything ships via a reviewed PR to the default branch.
-- Markdown is linted (`.markdownlint.json`); long prose lines are fine (MD013 off).
-
-## Off-limits
-
-- Secrets, `.env`, and the live deploy host.
-- Never weaken a CI workflow's checks or the review/merge gates.
-
-_Scaffolded by the agent (igor#304); refine as the project grows._
-EOF
-}
-
-# scaffold_pr_body <newline-separated-gaps> -- echo the scaffold PR body. Pure.
-scaffold_pr_body() {
-  local gaps="$1"
-  printf '## What this PR does\n\n'
-  printf -- '- [x] chore: scaffold agent-authorable repo setup so the repo can validate\n\n'
-  printf 'The onboarding checks flagged setup the **agent** can author. Added:\n\n'
-  grep -qx claude_md <<<"$gaps" && printf -- '- `CLAUDE.md` -- project orientation for the agent\n'
-  grep -qx lint      <<<"$gaps" && printf -- '- `.markdownlint.json` -- lenient markdown lint config\n'
-  grep -qx test      <<<"$gaps" && printf -- '- `package.json` `test` script -- a clean Eleventy dry-run build\n'
-  grep -qx ci        <<<"$gaps" && printf -- '- `.forgejo/workflows/validate.yml` -- CI that runs the build/test on every PR\n'
-  printf '\nMerging this completes onboarding -- the next tick re-validates. No human scaffolding needed.\n\n'
-  printf '## Test plan\n\n'
-  grep -qx ci   <<<"$gaps" && printf -- '- [x] The scaffolded `.forgejo/workflows/validate.yml` runs `npm test` (Eleventy dry-run) on every PR\n'
-  grep -qx test <<<"$gaps" && printf -- '- [x] `npm test` is a clean Eleventy dry-run build (the validation gate)\n'
-  printf -- '- [ ] Reviewer: merge, then the repo validates on the next tick\n'
-}
-
-# _scaffold_put <repo> <path> <content> <sha> -- PUT a file onto the scaffold
-# branch (create when sha empty, update when set). Impure.
-_scaffold_put() {
-  local repo="$1" path="$2" content="$3" sha="$4" b64 body method
-  b64=$(printf '%s' "$content" | base64 -w0) || return 1
-  # Forgejo's contents API: POST creates a new file, PUT updates an existing
-  # one (and requires its blob sha). Using PUT to CREATE returns 422
-  # "[SHA]: Required" -- which is why scaffolding a repo that needs CLAUDE.md
-  # or a lint config (a create) failed, while a package.json test-script bump
-  # (an update, with sha) succeeded. igor#304 follow-up.
-  if [ -n "$sha" ]; then
-    method=PUT
-    body=$(jq -n --arg m "chore: scaffold ${path} (igor#304)" --arg c "$b64" --arg s "$sha" --arg br "$SCAFFOLD_BRANCH" \
-      '{message:$m, content:$c, sha:$s, branch:$br}')
-  else
-    method=POST
-    body=$(jq -n --arg m "chore: scaffold ${path} (igor#304)" --arg c "$b64" --arg br "$SCAFFOLD_BRANCH" \
-      '{message:$m, content:$c, branch:$br}')
-  fi
-  _fj "$method" "/repos/${repo}/contents/${path}" "$body" >/dev/null
-}
-
-# scaffold_try_open_pr <repo> <report> -- open (or reuse) the scaffold PR for
-# the agent-authorable gaps. Echoes the PR number on success, empty on any
-# reason to fall through (no agent-doable gaps, unrecognized stack, a
-# mid-scaffold branch already present, or any API failure). Impure + guarded;
-# idempotent (an already-open scaffold PR is reused, never duplicated).
-scaffold_try_open_pr() {
-  local repo="$1" report="$2"
-  local gaps stack pkg base existing wrote=0
-
-  gaps=$(scaffold_parse_gaps "$report")
-  [ -n "$gaps" ] || return 0
-
-  pkg=$(forgejo_repo_get_file "$repo" package.json 2>/dev/null) || pkg=""
-  stack=$(scaffold_detect_stack "$pkg")
-  [ -n "$stack" ] || return 0
-
-  # Idempotency: reuse an already-open scaffold PR.
-  existing=$(forgejo_find_pr_by_head "$repo" "$SCAFFOLD_BRANCH" 2>/dev/null || true)
-  if [ -n "$existing" ]; then printf '%s' "$existing"; return 0; fi
-  # A leftover scaffold branch with no open PR (crash mid-scaffold) -- don't
-  # recreate it; skip to ticket-only this tick.
-  if _fj GET "/repos/${repo}/branches/${SCAFFOLD_BRANCH}" >/dev/null 2>&1; then
-    return 0
-  fi
-
-  base=$(_fj GET "/repos/${repo}" 2>/dev/null | jq -r '.default_branch // "master"') || base="master"
-  [ -n "$base" ] || base="master"
-
-  # Create the scaffold branch off the default branch, then PUT each file
-  # onto it (uniform branch target -- no first-PUT special-casing).
-  _fj POST "/repos/${repo}/branches" \
-    "$(jq -n --arg n "$SCAFFOLD_BRANCH" --arg o "$base" '{new_branch_name:$n, old_ref_name:$o}')" >/dev/null 2>&1 || return 0
-
-  if grep -qx claude_md <<<"$gaps"; then
-    _scaffold_put "$repo" "CLAUDE.md" "$(scaffold_claude_md "$repo" "$pkg")" "" && wrote=1
-  fi
-  if grep -qx lint <<<"$gaps"; then
-    _scaffold_put "$repo" ".markdownlint.json" "$(scaffold_markdownlint)" "" && wrote=1
-  fi
-  if grep -qx test <<<"$gaps"; then
-    local ts newpkg pkgsha
-    ts=$(scaffold_test_script "$stack")
-    newpkg=$(jq --arg t "$ts" '.scripts = ((.scripts // {}) + {test: $t})' <<<"$pkg" 2>/dev/null) || newpkg=""
-    pkgsha=$(_fj GET "/repos/${repo}/contents/package.json?ref=${SCAFFOLD_BRANCH}" 2>/dev/null | jq -r '.sha // empty')
-    if [ -n "$ts" ] && [ -n "$newpkg" ] && [ -n "$pkgsha" ]; then
-      _scaffold_put "$repo" "package.json" "$newpkg" "$pkgsha" && wrote=1
-    fi
-  fi
-  if grep -qx ci <<<"$gaps"; then
-    local install="npm install"
-    # npm ci is deterministic but needs a committed lockfile; fall back to
-    # npm install for repos without one.
-    _fj GET "/repos/${repo}/contents/package-lock.json?ref=${SCAFFOLD_BRANCH}" >/dev/null 2>&1 && install="npm ci"
-    _scaffold_put "$repo" ".forgejo/workflows/validate.yml" \
-      "$(scaffold_validate_yml "$stack" "$base" "$install")" "" && wrote=1
-  fi
-
-  [ "$wrote" -eq 1 ] || return 0
-
-  # Open UNASSIGNED: the repo is unvalidated, so the shadow-review tick
-  # skips it -- surfacing rides on the onboarding ticket (assigned to the
-  # reviewer) which links this PR, rather than a review request here.
-  local prnum
-  prnum=$(forgejo_open_pr "$repo" "$SCAFFOLD_BRANCH" "$base" \
-    "chore: scaffold agent-authorable repo setup (igor#304)" \
-    "$(scaffold_pr_body "$gaps")" 2>/dev/null) || return 0
-  printf '%s' "$prnum"
-}
-
-# handle_onboarding_failure <repo> <bot-user> <markdown-report>
-#
-# Idempotent: existing open ticket -> silent skip; existing closed
-# ticket and still failing -> reopen with updated checklist; nothing
-# -> file fresh.
-handle_onboarding_failure() {
-  local repo="$1" bot="$2" report="$3"
-
-  # igor#304: try to auto-scaffold the agent-authorable gaps first. On
-  # success the ticket points the human at the PR whose merge completes
-  # onboarding; on any failure scaffold_pr is empty and we file the full
-  # ticket as before.
-  local scaffold_pr=""
-  scaffold_pr=$(scaffold_try_open_pr "$repo" "$report" 2>/dev/null) || scaffold_pr=""
-  [ -n "$scaffold_pr" ] && log "onboarding: scaffold PR #${scaffold_pr} open on $repo (agent-authorable gaps)"
-
-  local body
-  if [ -n "$scaffold_pr" ]; then
-    body=$(cat <<EOF
-${ONBOARDING_MARKER}
-
-The agent scaffolded the setup it can author in **PR #${scaffold_pr}** (CLAUDE.md /
-test / lint / CI, as applicable). Review and merge it -- for a recognized stack that
-completes onboarding and the next tick validates. Anything the scaffold could not
-author (README, required labels, or an unrecognized stack) remains in the checklist:
-
-${report}
-
-Once the checklist is clear, close this ticket -- the next tick re-validates and
-either proceeds or reopens with what's still missing.
-
-This ticket is auto-managed by the agent. Do not edit the title or remove the
-HTML comment marker at the top of the body.
-EOF
-)
-  else
-    body=$(cat <<EOF
-${ONBOARDING_MARKER}
-
-The agent refuses to clone this repo until it has the scaffolding to support
-unattended work. Required checks:
-
-${report}
-
-Bring the repo to standard, then close this ticket -- the next tick will
-re-validate and either proceed or reopen this with what's still missing.
-
-This ticket is auto-managed by the agent. Do not edit the title or remove the
-HTML comment marker at the top of the body.
-EOF
-)
-  fi
-
-  local existing num state
-  existing=$(forgejo_find_marked_issue "$repo" "$bot" "$ONBOARDING_MARKER")
-
-  if [ -z "$existing" ] || [ "$existing" = "null" ] || [ "$existing" = "empty" ]; then
-    log "onboarding: filing fresh ticket on $repo"
-    num=$(forgejo_open_issue "$repo" "Repo not ready for the agent: missing scaffolding" "$body")
-    forgejo_add_label "$repo" "$num" "Status/Need More Info" 2>/dev/null \
-      || log "warning: could not apply 'Status/Need More Info' on $repo (label missing?)"
-    forgejo_add_label "$repo" "$num" "Priority/Critical" 2>/dev/null \
-      || log "warning: could not apply 'Priority/Critical' on $repo (label missing?)"
-    # Onboarding is a human ticket -- the repo needs scaffolding only the operator
-    # can add -- so assign the reviewer to surface it in their queue.
-    forgejo_assign "$repo" "$num" "$FORGEJO_REVIEWER" 2>/dev/null \
-      || log "warning: could not assign onboarding ticket on $repo to $FORGEJO_REVIEWER"
-    return
-  fi
-
-  num=$(jq -r '.number' <<<"$existing")
-  state=$(jq -r '.state' <<<"$existing")
-
-  if [ "$state" = "open" ]; then
-    log "onboarding: existing open ticket #${num} on $repo, skipping silently"
-    return
-  fi
-
-  log "onboarding: re-validation failed on $repo, reopening #${num}"
-  forgejo_comment "$repo" "$num" \
-"Re-validation still failing. Updated checklist:
-
-${report}"
-  forgejo_reopen_issue "$repo" "$num"
 }

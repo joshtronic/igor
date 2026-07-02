@@ -11,20 +11,22 @@ A timer fires `bin/tick.sh`. Per tick:
    previous interrupted run gets a "previous tick was interrupted --
    re-queueing" comment and is unassigned. Nothing slips through a
    midnight crash.
-4. **Validation sweep.** Every bot-accessible repo runs through
-   onboarding validation via the Forgejo API. A PASS is cached for
-   `VALIDATION_COOLDOWN_SECS` (15 min) so the full ~6-call check
-   doesn't re-run every tick at the 1-minute cadence; failures
-   re-check every tick. Repos
-   that fail get an auto-filed `Status/Need More Info` ticket
-   (or a reopen on the existing one) and are excluded from this
-   tick's **work** -- no PR review, no issue pickup. Validation
-   gates work, not analysis: the read-only weekly security/dep
-   audit still runs on a failed repo (it only files an issue, never
-   commits). The validated set is what the work steps iterate over.
-   Local clones are NOT purged on failure; when the human closes
-   the onboarding ticket and validation passes again, the clone is
-   still there.
+4. **Validation sweep.** Every bot-accessible repo is cloned (or its
+   existing clone fetched) and validated against that LOCAL clone --
+   zero per-file API calls. Cloning is gated on ACCESS, not on
+   validation. A `git fetch` is atomic, so a network blip fails the
+   whole fetch (the repo is skipped and retried next tick) instead of
+   making one file look absent. A PASS is cached for
+   `VALIDATION_COOLDOWN_SECS` (15 min) so the check doesn't re-run
+   every tick at the 1-minute cadence; a not-ready or indeterminate
+   repo re-checks every tick. A repo that fails validation is simply
+   skipped for this tick's **work** (no PR review, no issue pickup),
+   SILENTLY -- no ticket is filed. Onboarding is a manual operator
+   step; run `bin/validate-repo.sh <repo>` to see a failing repo's
+   checklist. Validation gates work, not analysis: the read-only
+   weekly security/dep audit still runs on a not-ready repo (it only
+   files an issue, never commits). The validated set is what the work
+   steps iterate over.
 5. **PR-review pickup.** Scan validated repos for open bot PRs
    where the latest non-bot review on the current HEAD is
    `REQUEST_CHANGES`, or for PRs reassigned back to the bot.
@@ -162,9 +164,9 @@ unattended issue/PR work actually needs.
 
 Two labels carry the state machine for agent-work tickets.
 `Status/Blocked` comes from Forgejo's Advanced label template;
-`Agent` is custom (created per-repo). Onboarding-failure tickets
-also use `Status/Need More Info` and `Priority/Critical`, both from
-the Advanced template. See
+`Agent` is custom (created per-repo). The agent also uses
+`Status/Need More Info` and `Priority/Critical` (both from the
+Advanced template) for questions and triage tickets. See
 [onboarding-a-repo.md](onboarding-a-repo.md) for how to set them up.
 
 | State               | Labels                     | Assignee  | Open?  |
@@ -184,8 +186,9 @@ Useful queries:
 - In flight: `is:open label:Agent assignee:<bot user>`
 - Stuck: `is:open label:Status/Blocked`
 
-The agent also files `Status/Need More Info` + `Priority/Critical`
-tickets for repos that fail onboarding validation. See
+Onboarding a repo (its labels + readiness files) is a manual step; a
+repo that isn't ready is simply skipped for work, silently -- no
+ticket. Run `bin/validate-repo.sh <repo>` to see what's missing. See
 [onboarding-a-repo.md](onboarding-a-repo.md).
 
 ## Pieces
@@ -214,7 +217,7 @@ bin/
 lib/
 |-- forgejo.sh               # Forgejo API helpers
 |-- cost.sh                  # Anthropic cost ledger (CLI + raw API)
-|-- repo-checks.sh           # repo-readiness checks + onboarding ticket lifecycle
+|-- repo-checks.sh           # repo-readiness checks (local-clone reads)
 |-- maintenance-checks.sh    # stack detection + audit tool dispatch
 |-- gsc.sh                   # Google Search Console API client (SEO, opt-in)
 |-- email.sh                 # SMTP2GO HTTP API sender (shared: SEO, sports, CEO)

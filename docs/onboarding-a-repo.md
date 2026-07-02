@@ -25,12 +25,13 @@ There is no per-project config. To put a repo under the agent's care:
 4. Optionally, run `bin/validate-repo.sh <owner>/<name>` from your agent
    install to confirm the readiness bar before the first tick.
 
-That's it. Every tick re-validates every bot-accessible repo via the
-Forgejo API. If any checks fail, the agent files a `Status/Need More Info`
-ticket listing what's missing and excludes the repo from this tick's
-work -- no maintenance, no PR review, no issue pickup. Fix the gaps,
-close the ticket, and the next tick re-validates and resumes (or reopens
-the ticket with what's still wrong).
+That's it. Every tick clones (or fetches) every bot-accessible repo and
+re-validates it against that local clone -- zero per-file API calls. If
+any check fails, the agent skips the repo for this tick's WORK (no PR
+review, no issue pickup, no dependency-bump PRs) -- SILENTLY; it does
+not file a ticket. The read-only weekly audit still runs. Fix the gaps
+and the next tick re-validates and resumes automatically. Run
+`bin/validate-repo.sh <owner>/<name>` any time to see what's missing.
 
 The weekly maintenance pass (dep freshness + security audit) is
 generic and runs automatically -- the harness detects the stack
