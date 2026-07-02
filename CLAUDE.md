@@ -101,18 +101,26 @@ respective tools on the host; install or skip.
   (Changing the timer interval or any `systemd/` unit needs a
   `systemctl --user daemon-reload` + `restart agent.timer` on the
   host; the self-pull updates the file but does not reload systemd.)
-- Validation runs every tick against every bot-accessible repo.
-  Repos with an open onboarding ticket short-circuit the full
-  check; closing the ticket re-enables it. Validation gates only
-  WORK (issue pickup, PR pushes, site-work) -- the read-only weekly
-  analysis pass (security/dep audit) runs on every bot-accessible
-  repo regardless of validation, since the audit itself only files
-  tickets and never commits. `ANALYSIS_REPOS_JSON` is the analysis
-  set; `VALIDATED_REPOS_JSON` is the work set. Validation is also what
-  proves a repo has tests + CI: `check_test_signal` AND
-  `check_ci_workflow` are both REQUIRED to pass, so "validated" is a
-  reliable stand-in for "a dependency bump here can be CI-verified" --
-  which is exactly the gate the maintenance pass uses to decide
+- Validation runs every tick against every bot-accessible repo. Each
+  repo is CLONED (or its clone fetched) and validated against that
+  LOCAL clone -- zero per-file API calls (`validate_repo_local` reads
+  `origin/<default-branch>` via `git show`/`cat-file`/`ls-tree`).
+  Cloning is gated on ACCESS, not validation, and a `git fetch` is
+  atomic, so a network blip fails the whole fetch (-> skip + retry next
+  tick) instead of making one file look absent and filing a bogus
+  ticket -- the old per-file API validation's failure mode (it once
+  clapped a healthy repo back to "not ready" on a network blip). A repo
+  that fails validation is simply skipped for WORK, SILENTLY -- NO
+  ticket; onboarding is a manual operator step (`bin/validate-repo.sh
+  <repo>` prints the checklist). Validation gates only WORK (issue
+  pickup, PR pushes, site-work) -- the read-only weekly analysis pass
+  (security/dep audit) runs on every bot-accessible repo regardless,
+  since the audit only files tickets and never commits.
+  `ANALYSIS_REPOS_JSON` is the analysis set; `VALIDATED_REPOS_JSON` is
+  the work set. Validation is also what proves a repo has tests + CI:
+  `check_test_signal` AND `check_ci_workflow` both REQUIRED, so
+  "validated" is a reliable stand-in for "a dependency bump here can be
+  CI-verified" -- exactly the gate the maintenance pass uses to decide
   PR-vs-issue (next bullet).
 - The maintenance pass (`do_maintenance_tick` ->
   `do_maintenance_for_repo`, weekly, one ISO-week stamp per repo under
@@ -121,7 +129,7 @@ respective tools on the host; install or skip.
   findings, ONE `claude_call` on `AGENT_MODEL_REVIEW` CLASSIFIES (never
   fixes) into lanes and the harness files up to four DEDUPED tickets,
   each keyed by an HTML-comment marker (skip-if-open dedup, like the
-  SEO/onboarding tickets -- a repo is audited at most once per ISO
+  SEO tickets -- a repo is audited at most once per ISO
   week, so the guard is just last week's ticket still being open):
   `maint-security` + `maint-bumps` are **Agent-labeled, unassigned**
   work tickets that the normal claimable grind turns into a reviewed PR
@@ -245,9 +253,9 @@ respective tools on the host; install or skip.
   assignment is the turn marker (issue-type recovery and pull-type
   pickup don't collide). Patch-id dedup: a head that is only a
   base-merge (same net diff) is recorded as seen but NOT re-reviewed.
-  Runs on the VALIDATED set: unvalidated repos (including onboarding-
-  open repos) are skipped -- a verdict there can never graduate to a
-  merge signal, so it's just bot footprint on a not-ready repo.
+  Runs on the VALIDATED set: unvalidated repos (not ready for work) are
+  skipped -- a verdict there can never graduate to a merge signal, so
+  it's just bot footprint on a not-ready repo.
   Per-SHA dedup under `.review` in `discretionary-state.json`; the
   per-sha comment marker (`<!-- review sha=... -->`) is the crash-safety
   net against a duplicate post on a crash-between-post-and-record. The

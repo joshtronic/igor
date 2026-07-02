@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# validate-repo.sh -- audit a Forgejo repo for the agent readiness without
-# cloning it. Prints a markdown checklist; exits 0 if all checks pass,
-# 1 if any fail. Use this to spot-check before adding a repo, or to
-# debug an auto-filed onboarding ticket.
+# validate-repo.sh -- audit a Forgejo repo for agent readiness. Clones the
+# repo to a temp dir and runs the same LOCAL checks the tick uses
+# (lib/repo-checks.sh), then prints a markdown checklist. Exits 0 if all
+# checks pass, 1 if any fail. Use this to spot-check before adding a repo,
+# or to see why a repo the bot can reach isn't being worked.
 #
 # Usage:
 #   validate-repo.sh <owner>/<name>          # check one repo
@@ -29,11 +30,29 @@ if [ $# -ne 1 ]; then
   exit 2
 fi
 
-audit_one() {
+# Same SSH clone URL the harness uses (bin/tick.sh:ssh_clone_url).
+ssh_clone_url() {
   local repo="$1"
+  if [[ "${FORGEJO_HOST:-}" == *:* ]]; then
+    echo "ssh://git@${FORGEJO_HOST}/${repo}.git"
+  else
+    echo "git@${FORGEJO_HOST}:${repo}.git"
+  fi
+}
+
+audit_one() {
+  local repo="$1" tmp status
   printf '== %s ==\n' "$repo"
-  validate_repo_via_api "$repo"
-  local status=$?
+  tmp=$(mktemp -d) || { echo "mktemp failed" >&2; return 2; }
+  # Shallow clone of the default branch is all the checks read.
+  if ! git clone --quiet --depth 1 "$(ssh_clone_url "$repo")" "$tmp" 2>/dev/null; then
+    printf 'could not clone %s -- check bot access\n\n' "$repo"
+    rm -rf "$tmp"
+    return 2
+  fi
+  validate_repo_local "$repo" "$tmp"
+  status=$?
+  rm -rf "$tmp"
   echo
   return $status
 }

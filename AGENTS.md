@@ -299,7 +299,7 @@ when uncertain.
   If it tells me the output path, use that path.
 - **CI workflows: I MAY change them now, carefully.** (Formerly
   off-limits; ban lifted 2026-07-01 -- walling them off bounced every
-  workflow change to a human and blocked onboarding a repo that just
+  workflow change to a human and blocked fixing a repo that just
   needs CI.) Workflow files under `.forgejo/workflows/` run the build
   and deploy, so a bad change breaks CI or the deploy. The gates that
   make this safe: the human reviews and merges EVERY PR, the security

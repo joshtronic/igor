@@ -531,9 +531,9 @@ Rules:
 # abandon (don't push) when this returns non-empty.
 list_offlimits_violations() {
   # WORKFLOW BAN LIFTED (2026-07-01, Josh's call). The agent may now touch
-  # `.forgejo/workflows/` -- so onboarding can add CI and the agent can
-  # maintain workflows, instead of bouncing every workflow change to a human
-  # ticket. What still guards it: the security_gate reviews every diff before
+  # `.forgejo/workflows/` -- so the agent can maintain CI workflows instead
+  # of bouncing every workflow change to a human ticket. What still guards
+  # it: the security_gate reviews every diff before
   # it ships, the human reviews and merges every PR, and the secret-bearing
   # deploy workflow runs on `push: master` only (never on a PR), so a
   # workflow change can't run with secrets before the human's merge gates it.
@@ -1043,9 +1043,9 @@ worker_effort() {
 # many repos that's a lot of redundant API calls re-proving the same
 # repos pass. Cache the PASS result for a cooldown window so
 # validation effectively runs ~once per window per repo regardless of
-# tick frequency. Failures are NOT cached -- they fall through to the
-# onboarding flow every tick for fast recovery once the human fixes
-# the repo. Stored as epoch seconds under a "validation" object.
+# tick frequency. Failures are NOT cached -- a not-ready repo re-checks
+# every tick, so it starts getting worked the moment the operator fixes
+# it. Stored as epoch seconds under a "validation" object.
 VALIDATION_COOLDOWN_SECS="${VALIDATION_COOLDOWN_SECS:-900}"  # 15 min
 
 validation_mark_ok() {
@@ -1130,10 +1130,10 @@ POST_MAX_ATTEMPTS="${POST_MAX_ATTEMPTS:-8}"
 # gate. Resilient to Monday-tick failures and to new repos added
 # mid-week.
 #
-# Deliberately does NOT skip repos that failed validation or carry an
-# open onboarding ticket. The maintenance audit is read-only -- it only
-# files an issue, never commits -- so a not-yet-onboarded repo still
-# gets its dependencies audited (matching the ANALYSIS_REPOS_JSON set
+# Deliberately does NOT skip repos that failed validation (aren't ready
+# for work). The maintenance audit is read-only -- it only files an
+# issue, never commits -- so a not-ready repo still gets its
+# dependencies audited (matching the ANALYSIS_REPOS_JSON set
 # do_maintenance_tick loops). Validation gates WORK pickup, not this.
 maintenance_eligible() {
   local repo="$1" last last_week this_week
@@ -1153,8 +1153,8 @@ maintenance_eligible() {
 # ANALYSIS set (ANALYSIS_REPOS_JSON), NOT the validated WORK set.
 # Analysis is read-only (it files tickets, never commits), so it is
 # deliberately decoupled from validation: a repo that fails validation
-# -- or carries an open onboarding ticket -- still gets its
-# dependencies audited. The two-tier split lives one level down, in
+# (isn't ready for work) still gets its dependencies audited. The
+# two-tier split lives one level down, in
 # do_maintenance_for_repo: a finding becomes an Agent-labeled bump
 # ticket (-> reviewed PR via the work flow) ONLY on a validated repo;
 # otherwise it's a human triage ticket. So audit reach ignores
@@ -1198,8 +1198,8 @@ do_maintenance_tick() {
 # -- Maintenance issue routing -----------------------------------
 #
 # The audit fans its results out to up to four DEDUPED tickets, each
-# keyed by an HTML-comment marker (same mechanism as the onboarding +
-# SEO tickets). Dedup is skip-if-open: a repo is audited at most once
+# keyed by an HTML-comment marker (same mechanism as the SEO
+# tickets). Dedup is skip-if-open: a repo is audited at most once
 # per ISO week (maintenance_eligible), so the only thing to guard is
 # last week's ticket still being open -- we don't stack a second one.
 #
@@ -1217,7 +1217,7 @@ MAINT_TRIAGE_MARKER="<!-- agent:maint-triage -->"      # human: majors + judgmen
 MAINT_TOOLING_MARKER="<!-- agent:maint-tooling -->"    # human: an audit tool could not run
 
 # True if <repo> is in the validated WORK set (has tests + CI per
-# validate_repo_via_api). VALIDATED_REPOS_JSON is the newline-delimited
+# validate_repo_local). VALIDATED_REPOS_JSON is the newline-delimited
 # repo set the per-tick validation sweep builds before the cascade runs.
 maintenance_repo_validated() {
   local target="$1"
@@ -2298,11 +2298,10 @@ logwatch_review_unit() {
 
 Service-specific context -- this unit is the agent harness ITSELF
 (a cron tick every minute). Additional known-benign patterns, never
-ticket-worthy: report already-sent statuses; validation skips over
-open onboarding tickets; single
-"indeterminate (Forgejo API error)" validation lines; "no claimable
-work -- idle" ticks; cooldown waits; "already ran this hour" logwatch
-statuses. Claude auth/usage-limit
+ticket-worthy: report already-sent statuses; "not ready for agentic
+work -- skipping" validation lines; single "indeterminate (no readable
+clone)" validation lines; "no claimable work -- idle" ticks; cooldown
+waits; "already ran this hour" logwatch statuses. Claude auth/usage-limit
 backoffs and health alert emails ARE ticket-worthy.
 EOF
 )
@@ -2520,8 +2519,8 @@ review_parse_response() {
 
 do_review_tick() {
   # Find the first open bot PR -- across the VALIDATED set -- whose live
-  # head hasn't been reviewed yet. Unvalidated repos (incl. onboarding-
-  # open) are skipped: a verdict there can never become a merge signal,
+  # head hasn't been reviewed yet. Unvalidated repos (not ready for
+  # work) are skipped: a verdict there can never become a merge signal,
   # so it's just bot footprint on a not-ready repo.
   # One review per tick; first un-reviewed head wins, then we exit the
   # cascade like every other pass.
@@ -2869,18 +2868,24 @@ fi
 
 # -- Validation sweep ------------------------------------------
 #
-# Per-tick pre-flight. Every bot-accessible repo runs through
-# repo-checks.sh before any downstream step (maintenance, PR
-# review, claimable discovery) is allowed to touch it. Repos that
-# fail get the onboarding-ticket treatment (idempotent file/reopen
-# via handle_onboarding_failure). Local clones are NOT purged on
-# failure -- the failure handler is already idempotent, and a
-# transient validation hiccup shouldn't cost a re-clone.
+# Per-tick pre-flight. Every bot-accessible repo is CLONED (or its
+# existing clone fetched) and then validated against that LOCAL clone --
+# zero per-file API calls. Cloning is gated on ACCESS, not on validation:
+# we pull down every repo the bot can see, then decide per-repo whether it
+# is ready for WORK. Reading a git clone is all-or-nothing, so validation
+# can't be fooled by one file's read blipping -- the old per-file API failure
+# mode that filed bogus onboarding tickets on healthy repos. With NO clone
+# yet, a blocked clone is `indeterminate` (skip + retry). Once a clone
+# EXISTS, a failed refresh-fetch validates the last-fetched state --
+# stale-but-valid ON PURPOSE: readiness barely changes tick-to-tick, and the
+# WORK step re-fetches before it acts, so nothing is ever done on stale data.
+# A repo that fails validation is simply skipped for work, SILENTLY;
+# onboarding is a manual operator step (`bin/validate-repo.sh <repo>` prints
+# a failing checklist).
 #
-# Builds VALIDATED_REPOS_JSON: newline-separated JSON lines, one
-# per passing repo, same shape that `jq -c '.[]' <<<$(forgejo_list_bot_repos)`
-# would produce. Downstream loops iterate this set instead of the
-# raw API response.
+# Builds VALIDATED_REPOS_JSON: newline-separated JSON lines, one per repo
+# ready for work, same shape that `jq -c '.[]' <<<$(forgejo_list_bot_repos)`
+# would produce. Downstream WORK loops iterate this set.
 
 log "validation sweep ($BOT_USER)"
 ALL_REPOS=$(forgejo_list_bot_repos)
@@ -2889,54 +2894,41 @@ ALL_REPOS=$(forgejo_list_bot_repos)
 # JSON-object shape as VALIDATED_REPOS_JSON. Validation gates WORK
 # (issue pickup, PR pushes, site-work); it does NOT gate read-only
 # ANALYSIS (the weekly security/dep audit, which only files tickets and
-# never commits). do_maintenance_tick loops this set so a repo that
-# fails validation -- or has an open onboarding ticket -- still gets its
-# dependencies audited; whether a finding becomes a PR (validated) or a
-# human triage ticket (not) is decided per-repo in do_maintenance_for_repo.
+# never commits). do_maintenance_tick loops this set so a repo that isn't
+# ready for work still gets its dependencies audited; whether a finding
+# becomes a PR (validated) or a human triage ticket (not) is decided
+# per-repo in do_maintenance_for_repo.
 ANALYSIS_REPOS_JSON=$(jq -c '.[]' <<<"$ALL_REPOS")
 VALIDATED_REPOS_JSON=""
 VAL_PASS=0
 VAL_CACHED=0
-VAL_FAIL=0
-VAL_SKIPPED=0
+VAL_NOTREADY=0
 VAL_INDET=0
 while IFS= read -r repo_line; do
   [ -z "$repo_line" ] && continue
   R_NAME=$(jq -r '.full_name' <<<"$repo_line")
 
-  # Short-circuit: open onboarding ticket means "this repo is
-  # known-broken and the user hasn't told us it's fixed." Skip the
-  # ~6-call validation pass and treat as failed. Closing the ticket
-  # is the user's signal to re-validate.
-  set +e
-  EXISTING=$(forgejo_find_marked_issue "$R_NAME" "$BOT_USER" "$ONBOARDING_MARKER" 2>/dev/null)
-  ONBOARDING_RC=$?
-  set -e
-  if [ "$ONBOARDING_RC" -ne 0 ]; then
-    log "validation: $R_NAME onboarding-check API error (rc=$ONBOARDING_RC) -- skipping this tick, will retry"
-    VAL_INDET=$((VAL_INDET + 1))
-    continue
-  fi
-  if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ] && [ "$EXISTING" != "empty" ] \
-      && [ "$(jq -r '.state' <<<"$EXISTING" 2>/dev/null)" = "open" ]; then
-    EXISTING_NUM=$(jq -r '.number' <<<"$EXISTING" 2>/dev/null)
-    log "validation: $R_NAME skipped -- open onboarding ticket #${EXISTING_NUM} (close ticket to re-validate)"
-    VAL_SKIPPED=$((VAL_SKIPPED + 1))
-    continue
-  fi
-
-  # Cooldown: reuse a recent PASS instead of re-running the ~6-API-call
-  # validation pass every tick. Decouples validation cost from tick
-  # frequency (matters at the 1-minute cadence as repos are added).
-  # Only PASSes are cached; failures re-check every tick.
+  # Cooldown: reuse a recent PASS instead of re-fetching + re-validating
+  # every tick. Decouples validation cost from tick frequency (matters at
+  # the 1-minute cadence as repos are added). Only PASSes are cached; a
+  # not-ready or indeterminate repo re-checks next tick.
   if validation_fresh "$R_NAME"; then
     VALIDATED_REPOS_JSON+="${repo_line}"$'\n'
     VAL_CACHED=$((VAL_CACHED + 1))
     continue
   fi
 
+  # Clone-on-access (clone-if-missing else fetch), then validate the clone.
+  # Only a PASS is cached (above), so a not-ready/indeterminate repo re-fetches
+  # every tick -- DELIBERATE: it means a repo starts getting worked the moment
+  # the operator finishes onboarding it, with no cooldown lag. The fetch is a
+  # cheap "already up to date" against the local Forgejo; revisit (e.g. a short
+  # failure-cooldown) only if the not-ready set ever grows large.
+  ensure_repo_local "$R_NAME" || true
+  R_PATH=$(repo_path_for "$R_NAME")
+
   set +e
-  V_REPORT=$(validate_repo_via_api "$R_NAME")
+  validate_repo_local "$R_NAME" "$R_PATH" >/dev/null
   V_RC=$?
   set -e
   if [ "$V_RC" -eq 0 ]; then
@@ -2944,21 +2936,19 @@ while IFS= read -r repo_line; do
     validation_mark_ok "$R_NAME"
     VAL_PASS=$((VAL_PASS + 1))
   elif [ "$V_RC" -eq 2 ]; then
-    # Indeterminate: the Forgejo API errored mid-read, so no check
-    # actually ran. A hiccup must NOT file an onboarding ticket on a
-    # healthy repo (that short-circuits validation until a human
-    # closes the ticket) -- skip the repo for work this tick only;
-    # nothing is cached, so the next tick re-checks.
-    log "validation: $R_NAME indeterminate (Forgejo API error) -- no ticket filed, re-checking next tick"
+    # Indeterminate: no readable clone (the fetch likely failed), so no
+    # check actually ran. Skip for work this tick only; nothing is cached,
+    # so the next tick re-checks.
+    log "validation: $R_NAME indeterminate (no readable clone) -- re-checking next tick"
     VAL_INDET=$((VAL_INDET + 1))
   else
-    log "validation: $R_NAME failed -- filing/reopening onboarding ticket"
-    handle_onboarding_failure "$R_NAME" "$BOT_USER" "$V_REPORT" \
-      || log "warning: onboarding handler failed on $R_NAME (token scope or repo perms); continuing"
-    VAL_FAIL=$((VAL_FAIL + 1))
+    # Genuinely not ready (a real gap in the clone). No ticket -- onboarding
+    # is a manual operator step; just skip this repo for work this tick.
+    log "validation: $R_NAME not ready for agentic work -- skipping (run bin/validate-repo.sh $R_NAME for the checklist)"
+    VAL_NOTREADY=$((VAL_NOTREADY + 1))
   fi
 done < <(jq -c '.[]' <<<"$ALL_REPOS")
-log "validation: ${VAL_PASS} pass, ${VAL_CACHED} cached, ${VAL_FAIL} fail, ${VAL_INDET} indeterminate, ${VAL_SKIPPED} skipped (open onboarding ticket)"
+log "validation: ${VAL_PASS} pass, ${VAL_CACHED} cached, ${VAL_NOTREADY} not-ready, ${VAL_INDET} indeterminate"
 
 if [ -z "$VALIDATED_REPOS_JSON" ]; then
   # No repo is safe for agentic WORK this tick. Read-only analysis is
