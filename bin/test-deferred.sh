@@ -14,6 +14,7 @@ done
 
 FAIL=0
 eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
+has() { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
 
 GATE='some intro text
 <!-- gate
@@ -49,6 +50,24 @@ echo "== fetch hardening (HTTPS ONLY, no network) =="
 eq "http:// rejected -> empty"   "" "$(deferred_fetch 'http://insecure.test/x')"
 eq "file:// rejected -> empty"   "" "$(deferred_fetch 'file:///etc/passwd')"
 eq "bare host rejected -> empty" "" "$(deferred_fetch 'not-a-url')"
+
+echo "== deferred_release_to_reviewer: gate MET hands to the human, not the grind =="
+# Stub the forgejo boundaries (test-deferred sources only deferred.sh).
+REMOVED=""; ASSIGNED="none"; COMMENTED=0
+forgejo_remove_label() { REMOVED="$REMOVED $3"; }   # $3 = label name
+forgejo_assign()       { ASSIGNED="$1#$2->$3"; }
+_fj() { case "$1 $2" in "POST "*/comments) COMMENTED=1 ;; esac; return 0; }
+log() { :; }
+deferred_release_to_reviewer acme/x 7 josh "the image is listed"
+has "release: dropped Status/Blocked"      "$REMOVED" "Status/Blocked"
+has "release: dropped Agent greenlight"     "$REMOVED" "Agent"
+eq  "release: assigned the reviewer"        "acme/x#7->josh" "$ASSIGNED"
+eq  "release: posted a comment"             "1" "$COMMENTED"
+
+REMOVED=""; ASSIGNED="none"
+deferred_release_to_reviewer acme/x 8 "" "evidence"   # no reviewer configured
+has "release(no reviewer): still drops Status/Blocked" "$REMOVED" "Status/Blocked"
+eq  "release(no reviewer): skips assign"               "none" "$ASSIGNED"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-deferred: all checks passed"
