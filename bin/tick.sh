@@ -2872,12 +2872,16 @@ fi
 # existing clone fetched) and then validated against that LOCAL clone --
 # zero per-file API calls. Cloning is gated on ACCESS, not on validation:
 # we pull down every repo the bot can see, then decide per-repo whether it
-# is ready for WORK. A `git fetch` is atomic, so a network blip fails the
-# whole fetch (-> the repo is skipped and retried next tick) instead of
-# making one file look absent and filing a bogus onboarding ticket -- the
-# failure mode the old per-file API validation had. A repo that fails
-# validation is simply skipped for work, SILENTLY; onboarding is a manual
-# operator step (`bin/validate-repo.sh <repo>` prints a failing checklist).
+# is ready for WORK. Reading a git clone is all-or-nothing, so validation
+# can't be fooled by one file's read blipping -- the old per-file API failure
+# mode that filed bogus onboarding tickets on healthy repos. With NO clone
+# yet, a blocked clone is `indeterminate` (skip + retry). Once a clone
+# EXISTS, a failed refresh-fetch validates the last-fetched state --
+# stale-but-valid ON PURPOSE: readiness barely changes tick-to-tick, and the
+# WORK step re-fetches before it acts, so nothing is ever done on stale data.
+# A repo that fails validation is simply skipped for work, SILENTLY;
+# onboarding is a manual operator step (`bin/validate-repo.sh <repo>` prints
+# a failing checklist).
 #
 # Builds VALIDATED_REPOS_JSON: newline-separated JSON lines, one per repo
 # ready for work, same shape that `jq -c '.[]' <<<$(forgejo_list_bot_repos)`
@@ -2915,6 +2919,11 @@ while IFS= read -r repo_line; do
   fi
 
   # Clone-on-access (clone-if-missing else fetch), then validate the clone.
+  # Only a PASS is cached (above), so a not-ready/indeterminate repo re-fetches
+  # every tick -- DELIBERATE: it means a repo starts getting worked the moment
+  # the operator finishes onboarding it, with no cooldown lag. The fetch is a
+  # cheap "already up to date" against the local Forgejo; revisit (e.g. a short
+  # failure-cooldown) only if the not-ready set ever grows large.
   ensure_repo_local "$R_NAME" || true
   R_PATH=$(repo_path_for "$R_NAME")
 

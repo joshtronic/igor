@@ -5,13 +5,16 @@
 #
 # All checks read a LOCAL fetched clone at origin/<default-branch> -- never
 # the working tree, never the Forgejo API. The tick clones every accessible
-# repo up front (ensure_repo_local) and validates that clone. A `git fetch`
-# is atomic: a network blip fails the whole fetch (-> the repo is skipped and
-# retried next tick) instead of making a single file look absent, which is how
-# the old per-file API validation filed bogus "not ready" tickets on healthy
-# repos. Onboarding is now a manual, ~1-minute operator step; a repo that
-# isn't ready is simply skipped for work, silently -- run
-# `bin/validate-repo.sh <repo>` to see what's missing.
+# repo up front (ensure_repo_local) and validates that clone. Reading a git
+# clone is all-or-nothing, so one file's read can't blip and look "absent" --
+# the old per-file API failure mode that filed bogus "not ready" tickets on
+# healthy repos. If no clone can be read at all (a fetch failed before any
+# clone landed), rc_local_init returns indeterminate and the repo is skipped +
+# retried; an existing clone whose refresh-fetch failed validates its
+# last-fetched state (stale-but-valid on purpose -- readiness barely changes
+# tick-to-tick, and the WORK step re-fetches before acting). Onboarding is now
+# a manual, ~1-minute operator step; a repo that isn't ready is simply skipped
+# for work, silently -- run `bin/validate-repo.sh <repo>` to see what's missing.
 #
 # Requires lib/forgejo.sh sourced first (for repo enumeration in the --all
 # path of validate-repo.sh; the checks themselves are pure git reads).
