@@ -245,24 +245,27 @@ ONBOARDING_MARKER='<!-- agent:onboarding -->'
 # -- Auto-scaffold agent-authorable gaps (igor#304) -------------
 #
 # When a repo fails onboarding on gaps the AGENT can author -- CLAUDE.md,
-# a package.json "test" script, a lint config -- open a scaffold PR
-# instead of dumping the whole setup on the human. Additive and fully
-# GUARDED: unrecognized stack or any API failure returns empty and
-# handle_onboarding_failure falls through to the plain ticket, so worst
-# case is exactly the pre-#304 behavior. CI (.forgejo/workflows/) is
-# off-limits to the agent and stays a human residual; README + labels
-# aren't auto-scaffolded.
+# a package.json "test" script, a lint config, and the CI workflow that
+# runs them -- open a scaffold PR instead of dumping the whole setup on
+# the human. Additive and fully GUARDED: unrecognized stack or any API
+# failure returns empty and handle_onboarding_failure falls through to
+# the plain ticket, so worst case is exactly the pre-#304 behavior. CI
+# (.forgejo/workflows/validate.yml) is scaffolded now that the workflow
+# ban is lifted (igor#315/#318), so a recognized stack onboards with no
+# human residual; README + labels aren't auto-scaffolded.
 
 SCAFFOLD_BRANCH='agent-scaffold'
 
 # scaffold_parse_gaps <report> -- echo the agent-authorable gaps still OPEN
-# in the checklist, one per line, from {claude_md,test,lint}. Reads the
+# in the checklist, one per line, from {claude_md,test,lint,ci}. Reads the
 # '- [ ] <name> -- ...' failure lines validate_repo_via_api emits. Pure.
+# (`ci` became agent-authorable once the workflow ban was lifted, igor#315/#318.)
 scaffold_parse_gaps() {
   local report="$1"
   grep -q '^- \[ \] CLAUDE\.md present'  <<<"$report" && printf 'claude_md\n'
   grep -q '^- \[ \] Test setup detected' <<<"$report" && printf 'test\n'
   grep -q '^- \[ \] Lint setup detected' <<<"$report" && printf 'lint\n'
+  grep -q '^- \[ \] CI workflow present' <<<"$report" && printf 'ci\n'
   return 0
 }
 
@@ -284,6 +287,49 @@ scaffold_detect_stack() {
 scaffold_test_script() {
   case "$1" in
     eleventy) printf 'npx @11ty/eleventy --dryrun' ;;
+    *) return 0 ;;
+  esac
+}
+
+# scaffold_validate_yml <stack> <default_branch> <install_cmd> -- echo a CI
+# workflow that runs the build/test on every PR (and on push to the default
+# branch). This is what makes a scaffolded repo GENUINELY validate: the
+# hardened check_ci_workflow requires a PR-triggered build/test/lint job, not
+# just any .yml. `pull_request:` carries no branch filter so it fires on PRs
+# regardless of whether the default is master/main. Adding CI became possible
+# once the workflow ban was lifted (igor#315/#318). Pure.
+scaffold_validate_yml() {
+  local stack="$1" branch="$2" install="$3"
+  case "$stack" in
+    eleventy)
+      cat <<EOF
+name: Validate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - ${branch}
+
+jobs:
+  validate:
+    runs-on: docker
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '24'
+
+      - name: Install dependencies
+        run: ${install}
+
+      - name: Build & test
+        run: npm test
+EOF
+      ;;
     *) return 0 ;;
   esac
 }
@@ -326,8 +372,8 @@ npm test        # a clean Eleventy dry-run build is the gate
 
 ## Off-limits
 
-- `.forgejo/workflows/` -- CI is operator-managed.
 - Secrets, `.env`, and the live deploy host.
+- Never weaken a CI workflow's checks or the review/merge gates.
 
 _Scaffolded by the agent (igor#304); refine as the project grows._
 EOF
@@ -338,14 +384,16 @@ scaffold_pr_body() {
   local gaps="$1"
   printf '## What this PR does\n\n'
   printf -- '- [x] chore: scaffold agent-authorable repo setup so the repo can validate\n\n'
-  printf 'The onboarding checks flagged scaffolding the **agent** can author. Added:\n\n'
+  printf 'The onboarding checks flagged setup the **agent** can author. Added:\n\n'
   grep -qx claude_md <<<"$gaps" && printf -- '- `CLAUDE.md` -- project orientation for the agent\n'
   grep -qx lint      <<<"$gaps" && printf -- '- `.markdownlint.json` -- lenient markdown lint config\n'
   grep -qx test      <<<"$gaps" && printf -- '- `package.json` `test` script -- a clean Eleventy dry-run build\n'
-  printf '\nStill on the human: CI (`.forgejo/workflows/`) is off-limits to the agent -- add it (and merge this) to finish onboarding.\n\n'
+  grep -qx ci        <<<"$gaps" && printf -- '- `.forgejo/workflows/validate.yml` -- CI that runs the build/test on every PR\n'
+  printf '\nMerging this completes onboarding -- the next tick re-validates. No human scaffolding needed.\n\n'
   printf '## Test plan\n\n'
-  printf -- '- [x] `npm test` is a clean Eleventy dry-run build (the validation gate)\n'
-  printf -- '- [ ] Reviewer: merge, then confirm the repo validates (or add the CI workflow if none exists)\n'
+  grep -qx ci   <<<"$gaps" && printf -- '- [x] The scaffolded `.forgejo/workflows/validate.yml` runs `npm test` (Eleventy dry-run) on every PR\n'
+  grep -qx test <<<"$gaps" && printf -- '- [x] `npm test` is a clean Eleventy dry-run build (the validation gate)\n'
+  printf -- '- [ ] Reviewer: merge, then the repo validates on the next tick\n'
 }
 
 # _scaffold_put <repo> <path> <content> <sha> -- PUT a file onto the scaffold
@@ -418,6 +466,14 @@ scaffold_try_open_pr() {
       _scaffold_put "$repo" "package.json" "$newpkg" "$pkgsha" && wrote=1
     fi
   fi
+  if grep -qx ci <<<"$gaps"; then
+    local install="npm install"
+    # npm ci is deterministic but needs a committed lockfile; fall back to
+    # npm install for repos without one.
+    _fj GET "/repos/${repo}/contents/package-lock.json?ref=${SCAFFOLD_BRANCH}" >/dev/null 2>&1 && install="npm ci"
+    _scaffold_put "$repo" ".forgejo/workflows/validate.yml" \
+      "$(scaffold_validate_yml "$stack" "$base" "$install")" "" && wrote=1
+  fi
 
   [ "$wrote" -eq 1 ] || return 0
 
@@ -440,8 +496,9 @@ handle_onboarding_failure() {
   local repo="$1" bot="$2" report="$3"
 
   # igor#304: try to auto-scaffold the agent-authorable gaps first. On
-  # success the ticket is narrowed to the human residual (CI); on any
-  # failure scaffold_pr is empty and we file the full ticket as before.
+  # success the ticket points the human at the PR whose merge completes
+  # onboarding; on any failure scaffold_pr is empty and we file the full
+  # ticket as before.
   local scaffold_pr=""
   scaffold_pr=$(scaffold_try_open_pr "$repo" "$report" 2>/dev/null) || scaffold_pr=""
   [ -n "$scaffold_pr" ] && log "onboarding: scaffold PR #${scaffold_pr} open on $repo (agent-authorable gaps)"
@@ -452,14 +509,14 @@ handle_onboarding_failure() {
 ${ONBOARDING_MARKER}
 
 The agent scaffolded the setup it can author in **PR #${scaffold_pr}** (CLAUDE.md /
-test / lint, as applicable). Review and merge it, then add anything only you can --
-notably the CI workflow (\`.forgejo/workflows/\`), which is off-limits to the agent.
-Current checklist:
+test / lint / CI, as applicable). Review and merge it -- for a recognized stack that
+completes onboarding and the next tick validates. Anything the scaffold could not
+author (README, required labels, or an unrecognized stack) remains in the checklist:
 
 ${report}
 
-Once the rest is in, close this ticket -- the next tick re-validates and either
-proceeds or reopens with what's still missing.
+Once the checklist is clear, close this ticket -- the next tick re-validates and
+either proceeds or reopens with what's still missing.
 
 This ticket is auto-managed by the agent. Do not edit the title or remove the
 HTML comment marker at the top of the body.
