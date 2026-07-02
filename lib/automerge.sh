@@ -25,6 +25,7 @@ AGENT_CONFIG_FILE="agent.json"                               # repo root; per-re
 AUTOMERGE_SMOKE_MAX_ATTEMPTS=5                                # propagation grace before a smoke alert
 AUTOMERGE_CI_MAX_ATTEMPTS=30                                  # ~30 ticks before a never-reporting deploy CI self-heals
 AUTOMERGE_SELF_REPO="${AUTOMERGE_SELF_REPO:-joshtronic/igor}" # never auto-merge the harness
+AUTOMERGE_BLOCK_COOLDOWN_SECS=3600                            # after a rejected merge, back off ~1h before re-trying the same head
 
 # Fallback logger so this module is sourceable standalone (tests).
 if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*"; }; fi
@@ -72,12 +73,70 @@ automerge_mergeable() {
     | jq -e '(.state == "open") and (.mergeable == true)' >/dev/null 2>&1
 }
 
-# automerge_do_merge <repo> <pr> -- merge the PR (merge commit). Echoes the merge
-# commit SHA on success; empty + nonzero on a failed merge API call.
+# _fj_merge <repo> <pr> -- POST the merge and echo "<http_code>\t<message>".
+# Bypasses _fj deliberately: _fj uses `curl -f`, which discards the response body
+# on a non-2xx -- but that body carries the REASON ("User not allowed to merge
+# PR", a conflict, ...), which we want to log instead of a bare "merge API failed".
+_fj_merge() {
+  local repo="$1" pr="$2" out code body
+  out=$(curl -s -w '\n%{http_code}' --max-time 30 -X POST \
+    -H "Authorization: token ${FORGEJO_TOKEN}" -H "Content-Type: application/json" \
+    -d '{"Do":"merge","delete_branch_after_merge":true}' \
+    "${FORGEJO_URL}/api/v1/repos/${repo}/pulls/${pr}/merge" 2>/dev/null)
+  code=${out##*$'\n'}
+  body=${out%$'\n'*}
+  printf '%s\t%s' "$code" "$(printf '%s' "$body" | jq -r '.message // empty' 2>/dev/null | head -1)"
+}
+
+# automerge_do_merge <repo> <pr> -- merge the PR (merge commit). On success echoes
+# the merge commit SHA and returns 0. On failure echoes the REASON ("HTTP <code>:
+# <message>") and returns 1, so the caller can log WHY (permission, conflict, ...)
+# and back off instead of re-POSTing a doomed merge every tick (igor#322).
 automerge_do_merge() {
-  local repo="$1" pr="$2"
-  _fj POST "/repos/${repo}/pulls/${pr}/merge" '{"Do":"merge","delete_branch_after_merge":true}' >/dev/null 2>&1 || return 1
-  _fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null | jq -r '.merge_commit_sha // empty'
+  local repo="$1" pr="$2" res code msg
+  res=$(_fj_merge "$repo" "$pr")
+  code=${res%%$'\t'*}; msg=${res#*$'\t'}
+  case "$code" in
+    2??) _fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null | jq -r '.merge_commit_sha // empty'; return 0 ;;
+    *)   printf 'HTTP %s: %s' "$code" "$msg"; return 1 ;;
+  esac
+}
+
+# -- Rejected-merge backoff (igor#322) --------------------------
+#
+# A rejected merge (permission, conflict, a required check the API enforces)
+# usually WON'T self-heal by re-POSTing next tick -- the old code retried it
+# forever, once per tick, with a bare "merge API failed". Instead, record the
+# failed head + reason and skip re-attempting the SAME head for a cooldown. It
+# self-heals: a config fix is picked up after the cooldown, and a new commit
+# (different head) clears the block immediately.
+automerge_block_active() {
+  # <state-file> <key> <head> -- 0 (skip) if this key last failed on the SAME
+  # head within the cooldown; 1 (attempt) otherwise.
+  local sf="$1" key="$2" head="$3" bsha bts now
+  [ -f "$sf" ] || return 1
+  bsha=$(jq -r --arg k "$key" '.automerge_block[$k].sha // ""' "$sf" 2>/dev/null)
+  [ "$bsha" = "$head" ] || return 1
+  bts=$(jq -r --arg k "$key" '.automerge_block[$k].ts // 0' "$sf" 2>/dev/null)
+  now=$(date +%s)
+  [ $(( now - bts )) -lt "$AUTOMERGE_BLOCK_COOLDOWN_SECS" ]
+}
+
+automerge_block_record() {
+  # <state-file> <key> <head> <reason>
+  local sf="$1" key="$2" head="$3" reason="$4" tmp now
+  [ -f "$sf" ] || echo '{}' >"$sf"
+  now=$(date +%s); tmp=$(mktemp)
+  jq --arg k "$key" --arg s "$head" --arg r "$reason" --argjson t "$now" \
+    '.automerge_block[$k] = {sha:$s, reason:$r, ts:$t}' "$sf" >"$tmp" 2>/dev/null && mv "$tmp" "$sf" || rm -f "$tmp"
+}
+
+automerge_block_clear() {
+  # <state-file> <key> -- drop the block (on a successful merge).
+  local sf="$1" key="$2" tmp
+  [ -f "$sf" ] || return 0
+  tmp=$(mktemp)
+  jq --arg k "$key" 'if .automerge_block then .automerge_block |= del(.[$k]) else . end' "$sf" >"$tmp" 2>/dev/null && mv "$tmp" "$sf" || rm -f "$tmp"
 }
 
 # automerge_behind_count <repo> <pr> -- how many base-branch commits the PR head
@@ -291,11 +350,21 @@ do_automerge_tick() {
       # couldn't tell -> skip this tick.
       behind=$(automerge_behind_count "$repo" "$pr")
       if [ "$behind" = "0" ]; then
-        sha=$(automerge_do_merge "$repo" "$pr") || { log "warning: automerge: merge API failed on ${key}"; continue; }
-        [ -n "$sha" ] || sha="$head"   # fall back to the head if the merge SHA didn't come back
-        _deploy_record "$repo" "$pr" "$sha" "$url"
-        log "automerge: merged ${key} (approved by ${FORGEJO_REVIEWER}, CI green) -- watching deploy ${sha:0:8}"
-        return 0
+        # Back off a head we already know the API rejects -- don't re-POST a
+        # doomed merge every tick (igor#322); the reason was logged on first fail.
+        if automerge_block_active "$sf" "$key" "$head"; then continue; fi
+        if sha=$(automerge_do_merge "$repo" "$pr"); then
+          automerge_block_clear "$sf" "$key"
+          [ -n "$sha" ] || sha="$head"   # fall back to the head if the merge SHA didn't come back
+          _deploy_record "$repo" "$pr" "$sha" "$url"
+          log "automerge: merged ${key} (approved by ${FORGEJO_REVIEWER}, CI green) -- watching deploy ${sha:0:8}"
+          return 0
+        else
+          # $sha holds the reason on failure ("HTTP 405: User not allowed ...").
+          automerge_block_record "$sf" "$key" "$head" "$sha"
+          log "automerge: ${key} merge rejected -- ${sha:-unknown reason}; backing off ${AUTOMERGE_BLOCK_COOLDOWN_SECS}s (head ${head:0:8})"
+          continue
+        fi
       elif [ "$behind" -gt 0 ] 2>/dev/null; then
         # Ready but behind base. Prefer to merge a CURRENT pr this tick (so master
         # advances just once); only if none is current do we update this one --
