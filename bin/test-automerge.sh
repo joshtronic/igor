@@ -172,18 +172,41 @@ eq  "barrier: sitemap-failure alerted"     "1"      "$ALERTS"
 eq  "barrier: sitemap-failure cleared"     ""       "$(jq -r '.deploy.repo // ""' "$STATE")"
 automerge_sitemap_failures() { return 0; }          # restore clean for any later use
 
-echo "== automerge_do_merge (merge body) =="
-MERGE_BODY=""
-_fj() {
-  case "$1 $2" in
-    "POST "*/merge) MERGE_BODY="$3" ;;
-    *) printf '%s' '{"merge_commit_sha":"deadbeef"}' ;;
-  esac
-}
-automerge_do_merge acme/x 5 > "$TMP/merge_sha"   # run in-shell (not $()) so MERGE_BODY persists
-eq  "do_merge: returns the merge sha"  "deadbeef" "$(cat "$TMP/merge_sha")"
-has "do_merge: Do=merge in the body"   "$MERGE_BODY" '"Do":"merge"'
-has "do_merge: deletes the branch"     "$MERGE_BODY" '"delete_branch_after_merge":true'
+echo "== _fj_merge: sends the merge payload, splits code/message =="
+export FORGEJO_TOKEN=test-token FORGEJO_URL=http://localhost   # _fj_merge reads these (set -u)
+# Test the REAL _fj_merge here, BEFORE the automerge_do_merge block below stubs
+# it out. It runs curl inside $(...), a subshell -- capture the payload to a FILE
+# (a var set in the subshell would be lost in the parent).
+curl() { local b=""; while [ $# -gt 0 ]; do [ "$1" = "-d" ] && { b="$2"; shift; }; shift; done; printf '%s' "$b" > "$TMP/merge_payload"; printf 'ignored\n200'; }
+: > "$TMP/merge_payload"; _fj_merge acme/x 5 >/dev/null; PAYLOAD=$(cat "$TMP/merge_payload")
+has "_fj_merge: sends Do=merge"        "$PAYLOAD" '"Do":"merge"'
+has "_fj_merge: sends delete_branch"   "$PAYLOAD" '"delete_branch_after_merge":true'
+curl() { printf '{"message":"User not allowed to merge PR"}\n405'; }
+eq  "_fj_merge: splits 405 + message"  "$(printf '405\tUser not allowed to merge PR')" "$(_fj_merge acme/x 5)"
+
+echo "== automerge_do_merge: sha on success, reason on failure =="
+_fj() { printf '%s' '{"merge_commit_sha":"deadbeef"}'; }   # the follow-up GET
+_fj_merge() { printf '200\t'; }
+eq  "do_merge: 2xx -> merge sha echoed"  "deadbeef" "$(automerge_do_merge acme/x 5)"
+automerge_do_merge acme/x 5 >/dev/null; eq "do_merge: 2xx -> rc0" "0" "$?"
+_fj_merge() { printf '405\tUser not allowed to merge PR'; }
+eq  "do_merge: reject -> reason echoed" "$(printf 'HTTP 405: User not allowed to merge PR')" "$(automerge_do_merge acme/x 5)"
+automerge_do_merge acme/x 5 >/dev/null; eq "do_merge: reject -> rc1" "1" "$?"
+
+echo "== automerge_block: backoff on a rejected head =="
+BSF="$TMP/block-state.json"; echo '{}' > "$BSF"
+AUTOMERGE_BLOCK_COOLDOWN_SECS=3600
+automerge_block_record "$BSF" "acme/x#5" "headA" "HTTP 405: nope"
+ok "block: same head within cooldown -> active(skip)" automerge_block_active "$BSF" "acme/x#5" "headA"
+no "block: different head -> retry"                   automerge_block_active "$BSF" "acme/x#5" "headB"
+no "block: unknown key -> retry"                      automerge_block_active "$BSF" "other/y#1" "headA"
+eq "block: reason recorded" "HTTP 405: nope" "$(jq -r '.automerge_block["acme/x#5"].reason' "$BSF")"
+automerge_block_clear "$BSF" "acme/x#5"
+no "block: after clear -> retry"                      automerge_block_active "$BSF" "acme/x#5" "headA"
+AUTOMERGE_BLOCK_COOLDOWN_SECS=0
+automerge_block_record "$BSF" "acme/x#5" "headA" "reason"
+no "block: cooldown elapsed -> retry"                 automerge_block_active "$BSF" "acme/x#5" "headA"
+AUTOMERGE_BLOCK_COOLDOWN_SECS=3600
 
 echo "== automerge_behind_count (the require-up-to-date gate) =="
 _fj() {
