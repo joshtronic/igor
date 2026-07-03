@@ -2,35 +2,26 @@
 # gsc.sh -- Google Search Console API client for the SEO analysis pass.
 # Isolates every GSC network call. Sourced by bin/tick.sh.
 #
-# The SEO subsystem is opt-in; callers gate on these being set:
-#   GSC_OAUTH_CLIENT_ID, GSC_OAUTH_CLIENT_SECRET, GSC_OAUTH_REFRESH_TOKEN
-# (mint the refresh token once with bin/gsc-auth.sh).
+# The SEO subsystem is opt-in; callers gate on GOOGLE_SERVICE_ACCOUNT (the
+# service-account key) being set.
 #
-# Requires on PATH: curl, jq.
-#
-# Auth model: the durable refresh token is exchanged for a short-lived
-# access token at the start of each pass. Access tokens are never stored.
+# Requires on PATH: curl, jq. Auth is delegated to lib/google-auth.sh
+# (google_sa_access_token) -- a service-account JWT-bearer token, minted fresh
+# each pass and never stored. This replaced the old OAuth refresh-token flow.
 
 # Fallback logger so this module is sourceable standalone (tests).
 if ! declare -F log >/dev/null; then
   log() { printf '[agent] %s\n' "$*"; }
 fi
 
-GSC_TOKEN_EP="https://oauth2.googleapis.com/token"
 GSC_API="https://www.googleapis.com/webmasters/v3"
+GSC_SCOPE="https://www.googleapis.com/auth/webmasters.readonly"
 
 # gsc_access_token
-# Echoes a fresh OAuth access token on stdout; empty + rc=1 on failure.
+# Echoes a fresh access token on stdout; empty + rc=1 on failure. Delegates to
+# the shared service-account minter (lib/google-auth.sh).
 gsc_access_token() {
-  local resp tok
-  resp=$(curl -fsS -X POST "$GSC_TOKEN_EP" \
-    --data-urlencode "client_id=${GSC_OAUTH_CLIENT_ID}" \
-    --data-urlencode "client_secret=${GSC_OAUTH_CLIENT_SECRET}" \
-    --data-urlencode "refresh_token=${GSC_OAUTH_REFRESH_TOKEN}" \
-    --data-urlencode "grant_type=refresh_token" 2>/dev/null) || return 1
-  tok=$(jq -r '.access_token // empty' <<<"$resp" 2>/dev/null)
-  [ -n "$tok" ] || return 1
-  printf '%s' "$tok"
+  google_sa_access_token "$GSC_SCOPE"
 }
 
 # gsc_list_domains <access_token>

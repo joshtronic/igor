@@ -168,8 +168,11 @@ respective tools on the host; install or skip.
 - Website work is opt-in via `WEBSITE_REPO`. With it unset the
   daily/weekly Igor slots no-op cleanly; the rest of the tick
   (issues, maintenance, PR review) still runs.
-- The SEO pass (`do_seo_tick`) is opt-in via the GSC + SMTP2GO env
-  and is GSC-driven, NOT repo-driven -- it enumerates Search Console
+- The SEO pass (`do_seo_tick`) is opt-in via a Google service account
+  (`GOOGLE_SERVICE_ACCOUNT` -- JWT-bearer auth via `lib/google-auth.sh`,
+  which replaced the old GSC OAuth refresh-token flow and is shared with the
+  CEO's GSC read) + SMTP2GO env, and is GSC-driven, NOT repo-driven -- it
+  enumerates Search Console
   domain properties, not Forgejo repos. Monthly (once per calendar
   month per domain, self-healing -- not a hard day-of-month window),
   one domain per tick, fully scripted (no LLM). The 28-day analysis

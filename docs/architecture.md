@@ -206,7 +206,6 @@ bin/
 |-- check-sync.sh            # CI lint: AGENTS.md <-> tick.sh contract
 |-- validate.sh              # validate env + Forgejo connectivity + bot perms
 |-- validate-repo.sh         # audit a single repo (or --all) for readiness
-|-- gsc-auth.sh              # one-time: mint a GSC OAuth refresh token (SEO)
 |-- install.sh               # one-time: install systemd units + enable timer
 |-- uninstall.sh             # stop, disable, remove units
 `-- lib/

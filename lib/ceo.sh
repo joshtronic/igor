@@ -385,13 +385,12 @@ ceo_read_gsc() {
     | jq -r '.seo.domain // empty' 2>/dev/null || true)
   [ -n "$domain" ] || return 0
   printf '## Search Console -- the scoreboard (%s)\n\n' "$domain"
-  if [ -z "${GSC_OAUTH_CLIENT_ID:-}" ] || [ -z "${GSC_OAUTH_CLIENT_SECRET:-}" ] \
-     || [ -z "${GSC_OAUTH_REFRESH_TOKEN:-}" ]; then
+  if [ -z "${GOOGLE_SERVICE_ACCOUNT:-}" ]; then
     printf -- '- GSC is not configured this run -- no numbers. Note it; do NOT guess.\n'
     return 0
   fi
   token=$(gsc_access_token 2>/dev/null) || {
-    printf -- '- GSC token refresh failed -- no numbers this cycle. Note it; do NOT guess.\n'
+    printf -- '- GSC token mint failed -- no numbers this cycle. Note it; do NOT guess.\n'
     return 0
   }
   read -r start end pstart pend <<<"$(seo_window)"
