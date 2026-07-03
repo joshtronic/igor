@@ -92,6 +92,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/crashlog.sh"
 # shellcheck source=../lib/security-gate.sh
 . "$AGENT_HOME/lib/security-gate.sh"
+# shellcheck source=lib/google-auth.sh
+. "$AGENT_HOME/lib/google-auth.sh"
 # shellcheck source=lib/gsc.sh
 . "$AGENT_HOME/lib/gsc.sh"
 # shellcheck source=lib/email.sh
@@ -182,12 +184,11 @@ fi
 export SMTP2GO_API_KEY="${SMTP2GO_API_KEY:-}"
 export SMTP2GO_SENDER="${SMTP2GO_SENDER:-}"
 
-# SEO analysis pass -- opt-in via Google Search Console + SMTP2GO creds.
+# SEO analysis pass -- opt-in via a Google service account + SMTP2GO creds.
 # do_seo_tick no-ops cleanly if any required one is unset. Floor/top-K
-# carry tuning defaults.
-export GSC_OAUTH_CLIENT_ID="${GSC_OAUTH_CLIENT_ID:-}"
-export GSC_OAUTH_CLIENT_SECRET="${GSC_OAUTH_CLIENT_SECRET:-}"
-export GSC_OAUTH_REFRESH_TOKEN="${GSC_OAUTH_REFRESH_TOKEN:-}"
+# carry tuning defaults. GOOGLE_SERVICE_ACCOUNT is the service-account key
+# (base64 | file path | inline JSON); see lib/google-auth.sh.
+export GOOGLE_SERVICE_ACCOUNT="${GOOGLE_SERVICE_ACCOUNT:-}"
 export PRIMARY_RECIPIENTS="${PRIMARY_RECIPIENTS:-}"
 export SEO_RECIPIENTS="${SEO_RECIPIENTS:-}"
 # Agentic SEO sites are declared per-repo in agent.json (`.seo.domain` +
@@ -1628,14 +1629,13 @@ ${marker}"
 # unconfigured or nothing was eligible (caller falls through).
 do_seo_tick() {
   # Opt-in gate: every required credential must be present.
-  if [ -z "${GSC_OAUTH_CLIENT_ID:-}" ] || [ -z "${GSC_OAUTH_CLIENT_SECRET:-}" ] \
-     || [ -z "${GSC_OAUTH_REFRESH_TOKEN:-}" ] || [ -z "${SMTP2GO_API_KEY:-}" ] \
+  if [ -z "${GOOGLE_SERVICE_ACCOUNT:-}" ] || [ -z "${SMTP2GO_API_KEY:-}" ] \
      || [ -z "${SMTP2GO_SENDER:-}" ] || [ -z "${PRIMARY_RECIPIENTS:-}" ]; then
     return 1
   fi
 
   local token
-  token=$(gsc_access_token) || { log "seo: GSC token refresh failed -- skipping this tick"; return 1; }
+  token=$(gsc_access_token) || { log "seo: GSC service-account token mint failed -- skipping this tick"; return 1; }
 
   # SEO_DEBUG_DOMAIN restricts the pass to a single domain for isolated
   # testing before the full sweep. Everything else is identical to a

@@ -383,17 +383,17 @@ gsc_query() { printf '%s' '{"rows":[{"clicks":10,"impressions":100,"position":5}
 # no .seo.domain -> clean no-op (non-SEO repos digest exactly as before)
 _G_CFG='{"smoke":{"url":"https://x"}}'
 eq "gsc: no .seo.domain -> empty" "" \
-   "$(GSC_OAUTH_CLIENT_ID='' GSC_OAUTH_CLIENT_SECRET='' GSC_OAUTH_REFRESH_TOKEN='' ceo_read_gsc acme/x)"
+   "$(GOOGLE_SERVICE_ACCOUNT='' ceo_read_gsc acme/x)"
 
 # .seo.domain set but GSC unconfigured -> scoreboard-dark note, no numbers
 _G_CFG='{"seo":{"domain":"vpsshowdown.com","agentic":true}}'
-out=$(GSC_OAUTH_CLIENT_ID='' GSC_OAUTH_CLIENT_SECRET='' GSC_OAUTH_REFRESH_TOKEN='' ceo_read_gsc acme/x)
+out=$(GOOGLE_SERVICE_ACCOUNT='' ceo_read_gsc acme/x)
 has   "gsc: unconfigured -> still names the domain" "$out" "vpsshowdown.com"
 has   "gsc: unconfigured -> 'not configured' note"  "$out" "not configured"
 hasnt "gsc: unconfigured -> no numbers table"       "$out" "avg position"
 
 # .seo.domain + GSC configured -> numbers block with aggregated totals + trend
-out=$(GSC_OAUTH_CLIENT_ID=a GSC_OAUTH_CLIENT_SECRET=b GSC_OAUTH_REFRESH_TOKEN=c ceo_read_gsc acme/x)
+out=$(GOOGLE_SERVICE_ACCOUNT=x ceo_read_gsc acme/x)
 has "gsc: scoreboard header"          "$out" "Search Console"
 has "gsc: clicks total (15)"          "$out" "clicks | 15"
 has "gsc: impressions total (200)"    "$out" "impressions | 200"
@@ -403,8 +403,8 @@ has "gsc: window dates surfaced"      "$out" "2026-06-01"
 
 # token refresh failure -> dark note, never a crash
 gsc_access_token() { return 1; }
-out=$(GSC_OAUTH_CLIENT_ID=a GSC_OAUTH_CLIENT_SECRET=b GSC_OAUTH_REFRESH_TOKEN=c ceo_read_gsc acme/x)
-has "gsc: token refresh fail -> note" "$out" "token refresh failed"
+out=$(GOOGLE_SERVICE_ACCOUNT=x ceo_read_gsc acme/x)
+has "gsc: token mint fail -> note" "$out" "token mint failed"
 
 unset -f forgejo_repo_get_file gsc_access_token gsc_query seo_window
 
