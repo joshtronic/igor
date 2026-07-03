@@ -239,6 +239,15 @@ claude_run_with_cost() {
       claude_health_record_failure "$kind" "$call_site: $(printf '%s' "$err_text" | tail -c 200)"
     fi
   fi
+  # igor#326: on a NONZERO exit the function still returns cleanly, so the
+  # tick-death crashlog path (crashlog_preserve) never fires and the worktree
+  # (with the stream) is torn down by the caller -- leaving no post-mortem for
+  # WHY claude exited nonzero. Preserve the stream here, while the scratch still
+  # exists. Guarded so a missing helper / any error can't break the caller.
+  if [ "$rc" -ne 0 ] && declare -F crashlog_preserve_scratch >/dev/null 2>&1; then
+    crashlog_preserve_scratch "$rc" "${AGENT_STATE_DIR:-$HOME/.local/state/agent}" \
+      "$call_site" "$scratch" 2>/dev/null || true
+  fi
   # Returned cleanly -- clear the in-flight marker so cleanup() won't treat this
   # worktree as a crash. (If we never reach here, the marker lingers and the
   # stream is preserved -- exactly the case we want to capture.)
