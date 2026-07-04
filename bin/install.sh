@@ -21,7 +21,7 @@ UNIT_DIR="$HOME/.config/systemd/user"
 # Pre-flight: harness depends on these being on PATH. Fail loudly here
 # rather than mysteriously deep inside tick.sh later.
 missing=()
-for cmd in jq curl git flock timeout claude sqlite3; do
+for cmd in jq curl git flock timeout claude sqlite3 openssl; do
   command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
@@ -37,6 +37,7 @@ if [ "${#missing[@]}" -gt 0 ]; then
       flock)     apt_pkgs+=("util-linux") ;;
       timeout)   apt_pkgs+=("coreutils") ;;
       sqlite3)   apt_pkgs+=("sqlite3") ;;
+      openssl)   apt_pkgs+=("openssl") ;;
       claude)    ;;  # not in apt; install per Anthropic's docs
     esac
   done
@@ -51,6 +52,41 @@ if [ "${#missing[@]}" -gt 0 ]; then
     esac
   done
   exit 1
+fi
+
+# Recommended: dev tooling for `make test` / `make lint` (CLAUDE.md).
+# Warn only -- the harness doesn't need these at runtime, but a host
+# without them can't run the quality gates a PR is judged against.
+missing_dev=()
+for cmd in make shellcheck markdownlint; do
+  command -v "$cmd" >/dev/null 2>&1 || missing_dev+=("$cmd")
+done
+if [ "${#missing_dev[@]}" -gt 0 ]; then
+  echo "warning: missing recommended dev tools: ${missing_dev[*]}" >&2
+  echo >&2
+  echo "these aren't required to run the harness, but \`make lint\`" >&2
+  echo "needs them:" >&2
+  apt_pkgs=()
+  for cmd in "${missing_dev[@]}"; do
+    case "$cmd" in
+      make)         apt_pkgs+=("make") ;;
+      shellcheck)   apt_pkgs+=("shellcheck") ;;
+      markdownlint) ;;  # not in apt; npm package
+    esac
+  done
+  if [ "${#apt_pkgs[@]}" -gt 0 ]; then
+    echo "  sudo apt-get install -y ${apt_pkgs[*]}" >&2
+  fi
+  for cmd in "${missing_dev[@]}"; do
+    case "$cmd" in
+      markdownlint)
+        echo "  markdownlint: npm install -g markdownlint-cli" >&2
+        ;;
+    esac
+  done
+  echo >&2
+  echo "continuing install without them." >&2
+  echo >&2
 fi
 
 # Pre-flight: systemd --user needs XDG_RUNTIME_DIR + DBUS env to
