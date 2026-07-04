@@ -84,14 +84,13 @@ respective tools on the host; install or skip.
   `AGENT_MODEL_SECURITY` (security gate). `AGENT_MODEL_THINKING` is
   retired. Adding/renaming model vars is a host-`.env` lockstep
   change -- tick.sh fails fast on a missing one, every minute.
-- `--max-turns` at every `claude_run_with_cost` call site (issue
-  work, PR-review, maintenance triage, site-work -- 4 sites across
-  `bin/tick.sh` + `bin/site-work-block.sh`) reads
-  `AGENT_MAX_TURNS:-50`, OPTIONAL unlike the model vars above --
-  unset means unchanged behavior. Thorough verification (Playwright
-  screenshots + a full play-through) is turn-expensive and worth
-  running to completion rather than capping mid-verification; raise
-  `AGENT_MAX_TURNS` in `.env` if that's happening.
+- `--max-turns` is hardcoded to 100 at every `claude_run_with_cost`
+  call site (issue work, PR-review, maintenance triage, site-work --
+  4 sites across `bin/tick.sh` + `bin/site-work-block.sh`). It was 50;
+  thorough verification (Playwright screenshots + a full play-through)
+  is turn-expensive, and 50 was capping runs mid-verification. This is
+  an opinionated system: the cap is a constant, not an env knob. Bump
+  the number in code if 100 turns out to be tight.
 - Claude auth/usage health: every CLI call records ok/auth/limit
   under `.health` in `discretionary-state.json` (only auth and
   usage-limit failures count -- ordinary nonzero exits stay the
