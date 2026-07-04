@@ -86,12 +86,14 @@ respective tools on the host; install or skip.
   change -- tick.sh fails fast on a missing one, every minute.
 - `--max-turns` at every `claude_run_with_cost` call site (issue
   work, PR-review, maintenance triage, site-work -- 4 sites across
-  `bin/tick.sh` + `bin/site-work-block.sh`) reads
-  `AGENT_MAX_TURNS:-50`, OPTIONAL unlike the model vars above --
-  unset means unchanged behavior. Thorough verification (Playwright
-  screenshots + a full play-through) is turn-expensive and worth
-  running to completion rather than capping mid-verification; raise
-  `AGENT_MAX_TURNS` in `.env` if that's happening.
+  `bin/tick.sh` + `bin/site-work-block.sh`) is a hardcoded `100`, a
+  deliberate constant, not an env knob. igor has one operator, so the
+  right value gets baked in rather than put behind a dial. It was 50;
+  that cap discarded two completed builds overnight (2026-07-04) when
+  thorough verification (Playwright screenshots + a full play-through,
+  roughly 30 tool calls on their own) ran turn-expensive and got cut
+  mid-verification. 100 is sized for that headroom. Change the literal
+  at all 4 sites if it ever needs to move again.
 - Claude auth/usage health: every CLI call records ok/auth/limit
   under `.health` in `discretionary-state.json` (only auth and
   usage-limit failures count -- ordinary nonzero exits stay the

@@ -226,7 +226,7 @@ claude_run_with_cost "$call_site" "$DISPLAY_LOG" "$TICK_TIMEOUT" \
   --model "$MODEL" \
   --append-system-prompt "$SYSTEM_PROMPT" \
   --settings "$AGENT_HOME/agent-settings.json" \
-  --max-turns "${AGENT_MAX_TURNS:-50}" \
+  --max-turns 100 \
   --print "$USER_MSG"
 CLAUDE_EXIT=$?
 set -e
