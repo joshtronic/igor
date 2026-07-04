@@ -1486,7 +1486,7 @@ EOF
   claude_run_with_cost "maintenance" "$m_log" "$TICK_TIMEOUT" \
     --model "$AGENT_MODEL_REVIEW" \
     --settings "$AGENT_HOME/agent-settings.json" \
-    --max-turns 50 \
+    --max-turns 100 \
     --print "$m_user_msg"
   m_exit=$?
   set -e
@@ -3407,7 +3407,7 @@ EOF
       --effort "$PR_REWORK_EFFORT" \
       --append-system-prompt "$PR_SYSTEM_PROMPT" \
       --settings "$AGENT_HOME/agent-settings.json" \
-      --max-turns 50 \
+      --max-turns 100 \
       --print "$PR_USER_MSG"
     PR_EXIT=$?
     set -e
@@ -3934,7 +3934,7 @@ claude_run_with_cost "tier-1-issue" "$CLAUDE_LOG" "$TICK_TIMEOUT" \
   --model "$AGENT_MODEL" \
   --append-system-prompt "$SYSTEM_PROMPT" \
   --settings "$AGENT_HOME/agent-settings.json" \
-  --max-turns 50 \
+  --max-turns 100 \
   --print "$USER_MSG"
 CLAUDE_EXIT=$?
 set -e
