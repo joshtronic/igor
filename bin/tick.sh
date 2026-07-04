@@ -4038,8 +4038,14 @@ elif [ "$COMMITS" -gt 0 ]; then
   fi
 
   # Scope cap. Big diffs and long commit chains get blocked instead of
-  # shipped; the human splits the work into smaller issues.
-  CHANGED=$(git diff --shortstat "origin/${PR_BASE}..HEAD" 2>/dev/null \
+  # shipped; the human splits the work into smaller issues. Generated/
+  # lockfiles are excluded from the line count -- they're not
+  # human-reviewed code and shouldn't burn the LoC budget (a lockfile
+  # regen alone can dwarf a legitimately small change).
+  CHANGED=$(git diff --shortstat "origin/${PR_BASE}..HEAD" -- . \
+    ':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/yarn.lock' \
+    ':(exclude,glob)**/pnpm-lock.yaml' ':(exclude,glob)**/*.lock' \
+    ':(exclude,glob)**/dist/**' ':(exclude,glob)**/build/**' 2>/dev/null \
     | awk '{ for (i=1;i<=NF;i++) if ($i ~ /insertion|deletion/) s+=$(i-1); print s+0 }')
   CHANGED=${CHANGED:-0}
   if [ "$COMMITS" -gt 10 ] || [ "$CHANGED" -gt 400 ]; then
