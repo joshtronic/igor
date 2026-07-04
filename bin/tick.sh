@@ -2100,7 +2100,7 @@ do_ceo_tick() {
     # won't re-ask a pending one), and last week's digest + the board's comments so the
     # brief incorporates their steering. One open digest at a time.
     pdnum=$(ceo_prior_digest_number "$repo")
-    activity=$(ceo_read_gsc "$repo"; ceo_read_metrics "$repo"; \
+    activity=$(ceo_read_gsc "$repo"; ceo_read_ga "$repo"; ceo_read_metrics "$repo"; \
                ceo_gather_week "$repo" "$since"; \
                ceo_proposal_outcomes "$repo"; \
                ceo_open_questions "$repo" "${FORGEJO_REVIEWER:-}"; \

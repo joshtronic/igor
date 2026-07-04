@@ -406,6 +406,50 @@ ceo_read_gsc() {
   printf '| avg position | %s | %s |\n' "$(jq -r '(.position * 100 | round) / 100' <<<"$ctot")" "$(jq -r '(.position * 100 | round) / 100' <<<"$ptot")"
 }
 
+# ceo_read_ga <repo> -- markdown of the repo's Google Analytics on-site
+# behavior (sessions / engagement / conversions), current 28-day window vs
+# the prior 28 days. Sibling to ceo_read_gsc: same agent.json `.seo.domain`
+# key, same GOOGLE_SERVICE_ACCOUNT gate, same seo_window. Unlike GSC (one
+# domain = one site), GA4 property resolution is per-domain
+# (ga_property_for_domain, no static map) so an unmatched domain is its own
+# "note it, do NOT guess" branch rather than a crash. Reuses seo_ga_metrics
+# (lib/seo-analysis.sh) to parse the aggregate report -- the same parser the
+# SEO pass's GA fold-in uses.
+ceo_read_ga() {
+  local repo="$1" domain property start end pstart pend cur prev cm pm
+  domain=$(forgejo_repo_get_file "$repo" "${AGENT_CONFIG_FILE:-agent.json}" 2>/dev/null \
+    | jq -r '.seo.domain // empty' 2>/dev/null || true)
+  [ -n "$domain" ] || return 0
+  printf '## Analytics -- on-site behavior (%s)\n\n' "$domain"
+  if [ -z "${GOOGLE_SERVICE_ACCOUNT:-}" ]; then
+    printf -- '- Analytics is not configured this run -- no numbers. Note it; do NOT guess.\n'
+    return 0
+  fi
+  if ! property=$(ga_property_for_domain "$domain" 2>/dev/null); then
+    printf -- '- Analytics token mint failed -- no numbers this cycle. Note it; do NOT guess.\n'
+    return 0
+  fi
+  if [ -z "$property" ]; then
+    printf -- '- No GA4 property matches %s -- no numbers this cycle. Note it; do NOT guess.\n' "$domain"
+    return 0
+  fi
+  read -r start end pstart pend <<<"$(seo_window)"
+  cur=$(ga_run_report "$property" "$start" "$end" "" \
+          "sessions,engagedSessions,engagementRate,totalUsers,keyEvents" 2>/dev/null || printf '{"rows":[]}')
+  prev=$(ga_run_report "$property" "$pstart" "$pend" "" \
+          "sessions,engagedSessions,engagementRate,totalUsers,keyEvents" 2>/dev/null || printf '{"rows":[]}')
+  cm=$(seo_ga_metrics "$cur"); pm=$(seo_ga_metrics "$prev")
+  printf '28-day window **%s -> %s** vs the prior 28 days (**%s -> %s**). Lead with these and the delta.\n\n' \
+    "$start" "$end" "$pstart" "$pend"
+  printf '| metric | current | prior |\n|---|---|---|\n'
+  printf '| sessions | %s | %s |\n'          "$(jq -r '.sessions // 0'          <<<"$cm")" "$(jq -r '.sessions // 0'          <<<"$pm")"
+  printf '| engaged sessions | %s | %s |\n'  "$(jq -r '.engagedSessions // 0'   <<<"$cm")" "$(jq -r '.engagedSessions // 0'   <<<"$pm")"
+  printf '| engagement rate | %s%% | %s%% |\n' \
+    "$(jq -r '((.engagementRate // 0) * 10000 | round) / 100' <<<"$cm")" "$(jq -r '((.engagementRate // 0) * 10000 | round) / 100' <<<"$pm")"
+  printf '| users | %s | %s |\n'             "$(jq -r '.totalUsers // 0'        <<<"$cm")" "$(jq -r '.totalUsers // 0'        <<<"$pm")"
+  printf '| conversions (key events) | %s | %s |\n' "$(jq -r '.keyEvents // 0'  <<<"$cm")" "$(jq -r '.keyEvents // 0'         <<<"$pm")"
+}
+
 # ---- Phase 2: proposing work (issues the board greenlights) ----
 # The CEO files up to two UNLABELED issues assigned to the human, each carrying
 # CEO_PROPOSAL_MARKER. They become real work only when the human adds the Agent

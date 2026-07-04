@@ -408,6 +408,57 @@ has "gsc: token mint fail -> note" "$out" "token mint failed"
 
 unset -f forgejo_repo_get_file gsc_access_token gsc_query seo_window
 
+# ---- ceo_read_ga (sibling to ceo_read_gsc -- on-demand GA4 pull) --------
+echo "== ceo_read_ga =="
+_A_CFG=''   # what the agent.json read returns
+forgejo_repo_get_file() { printf '%s' "$_A_CFG"; }
+seo_window() { printf '2026-06-01 2026-06-28 2026-05-04 2026-05-31'; }
+ga_property_for_domain() { printf 'properties/123'; }
+ga_run_report() { printf '%s' '{"rows":[]}'; }
+seo_ga_metrics() {
+  case "$1" in
+    *CUR*)  printf '%s' '{"sessions":100,"engagedSessions":60,"engagementRate":0.6,"totalUsers":80,"keyEvents":5}' ;;
+    *PREV*) printf '%s' '{"sessions":80,"engagedSessions":40,"engagementRate":0.5,"totalUsers":70,"keyEvents":3}' ;;
+    *)      printf 'null' ;;
+  esac
+}
+
+# no .seo.domain -> clean no-op (non-SEO repos digest exactly as before)
+_A_CFG='{"smoke":{"url":"https://x"}}'
+eq "ga: no .seo.domain -> empty" "" \
+   "$(GOOGLE_SERVICE_ACCOUNT='' ceo_read_ga acme/x)"
+
+# .seo.domain set but Analytics unconfigured -> dark note, no numbers
+_A_CFG='{"seo":{"domain":"vpsshowdown.com","agentic":true}}'
+out=$(GOOGLE_SERVICE_ACCOUNT='' ceo_read_ga acme/x)
+has   "ga: unconfigured -> still names the domain" "$out" "vpsshowdown.com"
+has   "ga: unconfigured -> 'not configured' note"  "$out" "not configured"
+hasnt "ga: unconfigured -> no numbers table"       "$out" "sessions |"
+
+# no matching GA4 property -> note, no numbers
+ga_property_for_domain() { return 0; }   # empty output, rc 0 -- no match
+out=$(GOOGLE_SERVICE_ACCOUNT=x ceo_read_ga acme/x)
+has "ga: no property match -> note" "$out" "No GA4 property matches"
+
+# property resolved + reports fetched -> numbers block with current + prior
+ga_property_for_domain() { printf 'properties/123'; }
+ga_run_report() { case "$2" in 2026-06-01) printf 'CUR';; *) printf 'PREV';; esac; }
+out=$(GOOGLE_SERVICE_ACCOUNT=x ceo_read_ga acme/x)
+has "ga: analytics header"           "$out" "Analytics"
+has "ga: sessions current (100)"     "$out" "sessions | 100 | 80"
+has "ga: engaged sessions (60/40)"   "$out" "engaged sessions | 60 | 40"
+has "ga: engagement rate (60%/50%)"  "$out" "60% | 50%"
+has "ga: users (80/70)"              "$out" "users | 80 | 70"
+has "ga: conversions (5/3)"          "$out" "conversions (key events) | 5 | 3"
+has "ga: window dates surfaced"      "$out" "2026-06-01"
+
+# token mint failure (ga_property_for_domain rc 1) -> dark note, never a crash
+ga_property_for_domain() { return 1; }
+out=$(GOOGLE_SERVICE_ACCOUNT=x ceo_read_ga acme/x)
+has "ga: token mint fail -> note" "$out" "token mint failed"
+
+unset -f forgejo_repo_get_file seo_window ga_property_for_domain ga_run_report seo_ga_metrics
+
 # ---- ceo_parse_reconsider (Phase 4 follow-up: proposal reconsider) -------
 echo "== ceo_parse_reconsider =="
 rc_parse() { if RPO=$(ceo_parse_reconsider "$1"); then RRC=0; else RRC=1; fi; }
