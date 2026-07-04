@@ -82,8 +82,8 @@ A timer fires `bin/tick.sh`. Per tick:
    picks up once that repo is validated. Surfaced opportunities are
    logged to `seo-opportunities.jsonl` with baselines for future
    outcome grading. Nothing above the floor -> no email, no ticket.
-9. **Sports digest** (opt-in via `SPORTS_RECIPIENTS` + `SPORTS_LEAGUES`
-   + SMTP2GO env; no-ops when unconfigured). A daily, 7-days-a-week
+9. **Sports digest** (opt-in via `SPORTS_RECIPIENTS` + `SPORTS_LEAGUES` +
+   SMTP2GO env; no-ops when unconfigured). A daily, 7-days-a-week
    email that teaches sports through yesterday's news: `lib/espn.sh`
    fetches each configured league's scoreboard (yesterday) + headlines
    from ESPN's free public JSON API, and ONE `claude_call` on

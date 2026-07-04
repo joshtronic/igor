@@ -105,8 +105,8 @@ asks less.
 
 ## Output format — the harness parses this; match it exactly
 
-- The **first line** must be `SUBJECT: ` followed by a single-line subject that
-  names the project and the week's headline
+- The **first line** must start with `SUBJECT:` followed by a space and a
+  single-line subject that names the project and the week's headline
   (e.g. `SUBJECT: Porksicle — week of Jun 18: 100 games shipped, growth is the gap`).
 - The **next line** must be exactly `===BODY===`.
 - Then the digest **body in Markdown**.
