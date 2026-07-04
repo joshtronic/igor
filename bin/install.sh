@@ -58,7 +58,7 @@ fi
 # Warn only -- the harness doesn't need these at runtime, but a host
 # without them can't run the quality gates a PR is judged against.
 missing_dev=()
-for cmd in make shellcheck markdownlint; do
+for cmd in make shellcheck mdl; do
   command -v "$cmd" >/dev/null 2>&1 || missing_dev+=("$cmd")
 done
 if [ "${#missing_dev[@]}" -gt 0 ]; then
@@ -71,19 +71,12 @@ if [ "${#missing_dev[@]}" -gt 0 ]; then
     case "$cmd" in
       make)         apt_pkgs+=("make") ;;
       shellcheck)   apt_pkgs+=("shellcheck") ;;
-      markdownlint) ;;  # not in apt; npm package
+      mdl)          apt_pkgs+=("markdownlint") ;;
     esac
   done
   if [ "${#apt_pkgs[@]}" -gt 0 ]; then
     echo "  sudo apt-get install -y ${apt_pkgs[*]}" >&2
   fi
-  for cmd in "${missing_dev[@]}"; do
-    case "$cmd" in
-      markdownlint)
-        echo "  markdownlint: npm install -g markdownlint-cli" >&2
-        ;;
-    esac
-  done
   echo >&2
   echo "continuing install without them." >&2
   echo >&2
