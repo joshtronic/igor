@@ -90,6 +90,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/claude.sh"
 # shellcheck source=lib/crashlog.sh
 . "$AGENT_HOME/lib/crashlog.sh"
+# shellcheck source=lib/healthcheck.sh
+. "$AGENT_HOME/lib/healthcheck.sh"
 # shellcheck source=../lib/security-gate.sh
 . "$AGENT_HOME/lib/security-gate.sh"
 # shellcheck source=lib/google-auth.sh
@@ -148,6 +150,18 @@ WORKTREE=""
 PR_WORKTREE=""
 cleanup() {
   local rc=$?
+  # Task heartbeat (check B): pair the start ping (fired once the tick
+  # clears the health/deploy gates -- see HC_TASK_STARTED) with a
+  # success/fail ping here so every exit path reports honestly, not just
+  # the happy one. Guarded so a tick that never reached the cascade (e.g.
+  # a health cooldown, or an error before it) doesn't falsely report.
+  if [ -n "${HC_TASK_STARTED:-}" ]; then
+    if [ "$rc" -eq 0 ]; then
+      hc_ping task success
+    else
+      hc_ping task fail
+    fi
+  fi
   # Post-mortem: if a model call was in-flight when the tick died (the #279
   # signature -- abnormal exit, no "claude exited" line), preserve its raw stream
   # before the worktree is removed below or reused next tick. Best-effort.
@@ -225,6 +239,15 @@ export ALERT_RECIPIENTS="${ALERT_RECIPIENTS:-}"
 export SPORTS_RECIPIENTS="${SPORTS_RECIPIENTS:-}"
 export SPORTS_LEAGUES="${SPORTS_LEAGUES:-}"
 
+# Healthcheck pings (dead-man's switch) -- opt-in, inert, non-model (plain
+# curl via lib/healthcheck.sh). Both default to empty so referencing them
+# under `set -u` is safe; hc_ping no-ops silently when its URL is unset.
+# HEARTBEAT proves the tick is still firing at all; TASK's start/success/
+# fail pair (wired below + in cleanup()) catches a crash/hang mid-cascade.
+# See #297 for the operator-side healthchecks.io setup that activates them.
+export HEALTHCHECK_HEARTBEAT_URL="${HEALTHCHECK_HEARTBEAT_URL:-}"
+export HEALTHCHECK_TASK_URL="${HEALTHCHECK_TASK_URL:-}"
+
 # Put the harness's bin dir on PATH for every Claude invocation in
 # this script. Without this, Claude can't call agent-enqueue.sh /
 # agent-ask.sh / agent-block.sh / agent-report.sh by name -- it
@@ -245,6 +268,11 @@ if ! flock -n 200; then
 fi
 
 log() { printf '[agent] %s\n' "$*"; }
+
+# Dead-man's-switch heartbeat (check A) -- unconditional, every tick that
+# gets this far (i.e. actually holds the lock). No-op when
+# HEALTHCHECK_HEARTBEAT_URL is unset.
+hc_ping heartbeat
 
 # Title -> branch-safe slug. ASCII alphanumerics survive; everything
 # else collapses to '-'. Capped at 50 chars, preferring to cut on a
@@ -2827,6 +2855,17 @@ if claude_health_blocked; then
   do_seo_tick || true
   exit 0
 fi
+
+# Task heartbeat (check B) -- the gates above (health probe, deploy
+# barrier, cooldown check) can end the tick before real work ever starts,
+# so the start ping sits here, at the true top of the cascade. Paired
+# success/fail ping lives in cleanup() (trap on EXIT), guarded on
+# HC_TASK_STARTED so it only fires for a tick that reached this point --
+# covers every exit path below (including the cascade's many early
+# `exit 0`s) as well as a crash/hang. No-op when HEALTHCHECK_TASK_URL is
+# unset.
+HC_TASK_STARTED=1
+hc_ping task start
 
 # -- Bootstrap: ensure the website is cloned (if opt-in) ----------
 #
