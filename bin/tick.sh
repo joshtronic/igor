@@ -2256,16 +2256,21 @@ own once calls succeed again."
 # assigned-to-reviewer), so unassigning is optional. Review time is
 # logged on each filed ticket.
 #
-# State: one ".logwatch" object {date} in discretionary-state.json.
-# Stamped once ATTEMPTED (slot semantics): a wedged pass must not
-# retry model calls every tick for the rest of the day. The
-# after-01:00 gate is window-completeness (the hour being analyzed
-# must have closed), not a send-hour preference.
+# State: one ".logwatch" object {hour, backoff_days} in
+# discretionary-state.json. Stamped once ATTEMPTED (slot semantics): a
+# wedged pass must not retry model calls every tick for the rest of
+# the day. The after-01:00 gate is window-completeness (the hour being
+# analyzed must have closed), not a send-hour preference.
 #
 # A Claude health backoff (auth/limit, lib/claude.sh's .health) that
-# overlapped the reviewed hour suppresses the whole pass -- see
-# lib/logwatch.sh's logwatch_health_backoff_in_window. The health
-# channel already owns auth/limit alerting.
+# overlapped the reviewed hour -- see lib/logwatch.sh's
+# logwatch_health_backoff_in_window -- gets its own narration lines
+# stripped from the journal rather than suppressing the whole pass, so
+# an unrelated failure in the same window still files (igor#340). Once
+# the backoff has recurred on >=2 distinct calendar days
+# (logwatch_chronic_backoff, tracked in ".logwatch.backoff_days"), the
+# stripping stops: chronic isn't noise, and the once-daily health email
+# under-surfaces a recurring problem.
 
 LOGWATCH_MARKER='<!-- agent:logwatch -->'
 
@@ -2283,16 +2288,24 @@ logwatch_mark_done() {
   hour=$(date -d '1 hour ago' +%Y-%m-%dT%H)
   [ -f "$state_file" ] || echo '{}' > "$state_file"
   tmp=$(mktemp)
-  jq --arg h "$hour" '.logwatch = {hour: $h}' "$state_file" > "$tmp"
+  # Merge, not replace -- a bare `.logwatch = {hour: ...}` would wipe
+  # `.logwatch.backoff_days` (igor#340's chronic-day tracking) every
+  # single hour, since this stamp runs before that tracking is read.
+  jq --arg h "$hour" '.logwatch = ((.logwatch // {}) + {hour: $h})' "$state_file" > "$tmp"
   mv "$tmp" "$state_file"
 }
 
-# logwatch_review_unit <repo> <unit>
+# logwatch_review_unit <repo> <unit> [suppress_noise]
 # Review ONE unit's just-closed-hour journal; file tickets on <repo>.
-# Returns 0 if a model call ran (the tick did real work), 1 if the
-# unit was skipped (empty journal).
+# suppress_noise=1 strips lines that are pure narration of a
+# TRANSIENT Claude health backoff (logwatch_strip_backoff_noise)
+# before review, so a genuine unrelated failure in the same window
+# still files even while the backoff itself stays unticketed; omit
+# (or a chronic backoff, see do_logwatch_tick) to review the journal
+# as-is. Returns 0 if a model call ran (the tick did real work), 1 if
+# the unit was skipped (empty journal).
 logwatch_review_unit() {
-  local repo="$1" unit="$2"
+  local repo="$1" unit="$2" suppress_noise="${3:-0}"
   local win_start win_end win_label start journal
   win_start=$(date -d '1 hour ago' '+%Y-%m-%d %H:00:00')   # the just-closed clock hour
   win_end=$(date '+%Y-%m-%d %H:00:00')
@@ -2302,6 +2315,9 @@ logwatch_review_unit() {
   journal=$(journalctl --user -u "$unit" \
     --since "$win_start" --until "$win_end" \
     --no-pager 2>/dev/null | grep -v '^-- No entries --$' | tail -c 60000)
+  if [ "$suppress_noise" = "1" ]; then
+    journal=$(logwatch_strip_backoff_noise "$journal")
+  fi
   if [ -z "$journal" ]; then
     log "logwatch: ${unit}: no entries in the past hour -- skipping"
     return 1
@@ -2467,15 +2483,28 @@ do_logwatch_tick() {
   # about to review means its own review-call failures and the
   # backoff/alert lines in agent.service's journal are all downstream of
   # that one event -- the health-alert email already owns auth/limit
-  # notification (igor#332/#333 double-report). Suppress the whole pass.
-  local win_start_str win_end_str win_start_epoch win_end_epoch
+  # notification (igor#332/#333 double-report). A TRANSIENT backoff (its
+  # first distinct day) gets only its own narration lines stripped from
+  # the journal (logwatch_strip_backoff_noise), so a genuine unrelated
+  # failure in the same window still files. A CHRONIC backoff (recurring
+  # on >=2 distinct days, igor#340) is left unfiltered instead -- the
+  # once-daily health email under-surfaces a recurring problem, so the
+  # backoff narration stays visible for the reviewer to ticket (the
+  # agent.service known-benign blurb already says these lines ARE
+  # ticket-worthy; per-open-issue-title dedup keeps it to one ticket).
+  local win_start_str win_end_str win_start_epoch win_end_epoch suppress_noise=0
   win_start_str=$(date -d '1 hour ago' '+%Y-%m-%d %H:00:00')
   win_end_str=$(date '+%Y-%m-%d %H:00:00')
   win_start_epoch=$(date -d "$win_start_str" +%s)
   win_end_epoch=$(date -d "$win_end_str" +%s)
   if logwatch_health_backoff_in_window "$(discretionary_state_file)" "$win_start_epoch" "$win_end_epoch"; then
-    log "logwatch: Claude health backoff active in window -- suppressing (health channel owns auth/limit alerting)"
-    return 1
+    logwatch_record_backoff_day "$(discretionary_state_file)" "$(date -d '1 hour ago' +%Y-%m-%d)"
+    if logwatch_chronic_backoff "$(discretionary_state_file)"; then
+      log "logwatch: Claude health backoff chronic (>=${LOGWATCH_CHRONIC_BACKOFF_DAYS} distinct days) -- leaving backoff narration visible to the reviewer"
+    else
+      log "logwatch: Claude health backoff active in window -- stripping backoff narration lines only (health channel owns auth/limit alerting)"
+      suppress_noise=1
+    fi
   fi
 
   # Discovery: every bot-accessible repo that declares systemd units.
@@ -2490,7 +2519,7 @@ do_logwatch_tick() {
     [ -z "$units" ] && continue
     while IFS= read -r unit; do
       [ -z "$unit" ] && continue
-      if logwatch_review_unit "$r_name" "$unit"; then
+      if logwatch_review_unit "$r_name" "$unit" "$suppress_noise"; then
         reviewed=$((reviewed + 1))
       fi
     done <<<"$units"
