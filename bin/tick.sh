@@ -96,6 +96,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/google-auth.sh"
 # shellcheck source=lib/gsc.sh
 . "$AGENT_HOME/lib/gsc.sh"
+# shellcheck source=lib/ga.sh
+. "$AGENT_HOME/lib/ga.sh"
 # shellcheck source=lib/email.sh
 . "$AGENT_HOME/lib/email.sh"
 # shellcheck source=lib/seo-analysis.sh
@@ -1693,6 +1695,19 @@ do_seo_tick() {
   agentic_repo=$(seo_agentic_repo_for "$target")
   [ -n "$agentic_repo" ] && agentic_bool=true
   seo_record_opportunities "$report" "$agentic_bool" "$period"
+
+  # GA is additive and optional: no matching property (or a fetch
+  # failure) leaves report.ga at its "null" default, and both renderers
+  # fall back to GSC-only output, unchanged.
+  local ga_property ga_report ga_metrics
+  ga_property=$(ga_property_for_domain "$target") || ga_property=""
+  if [ -n "$ga_property" ]; then
+    ga_report=$(ga_run_report "$ga_property" "$start" "$end" "" \
+                  "sessions,engagedSessions,engagementRate,totalUsers,keyEvents") \
+      || ga_report='{"rows":[]}'
+    ga_metrics=$(seo_ga_metrics "$ga_report")
+    report=$(jq --argjson ga "$ga_metrics" '.ga = $ga' <<<"$report")
+  fi
 
   # Render once, reuse for email (text+html) and ticket (markdown).
   local md html recipients subject

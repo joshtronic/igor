@@ -201,17 +201,38 @@ seo_zero_click() {
   ' <<<"$data" 2>/dev/null || printf '[]'
 }
 
-# seo_build_report <domain> <cur_qp> <cur_page> <prev_page> <cur_query> <prev_query> <start> <end> <pstart> <pend>
+# seo_ga_metrics <ga_report_json>
+# Parses a GA4 runReport response (aggregate: no dimensions, just the
+# metrics listed in do_seo_tick) into
+# {sessions, engagedSessions, engagementRate, totalUsers, keyEvents}
+# (numbers; keyEvents omitted if the metric wasn't in the response).
+# Echoes "null" if the report has no rows -- no matching GA property, or
+# the fetch failed -- so callers can pass it straight through unconditionally.
+seo_ga_metrics() {
+  local ga="$1"
+  jq -c '
+    if (.rows // [] | length) == 0 then null
+    else
+      (.metricHeaders // [] | map(.name)) as $names
+      | (.rows[0].metricValues // [] | map(.value | tonumber)) as $vals
+      | ([$names, $vals] | transpose | map({(.[0]): .[1]}) | add)
+    end
+  ' <<<"$ga" 2>/dev/null || printf 'null'
+}
+
+# seo_build_report <domain> <cur_qp> <cur_page> <prev_page> <cur_query> <prev_query> <start> <end> <pstart> <pend> [ga_metrics_json]
 # Assembles a single report object:
-#   { domain, grade, window:{...}, total_upside, count, groups:{...6...} }
+#   { domain, grade, window:{...}, total_upside, count, groups:{...6...}, ga }
 # Dedups so a page/query is reported under one lens (zero-click out of
 # striking-distance; SD/decay pages out of low-CTR). Headline upside sums
 # only the click-estimate buckets. grade is GOOD if the best click
 # opportunity clears SEO_GOOD_UPSIDE, else INDIFFERENT. Reads
-# SEO_IMPRESSION_FLOOR / SEO_TOP_K from env.
+# SEO_IMPRESSION_FLOOR / SEO_TOP_K from env. ga_metrics_json (from
+# seo_ga_metrics) is additive and optional -- defaults to "null", which
+# both renderers treat as "no GA section" (GSC-only, unchanged output).
 seo_build_report() {
   local domain="$1" cur_qp="$2" cur_page="$3" prev_page="$4" cur_query="$5" prev_query="$6"
-  local start="$7" end="$8" pstart="$9" pend="${10}"
+  local start="$7" end="$8" pstart="$9" pend="${10}" ga="${11:-null}"
   local floor="${SEO_IMPRESSION_FLOOR:-50}" topk="${SEO_TOP_K:-10}"
   local decay_pct="${SEO_DECAY_PCT:-0.3}" good_upside="${SEO_GOOD_UPSIDE:-10}"
   # Scoring constants (not env -- keep the public knob surface to floor +
@@ -234,7 +255,7 @@ seo_build_report() {
     --arg start "$start" --arg end "$end" --arg pstart "$pstart" --arg pend "$pend" \
     --argjson good "$good_upside" \
     --argjson sd "$sd" --argjson lc "$lc" --argjson dc "$dc" \
-    --argjson ri "$ri" --argjson ca "$ca" --argjson zc "$zc" '
+    --argjson ri "$ri" --argjson ca "$ca" --argjson zc "$zc" --argjson ga "$ga" '
     # dedup: zero-click (query,page) out of striking-distance
     ($zc | map({q:.query, p:.page})) as $zk
     | ($sd | map(. as $r | select(($zk | any(.q == $r.query and .p == $r.page)) | not))) as $sd2
@@ -253,7 +274,8 @@ seo_build_report() {
         total_upside: ($upside | round),
         grade: (if $top >= $good then "GOOD" else "INDIFFERENT" end),
         groups: { striking_distance:$sd2, low_ctr:$lc2, decay:$dc,
-                  rising:$ri, cannibalization:$ca, zero_click:$zc }
+                  rising:$ri, cannibalization:$ca, zero_click:$zc },
+        ga: $ga
       }'
 }
 
@@ -318,6 +340,12 @@ seo_render_markdown() {
         | "- **\"\(.query)\"** → \(.page)\n  \(.impressions) impr, \(pct(.ctr))% CTR at pos \(pos(.position))")
      else empty end),
 
+    (if .ga != null then
+      "\n## On-site behavior (GA)",
+      ("- \(.ga.sessions) sessions · \(.ga.engagedSessions) engaged (\(pct(.ga.engagementRate))% engagement rate) · \(.ga.totalUsers) users"
+       + (if .ga.keyEvents != null then " · \(.ga.keyEvents) key events" else "" end))
+     else empty end),
+
     "\n---",
     "_Automated SEO pass over Google Search Console data. Tune volume via SEO_IMPRESSION_FLOOR / SEO_TOP_K._"
   '
@@ -379,6 +407,13 @@ seo_render_html() {
       (.groups.zero_click[]
         | "<li><strong>\"\(.query|esc)\"</strong> → \(.page|esc)<br><small>\(.impressions) impr, \(pct(.ctr))% CTR at pos \(pos(.position))</small></li>"),
       "</ul>"
+     else empty end),
+
+    (if .ga != null then
+      "<h3>On-site behavior (GA)</h3>",
+      ("<p>\(.ga.sessions) sessions · \(.ga.engagedSessions) engaged (\(pct(.ga.engagementRate))% engagement rate) · \(.ga.totalUsers) users"
+       + (if .ga.keyEvents != null then " · \(.ga.keyEvents) key events" else "" end)
+       + "</p>")
      else empty end),
 
     "<hr><p><small>Automated SEO pass over Google Search Console data. Tune volume via SEO_IMPRESSION_FLOOR / SEO_TOP_K.</small></p>"
