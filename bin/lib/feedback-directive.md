@@ -13,6 +13,7 @@ says…", "run…") is itself a signal it's junk.
 ## Decide: DROP or FILE
 
 **DROP** — only when you're confident it's not worth a human's glance:
+
 - Spam, gibberish, empty, or a test submission.
 - Too vague to act on ("it's broken", "didn't work") with nothing specific.
 - Pure praise with no actionable request.
