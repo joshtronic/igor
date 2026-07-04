@@ -113,6 +113,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/feedback.sh"
 # shellcheck source=lib/deferred.sh
 . "$AGENT_HOME/lib/deferred.sh"
+# shellcheck source=lib/logwatch.sh
+. "$AGENT_HOME/lib/logwatch.sh"
 
 # Children invocations (agent-* helper scripts) share our tick id
 # so cost-ledger entries from child processes group with the
@@ -2259,6 +2261,11 @@ own once calls succeed again."
 # retry model calls every tick for the rest of the day. The
 # after-01:00 gate is window-completeness (the hour being analyzed
 # must have closed), not a send-hour preference.
+#
+# A Claude health backoff (auth/limit, lib/claude.sh's .health) that
+# overlapped the reviewed hour suppresses the whole pass -- see
+# lib/logwatch.sh's logwatch_health_backoff_in_window. The health
+# channel already owns auth/limit alerting.
 
 LOGWATCH_MARKER='<!-- agent:logwatch -->'
 
@@ -2455,6 +2462,21 @@ do_logwatch_tick() {
 
   # Attempted = done for this hour, BEFORE any model call (see header).
   logwatch_mark_done
+
+  # A Claude health backoff (auth/limit) that overlapped the hour we're
+  # about to review means its own review-call failures and the
+  # backoff/alert lines in agent.service's journal are all downstream of
+  # that one event -- the health-alert email already owns auth/limit
+  # notification (igor#332/#333 double-report). Suppress the whole pass.
+  local win_start_str win_end_str win_start_epoch win_end_epoch
+  win_start_str=$(date -d '1 hour ago' '+%Y-%m-%d %H:00:00')
+  win_end_str=$(date '+%Y-%m-%d %H:00:00')
+  win_start_epoch=$(date -d "$win_start_str" +%s)
+  win_end_epoch=$(date -d "$win_end_str" +%s)
+  if logwatch_health_backoff_in_window "$(discretionary_state_file)" "$win_start_epoch" "$win_end_epoch"; then
+    log "logwatch: Claude health backoff active in window -- suppressing (health channel owns auth/limit alerting)"
+    return 1
+  fi
 
   # Discovery: every bot-accessible repo that declares systemd units.
   # ANALYSIS_REPOS_JSON (not the validated set) -- like maintenance,
