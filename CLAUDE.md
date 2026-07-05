@@ -121,9 +121,10 @@ respective tools on the host; install or skip.
   ticket -- the old per-file API validation's failure mode (it once
   clapped a healthy repo back to "not ready" on a network blip). A repo
   that fails validation is simply skipped for WORK, SILENTLY -- NO
-  ticket; onboarding is a manual operator step (`bin/validate-repo.sh
-  <repo>` prints the checklist). Validation gates only WORK (issue
-  pickup, PR pushes, site-work) -- the read-only weekly analysis pass
+  ticket; onboarding is a manual operator step
+  (`bin/validate-repo.sh <repo>` prints the checklist). Validation
+  gates only WORK (issue pickup, PR pushes, site-work) -- the
+  read-only weekly analysis pass
   (security/dep audit) runs on every bot-accessible repo regardless,
   since the audit only files tickets and never commits.
   `ANALYSIS_REPOS_JSON` is the analysis set; `VALIDATED_REPOS_JSON` is
@@ -201,9 +202,9 @@ respective tools on the host; install or skip.
   share `email.sh`, gating on `SMTP2GO_API_KEY` + `SMTP2GO_SENDER`
   (renamed from `SEO_SENDER_EMAIL`); change the code's email vars and the
   host `.env` must change in lockstep or those emails break.
-- The sports digest (`do_sports_tick`) is opt-in via `SPORTS_RECIPIENTS`
-  + `SPORTS_LEAGUES` + SMTP2GO and is another email sibling -- but the
-  FIRST that uses the model (scripted ESPN fetch via `lib/espn.sh`, ONE
+- The sports digest (`do_sports_tick`) is opt-in via `SPORTS_RECIPIENTS` +
+  `SPORTS_LEAGUES` + SMTP2GO and is another email sibling -- but the FIRST
+  that uses the model (scripted ESPN fetch via `lib/espn.sh`, ONE
   `claude_call` distill on `AGENT_MODEL`), so unlike SEO it sits
   below the health gate and goes dark during a Claude cooldown. Daily,
   7 days a week, first tick after 03:00 (window-completeness like

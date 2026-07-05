@@ -73,8 +73,8 @@ Pick the models in `.env`, stakes-ordered per surface: `AGENT_MODEL`
 independent reviewer -- the strongest tier you have; e.g.
 `claude-fable-5`).
 
-The bot's Forgejo token (`FORGEJO_TOKEN`) lives in the same `.env`, chmod
-600. See `.env.example` for the full template.
+The bot's Forgejo token (`FORGEJO_TOKEN`) lives in the same `.env`,
+chmod 600. See `.env.example` for the full template.
 
 ## Bot user
 
