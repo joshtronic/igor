@@ -254,6 +254,8 @@ shipped_digest() {
 # tokens earns no freshness bonus. Reads frontmatter tags only; handles both
 # `tags: ["a", "b"]` and `tags: [a, b]`. NOT a dedup gate -- just a nudge, so
 # a near-miss that doesn't match simply forfeits the bonus, it never blocks.
+# shellcheck disable=SC2120  # the sole call site relies on the default,
+# so the arg is intentionally never passed.
 recent_post_territory_tokens() {
   local count="${1:-6}" files f
   files=$(find "$WEBSITE_PATH"/src/posts -type f -name '*.md' 2>/dev/null \
@@ -646,6 +648,7 @@ run_ideation() {
   local EXCLUDED_SOURCES_SQL recent_terr
   shipped=$(shipped_digest)
   EXCLUDED_SOURCES_SQL=$(build_excluded_sources_sql)
+  # shellcheck disable=SC2119  # the default count (6) is what we want here.
   recent_terr=$(recent_post_territory_tokens)
   for round in $(seq 1 "$MAX_IDEATION_ROUNDS"); do
     bundle=$(corpus_sample)

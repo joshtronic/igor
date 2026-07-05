@@ -29,6 +29,7 @@ eq "primary first, order preserved"       "josh@x.com,a@x,b@x" "$(recipients_wit
 eq "primary repeated in extras -> deduped" "josh@x.com,jen@y.com" "$(recipients_with_primary "josh@x.com,jen@y.com")"
 eq "internal dupes in extras -> deduped"  "josh@x.com,jen@y.com" "$(recipients_with_primary "jen@y.com,jen@y.com")"
 
+# shellcheck disable=SC2034  # read by recipients_with_primary (lib/email.sh)
 PRIMARY_RECIPIENTS=""
 eq "no primary -> extras only"            "jen@y.com" "$(recipients_with_primary "jen@y.com")"
 eq "nothing set -> empty"                 "" "$(recipients_with_primary "")"

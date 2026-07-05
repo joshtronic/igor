@@ -128,7 +128,7 @@ eq "live_sha: no meta -> empty"        "" "$(automerge_live_sha https://x)"
 
 echo "== automerge_sitemap_failures (walk + flag non-2xx) =="
 curl() {
-  local u="${@: -1}"
+  local u="${*: -1}"
   case "$u" in
     */sitemap.xml) printf '<urlset><url><loc>https://x/ok</loc></url><url><loc>https://x/bad</loc></url></urlset>' ;;
     */bad)         echo 500 ;;
@@ -203,10 +203,10 @@ no "block: unknown key -> retry"                      automerge_block_active "$B
 eq "block: reason recorded" "HTTP 405: nope" "$(jq -r '.automerge_block["acme/x#5"].reason' "$BSF")"
 automerge_block_clear "$BSF" "acme/x#5"
 no "block: after clear -> retry"                      automerge_block_active "$BSF" "acme/x#5" "headA"
+# shellcheck disable=SC2034  # read by automerge_block_active (lib/automerge.sh)
 AUTOMERGE_BLOCK_COOLDOWN_SECS=0
 automerge_block_record "$BSF" "acme/x#5" "headA" "reason"
 no "block: cooldown elapsed -> retry"                 automerge_block_active "$BSF" "acme/x#5" "headA"
-AUTOMERGE_BLOCK_COOLDOWN_SECS=3600
 
 echo "== automerge_behind_count (the require-up-to-date gate) =="
 _fj() {

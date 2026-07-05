@@ -39,6 +39,8 @@ GOOGLE_SERVICE_ACCOUNT="";        no "unset -> rc1"   google_sa_json
 GOOGLE_SERVICE_ACCOUNT="notjson"; no "garbage -> rc1" google_sa_json
 
 echo "== google_sa_access_token: assembles + signs a valid JWT, returns the token =="
+# shellcheck disable=SC2034  # read by google_sa_json, called from
+# google_sa_access_token below (lib/google-auth.sh).
 GOOGLE_SERVICE_ACCOUNT="$SA"
 # stub curl: capture the assertion (the JWT), return a fake token response
 curl() { local i; for ((i=1; i<=$#; i++)); do case "${!i}" in assertion=*) printf '%s' "${!i#assertion=}" > "$TMP/jwt";; esac; done; printf '{"access_token":"fake-tok-abc"}'; }

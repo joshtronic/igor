@@ -25,3 +25,12 @@ disable=SC2317
 # the backtick for a command-substitution attempt). Double-quoting
 # either would change behavior, not just silence a lint.
 disable=SC2016
+
+# SC2218 ("function only defined later, move the definition up"): the
+# mirror image of the SC2317 false positive above -- bin/test-*.sh
+# sources the real lib function, calls it for an early scenario, then
+# REDEFINES it later in the same file to stub a later scenario.
+# shellcheck sees the call before that later textual redefinition and
+# assumes a forward-reference bug; the real definition already came
+# from the `source` line at the top of the file.
+disable=SC2218

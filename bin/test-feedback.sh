@@ -148,6 +148,7 @@ eq "file: applies resolved label ids to the payload" "[2,3]" "$(jq -c '.labels' 
 echo "== do_feedback_tick decision =="
 export FORGEJO_REVIEWER=josh AGENT_MODEL_REVIEW=m
 export ANALYSIS_REPOS_JSON='{"full_name":"acme/x"}'
+# shellcheck disable=SC2034  # read by do_feedback_tick in lib/feedback.sh
 AGENT_HOME="$TMP"; mkdir -p "$TMP/bin/lib"; echo "directive" > "$TMP/bin/lib/feedback-directive.md"
 feedback_csv_url()      { echo "https://x"; }
 feedback_fetch_rows()   { echo '[{"Timestamp":"u1","Game":"g","Tell us more":"a real, specific bug"}]'; }

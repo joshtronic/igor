@@ -27,6 +27,8 @@ CEO_QUESTION_MARKER="<!-- ceo-question -->"
 # Upper bound on simultaneously-open CEO items (proposals + questions) before the
 # pass stops filing new ones -- a generous backstop against infinite pileup that
 # still lets the CEO grind, replacing the old "no new work until zero open" gate.
+# shellcheck disable=SC2034  # read only by bin/tick.sh, which sources this
+# file; invisible to shellcheck when lib/ceo.sh is checked as its own unit.
 CEO_MAX_OPEN=8
 # Stamped into the weekly board digest, now a RESPONDABLE issue (the brief moved off
 # one-way email): the board comments to steer next week's read, closes to drop. Not a
@@ -705,7 +707,8 @@ ceo_parse_reconsider() {
 
 # ceo_codecheck_clone_path <repo> -- the harness's local clone path, empty if absent.
 ceo_codecheck_clone_path() {
-  local repo="$1" p="${AGENT_STATE_DIR:-$HOME/.local/state/agent}/repos/${repo}"
+  local repo="$1"
+  local p="${AGENT_STATE_DIR:-$HOME/.local/state/agent}/repos/${repo}"
   [ -d "$p/.git" ] && printf '%s' "$p"
 }
 
