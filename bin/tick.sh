@@ -125,7 +125,14 @@ export TICK_PID=$$
 
 # -- Resolve bot identity --------------------------------------
 
-BOT_USER=$(forgejo_whoami)
+# forgejo_whoami's pipeline (curl | jq) can fail with curl's raw exit code
+# (e.g. 6/COULDNT_RESOLVE_HOST on a network blip -- the same one that can
+# make the self-pull above fail). Under `set -euo pipefail`, an unguarded
+# `BOT_USER=$(forgejo_whoami)` lets that raw code kill the tick via errexit
+# BEFORE the check below runs, bypassing this diagnostic and exiting with a
+# meaningless code (igor#346). Catch it so a lookup failure always falls
+# through to the intended message + exit 3.
+BOT_USER=$(forgejo_whoami) || BOT_USER=""
 [ -n "$BOT_USER" ] || {
   echo "agent: failed to resolve bot user from $FORGEJO_URL/api/v1/user" >&2
   exit 3
