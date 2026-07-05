@@ -109,10 +109,14 @@ claude_health_record_ok() {
   mkdir -p "$(dirname "$f")"
   [ -f "$f" ] || echo '{}' > "$f"
   tmp=$(mktemp)
-  jq --argjson now "$now" \
+  if jq --argjson now "$now" \
     '.health = ((.health // {})
       + {last_ok: $now, first_failure: 0, kind: "", detail: "", cooldown_until: 0})' \
-    "$f" > "$tmp" 2>/dev/null && mv "$tmp" "$f" || rm -f "$tmp"
+    "$f" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$f"
+  else
+    rm -f "$tmp"
+  fi
 }
 
 # claude_health_record_failure <kind> <detail>
@@ -130,12 +134,16 @@ claude_health_record_failure() {
   mkdir -p "$(dirname "$f")"
   [ -f "$f" ] || echo '{}' > "$f"
   tmp=$(mktemp)
-  jq --argjson now "$now" --argjson cd "$cooldown" \
+  if jq --argjson now "$now" --argjson cd "$cooldown" \
      --arg kind "$kind" --arg detail "$detail" \
     '.health = ((.health // {})
       + {kind: $kind, detail: $detail, cooldown_until: ($now + $cd)}
       + (if (.health.first_failure // 0) > 0 then {} else {first_failure: $now} end))' \
-    "$f" > "$tmp" 2>/dev/null && mv "$tmp" "$f" || rm -f "$tmp"
+    "$f" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$f"
+  else
+    rm -f "$tmp"
+  fi
   log "claude health: $kind failure recorded, backing off ${cooldown}s -- $detail"
 }
 

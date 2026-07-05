@@ -69,9 +69,13 @@ logwatch_record_backoff_day() {
   local state_file="$1" day="$2" tmp
   [ -f "$state_file" ] || echo '{}' > "$state_file"
   tmp=$(mktemp)
-  jq --arg d "$day" --argjson cap "$LOGWATCH_BACKOFF_DAYS_CAP" \
+  if jq --arg d "$day" --argjson cap "$LOGWATCH_BACKOFF_DAYS_CAP" \
     '.logwatch.backoff_days = (((.logwatch.backoff_days // []) + [$d]) | unique | .[-$cap:])' \
-    "$state_file" > "$tmp" 2>/dev/null && mv "$tmp" "$state_file" || rm -f "$tmp"
+    "$state_file" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$state_file"
+  else
+    rm -f "$tmp"
+  fi
 }
 
 # logwatch_chronic_backoff <state_file>

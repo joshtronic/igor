@@ -25,7 +25,7 @@ crashlog_preserve() {
   local wt scratch dest stamp base
   stamp=$(date +%Y%m%dT%H%M%S 2>/dev/null) || return 0
   for wt in "$@"; do
-    [ -n "$wt" ] && [ -f "$wt/.agent/claude-in-flight" ] || continue
+    if [ -z "$wt" ] || [ ! -f "$wt/.agent/claude-in-flight" ]; then continue; fi
     scratch="$wt/.agent"
     base=$(basename "$wt" 2>/dev/null || echo worktree)
     dest="$state_dir/crash-logs/${stamp}-rc${rc}-${base}"
@@ -71,8 +71,9 @@ crashlog_preserve_scratch() {
 crashlog_prune() {
   local dir="$1/crash-logs" old
   [ -d "$dir" ] || return 0
-  ls -1dt "$dir"/*/ 2>/dev/null | tail -n +"$((CRASHLOG_KEEP + 1))" | while IFS= read -r old; do
-    [ -n "$old" ] && rm -rf "$old" 2>/dev/null || true
+  find "$dir" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn | cut -d' ' -f2- | tail -n +"$((CRASHLOG_KEEP + 1))" | while IFS= read -r old; do
+    if [ -n "$old" ]; then rm -rf "$old" 2>/dev/null; fi
   done
   return 0
 }

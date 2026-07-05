@@ -127,8 +127,12 @@ automerge_block_record() {
   local sf="$1" key="$2" head="$3" reason="$4" tmp now
   [ -f "$sf" ] || echo '{}' >"$sf"
   now=$(date +%s); tmp=$(mktemp)
-  jq --arg k "$key" --arg s "$head" --arg r "$reason" --argjson t "$now" \
-    '.automerge_block[$k] = {sha:$s, reason:$r, ts:$t}' "$sf" >"$tmp" 2>/dev/null && mv "$tmp" "$sf" || rm -f "$tmp"
+  if jq --arg k "$key" --arg s "$head" --arg r "$reason" --argjson t "$now" \
+    '.automerge_block[$k] = {sha:$s, reason:$r, ts:$t}' "$sf" >"$tmp" 2>/dev/null; then
+    mv "$tmp" "$sf"
+  else
+    rm -f "$tmp"
+  fi
 }
 
 automerge_block_clear() {
@@ -136,7 +140,11 @@ automerge_block_clear() {
   local sf="$1" key="$2" tmp
   [ -f "$sf" ] || return 0
   tmp=$(mktemp)
-  jq --arg k "$key" 'if .automerge_block then .automerge_block |= del(.[$k]) else . end' "$sf" >"$tmp" 2>/dev/null && mv "$tmp" "$sf" || rm -f "$tmp"
+  if jq --arg k "$key" 'if .automerge_block then .automerge_block |= del(.[$k]) else . end' "$sf" >"$tmp" 2>/dev/null; then
+    mv "$tmp" "$sf"
+  else
+    rm -f "$tmp"
+  fi
 }
 
 # automerge_behind_count <repo> <pr> -- how many base-branch commits the PR head
@@ -146,7 +154,7 @@ automerge_behind_count() {
   local repo="$1" pr="$2" obj head base cmp
   obj=$(_fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null) || { echo -1; return; }
   head=$(jq -r '.head.sha // empty' <<<"$obj"); base=$(jq -r '.base.ref // empty' <<<"$obj")
-  [ -n "$head" ] && [ -n "$base" ] || { echo -1; return; }
+  if [ -z "$head" ] || [ -z "$base" ]; then echo -1; return; fi
   cmp=$(_fj GET "/repos/${repo}/compare/${head}...${base}" 2>/dev/null) || { echo -1; return; }
   jq -r 'if type == "object" then (.total_commits // (.commits | length) // 0) else -1 end' <<<"$cmp" 2>/dev/null || echo -1
 }
@@ -231,9 +239,11 @@ Live URL:     ${url}
 
 Phase 1 is alert-only -- no automatic revert. Eyes on it: check CI / the deploy
 and the live site."
-  email_send "$subject" "<pre>${body}</pre>" "$body" "$recipients" \
-    && log "deploy: alert emailed to ${recipients}" \
-    || log "warning: deploy: alert email failed"
+  if email_send "$subject" "<pre>${body}</pre>" "$body" "$recipients"; then
+    log "deploy: alert emailed to ${recipients}"
+  else
+    log "warning: deploy: alert email failed"
+  fi
 }
 
 # do_deploy_barrier -- watch a pending deploy. Returns 0 (END THE TICK) while it
@@ -330,7 +340,7 @@ do_automerge_tick() {
     url=$(automerge_smoke_url "$repo"); [ -n "$url" ] || continue   # not eligible
     prs=$(forgejo_list_open_bot_prs "$repo" "$BOT_USER" 2>/dev/null) || continue
     while IFS= read -r pr; do
-      [ -n "$pr" ] && [ "$pr" != "null" ] || continue
+      if [ -z "$pr" ] || [ "$pr" = "null" ]; then continue; fi
       automerge_approved_by "$repo" "$pr" "$FORGEJO_REVIEWER" || continue
       key="${repo}#${pr}"
       verdict=$(jq -r --arg k "$key" '.review[$k].verdict // ""' "$sf" 2>/dev/null)

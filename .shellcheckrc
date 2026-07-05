@@ -6,3 +6,22 @@
 # use site are the right answer for IDEs but the CLI ignores them
 # without `-x` (which we don't want as a default).
 disable=SC1091
+
+# SC2317 ("command appears to be unreachable"): a static-flow false
+# positive on two patterns this codebase relies on throughout bin/
+# and lib/ -- functions invoked only via `trap ... EXIT` (e.g.
+# tick.sh's cleanup) and functions redefined inline in bin/test-*.sh
+# to stub out a sourced lib function, then called indirectly by the
+# code under test. shellcheck's flow analysis can't see either call
+# path and flags the definition as dead code it never is.
+disable=SC2317
+
+# SC2016 ("expressions don't expand in single quotes"): every hit in
+# this codebase is single-quoting done ON PURPOSE, not a missed
+# interpolation -- jq filter strings that use jq's OWN $var syntax
+# (would break if double-quoted and shell-expanded first), and
+# multi-line prompt/comment-body printf templates whose markdown
+# has literal backtick code-spans (shellcheck's heuristic mistakes
+# the backtick for a command-substitution attempt). Double-quoting
+# either would change behavior, not just silence a lint.
+disable=SC2016
