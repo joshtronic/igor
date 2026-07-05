@@ -80,6 +80,8 @@ unset env_file_hint
 
 # shellcheck source=lib/forgejo.sh
 . "$AGENT_HOME/lib/forgejo.sh"
+# shellcheck source=lib/checkpoint.sh
+. "$AGENT_HOME/lib/checkpoint.sh"
 # shellcheck source=lib/repo-checks.sh
 . "$AGENT_HOME/lib/repo-checks.sh"
 # shellcheck source=lib/maintenance-checks.sh
@@ -2637,6 +2639,10 @@ do_review_tick() {
       [ -n "$target_repo" ] && break
       [ -z "$pr_num" ] && continue
       pr_json=$(forgejo_get_pr "$repo" "$pr_num" 2>/dev/null || echo '{}')
+      # Skip turn-cap checkpoint drafts: a WIP PR is paused mid-work, not ready
+      # to review. It finalizes (WIP dropped) when the agent completes it, and
+      # gets reviewed then.
+      checkpoint_is_wip "$(jq -r '.title // ""' <<<"$pr_json")" && continue
       head_sha=$(jq -r '.head.sha // ""' <<<"$pr_json")
       [ -z "$head_sha" ] && continue
       key="${repo}#${pr_num}"
@@ -3838,7 +3844,12 @@ while IFS= read -r repo_line; do
     C_NUM=$(jq -r .number <<<"$candidate")
 
     C_HISTORY=$(forgejo_bot_prs_for_issue "$R_NAME" "$C_NUM" "$BOT_USER" 2>/dev/null || echo '[]')
-    C_OPEN=$(jq '[.[] | select(.state == "open")] | length' <<<"$C_HISTORY")
+    # An open bot PR normally means work in flight -> skip. EXCEPT a WIP
+    # checkpoint draft (turn-cap snapshot): that IS this issue, paused
+    # mid-flight, and must be RESUMED, not skipped -- so it stays claimable.
+    C_OPEN=$(jq --arg wip "$CHECKPOINT_WIP_PREFIX" \
+      '[.[] | select(.state == "open" and ((.title // "") | startswith($wip) | not))] | length' \
+      <<<"$C_HISTORY")
     if [ "$C_OPEN" -gt 0 ]; then
       log "skipping ${R_NAME}#${C_NUM} -- open bot PR (in flight)"
       continue
@@ -3900,8 +3911,31 @@ else
   BRANCH="agent/${ISSUE_NUMBER}"
 fi
 
+# -- Resume detection (turn-cap checkpoint) --------------------
+# An open WIP checkpoint PR means a prior tick hit the turn cap and snapshotted
+# its work-in-progress. Resume from that branch (Claude continues) instead of
+# starting the issue over from the base. The WIP PR's head ref is authoritative
+# for the branch name (in case the title-slug derivation ever changes). See
+# lib/checkpoint.sh.
+IS_RESUME=0; RESUME_PR=""; CHECKPOINT_N=0
+CP_HISTORY=$(forgejo_bot_prs_for_issue "$FORGEJO_REPO" "$ISSUE_NUMBER" "$BOT_USER" 2>/dev/null || echo '[]')
+RESUME_PR=$(jq -r --arg wip "$CHECKPOINT_WIP_PREFIX" \
+  '[.[] | select(.state == "open" and ((.title // "") | startswith($wip)))] | first | .number // empty' \
+  <<<"$CP_HISTORY" 2>/dev/null || echo "")
+if [ -n "$RESUME_PR" ]; then
+  IS_RESUME=1
+  RESUME_OBJ=$(forgejo_get_pr "$FORGEJO_REPO" "$RESUME_PR" 2>/dev/null || echo '{}')
+  RESUME_HEAD=$(jq -r '.head.ref // empty' <<<"$RESUME_OBJ")
+  [ -n "$RESUME_HEAD" ] && BRANCH="$RESUME_HEAD"
+  CHECKPOINT_N=$(checkpoint_read_count "$(jq -r '.body // ""' <<<"$RESUME_OBJ")")
+fi
+
 log "claiming ${FORGEJO_REPO}#${ISSUE_NUMBER}: ${ISSUE_TITLE}"
-log "branch: ${BRANCH}"
+if [ "$IS_RESUME" = "1" ]; then
+  log "branch: ${BRANCH} (RESUMING WIP checkpoint PR #${RESUME_PR}, checkpoint ${CHECKPOINT_N}/${CHECKPOINT_MAX})"
+else
+  log "branch: ${BRANCH}"
+fi
 
 # Export the tier-1 issue context so agent-block.sh / agent-report.sh
 # can find the current issue. BOT_USER and FORGEJO_REVIEWER are
@@ -3978,7 +4012,17 @@ cd "$REPO_PATH"
 # is already guarded above; this guards the stale *branch* (matches the -B used
 # by the PR-rework and site-work worktree paths).
 git worktree prune 2>/dev/null || true
-git worktree add -B "$BRANCH" "$WORKTREE" "origin/${PR_BASE}"
+# On resume, carve from the checkpoint branch (which holds the committed WIP) so
+# Claude continues rather than starting over. The preflight fetch above already
+# refreshed origin/$BRANCH. If the branch vanished (deleted/merged out of band),
+# fall back to a fresh start from the base and drop the resume flag.
+if [ "$IS_RESUME" = "1" ] && git rev-parse --verify --quiet "refs/remotes/origin/${BRANCH}" >/dev/null 2>&1; then
+  git worktree add -B "$BRANCH" "$WORKTREE" "origin/${BRANCH}"
+  log "worktree: resuming on origin/${BRANCH}"
+else
+  [ "$IS_RESUME" = "1" ] && { log "resume: origin/${BRANCH} gone -- starting fresh from ${PR_BASE}"; IS_RESUME=0; CHECKPOINT_N=0; RESUME_PR=""; }
+  git worktree add -B "$BRANCH" "$WORKTREE" "origin/${PR_BASE}"
+fi
 init_igor_scratch "$WORKTREE"
 
 # -- Invoke Claude ---------------------------------------------
@@ -4001,6 +4045,16 @@ ${ISSUE_BODY}
 EOF
 )
 
+# On resume, tell Claude it's continuing paused work already committed on this
+# branch -- not starting over. Its own prior progress is in the git history.
+if [ "$IS_RESUME" = "1" ]; then
+  USER_MSG="You are RESUMING work on this issue that you started earlier but did not finish -- the prior run hit its per-tick turn limit and its work-in-progress is ALREADY COMMITTED on this branch (\`${BRANCH}\`) and checked out in this worktree. Do NOT start over.
+
+First run \`git log --oneline origin/${PR_BASE}..HEAD\` and \`git diff origin/${PR_BASE}...HEAD\` to see exactly what's already done, then continue from there toward completing the issue. Keep working on this same branch. When the issue is fully finished, make sure \`.agent/PR_BODY.md\` describes the WHOLE change (not just this session's part).
+
+${USER_MSG}"
+fi
+
 log "invoking claude (timeout ${TICK_TIMEOUT})"
 CLAUDE_LOG="$WORKTREE/.agent/claude-output.log"
 START_TS=$(date +%s)
@@ -4022,34 +4076,123 @@ normalize_worktree_dashes "$WORKTREE"
 # Auto-commit anything dirty outside .agent/ so Claude doesn't have
 # to run git himself.
 cd "$WORKTREE"
+
+# Disposition of the worktree after the run (lib/checkpoint.sh):
+#   commit     -- claude finished (exit 0): commit + finalize the PR
+#   checkpoint -- turn cap hit, no stash: snapshot the WIP and resume next tick
+#   discard    -- a real crash; or a turn-cap cut-off left with an unrestored
+#                 `git stash` we can't safely commit over -> ship-safety discard
+# The stash guard preserves the porksicle#114 invariant: a nonzero exit can mean
+# the run died mid-workflow before restoring a `git stash` it took, so committing
+# -A would ship a scratch tree OVER the stashed real edits. The `:-1` default on
+# CLAUDE_EXIT fails SAFE (unset/empty -> treated as nonzero). Only a CLEAN
+# max-turns cut-off (a real result event, no stash) earns a checkpoint.
+CLAUDE_STREAM="$(dirname "$CLAUDE_LOG")/claude-stream.jsonl"
+HIT_TURN_CAP=0; checkpoint_hit_turn_cap "$CLAUDE_STREAM" && HIT_TURN_CAP=1
+HAS_STASH=0; [ -n "$(git stash list 2>/dev/null)" ] && HAS_STASH=1
+DISPOSITION=$(checkpoint_decision "${CLAUDE_EXIT:-1}" "$HIT_TURN_CAP" "$HAS_STASH")
+log "disposition: $DISPOSITION (exit=${CLAUDE_EXIT:-?} turn_cap=${HIT_TURN_CAP} stash=${HAS_STASH} resume=${IS_RESUME})"
+
 DIRTY_PATHS=$(git status --porcelain 2>/dev/null \
   | awk '$2 !~ /^\.agent\// { print $2 }')
 if [ -n "$DIRTY_PATHS" ]; then
   DIRTY_COUNT=$(echo "$DIRTY_PATHS" | wc -l | tr -d ' ')
-  if [ "${CLAUDE_EXIT:-1}" -ne 0 ]; then
-    # Ship-safety gate (porksicle#114). A nonzero claude exit means the
-    # run died mid-workflow -- before it restored any `git stash` it took
-    # (e.g. to grab "before" screenshots) and before it wrote PR_BODY.md.
-    # The leftover worktree is NOT a trustworthy diff: committing whatever
-    # remains has shipped a scratch file OVER the real, stashed-away edits
-    # and auto-merged it, silently dropping the requested change. The
-    # worktree is disposable and the issue re-queues, so refuse to commit
-    # a partial tree. Control falls through to the noop/blocked path
-    # (COMMITS stays 0) for a clean retry next tick; a run that keeps
-    # crashing gets Status/Blocked there so it can't loop. The `:-1`
-    # default fails SAFE: an unset/empty CLAUDE_EXIT is treated as a crash
-    # (don't ship) rather than falling through to the commit branch -- so
-    # the gate stays correct even if a refactor ever moves the assignment.
-    log "ship-safety: claude exited $CLAUDE_EXIT mid-run -- NOT committing partial worktree ($DIRTY_COUNT dirty file(s)); re-queuing"
+  case "$DISPOSITION" in
+    commit)
+      # Stage first so derive_commit_subject can see new files via
+      # `git diff --cached`. See tier-3 comment for the failure mode
+      # without this.
+      git add -A
+      COMMIT_SUBJECT=$(derive_commit_subject "$WORKTREE/.agent/PR_BODY.md" "$WORKTREE" "chore: issue #${ISSUE_NUMBER} -- ${ISSUE_TITLE}")
+      log "harness-commit: $DIRTY_COUNT file(s), subject: $COMMIT_SUBJECT"
+      git commit --quiet -m "$COMMIT_SUBJECT" || log "warning: harness commit failed"
+      ;;
+    checkpoint)
+      # Turn cap hit: snapshot the in-progress work as a WIP commit so it isn't
+      # discarded. The checkpoint-routing block below pushes it + draft PR.
+      git add -A
+      log "checkpoint: turn cap hit -- snapshotting $DIRTY_COUNT dirty file(s) as WIP"
+      git commit --quiet -m "WIP: issue #${ISSUE_NUMBER} checkpoint -- ${ISSUE_TITLE}" \
+        || log "warning: checkpoint commit failed"
+      ;;
+    discard)
+      log "ship-safety: claude exited ${CLAUDE_EXIT:-?} mid-run -- NOT committing partial worktree ($DIRTY_COUNT dirty file(s)); re-queuing"
+      ;;
+  esac
+fi
+
+# -- Checkpoint / resume routing (turn cap) --------------------
+#
+# A max-turns cut-off (or a crash mid-resume, where a prior checkpoint is
+# already committed) does NOT run the normal ship gates -- the work is
+# incomplete. It snapshots as a DRAFT ("WIP:") PR the review + merge loops skip,
+# keeps the issue claimable, and resumes next tick. Both a checkpoint and a
+# crash-mid-resume count against the resume budget; an exhausted budget escalates
+# to the human instead of resuming forever. Only fires when there's committed
+# work to preserve (COMMITS>0) -- a turn cap with zero commits is genuine no
+# progress and falls through to the noop path. See lib/checkpoint.sh.
+cd "$WORKTREE"
+COMMITS=$(git rev-list --count "origin/${PR_BASE}..HEAD" 2>/dev/null || echo 0)
+
+if { [ "$DISPOSITION" = "checkpoint" ] || { [ "$DISPOSITION" = "discard" ] && [ "$IS_RESUME" = "1" ]; }; } \
+   && [ "$COMMITS" -gt 0 ]; then
+  NEXT_N=$(( CHECKPOINT_N + 1 ))
+
+  if [ "$DISPOSITION" = "checkpoint" ]; then
+    # New snapshot commit -> push it. --force-with-lease: crash-retry safe, loud
+    # if someone else moved the ref. On push failure, leave the worktree and
+    # re-queue (the issue stays claimable; next tick retries).
+    if ! git push --force-with-lease -u origin "$BRANCH"; then
+      log "checkpoint: push failed on $BRANCH -- re-queuing (unassigning)"
+      forgejo_unassign_all "$FORGEJO_REPO" "$ISSUE_NUMBER" 2>/dev/null || true
+      exit 0
+    fi
+    log "checkpoint: pushed WIP snapshot to $BRANCH ($COMMITS commit(s))"
   else
-    # Stage first so derive_commit_subject can see new files via
-    # `git diff --cached`. See tier-3 comment for the failure mode
-    # without this.
-    git add -A
-    COMMIT_SUBJECT=$(derive_commit_subject "$WORKTREE/.agent/PR_BODY.md" "$WORKTREE" "chore: issue #${ISSUE_NUMBER} -- ${ISSUE_TITLE}")
-    log "harness-commit: $DIRTY_COUNT file(s), subject: $COMMIT_SUBJECT"
-    git commit --quiet -m "$COMMIT_SUBJECT" || log "warning: harness commit failed"
+    # discard + resume: no NEW commit this tick (HEAD == origin/$BRANCH already);
+    # the prior checkpoint on the remote is preserved as-is. Nothing to push.
+    log "checkpoint: crash during resume -- prior snapshot on $BRANCH preserved, not finalizing"
   fi
+
+  # Ensure a draft (WIP) PR exists for the snapshot, then bump its counter.
+  CP_PR="$RESUME_PR"
+  [ -n "$CP_PR" ] || CP_PR=$(forgejo_find_pr_by_head "$FORGEJO_REPO" "$BRANCH")
+  if [ -z "$CP_PR" ]; then
+    CP_TITLE=$(checkpoint_wip_title "$(git log -1 --pretty=%s)")
+    if [ -f .agent/PR_BODY.md ]; then
+      CP_BODY=$(cat .agent/PR_BODY.md)
+    else
+      CP_BODY="Work-in-progress checkpoint. The agent hit its per-tick turn limit and snapshotted its progress here; it resumes automatically on the next tick. This PR is a draft (\`WIP:\`) -- the review and merge loops leave it alone until it's finished."
+    fi
+    CP_BODY+=$'\n\nCloses #'"$ISSUE_NUMBER"
+    CP_BODY=$(checkpoint_set_count "$CP_BODY" "$NEXT_N")
+    CP_PR=$(forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$CP_TITLE" "$CP_BODY")
+    log "checkpoint: opened draft PR${CP_PR:+ #$CP_PR} (WIP; resuming next tick)"
+  else
+    CUR_BODY=$(forgejo_get_pr "$FORGEJO_REPO" "$CP_PR" 2>/dev/null | jq -r '.body // ""')
+    forgejo_edit_pr "$FORGEJO_REPO" "$CP_PR" --body "$(checkpoint_set_count "$CUR_BODY" "$NEXT_N")" \
+      || log "warning: could not bump checkpoint counter on PR #$CP_PR"
+  fi
+
+  forgejo_log_time "$FORGEJO_REPO" "$ISSUE_NUMBER" "$ELAPSED" 2>/dev/null || true
+
+  if checkpoint_budget_exhausted "$NEXT_N"; then
+    # OUTCOME: blocked
+    # Too many checkpoints without finishing: stop resuming, hand to the human.
+    log "outcome: blocked (checkpoint budget exhausted: $NEXT_N)"
+    forgejo_add_label "$FORGEJO_REPO" "$ISSUE_NUMBER" "Status/Blocked" 2>/dev/null \
+      || log "warning: could not apply Status/Blocked"
+    if [ -n "${FORGEJO_REVIEWER:-}" ]; then
+      forgejo_assign "$FORGEJO_REPO" "$ISSUE_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
+    fi
+    forgejo_comment "$FORGEJO_REPO" "$ISSUE_NUMBER" \
+      "This issue has checkpointed ${NEXT_N} times (turn cap) without completing -- the sign it's too large for the agent's per-tick budget. Draft PR #${CP_PR} holds the work so far. \`Status/Blocked\` applied: split this into smaller issues, then remove the label to resume." 2>/dev/null || true
+  else
+    # Keep it claimable so the next tick resumes it.
+    forgejo_unassign_all "$FORGEJO_REPO" "$ISSUE_NUMBER" 2>/dev/null || true
+    log "checkpoint: PR #${CP_PR} left as draft; issue re-queued for resume (${NEXT_N}/${CHECKPOINT_MAX})"
+  fi
+  exit 0
 fi
 
 # -- Determine outcome -----------------------------------------
@@ -4094,11 +4237,22 @@ elif [ "$COMMITS" -gt 0 ]; then
     ':(exclude,glob)**/dist/**' ':(exclude,glob)**/build/**' 2>/dev/null \
     | awk '{ for (i=1;i<=NF;i++) if ($i ~ /insertion|deletion/) s+=$(i-1); print s+0 }')
   CHANGED=${CHANGED:-0}
-  if [ "$COMMITS" -gt 10 ] || [ "$CHANGED" -gt 400 ]; then
+  # For the commit-count cap, exclude the harness's own WIP-checkpoint commits:
+  # they're resume artifacts, not history sprawl, and would otherwise block a
+  # legitimately completed task that simply took several turn-cap checkpoints to
+  # finish. The line cap (the real reviewability gate) still spans the whole
+  # diff. Normal PRs have no WIP commits, so this is a no-op for them.
+  # (grep -c prints 0 and exits 1 when every commit is a checkpoint; `|| true`
+  # swallows that so pipefail/errexit don't abort, and the default catches an
+  # empty result.)
+  REVIEW_COMMITS=$(git log "origin/${PR_BASE}..HEAD" --pretty=%s 2>/dev/null \
+    | grep -cvE '^WIP: issue #[0-9]+ checkpoint' || true)
+  REVIEW_COMMITS=${REVIEW_COMMITS:-0}
+  if [ "$REVIEW_COMMITS" -gt 10 ] || [ "$CHANGED" -gt 400 ]; then
     # OUTCOME: blocked
-    log "outcome: blocked (scope: $COMMITS commits, $CHANGED lines)"
+    log "outcome: blocked (scope: $REVIEW_COMMITS non-checkpoint commits / $COMMITS total, $CHANGED lines)"
     FILES=$(git diff --name-only "origin/${PR_BASE}..HEAD" | head -30 | sed 's/^/  - /')
-    agent-block.sh "Scope exceeded: this branch reached **${COMMITS} commits / ${CHANGED} changed lines**, over the per-issue cap (10 commits / 400 lines).
+    agent-block.sh "Scope exceeded: this branch reached **${REVIEW_COMMITS} commits / ${CHANGED} changed lines**, over the per-issue cap (10 commits / 400 lines).
 
 Files touched (first 30):
 ${FILES}
@@ -4162,6 +4316,28 @@ Address it, then remove \`Status/Blocked\` to re-queue. (If the note above says 
   if [ -n "$EXISTING_PR" ]; then
     log "PR #$EXISTING_PR already open for $BRANCH -- skipping open"
     NEW_PR_NUMBER="$EXISTING_PR"
+    # Finalize a checkpoint draft: give it a clean (non-WIP) title + a real body,
+    # which marks it ready so the review + merge loops (which skip WIP PRs) pick
+    # it up. Prefer the newest real commit subject, skipping the harness's
+    # "WIP: ... checkpoint" markers; the body comes from PR_BODY.md as usual.
+    EX_TITLE=$(forgejo_get_pr "$FORGEJO_REPO" "$EXISTING_PR" 2>/dev/null | jq -r '.title // ""')
+    if checkpoint_is_wip "$EX_TITLE"; then
+      FINAL_TITLE=$(git log "origin/${PR_BASE}..HEAD" --pretty=%s 2>/dev/null \
+        | grep -vE '^WIP: issue #[0-9]+ checkpoint' | head -1)
+      [ -n "$FINAL_TITLE" ] || FINAL_TITLE="issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
+      if [ -f .agent/PR_BODY.md ]; then
+        FINAL_BODY=$(cat .agent/PR_BODY.md)
+      else
+        FINAL_BODY=$(git log "origin/${PR_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
+      fi
+      FINAL_BODY+=$(build_deps_section "$PR_BASE")
+      FINAL_BODY+=$'\n\nCloses #'"$ISSUE_NUMBER"
+      if forgejo_edit_pr "$FORGEJO_REPO" "$EXISTING_PR" --title "$FINAL_TITLE" --body "$FINAL_BODY"; then
+        log "checkpoint: finalized -- PR #$EXISTING_PR ready for review (WIP dropped)"
+      else
+        log "warning: could not finalize checkpoint PR #$EXISTING_PR"
+      fi
+    fi
   else
     PR_TITLE=$(git log -1 --pretty=%s)
     if [ -f .agent/PR_BODY.md ]; then
