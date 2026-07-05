@@ -318,9 +318,12 @@ forgejo_remove_label() {
 # merged}. Empty array if none.
 #
 # Used by discovery to gate claimable issues:
-#   - any state="open" entry  -> issue is in flight, skip
+#   - any OPEN, non-WIP entry -> issue is in flight, skip
+#   - an OPEN, WIP entry (turn-cap checkpoint draft) -> RESUME, don't skip
+#     (the title carries checkpoint.sh's CHECKPOINT_WIP_PREFIX)
 #   - 2+ state="closed", merged=false  -> 2 rejected attempts,
 #     block with Status/Blocked instead of re-trying
+# The `title` is returned so callers can tell a WIP checkpoint from a real PR.
 forgejo_bot_prs_for_issue() {
   local repo="$1" issue_num="$2" user="$3"
   _fj GET "/repos/${repo}/pulls?state=all&limit=100" \
@@ -328,7 +331,24 @@ forgejo_bot_prs_for_issue() {
         [.[]
          | select(.user.login == $u)
          | select(.body != null and (.body | test("(?i)closes\\s+#" + $n + "\\b")))
-         | {number, state, merged: (.merged // false)}]'
+         | {number, state, title: (.title // ""), merged: (.merged // false)}]'
+}
+
+# forgejo_edit_pr <repo> <number> [--title T] [--body B] -- patch a PR's title
+# and/or body. A PR IS an issue in Forgejo, so the issues PATCH endpoint edits
+# both. Used by the checkpoint flow to bump the counter in a draft's body and to
+# drop the WIP prefix from its title on finalize. No-op payload if no flags given.
+forgejo_edit_pr() {
+  local repo="$1" number="$2"; shift 2
+  local payload='{}'
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --title) payload=$(jq --arg v "$2" '.title = $v' <<<"$payload"); shift 2 ;;
+      --body)  payload=$(jq --arg v "$2" '.body = $v'  <<<"$payload"); shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  _fj PATCH "/repos/${repo}/issues/${number}" "$payload" >/dev/null
 }
 
 # Returns the authenticated user's login (the bot's username). Empty

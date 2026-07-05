@@ -88,12 +88,37 @@ respective tools on the host; install or skip.
   work, PR-review, maintenance triage, site-work -- 4 sites across
   `bin/tick.sh` + `bin/site-work-block.sh`) is a hardcoded `100`, a
   deliberate constant, not an env knob. igor has one operator, so the
-  right value gets baked in rather than put behind a dial. It was 50;
-  that cap discarded two completed builds overnight (2026-07-04) when
-  thorough verification (Playwright screenshots + a full play-through,
-  roughly 30 tool calls on their own) ran turn-expensive and got cut
-  mid-verification. 100 is sized for that headroom. Change the literal
+  right value gets baked in rather than put behind a dial. The cap
+  bounds a tick's RUNTIME (no single issue runs for hours and starves
+  the loop); it is NOT meant to forbid a large task from ever finishing.
+  For issue work that guarantee is upheld by **checkpoint-and-resume**
+  (`lib/checkpoint.sh`, next bullet): a turn-cap cut-off snapshots its
+  work and picks up next tick instead of being discarded, so 100 is a
+  per-tick budget, not a hard ceiling on total work. Change the literal
   at all 4 sites if it ever needs to move again.
+- **Checkpoint-and-resume** (`lib/checkpoint.sh`, tier-1 issue work only)
+  makes the turn cap non-destructive. After the claude run, the worktree's
+  disposition is one of: `commit` (exit 0 -> finalize the PR), `checkpoint`
+  (a clean `max_turns` result event with no unrestored `git stash` -> snapshot
+  the WIP), or `discard` (a real crash, or a turn cap left with a stash we
+  can't safely commit over -> the porksicle#114 ship-safety discard). A
+  `checkpoint` commits the in-progress work and publishes it as a **draft
+  (`WIP:` title) PR** that the review + merge loops SKIP and the discovery/claim
+  gate RESUMES (carving the next worktree from that branch, with a "continue,
+  don't restart" directive to Claude) -- so the issue stays claimable and picks
+  up where it left off. Natural completion (`exit 0`) drops the `WIP:` prefix,
+  marking the PR ready -> shadow review. Guardrails: a **resume budget**
+  (`CHECKPOINT_MAX`, tracked as `<!-- agent-checkpoints=N -->` in the PR body)
+  caps how many times one issue may checkpoint before it's escalated to the
+  human with `Status/Blocked` ("too big -- split it"), so a non-converging task
+  can't monopolize the loop; a crash mid-resume preserves the prior (clean)
+  checkpoint and also counts against that budget. The finalize-time gates (scope
+  cap, security review, vacuous-test, off-limits) run only on completion, NOT on
+  a checkpoint -- an incomplete snapshot isn't judged. Note the 400-line scope
+  cap is orthogonal: checkpoint-resume solves the TURN budget, so a task that is
+  both turn-expensive AND >400 net lines will checkpoint through the turns and
+  then block at finalize on scope -- the correct "human, split this" signal.
+  Tests: `bin/test-checkpoint.sh`.
 - Claude auth/usage health: every CLI call records ok/auth/limit
   under `.health` in `discretionary-state.json` (only auth and
   usage-limit failures count -- ordinary nonzero exits stay the
