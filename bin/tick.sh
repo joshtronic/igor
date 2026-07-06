@@ -3585,6 +3585,12 @@ Review requested so a human can review/discard." 2>/dev/null \
         exit 0
       fi
 
+      # Heartbeat before the security gate -- this is the second long
+      # model call in the same tick (the rework claude_run_with_cost
+      # above already ate up to TICK_TIMEOUT), so without this ping the
+      # dead-man's-switch gap between heartbeats is the SUM of both
+      # stages (~55m), not the longest single one (~30m). igor#360.
+      hc_ping heartbeat
       # Security gate on the revision delta before pushing it back.
       if PR_SEC_FINDINGS=$(security_gate "$PR_WORKTREE" "$PR_HEAD" "security-gate-pr-review"); then
         :
@@ -4296,6 +4302,12 @@ Revert those changes (or do them yourself outside the agent) and remove \`Status
   # material finding blocks like the guards above (work waits for the
   # human). The agent's own /security-review is the fix-early pass --
   # this is the unskippable one the harness owns.
+  #
+  # Heartbeat first -- this is the second long model call in the tick
+  # (the tier-1 build claude_run_with_cost above already ate up to
+  # TICK_TIMEOUT), so without this ping the dead-man's-switch gap is the
+  # SUM of both stages (~55m), not the longest single one (~30m). igor#360.
+  hc_ping heartbeat
   # OUTCOME: blocked
   if SEC_FINDINGS=$(security_gate "$WORKTREE" "$PR_BASE" "security-gate-issue"); then
     :
