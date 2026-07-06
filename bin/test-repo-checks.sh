@@ -108,9 +108,9 @@ ok "a complete repo validates (rc 0)" validate_repo_local demo/good "$GCLONE"
 # $CLONE (from the rc_local_init block) has only README + empty package.json
 # -> genuinely not ready.
 V=0; validate_repo_local demo/x "$CLONE" >/dev/null 2>&1 || V=$?
-[ "$V" -eq 1 ] && printf '  + incomplete repo -> rc 1 (not ready)\n' || { printf '  x incomplete repo should rc 1, got %s\n' "$V"; FAIL=$((FAIL + 1)); }
+if [ "$V" -eq 1 ]; then printf '  + incomplete repo -> rc 1 (not ready)\n'; else printf '  x incomplete repo should rc 1, got %s\n' "$V"; FAIL=$((FAIL + 1)); fi
 V=0; validate_repo_local demo/x "$TMPROOT/does-not-exist" >/dev/null 2>&1 || V=$?
-[ "$V" -eq 2 ] && printf '  + missing clone -> rc 2 (indeterminate)\n' || { printf '  x missing clone should rc 2, got %s\n' "$V"; FAIL=$((FAIL + 1)); }
+if [ "$V" -eq 2 ]; then printf '  + missing clone -> rc 2 (indeterminate)\n'; else printf '  x missing clone should rc 2, got %s\n' "$V"; FAIL=$((FAIL + 1)); fi
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-repo-checks: all passed"

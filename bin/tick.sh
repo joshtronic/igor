@@ -1001,9 +1001,12 @@ review_set_rework_crashes() {
   state_file=$(discretionary_state_file)
   [ -f "$state_file" ] || echo '{}' > "$state_file"
   tmp=$(mktemp)
-  jq --arg k "$key" --argjson n "$n" \
-    '.review //= {} | .review[$k].rework_crashes = $n' "$state_file" > "$tmp" \
-    && mv "$tmp" "$state_file" || rm -f "$tmp"
+  if jq --arg k "$key" --argjson n "$n" \
+    '.review //= {} | .review[$k].rework_crashes = $n' "$state_file" > "$tmp"; then
+    mv "$tmp" "$state_file"
+  else
+    rm -f "$tmp"
+  fi
 }
 
 # Echo pending_rc_body for a PR from review state, or empty string.
@@ -3572,7 +3575,7 @@ Review requested so a human can resolve the conflict or re-trigger the agent." 2
         forgejo_comment "$PR_REPO" "$PR_NUMBER" \
           "The agent refused to push revisions: the new commits modify CI workflow files, which are off-limits. Paths touched:
 
-$(echo "$PR_OFFLIMITS" | sed 's/^/  - /')
+  - ${PR_OFFLIMITS//$'\n'/$'\n'  - }
 
 Review requested so a human can review/discard." 2>/dev/null \
           || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
@@ -3647,9 +3650,11 @@ Review requested so a human can review/discard." 2>/dev/null \
       fi
     fi
 
-    forgejo_log_time "$PR_REPO" "$PR_NUMBER" "$PR_ELAPSED" \
-      && log "time logged: ${PR_ELAPSED}s on ${PR_REPO}#${PR_NUMBER}" \
-      || log "warning: could not log time on ${PR_REPO}#${PR_NUMBER}"
+    if forgejo_log_time "$PR_REPO" "$PR_NUMBER" "$PR_ELAPSED"; then
+      log "time logged: ${PR_ELAPSED}s on ${PR_REPO}#${PR_NUMBER}"
+    else
+      log "warning: could not log time on ${PR_REPO}#${PR_NUMBER}"
+    fi
 
     (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || true
 
@@ -4207,9 +4212,11 @@ HAS_BLOCKED=$(jq -r '[.labels[].name] | index("Status/Blocked") != null' <<<"$CU
 if [ "$ISSUE_STATE" = "closed" ]; then
   # OUTCOME: report
   log "outcome: report (issue closed by agent)"
-  forgejo_log_time "$FORGEJO_REPO" "$ISSUE_NUMBER" "$ELAPSED" \
-    && log "time logged: ${ELAPSED}s on ${FORGEJO_REPO}#${ISSUE_NUMBER}" \
-    || log "warning: could not log time on ${FORGEJO_REPO}#${ISSUE_NUMBER}"
+  if forgejo_log_time "$FORGEJO_REPO" "$ISSUE_NUMBER" "$ELAPSED"; then
+    log "time logged: ${ELAPSED}s on ${FORGEJO_REPO}#${ISSUE_NUMBER}"
+  else
+    log "warning: could not log time on ${FORGEJO_REPO}#${ISSUE_NUMBER}"
+  fi
 
 elif [ "$HAS_BLOCKED" = "true" ]; then
   # OUTCOME: blocked
@@ -4268,7 +4275,7 @@ Split this into smaller issues, then remove \`Status/Blocked\` and the next tick
     log "outcome: blocked (off-limits files touched)"
     agent-block.sh "The agent refused to push: this PR modifies CI workflow files, which are operator-managed and off-limits to ticks. Paths touched:
 
-$(echo "$OFFLIMITS" | sed 's/^/  - /')
+  - ${OFFLIMITS//$'\n'/$'\n'  - }
 
 Revert those changes (or do them yourself outside the agent) and remove \`Status/Blocked\` to re-queue. If a workflow change is genuinely needed, file a separate issue for the human to handle."
     exit 0
@@ -4365,9 +4372,11 @@ Address it, then remove \`Status/Blocked\` to re-queue. (If the note above says 
   # review). PR-review ticks log on the PR. Discretionary ticks (no
   # issue) log on the PR they create. Best-effort; never fail the
   # tick over this.
-  forgejo_log_time "$FORGEJO_REPO" "$ISSUE_NUMBER" "$ELAPSED" \
-    && log "time logged: ${ELAPSED}s on ${FORGEJO_REPO}#${ISSUE_NUMBER} (issue)" \
-    || log "warning: could not log time on ${FORGEJO_REPO}#${ISSUE_NUMBER}"
+  if forgejo_log_time "$FORGEJO_REPO" "$ISSUE_NUMBER" "$ELAPSED"; then
+    log "time logged: ${ELAPSED}s on ${FORGEJO_REPO}#${ISSUE_NUMBER} (issue)"
+  else
+    log "warning: could not log time on ${FORGEJO_REPO}#${ISSUE_NUMBER}"
+  fi
 
   # Unassign the bot from the issue so the next tick's recovery
   # sweep stays quiet. Keep the Agent label intact -- the label is

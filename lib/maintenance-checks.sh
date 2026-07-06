@@ -152,8 +152,7 @@ _run_cargo() {
   local outdated_file="$out_dir/cargo-outdated.txt"
 
   if ensure_audit_tool cargo-audit "cargo install --quiet cargo-audit"; then
-    (cd "$repo_path" && cargo audit 2>&1) > "$audit_file"
-    if [ $? -eq 0 ]; then echo "cargo-audit:clean"; else echo "cargo-audit:findings"; fi
+    if (cd "$repo_path" && cargo audit 2>&1) > "$audit_file"; then echo "cargo-audit:clean"; else echo "cargo-audit:findings"; fi
   else
     echo "cargo audit unavailable on this host" > "$audit_file"
     echo "cargo-audit:skipped"
@@ -181,8 +180,7 @@ _run_pip() {
   local outdated_file="$out_dir/pip-outdated.txt"
 
   if ensure_audit_tool pip-audit "pip install --user --quiet pip-audit"; then
-    (cd "$repo_path" && pip-audit 2>&1) > "$audit_file"
-    if [ $? -eq 0 ]; then echo "pip-audit:clean"; else echo "pip-audit:findings"; fi
+    if (cd "$repo_path" && pip-audit 2>&1) > "$audit_file"; then echo "pip-audit:clean"; else echo "pip-audit:findings"; fi
   else
     echo "pip-audit unavailable on this host" > "$audit_file"
     echo "pip-audit:skipped"
@@ -283,8 +281,7 @@ _run_bundle() {
   local outdated_file="$out_dir/bundle-outdated.txt"
 
   if ensure_audit_tool bundle-audit "gem install --user-install --silent bundler-audit"; then
-    (cd "$repo_path" && bundle-audit check --update 2>&1) > "$audit_file"
-    if [ $? -eq 0 ]; then echo "bundle-audit:clean"; else echo "bundle-audit:findings"; fi
+    if (cd "$repo_path" && bundle-audit check --update 2>&1) > "$audit_file"; then echo "bundle-audit:clean"; else echo "bundle-audit:findings"; fi
   else
     echo "bundle-audit unavailable on this host" > "$audit_file"
     echo "bundle-audit:skipped"

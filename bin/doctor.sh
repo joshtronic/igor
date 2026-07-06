@@ -52,11 +52,11 @@ info()    { printf '         %s\n' "$*"; }
 section "Environment"
 info "AGENT_HOME=$AGENT_HOME"
 info "AGENT_STATE_DIR=$AGENT_STATE_DIR"
-[ -n "${FORGEJO_URL:-}" ]       && ok "FORGEJO_URL=$FORGEJO_URL" || bad "FORGEJO_URL missing"
-[ -n "${FORGEJO_TOKEN:-}" ]     && ok "FORGEJO_TOKEN set"  || bad "FORGEJO_TOKEN missing"
-[ -n "${AGENT_MODEL:-}" ]        && ok "AGENT_MODEL=$AGENT_MODEL" || bad "AGENT_MODEL missing"
-[ -n "${AGENT_MODEL_REVIEW:-}" ]   && ok "AGENT_MODEL_REVIEW=$AGENT_MODEL_REVIEW" || bad "AGENT_MODEL_REVIEW missing"
-[ -n "${AGENT_MODEL_SECURITY:-}" ] && ok "AGENT_MODEL_SECURITY=$AGENT_MODEL_SECURITY" || bad "AGENT_MODEL_SECURITY missing"
+if [ -n "${FORGEJO_URL:-}" ]; then ok "FORGEJO_URL=$FORGEJO_URL"; else bad "FORGEJO_URL missing"; fi
+if [ -n "${FORGEJO_TOKEN:-}" ]; then ok "FORGEJO_TOKEN set"; else bad "FORGEJO_TOKEN missing"; fi
+if [ -n "${AGENT_MODEL:-}" ]; then ok "AGENT_MODEL=$AGENT_MODEL"; else bad "AGENT_MODEL missing"; fi
+if [ -n "${AGENT_MODEL_REVIEW:-}" ]; then ok "AGENT_MODEL_REVIEW=$AGENT_MODEL_REVIEW"; else bad "AGENT_MODEL_REVIEW missing"; fi
+if [ -n "${AGENT_MODEL_SECURITY:-}" ]; then ok "AGENT_MODEL_SECURITY=$AGENT_MODEL_SECURITY"; else bad "AGENT_MODEL_SECURITY missing"; fi
 info "FORGEJO_REVIEWER=${FORGEJO_REVIEWER:-(unset)}"
 
 # ----- Claude CLI auth (subscription login, not API key) ---------
@@ -103,8 +103,8 @@ section "Local clones"
 if [ -n "${WEBSITE_REPO:-}" ]; then
   CLONE="$AGENT_REPO_ROOT/$WEBSITE_REPO"
   if [ -d "$CLONE/.git" ]; then
-    AHEAD=$(cd "$CLONE" && git rev-list --count HEAD..@{u} 2>/dev/null || echo "?")
-    BEHIND=$(cd "$CLONE" && git rev-list --count @{u}..HEAD 2>/dev/null || echo "?")
+    AHEAD=$(cd "$CLONE" && git rev-list --count "HEAD..@{u}" 2>/dev/null || echo "?")
+    BEHIND=$(cd "$CLONE" && git rev-list --count "@{u}..HEAD" 2>/dev/null || echo "?")
     LAST=$(cd "$CLONE" && git log -1 --pretty=format:'%h %s (%cr)' 2>/dev/null)
     ok "$WEBSITE_REPO: $LAST"
     [ "$AHEAD" != "0" ] && [ "$AHEAD" != "?" ] && warn "  behind remote by $AHEAD commit(s) -- pull pending"
@@ -172,14 +172,15 @@ fi
 # ----- Stale local agent branches -------------------------------
 
 section "Local agent branches per clone"
-for repo_path in $(find "$AGENT_REPO_ROOT" -maxdepth 2 -mindepth 2 -type d 2>/dev/null); do
+while IFS= read -r repo_path; do
+  [ -z "$repo_path" ] && continue
   BRANCHES=$(cd "$repo_path" && git for-each-ref --format='%(refname:short)' 'refs/heads/agent/*' 2>/dev/null)
   if [ -n "$BRANCHES" ]; then
     COUNT=$(echo "$BRANCHES" | wc -l | tr -d ' ')
     warn "$(basename "$(dirname "$repo_path")")/$(basename "$repo_path"): $COUNT local agent branch(es)"
-    echo "$BRANCHES" | sed 's/^/    /'
+    printf '    %s\n' "${BRANCHES//$'\n'/$'\n'    }"
   fi
-done
+done < <(find "$AGENT_REPO_ROOT" -maxdepth 2 -mindepth 2 -type d 2>/dev/null)
 
 # ----- Open PRs across bot repos --------------------------------
 

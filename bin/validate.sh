@@ -107,7 +107,7 @@ else
   warn "WEBSITE_REPO unset -- website work DISABLED (set in .env to enable reading pipeline + site-work block)"
 fi
 
-[ -f "$AGENT_HOME/agent-settings.json" ] && pass "agent-settings.json present" || fail "agent-settings.json present"
+if [ -f "$AGENT_HOME/agent-settings.json" ]; then pass "agent-settings.json present"; else fail "agent-settings.json present"; fi
 
 state_dir="${AGENT_STATE_DIR:-$HOME/.local/state/agent}"
 if mkdir -p "$state_dir/worktrees" "$state_dir/repos" 2>/dev/null \

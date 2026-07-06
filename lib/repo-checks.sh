@@ -177,8 +177,11 @@ check_ci_workflow() {
 #   2 -- INDETERMINATE: the clone is missing or its refs are unreadable (the
 #        fetch likely failed), so no check actually ran -- skip and retry.
 #
-# <repo-label> is only for the checklist header; every read is local.
+# <repo-label> keeps the call signature self-documenting -- callers already
+# print it in their own header (bin/validate-repo.sh, tick.sh) and the
+# checklist body never needs it.
 validate_repo_local() {
+  # shellcheck disable=SC2034  # repo is signature-only, see above.
   local repo="$1" path="$2" fail=0
 
   _emit() {

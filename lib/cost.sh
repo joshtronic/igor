@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # lib/cost.sh -- cost-ledger helpers.
 #
 # Append-only JSONL ledger of every model call the agent makes. One
