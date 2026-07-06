@@ -471,7 +471,7 @@ ceo_open_proposals_count() {
 # assigned to <assignee>, stamped as a CEO proposal. Returns 0 on success.
 ceo_file_proposal() {
   local repo="$1" title="$2" body="$3" assignee="$4" full payload
-  full=$(printf '%s\n\n---\n_Proposed by the CEO against the mandate priorities. **Greenlight:** add the `Agent` label and unassign. **Decline:** close._\n%s' \
+  full=$(printf '%s\n\n---\n_🔵 **CEO PROPOSAL** -- Proposed by the CEO against the mandate priorities. **Greenlight:** add the `Agent` label and unassign. **Decline:** close._\n%s' \
     "$body" "$CEO_PROPOSAL_MARKER")
   payload=$(jq -n --arg t "$title" --arg b "$full" --arg a "$assignee" \
     '{title: $t, body: $b, assignees: [$a]}')
@@ -490,7 +490,7 @@ ceo_file_proposal() {
 # (label is best-effort), 1 if the create itself failed.
 ceo_file_question() {
   local repo="$1" title="$2" body="$3" reviewer="$4" full payload resp num
-  full=$(printf '%s\n\n---\n_The CEO needs a decision. **Answer in a comment, then unassign yourself** to hand it back. **Decline / N-A:** close._\n%s' \
+  full=$(printf '%s\n\n---\n_❓ **CEO QUESTION** -- This is a decision for you, not agent work yet -- **comment your answer, then unassign**. Do **not** add the `Agent` label (that'"'"'s for proposals). Decline / N-A: close._\n%s' \
     "$body" "$CEO_QUESTION_MARKER")
   payload=$(jq -n --arg t "$title" --arg b "$full" --arg a "$reviewer" \
     '{title: $t, body: $b, assignees: [$a]}')
@@ -568,7 +568,7 @@ ceo_open_items_count() {
 # work item (no Agent label) and not counted toward CEO_MAX_OPEN.
 ceo_file_digest() {
   local repo="$1" title="$2" body="$3" reviewer="$4" full payload
-  full=$(printf '%s\n\n---\n_The weekly board digest. **Comment to steer** next week'"'"'s read; **close** to acknowledge or drop._\n%s' \
+  full=$(printf '%s\n\n---\n_📋 **CEO DIGEST** -- The weekly board digest. **Comment to steer** next week'"'"'s read; **close** to acknowledge or drop._\n%s' \
     "$body" "$CEO_DIGEST_MARKER")
   payload=$(jq -n --arg t "$title" --arg b "$full" --arg a "$reviewer" \
     '{title: $t, body: $b, assignees: [$a]}')
