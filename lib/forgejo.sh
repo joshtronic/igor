@@ -159,7 +159,8 @@ forgejo_open_pr() {
 # agent is told to keep screenshots small; this is the backstop.
 FORGEJO_ATTACH_MAX_BYTES="${FORGEJO_ATTACH_MAX_BYTES:-900000}"
 forgejo_attach_image() {
-  local repo="$1" number="$2" file="$3" name="${4:-$(basename "$file")}" size
+  local repo="$1" number="$2" file="$3" size
+  local name="${4:-$(basename "$file")}"
   [ -f "$file" ] || { printf 'forgejo_attach_image: no such file: %s\n' "$file" >&2; return 1; }
   size=$(wc -c < "$file")
   if [ "$size" -gt "$FORGEJO_ATTACH_MAX_BYTES" ]; then
