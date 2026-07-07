@@ -101,7 +101,11 @@ the actual work.
   repo's `CLAUDE.md` names a verification command (e.g. a Playwright
   or e2e script), run it before exit and convert the checks it covers
   from `[ ]` to `[x]`, with a one-line note on what was confirmed;
-  reference any screenshots the command produced. Reserve `[ ]` for
+  reference any screenshots the command produced. **To put a screenshot
+  ON the PR, save it to `.agent/screenshots/`** (PNG or JPEG, keep each
+  under ~900KB -- resize or drop JPEG quality for large captures); the
+  harness uploads them and embeds them in the PR under a Screenshots
+  heading. Reserve `[ ]` for
   checks that genuinely can't be automated -- subjective judgment
   calls, comparisons against an external system -- NOT for "I didn't
   run a browser." If the repo has no declared verify command, leaving
