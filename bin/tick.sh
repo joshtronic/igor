@@ -4376,6 +4376,12 @@ Address it, then remove \`Status/Blocked\` to re-queue. (If the note above says 
 
     NEW_PR_NUMBER=$(forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$PR_TITLE" "$PR_BODY")
     log "PR opened${NEW_PR_NUMBER:+ (#$NEW_PR_NUMBER)}"
+    # UI work: attach any screenshots the agent dropped in .agent/screenshots/
+    # so the PR carries visual proof, not just a text reference. Best-effort.
+    if [ -n "$NEW_PR_NUMBER" ] && [ -d "$WORKTREE/.agent/screenshots" ]; then
+      SHOT_N=$(forgejo_attach_pr_screenshots "$FORGEJO_REPO" "$NEW_PR_NUMBER" "$WORKTREE/.agent/screenshots" 2>/dev/null || echo 0)
+      [ "${SHOT_N:-0}" -gt 0 ] && log "attached $SHOT_N screenshot(s) to #$NEW_PR_NUMBER" || true
+    fi
   fi
 
   # Record Claude's wall-clock on the ISSUE (Forgejo time tracking).

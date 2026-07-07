@@ -152,6 +152,51 @@ forgejo_open_pr() {
   printf '%s\n' "$number"
 }
 
+# Upload one image as an attachment on an issue/PR; echo its public URL (empty
+# on failure). The Forgejo assets endpoint is multipart, so it can't ride _fj
+# (JSON-only). Size-guarded: the reverse proxy caps the request body, so an
+# oversized capture would 413 -- skip it (warn to stderr) rather than fail. The
+# agent is told to keep screenshots small; this is the backstop.
+FORGEJO_ATTACH_MAX_BYTES="${FORGEJO_ATTACH_MAX_BYTES:-900000}"
+forgejo_attach_image() {
+  local repo="$1" number="$2" file="$3" name="${4:-$(basename "$file")}" size
+  [ -f "$file" ] || { printf 'forgejo_attach_image: no such file: %s\n' "$file" >&2; return 1; }
+  size=$(wc -c < "$file")
+  if [ "$size" -gt "$FORGEJO_ATTACH_MAX_BYTES" ]; then
+    printf 'forgejo_attach_image: skip %s (%s bytes > %s cap)\n' "$name" "$size" "$FORGEJO_ATTACH_MAX_BYTES" >&2
+    return 1
+  fi
+  curl -sf --max-time 60 -X POST \
+    -H "Authorization: token $FORGEJO_TOKEN" \
+    -F "attachment=@${file};filename=${name}" \
+    "$FORGEJO_URL/api/v1/repos/${repo}/issues/${number}/assets?name=${name}" \
+    | jq -r '.browser_download_url // empty'
+}
+
+# Attach every image in <dir> to a PR and append an embedded "## Screenshots"
+# section to its body (once -- guarded by an HTML-comment marker). Echoes the
+# count attached. No-op (echo 0) if the dir is absent/empty. Lets a UI-work PR
+# carry the visual proof the agent captured, instead of just referencing it in
+# text. $1 repo  $2 PR number  $3 dir
+forgejo_attach_pr_screenshots() {
+  local repo="$1" number="$2" dir="$3" md="" url f count=0
+  [ -d "$dir" ] || { echo 0; return 0; }
+  for f in "$dir"/*.png "$dir"/*.PNG "$dir"/*.jpg "$dir"/*.jpeg; do
+    [ -f "$f" ] || continue
+    url=$(forgejo_attach_image "$repo" "$number" "$f") || continue
+    [ -n "$url" ] || continue
+    md+="![$(basename "$f")](${url})"$'\n\n'
+    count=$((count + 1))
+  done
+  [ "$count" -gt 0 ] || { echo 0; return 0; }
+  local body newbody
+  body=$(_fj GET "/repos/${repo}/issues/${number}" | jq -r '.body // ""')
+  case "$body" in *"<!-- screenshots -->"*) echo "$count"; return 0 ;; esac
+  newbody="${body}"$'\n\n<!-- screenshots -->\n## Screenshots\n\n'"${md}"
+  _fj PATCH "/repos/${repo}/issues/${number}" "$(jq -n --arg b "$newbody" '{body: $b}')" >/dev/null
+  echo "$count"
+}
+
 # All open PRs assigned to the authenticated bot user across every accessible
 # repo. The human->bot re-engagement signal: the human assigns a PR back to
 # the bot, next tick finds it here and reopens the work. (Outbound, the bot
