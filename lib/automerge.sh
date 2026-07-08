@@ -192,12 +192,18 @@ automerge_live_sha() {
 # sitemap is noted on stderr (-> journal), never silently truncated.
 automerge_sitemap_failures() {
   local base xml locs total loc code
+  local -a loc_arr=()
   base=$(printf '%s' "$1" | sed -E 's#^(https?://[^/]+).*#\1#')
   xml=$(curl -fsSL --max-time 20 "${base}/sitemap.xml" 2>/dev/null) || return 0   # no sitemap -> skip
   locs=$(printf '%s' "$xml" | grep -oE '<loc>[^<]+</loc>' | sed -E 's#</?loc>##g')
   total=$(printf '%s\n' "$locs" | grep -c . || true)
   [ "${total:-0}" -gt 500 ] && printf 'deploy: sitemap has %s urls, checking the first 500\n' "$total" >&2
-  printf '%s\n' "$locs" | head -500 | while IFS= read -r loc; do
+  # Slice the first 500 from an array, NOT `printf ... | head -500`: head closes
+  # the pipe after 500 lines while printf is still writing the rest, killing it
+  # with SIGPIPE (broken-pipe spew on every >500-url deploy -- issue #364). No
+  # pipe to the reader, no signal.
+  mapfile -t loc_arr <<< "$locs"
+  for loc in "${loc_arr[@]:0:500}"; do
     [ -n "$loc" ] || continue
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -L "$loc" 2>/dev/null || echo 000)
     case "$code" in 2??|3??) ;; *) printf '%s (%s)\n' "$loc" "$code" ;; esac

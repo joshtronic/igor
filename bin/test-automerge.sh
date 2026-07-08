@@ -142,6 +142,47 @@ case "$smf" in *"/ok"*) printf '  x %s\n' "sitemap: wrongly flagged the 200 page
 curl() { return 1; }
 eq "sitemap: no sitemap.xml -> empty (skip)" "" "$(automerge_sitemap_failures https://x)"
 
+# issue #364 regression: a >500-url sitemap must cap at 500 WITHOUT the old
+# `printf | head -500` broken-pipe spew. The call runs under `trap '' PIPE` to
+# reproduce production: systemd sets IgnoreSIGPIPE=yes, so head's early close
+# (after 500 of these >64KB-total padded urls) makes the still-writing printf's
+# write() return EPIPE -> "printf: write error: Broken pipe" instead of a silent
+# SIGPIPE. The array-slice fix never pipes into a truncating reader.
+sm_pad="$(printf 'p%.0s' {1..160})"
+curl() {
+  local u="${*: -1}" i
+  case "$u" in
+    */sitemap.xml)
+      # 1200 urls so the overflow past the first 500 (>64KB of padded urls) can't
+      # fit the pipe buffer -- forcing the old printf to still be writing when
+      # head closes. bad-within (#250) is checked; bad-beyond (#900) is past cap.
+      printf '<urlset>'
+      for i in $(seq 1 1200); do
+        case "$i" in
+          250) printf '<url><loc>https://x/ubad-within-%s</loc></url>' "$sm_pad" ;;
+          900) printf '<url><loc>https://x/ubad-beyond-%s</loc></url>' "$sm_pad" ;;
+          *)   printf '<url><loc>https://x/u%s-%s</loc></url>' "$i" "$sm_pad" ;;
+        esac
+      done
+      printf '</urlset>' ;;
+    */ubad-*) echo 500 ;;
+    *)        echo 200 ;;
+  esac
+}
+sm_err="$(mktemp)"
+sm_big="$( ( trap '' PIPE; automerge_sitemap_failures https://x ) 2>"$sm_err" )"
+has "sitemap: flags a bad url inside the first 500" "$sm_big" "ubad-within"
+case "$sm_big" in
+  *ubad-beyond*) printf '  x %s\n' "sitemap: did NOT cap at 500 (flagged url #550)"; FAIL=$((FAIL + 1)) ;;
+  *)             printf '  + %s\n' "sitemap: caps the walk at 500 urls" ;;
+esac
+if grep -qi 'broken pipe' "$sm_err"; then
+  printf '  x %s\n' "sitemap: SIGPIPE broken-pipe spew on a >500-url sitemap (#364)"; FAIL=$((FAIL + 1))
+else
+  printf '  + %s\n' "sitemap: no broken-pipe spew on a >500-url sitemap (#364)"
+fi
+rm -f "$sm_err"
+
 echo "== deploy barrier: propagation gate =="
 forgejo_commit_status() { echo success; }
 automerge_sitemap_failures() { return 0; }     # sitemap clean unless a test says otherwise
