@@ -1095,6 +1095,17 @@ DRAWS_ON=$(printf '%s' "$DECISION" | jq -r '[.draws_on[]? | select(type=="number
 log "chosen: form=$FORM slug=$SLUG draws_on=[${DRAWS_ON}]"
 log "angle: $ANGLE"
 
+# Hard slug-collision gate (#367). A post that reuses an already-shipped slug
+# writes the same Eleventy permalink (posts/<slug>/index.html), so its PR can
+# never pass CI -- an Output-conflict build. The shipped-digest nudge is only a
+# hint to the model and doesn't reliably catch a same-slug regeneration, so
+# reject it HERE, before the expensive draft and an un-mergeable PR. Exiting
+# clean lets the daily slot retry next tick and re-roll a fresh idea.
+if find "$WEBSITE_PATH/src/posts" -type f \( -name "*-${SLUG}.md" -o -name "${SLUG}.md" \) 2>/dev/null | grep -q .; then
+  log "chosen slug '$SLUG' collides with an already-shipped post -- skipping to avoid a duplicate-permalink PR (#367); will re-roll next tick"
+  exit 0
+fi
+
 # Draft, with one retry. The tick scheduler marks this slot done the
 # moment it is attempted (no second slot today), so resilience has to
 # live here: a transient draft hiccup gets one more shot before we give
