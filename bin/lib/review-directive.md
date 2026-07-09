@@ -50,6 +50,16 @@ The author works under a fixed contract. Hold the PR to it:
   REQUEST_CHANGES just spins the rework loop until it escalates. Block only
   if the DATA itself is malformed/corrupt, or a *substantive* change the PR
   depends on is actually missing from the diff.
+- **Un-fixable PR framing is a COMMENT, never a block.** The rule above is
+  not just about a count -- it generalizes. When the ONLY remaining defect
+  is pipeline-generated PR title/description framing the author provably
+  cannot edit from inside the PR (a stale, duplicate, or mis-worded
+  auto-summary whose source lives in the repo's scripts, not this diff),
+  note it and return **COMMENT**. The content is already fixed; a blocking
+  REQUEST_CHANGES here only spins the rework loop to a no-op escalation and
+  then **deadlocks auto-merge on an already-approved PR** (it refuses to
+  merge past a live RC, every tick, forever). Block only if the CODE or DATA
+  in the diff is actually wrong -- the framing is not.
 - **Tests + lint.** The author must add/adjust tests and leave the
   branch green. CI status is your objective read on this -- a
   `failure` status is a hard REQUEST_CHANGES regardless of how good the
