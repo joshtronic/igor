@@ -115,6 +115,24 @@ checkpoint_set_count() {
   printf '%s\n\n<!-- %s=%s -->\n' "$stripped" "$CHECKPOINT_COUNT_TAG" "$n"
 }
 
+# pr_body_ensure_closes <pr_body> <issue_number> -- the body with a
+# "Closes #<issue>" line guaranteed present, so a merge auto-closes the issue
+# (#372). Idempotent + no-dup: returns the body unchanged when <issue> is empty
+# OR the body already carries a closing keyword (close/fix/resolve, any
+# inflection) for that EXACT issue -- so it never doubles a keyword Claude
+# already wrote, and "#369" won't be considered satisfied by a "#3690". Pure
+# string logic; bin/tick.sh owns the git/forgejo side effects.
+pr_body_ensure_closes() {
+  local body="$1" issue="$2"
+  [ -n "$issue" ] || { printf '%s' "$body"; return; }
+  if printf '%s' "$body" \
+      | grep -qiE "(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#${issue}([^0-9]|$)"; then
+    printf '%s' "$body"
+  else
+    printf '%s\n\nCloses #%s' "$body" "$issue"
+  fi
+}
+
 # checkpoint_budget_exhausted <count> -- rc 0 when an issue has checkpointed
 # CHECKPOINT_MAX or more times without finishing and must be escalated to a human
 # instead of resumed again.
