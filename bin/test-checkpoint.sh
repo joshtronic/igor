@@ -128,4 +128,18 @@ forgejo_edit_pr acme/x 10 --body "$(checkpoint_set_count 'orig body' 3)"
 eq  "edit_pr: body-only omits the title key"   "null"                     "$(jq -r '.title // "null"' "$TMP/b")"
 eq  "edit_pr: counter round-trips through edit" "3" "$(checkpoint_read_count "$(jq -r '.body' "$TMP/b")")"
 
+echo "== pr_body_ensure_closes: guarantee an auto-close keyword (#372) =="
+eq  "empty issue -> body unchanged"        "keep me" "$(pr_body_ensure_closes 'keep me' '')"
+has "no keyword -> appends Closes #369"    "$(pr_body_ensure_closes 'did the work' '369')" "Closes #369"
+has "append preserves the original body"   "$(pr_body_ensure_closes 'did the work' '369')" "did the work"
+eq  "already 'Closes #369' -> unchanged"   "fix\n\nCloses #369" "$(pr_body_ensure_closes 'fix\n\nCloses #369' '369')"
+eq  "already 'Fixes #369' -> unchanged"    "Fixes #369" "$(pr_body_ensure_closes 'Fixes #369' '369')"
+eq  "already 'resolved #369' -> unchanged" "resolved #369" "$(pr_body_ensure_closes 'resolved #369' '369')"
+lacks "case-insensitive match doesn't double" "$(pr_body_ensure_closes 'CLOSES #369' '369')" "Closes #369"
+has "'#3690' does NOT satisfy #369 -> appends" "$(pr_body_ensure_closes 'see #3690' '369')" "Closes #369"
+has "keyword for a DIFFERENT issue -> still appends" "$(pr_body_ensure_closes 'Closes #12' '369')" "Closes #369"
+# idempotent: a second pass over an appended body must not add a second keyword
+ONCE=$(pr_body_ensure_closes 'work' '369'); TWICE=$(pr_body_ensure_closes "$ONCE" '369')
+eq  "idempotent -> second pass is a no-op" "$ONCE" "$TWICE"
+
 if [ "$FAIL" -eq 0 ]; then echo "test-checkpoint: ALL PASS"; else echo "test-checkpoint: $FAIL FAILED"; exit 1; fi

@@ -4175,7 +4175,7 @@ if { [ "$DISPOSITION" = "checkpoint" ] || { [ "$DISPOSITION" = "discard" ] && [ 
     else
       CP_BODY="Work-in-progress checkpoint. The agent hit its per-tick turn limit and snapshotted its progress here; it resumes automatically on the next tick. This PR is a draft (\`WIP:\`) -- the review and merge loops leave it alone until it's finished."
     fi
-    CP_BODY+=$'\n\nCloses #'"$ISSUE_NUMBER"
+    CP_BODY=$(pr_body_ensure_closes "$CP_BODY" "$ISSUE_NUMBER")
     CP_BODY=$(checkpoint_set_count "$CP_BODY" "$NEXT_N")
     CP_PR=$(forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$CP_TITLE" "$CP_BODY")
     log "checkpoint: opened draft PR${CP_PR:+ #$CP_PR} (WIP; resuming next tick)"
@@ -4339,7 +4339,8 @@ Address it, then remove \`Status/Blocked\` to re-queue. (If the note above says 
     # which marks it ready so the review + merge loops (which skip WIP PRs) pick
     # it up. Prefer the newest real commit subject, skipping the harness's
     # "WIP: ... checkpoint" markers; the body comes from PR_BODY.md as usual.
-    EX_TITLE=$(forgejo_get_pr "$FORGEJO_REPO" "$EXISTING_PR" 2>/dev/null | jq -r '.title // ""')
+    EX_JSON=$(forgejo_get_pr "$FORGEJO_REPO" "$EXISTING_PR" 2>/dev/null || echo '{}')
+    EX_TITLE=$(printf '%s' "$EX_JSON" | jq -r '.title // ""')
     if checkpoint_is_wip "$EX_TITLE"; then
       FINAL_TITLE=$(git log "origin/${PR_BASE}..HEAD" --pretty=%s 2>/dev/null \
         | grep -vE '^WIP: issue #[0-9]+ checkpoint' | head -1)
@@ -4350,11 +4351,26 @@ Address it, then remove \`Status/Blocked\` to re-queue. (If the note above says 
         FINAL_BODY=$(git log "origin/${PR_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
       fi
       FINAL_BODY+=$(build_deps_section "$PR_BASE")
-      FINAL_BODY+=$'\n\nCloses #'"$ISSUE_NUMBER"
+      FINAL_BODY=$(pr_body_ensure_closes "$FINAL_BODY" "$ISSUE_NUMBER")
       if forgejo_edit_pr "$FORGEJO_REPO" "$EXISTING_PR" --title "$FINAL_TITLE" --body "$FINAL_BODY"; then
         log "checkpoint: finalized -- PR #$EXISTING_PR ready for review (WIP dropped)"
       else
         log "warning: could not finalize checkpoint PR #$EXISTING_PR"
+      fi
+    else
+      # Non-WIP existing PR (e.g. a reworked one): the WIP-finalize branch above
+      # is skipped, and this path used to leave the body untouched -- so a PR
+      # whose body lacks the closing keyword merges WITHOUT auto-closing its
+      # issue (#372: #371 left #369 open). Guarantee it here, idempotently --
+      # only edit when the keyword is actually missing.
+      EX_BODY=$(printf '%s' "$EX_JSON" | jq -r '.body // ""')
+      EX_NEW=$(pr_body_ensure_closes "$EX_BODY" "$ISSUE_NUMBER")
+      if [ "$EX_NEW" != "$EX_BODY" ]; then
+        if forgejo_edit_pr "$FORGEJO_REPO" "$EXISTING_PR" --body "$EX_NEW"; then
+          log "ensured 'Closes #$ISSUE_NUMBER' on existing PR #$EXISTING_PR (#372)"
+        else
+          log "warning: could not add closing keyword to PR #$EXISTING_PR"
+        fi
       fi
     fi
   else
@@ -4372,7 +4388,7 @@ Address it, then remove \`Status/Blocked\` to re-queue. (If the note above says 
       fi
     fi
     PR_BODY+=$(build_deps_section "$PR_BASE")
-    PR_BODY+=$'\n\nCloses #'"$ISSUE_NUMBER"
+    PR_BODY=$(pr_body_ensure_closes "$PR_BODY" "$ISSUE_NUMBER")
 
     NEW_PR_NUMBER=$(forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$PR_TITLE" "$PR_BODY")
     log "PR opened${NEW_PR_NUMBER:+ (#$NEW_PR_NUMBER)}"
