@@ -47,6 +47,13 @@ _fj() {
 # Returns a JSON array. Empty array if no candidates.
 forgejo_find_claimable() {
   local repo="$1" reviewer="${2:-}"
+  # The API `labels=Agent` filter is an OPTIMIZATION, not the gate: Forgejo
+  # IGNORES a label filter that names a label the repo doesn't have -- it
+  # returns ALL open issues instead of none. A repo missing the `Agent` label
+  # (e.g. a freshly-onboarded one) would otherwise make the greenlight gate
+  # fail OPEN and the grind would claim every unlabeled ticket. Re-verify the
+  # `Agent` label client-side so the gate fails CLOSED regardless of the repo's
+  # label set.
   _fj GET "/repos/${repo}/issues?state=open&labels=Agent&type=issues&sort=oldest&limit=50" \
     | jq -c --arg reviewer "$reviewer" '
         [.[] | select(
@@ -58,6 +65,7 @@ forgejo_find_claimable() {
               and (.assignees[0].login == $reviewer)
             )
           )
+          and (([.labels[].name] | index("Agent")) != null)
           and (([.labels[].name] | index("Status/Blocked")) == null)
         )] | sort_by(.created_at)
       '
