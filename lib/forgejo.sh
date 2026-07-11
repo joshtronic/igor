@@ -105,16 +105,47 @@ forgejo_unassign_all() {
   _fj PATCH "/repos/${repo}/issues/${number}" '{"assignees": []}' >/dev/null
 }
 
+# The HTTP POST behind forgejo_request_review, split out as a seam tests can
+# stub. Echoes "<body>\n<http_code>" (curl -w appends the code last) and never
+# uses -f, so a non-2xx body survives for the caller to classify.
+_forgejo_post_reviewers() {
+  local url="$1" payload="$2"
+  curl -s -w $'\n%{http_code}' --max-time 30 -X POST \
+    -H "Authorization: token $FORGEJO_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$payload" "$url"
+}
+
 # Request review from a user on a PR. A separate endpoint from PR-create,
-# which can't set reviewers. Idempotent: re-requesting an already-requested
-# reviewer is a harmless no-op, so it's crash-safe to call again. PRs ONLY
-# (issues have no reviewers). Note: Forgejo rejects requesting review from a
-# PR's own author -- that's why the bot can't review its own PRs and the
-# human->bot re-engagement stays assignment-based (forgejo_my_assigned_prs).
+# which can't set reviewers. PRs ONLY (issues have no reviewers). Note: Forgejo
+# rejects requesting review from a PR's own author -- that's why the bot can't
+# review its own PRs and the human->bot re-engagement stays assignment-based
+# (forgejo_my_assigned_prs).
+#
+# Idempotent + fault-tolerant (#377): re-requesting an already-requested
+# reviewer is a harmless no-op (verified: HTTP 201, empty body), so the only
+# real failures are transient (5xx / timeout, curl code 000) or a genuine
+# client error. Retry ONCE on a transient code, then on persistent failure
+# emit the HTTP status + body on stderr and return non-zero -- so the caller
+# logs WHY it failed instead of the old bare, ambiguous warning. rc 0 iff the
+# request actually landed (2xx).
 forgejo_request_review() {
   local repo="$1" number="$2" reviewer="$3"
-  _fj POST "/repos/${repo}/pulls/${number}/requested_reviewers" \
-    "$(jq -n --arg r "$reviewer" '{reviewers: [$r]}')" >/dev/null
+  local url="$FORGEJO_URL/api/v1/repos/${repo}/pulls/${number}/requested_reviewers"
+  local payload resp code body attempt
+  payload=$(jq -n --arg r "$reviewer" '{reviewers: [$r]}')
+  for attempt in 1 2; do
+    resp=$(_forgejo_post_reviewers "$url" "$payload")
+    code="${resp##*$'\n'}"   # last line: the http_code
+    body="${resp%$'\n'*}"    # everything before it: the response body
+    case "$code" in
+      2*) return 0 ;;
+      5*|000) [ "$attempt" -eq 1 ] && { sleep 1; continue; } ;;
+    esac
+    break
+  done
+  printf 'HTTP %s: %s' "${code:-000}" "$(printf '%s' "$body" | tr '\n' ' ' | head -c 200)" >&2
+  return 1
 }
 
 forgejo_comment() {
