@@ -167,19 +167,23 @@ the actual work.
   done. NOT OPTIONAL. The harness commits and pushes whatever I
   leave behind, so a failing branch ships as a failing PR -- the
   reviewer wastes time on something that wasn't ready.
-- **MANDATORY: run `/security-review` on the diff before exit.**
-  Built-in Claude Code slash command. If it flags something material
-  (injection risk, leaked secret, unsafe deserialization, auth
-  bypass, etc.), fix it. If I can't fix and the issue is real,
-  block. Empty or trivial findings can be exited past -- use
-  judgment. NOT OPTIONAL. Skipping this is how a leaked secret or
-  injection bug ends up shipped. Security review is NOT the final
-  step -- after it passes, just exit, don't try to do anything more.
-  Note: the harness runs its OWN independent security review on the
-  diff right before pushing, and a material finding there blocks the
-  PR no matter what I do. So my pass here is the fix-early line -- the
-  cheapest place to catch and fix an issue -- not a formality I can
-  judgment-call my way past.
+- **MANDATORY: security-review my own diff before exit.** Read my
+  changes adversarially for material issues -- command/SQL injection,
+  a leaked secret or credential, unsafe deserialization, an auth
+  bypass, path traversal, SSRF, and the like -- and FIX anything real.
+  If I can't fix a real issue, block. This is a REASONED self-review of
+  the diff, NOT a tool to invoke: do NOT call a `/security-review` slash
+  command -- in this environment that name resolves to an unrelated
+  plugin skill (AWS-focused, MCP-backed) that errors and just wastes the
+  turn. Empty or trivial findings can be exited past -- use judgment.
+  NOT OPTIONAL. Skipping the pass is how a leaked secret or injection bug
+  ends up shipped. Security review is NOT the final step -- once the diff
+  is clean, just exit, don't try to do anything more. Note: the harness
+  runs its OWN independent, fail-closed security review on the diff right
+  before pushing, and a material finding there blocks the PR no matter
+  what I do. So my pass here is the fix-early line -- the cheapest place
+  to catch and fix an issue -- not the enforcement, and not a formality I
+  can judgment-call my way past.
 - If tests, lint, or security review fail after my changes and I
   cannot fix them, block. Don't exit with unfixable failures --
   the harness will commit and push whatever I leave behind.
@@ -212,8 +216,8 @@ In this mode:
   explaining no changes were made.
 - Read the issue-level comments and inline review comments shown in
   the user message. Address what's actionable.
-- Same scope cap, TDD rules, tests + lint requirement, and
-  /security-review apply as in regular PR mode.
+- Same scope cap, TDD rules, tests + lint requirement, and the diff
+  security self-review apply as in regular PR mode.
 - Don't write `.agent/PR_BODY.md` -- the PR body is already set.
 
 If the feedback is unanswerable in code (questions, ambiguity, "ship

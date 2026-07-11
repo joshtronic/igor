@@ -398,6 +398,20 @@ forgejo_remove_label() {
   _fj DELETE "/repos/${repo}/issues/${number}/labels/${id}" >/dev/null
 }
 
+# forgejo_repo_has_label <repo> <name> -- does the repo DEFINE a label of this
+# name? (Repo-level metadata, not on any issue.) The greenlight gate matches
+# issues by the `Agent` label, but Forgejo can only match a label the repo
+# actually defines -- so onboarding wants to confirm it exists. Distinct exit
+# codes so a caller can tell "absent" from "couldn't check":
+#   0 -- present
+#   1 -- absent (the labels list was read and holds no such name)
+#   2 -- indeterminate (the API read itself failed: network/token)
+forgejo_repo_has_label() {
+  local repo="$1" name="$2" labels
+  labels=$(_fj GET "/repos/${repo}/labels") || return 2
+  jq -e --arg n "$name" 'any(.[]; .name == $n)' <<<"$labels" >/dev/null 2>&1
+}
+
 # Bot-authored PRs on this repo that reference this issue via
 # "Closes #N" (case-insensitive). Each entry: {number, state,
 # merged}. Empty array if none.
