@@ -53,6 +53,21 @@ audit_one() {
   validate_repo_local "$repo" "$tmp"
   status=$?
   rm -rf "$tmp"
+
+  # Agent greenlight label -- repo metadata, so it's the one API read here and
+  # deliberately NOT in validate_repo_local (that stays pure local-clone reads
+  # for the per-tick hot path). ADVISORY: a missing `Agent` label is now safe
+  # (the gate fails closed since #375), so it never flips readiness -- but a
+  # repo meant to be agentic that lacks it silently does no issue work, so we
+  # flag it "so you notice" (#376).
+  forgejo_repo_has_label "$repo" Agent
+  case $? in
+    0) printf -- '- [x] %s\n' '`Agent` greenlight label defined' ;;
+    1) printf -- '- [ ] %s -- %s\n' '`Agent` greenlight label defined (advisory)' \
+         'no issues here are claimable until this repo defines an `Agent` label -- the greenlight gate has nothing to match' ;;
+    *) printf -- '- [~] %s\n' '`Agent` label check skipped -- could not read repo labels (network/token)' ;;
+  esac
+
   echo
   return $status
 }
