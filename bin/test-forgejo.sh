@@ -58,6 +58,22 @@ _fj() { printf '%s' "$NOAGENT"; }
 eq "repo missing Agent label -> nothing claimable (fails CLOSED)" \
   "[]" "$(forgejo_find_claimable acme/x josh | jq -c '[.[].number]')"
 
+# forgejo_repo_has_label: the onboarding check behind #376. Distinct exit codes
+# let validate-repo.sh tell "absent" (flag it) from "couldn't check" (skip).
+echo "== forgejo_repo_has_label: present / absent / indeterminate =="
+
+_fj() { printf '%s' '[{"id":1,"name":"Agent"},{"id":2,"name":"Kind/Bug"}]'; }
+forgejo_repo_has_label acme/x Agent; eq "defined label -> rc 0 (present)" "0" "$?"
+forgejo_repo_has_label acme/x Nope;  eq "undefined name -> rc 1 (absent)" "1" "$?"
+
+_fj() { printf '%s' '[]'; }
+forgejo_repo_has_label acme/x Agent; eq "empty label set -> rc 1 (absent)" "1" "$?"
+
+# curl -sf exits nonzero on an HTTP error; the read must surface as indeterminate
+# (rc 2), NOT be mistaken for "label absent".
+_fj() { return 22; }
+forgejo_repo_has_label acme/x Agent; eq "API read failed -> rc 2 (indeterminate)" "2" "$?"
+
 if [ "$FAIL" -eq 0 ]; then echo "test-forgejo: all checks passed"; exit 0; fi
 echo "test-forgejo: $FAIL check(s) FAILED"
 exit 1
