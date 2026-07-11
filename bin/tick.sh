@@ -2623,6 +2623,21 @@ review_parse_response() {
   jq -n --arg v "$verdict" --arg b "$body" '{verdict:$v, body:$b}'
 }
 
+# Request the human reviewer on a PR and log the outcome TRUTHFULLY: a success
+# line only when the request actually landed, otherwise ONE warning carrying the
+# API reason. Replaces the old "request || warn; log success anyway" pattern,
+# which emitted a contradictory warning-then-"requested" pair when the request
+# failed (#377). $3 is a short context label (e.g. "verdict=APPROVE").
+review_request_human() {
+  local repo="$1" number="$2" ctx="$3" reason
+  [ -n "${FORGEJO_REVIEWER:-}" ] || return 0
+  if reason=$(forgejo_request_review "$repo" "$number" "$FORGEJO_REVIEWER" 2>&1); then
+    log "review: ${repo}#${number} requested review from ${FORGEJO_REVIEWER} (${ctx})"
+  else
+    log "warning: review: review-request to ${FORGEJO_REVIEWER} failed on ${repo}#${number} (${ctx}): ${reason:-unknown}"
+  fi
+}
+
 do_review_tick() {
   # Find the first open bot PR -- across the VALIDATED set -- whose live
   # head hasn't been reviewed yet. Unvalidated repos (not ready for
@@ -2796,9 +2811,7 @@ ${review_body}
       APPROVE|COMMENT)
         review_reset_rework "$key"
         if [ -n "${FORGEJO_REVIEWER:-}" ]; then
-          forgejo_request_review "$target_repo" "$target_num" "$FORGEJO_REVIEWER" 2>/dev/null \
-            || log "warning: review: review-request to ${FORGEJO_REVIEWER} failed on ${key} (verdict=${verdict})"
-          log "review: ${key} requested review from ${FORGEJO_REVIEWER} (verdict=${verdict})"
+          review_request_human "$target_repo" "$target_num" "verdict=${verdict}"
         fi
         ;;
       REQUEST_CHANGES)
@@ -2810,9 +2823,7 @@ ${review_body}
             forgejo_comment "$target_repo" "$target_num" \
               "${target_repo} is not in the validated set (no CI / not validated), so autonomous rework cannot be CI-verified. Handing to you." 2>/dev/null \
               || log "warning: review: unvalidated-repo comment failed on ${key}"
-            forgejo_request_review "$target_repo" "$target_num" "$FORGEJO_REVIEWER" 2>/dev/null \
-              || log "warning: review: review-request to ${FORGEJO_REVIEWER} failed on ${key} (unvalidated)"
-            log "review: ${key} requested review from ${FORGEJO_REVIEWER} (unvalidated repo)"
+            review_request_human "$target_repo" "$target_num" "unvalidated repo"
           fi
         elif [ "$rc_rounds" -ge 3 ]; then
           log "review: ${key} REQUEST_CHANGES rework_rounds=${rc_rounds} >= 3 -- escalating to human"
@@ -2820,9 +2831,7 @@ ${review_body}
             forgejo_comment "$target_repo" "$target_num" \
               "Igor requested changes ${rc_rounds} times without converging -- handing this to you." 2>/dev/null \
               || log "warning: review: escalation comment failed on ${key}"
-            forgejo_request_review "$target_repo" "$target_num" "$FORGEJO_REVIEWER" 2>/dev/null \
-              || log "warning: review: review-request to ${FORGEJO_REVIEWER} failed on ${key} (escalation)"
-            log "review: ${key} escalated to ${FORGEJO_REVIEWER} after ${rc_rounds} rework rounds"
+            review_request_human "$target_repo" "$target_num" "escalation after ${rc_rounds} rework rounds"
           fi
         else
           local new_rounds
