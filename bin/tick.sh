@@ -2410,7 +2410,7 @@ Do NOT file for:
 ${blurb}
 
 DO file for:
-- a run that exhausted its retries or abandoned the night
+- a run that exhausted its retries or abandoned the window
 - an error with no subsequent success in the window
 - the unit crashing or exiting nonzero with no benign explanation
 - output indicative of a bug: stack traces, unbound variables,
@@ -2419,7 +2419,7 @@ DO file for:
 Output STRICT JSON only -- no preamble, no fences:
 {\"findings\": [{\"title\": \"...\", \"severity\": \"low|medium|high\", \"body\": \"...\"}]}
 
-- findings: [] when the night was clean. This is the expected common
+- findings: [] when the hour was clean. This is the expected common
   case; do not invent work.
 - At most 2 findings; pick the most material.
 - title: terse, specific, greppable -- it becomes a Forgejo issue
@@ -2455,14 +2455,14 @@ ${journal}"
     log "logwatch: ${unit}: unparseable review response (attempt $attempt)"
   done
   if [ -z "$findings" ]; then
-    log "logwatch: ${unit}: no parseable review after 2 attempts -- giving up until tomorrow"
+    log "logwatch: ${unit}: no parseable review after 2 attempts -- giving up until next hour"
     return 0
   fi
 
   local count
   count=$(jq 'length' <<<"$findings")
   if [ "$count" -eq 0 ]; then
-    log "logwatch: ${unit}: clean night -- nothing to file"
+    log "logwatch: ${unit}: clean hour -- nothing to file"
     return 0
   fi
   if [ "$count" -gt 2 ]; then
