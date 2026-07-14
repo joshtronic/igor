@@ -456,6 +456,26 @@ forgejo_whoami() {
   _fj GET "/user" | jq -r '.login // empty'
 }
 
+# Resolve the bot's login, retrying a transient /api/v1/user failure with
+# backoff (igor#383). Bot-identity resolution gates the ENTIRE tick, so a
+# one-off API hiccup must not hard-abort the unit: a few quick retries ride
+# through the common momentary blip. Only a PERSISTENT failure (retries
+# exhausted -- a sustained outage or a revoked token) returns empty, which the
+# caller escalates to a visible exit. Echoes the login on success, empty on
+# persistent failure; returns 0 iff resolved. The assignment stays guarded
+# because forgejo_whoami's curl|jq pipeline can surface curl's raw exit code
+# under pipefail (igor#346). Kept out of forgejo_whoami itself so the fast-fail
+# diagnostic callers (doctor.sh, validate.sh) don't inherit the backoff.
+forgejo_resolve_bot_user() {
+  local attempt bot=""
+  for attempt in 1 2 3; do
+    bot=$(forgejo_whoami) || bot=""
+    [ -n "$bot" ] && { printf '%s\n' "$bot"; return 0; }
+    if [ "$attempt" -lt 3 ]; then sleep "$attempt"; fi
+  done
+  return 1
+}
+
 # Lists every repo the bot has push access to. Returns a JSON array of
 # {full_name, default_branch}. Paginated (50/page).
 forgejo_list_bot_repos() {
