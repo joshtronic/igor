@@ -127,14 +127,15 @@ export TICK_PID=$$
 
 # -- Resolve bot identity --------------------------------------
 
-# forgejo_whoami's pipeline (curl | jq) can fail with curl's raw exit code
-# (e.g. 6/COULDNT_RESOLVE_HOST on a network blip -- the same one that can
-# make the self-pull above fail). Under `set -euo pipefail`, an unguarded
-# `BOT_USER=$(forgejo_whoami)` lets that raw code kill the tick via errexit
-# BEFORE the check below runs, bypassing this diagnostic and exiting with a
-# meaningless code (igor#346). Catch it so a lookup failure always falls
-# through to the intended message + exit 3.
-BOT_USER=$(forgejo_whoami) || BOT_USER=""
+# This gates the ENTIRE tick, so a transient /api/v1/user blip must not
+# hard-abort the unit: forgejo_resolve_bot_user retries with backoff, so a
+# one-off hiccup rides through on a later attempt instead of crashing systemd
+# with exit 3 (igor#383). Only a PERSISTENT failure (retries exhausted) falls
+# through to exit 3 -- a sustained outage or revoked token SHOULD surface as a
+# failed unit. The assignment stays guarded because forgejo_whoami's curl | jq
+# pipeline can surface curl's raw exit code under pipefail, which would kill the
+# tick BEFORE the check below runs, bypassing this diagnostic (igor#346).
+BOT_USER=$(forgejo_resolve_bot_user) || BOT_USER=""
 [ -n "$BOT_USER" ] || {
   echo "agent: failed to resolve bot user from $FORGEJO_URL/api/v1/user" >&2
   exit 3
