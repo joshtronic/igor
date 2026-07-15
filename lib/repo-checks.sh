@@ -95,7 +95,29 @@ check_test_signal() {
   # Cargo / Go projects -- test runners are implicit
   rc_file_exists Cargo.toml && return 0
   rc_file_exists go.mod && return 0
+  # Deploy-verifiable static site (games/sites with no unit suite) -- see
+  # check_deploy_smoke_signal below.
+  check_deploy_smoke_signal && return 0
   return 1
+}
+
+# check_deploy_smoke_signal -- an alternate test-signal path for static sites
+# with no unit-test suite (e.g. snail.io). Per Josh: "games are still websites
+# -- the smoke test is the site deploying and passing that bundle-hash
+# validation." A repo qualifies when agent.json declares a live `.smoke.url`
+# (the same file lib/automerge.sh reads to gate auto-merge) AND the build
+# stamps a `deploy-sha` marker into the page (the live propagation check
+# lib/automerge.sh's automerge_live_sha performs post-deploy). The actual
+# pre-merge correctness bar -- CI building the site on the PR -- is
+# check_ci_workflow, run separately by validate_repo_local; this only
+# substitutes for the unit-test requirement, it doesn't relax CI.
+check_deploy_smoke_signal() {
+  local cfg url
+  cfg=$(rc_file_read agent.json)
+  [ -n "$cfg" ] || return 1
+  url=$(jq -r '.smoke.url // empty' <<<"$cfg" 2>/dev/null)
+  [ -n "$url" ] || return 1
+  git -C "$_RC_REPO_PATH" grep -qiF 'deploy-sha' "$_RC_REF" >/dev/null 2>&1
 }
 
 check_lint_signal() {
@@ -209,7 +231,7 @@ validate_repo_local() {
 
   check_test_signal
   _emit $? "Test setup detected" \
-    "add a way to run tests: \`\"test\"\` script in package.json, \`pytest.ini\`, \`[tool.pytest]\` in pyproject.toml, \`test:\` target in Makefile, or use a Cargo/Go project (implicit)"
+    "add a way to run tests: \`\"test\"\` script in package.json, \`pytest.ini\`, \`[tool.pytest]\` in pyproject.toml, \`test:\` target in Makefile, a Cargo/Go project (implicit), or -- for a static site with no unit suite -- a deploy-verifiable smoke: \`agent.json\` \`.smoke.url\` plus a \`deploy-sha\` marker the build stamps into the page"
 
   check_lint_signal
   _emit $? "Lint setup detected" \
