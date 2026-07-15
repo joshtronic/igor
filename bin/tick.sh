@@ -86,6 +86,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/repo-checks.sh"
 # shellcheck source=lib/maintenance-checks.sh
 . "$AGENT_HOME/lib/maintenance-checks.sh"
+# shellcheck source=lib/browser-reap.sh
+. "$AGENT_HOME/lib/browser-reap.sh"
 # shellcheck source=lib/cost.sh
 . "$AGENT_HOME/lib/cost.sh"
 # shellcheck source=lib/claude.sh
@@ -1217,6 +1219,13 @@ maintenance_eligible() {
 # Igor-driven (scheduled chore). Runs after Igor's own daily work in
 # the cascade; no time-of-day gate (the shift window was removed).
 do_maintenance_tick() {
+  # Stale headless-browser reap runs first and unconditionally, ahead of
+  # the weekly per-repo eligibility gate below -- it's not itself a
+  # per-repo audit, just a host-level cleanup that should self-heal every
+  # time this function is reached (igor#388). Non-model (ps + kill only);
+  # silent no-op when nothing is stale.
+  browser_reap_sweep
+
   local repo_line r_name
   local eligible=()
   while IFS= read -r repo_line; do
