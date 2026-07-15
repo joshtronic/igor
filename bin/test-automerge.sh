@@ -320,6 +320,29 @@ UPDATED=""; echo '{}' > "$STATE"
 no "automerge: inconclusive up-to-date -> no merge/update (rc1)"  do_automerge_tick
 eq "automerge: inconclusive did not update"      ""              "$UPDATED"
 
+echo "== do_automerge_tick: active block skips AND logs it (igor#386) =="
+# A prior rejected merge on this exact head must skip silently on the merge
+# side (no re-POST) but NOT silently on the log side -- the initial rejection
+# log line scrolls out of view long before the hour-long cooldown clears, so
+# every skipped tick during the cooldown must say so too, or a human staring
+# at the log during the block window sees nothing and assumes the tick never
+# reached this PR at all.
+export VALIDATED_REPOS_JSON='{"full_name":"acme/site"}'
+automerge_smoke_url() { echo "https://x"; }
+forgejo_list_open_bot_prs() { echo '[{"number":7}]'; }
+automerge_approved_by() { return 0; }
+automerge_behind_count() { echo 0; }
+_fj() { echo '{"head":{"sha":"headsha7"}}'; }
+MERGED=0; automerge_do_merge() { MERGED=1; echo "sha"; }
+echo '{}' > "$STATE"
+AUTOMERGE_BLOCK_COOLDOWN_SECS=3600
+automerge_block_record "$STATE" "acme/site#7" "headsha7" "HTTP 405: nope"
+AUTOMERGE_OUT=$(do_automerge_tick 2>&1); AUTOMERGE_RC=$?
+if [ "$AUTOMERGE_RC" -ne 0 ]; then printf '  + %s\n' "automerge: active block -> no merge (rc1)"
+else printf '  x %s\n' "automerge: active block -> no merge (rc1)"; FAIL=$((FAIL + 1)); fi
+eq "automerge: active block did NOT call automerge_do_merge" "0" "$MERGED"
+has "automerge: active block logs the skip"     "$AUTOMERGE_OUT" "still backing off a prior rejected merge"
+
 if [ "$FAIL" -eq 0 ]; then echo "test-automerge: all checks passed"; exit 0; fi
 echo "test-automerge: $FAIL check(s) FAILED"
 exit 1

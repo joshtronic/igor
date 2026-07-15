@@ -368,7 +368,14 @@ do_automerge_tick() {
       if [ "$behind" = "0" ]; then
         # Back off a head we already know the API rejects -- don't re-POST a
         # doomed merge every tick (igor#322); the reason was logged on first fail.
-        if automerge_block_active "$sf" "$key" "$head"; then continue; fi
+        # Still log EACH skipped tick during the cooldown (igor#386) -- the
+        # original rejection log line scrolls out of view long before the
+        # cooldown clears, and a silent skip here otherwise looks identical
+        # to the tick never reaching this PR at all.
+        if automerge_block_active "$sf" "$key" "$head"; then
+          log "automerge: ${key} still backing off a prior rejected merge on head ${head:0:8} (${AUTOMERGE_BLOCK_COOLDOWN_SECS}s cooldown)"
+          continue
+        fi
         if sha=$(automerge_do_merge "$repo" "$pr"); then
           automerge_block_clear "$sf" "$key"
           [ -n "$sha" ] || sha="$head"   # fall back to the head if the merge SHA didn't come back

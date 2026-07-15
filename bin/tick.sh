@@ -2901,9 +2901,108 @@ do_health_tick || true
 # -- Deploy barrier (non-model: API + curl, so it runs even during a Claude
 # health cooldown). Watches an in-flight deploy and ENDS the tick until it
 # verifies -- so no long work starts mid-deploy. Sits above the health gate.
-# (do_automerge_tick is NOT here: it needs VALIDATED_REPOS_JSON, which the
-# validation sweep below builds -- so it runs right after that, not here.)
 do_deploy_barrier && exit 0
+
+# -- Validation sweep ------------------------------------------
+#
+# Per-tick pre-flight. Every bot-accessible repo is CLONED (or its
+# existing clone fetched) and then validated against that LOCAL clone --
+# zero per-file API calls. Cloning is gated on ACCESS, not on validation:
+# we pull down every repo the bot can see, then decide per-repo whether it
+# is ready for WORK. Reading a git clone is all-or-nothing, so validation
+# can't be fooled by one file's read blipping -- the old per-file API failure
+# mode that filed bogus onboarding tickets on healthy repos. With NO clone
+# yet, a blocked clone is `indeterminate` (skip + retry). Once a clone
+# EXISTS, a failed refresh-fetch validates the last-fetched state --
+# stale-but-valid ON PURPOSE: readiness barely changes tick-to-tick, and the
+# WORK step re-fetches before it acts, so nothing is ever done on stale data.
+# A repo that fails validation is simply skipped for work, SILENTLY;
+# onboarding is a manual operator step (`bin/validate-repo.sh <repo>` prints
+# a failing checklist).
+#
+# Builds VALIDATED_REPOS_JSON: newline-separated JSON lines, one per repo
+# ready for work, same shape that `jq -c '.[]' <<<$(forgejo_list_bot_repos)`
+# would produce. Downstream WORK loops iterate this set.
+#
+# Runs here, ABOVE the claude_health_blocked gate below (igor#386):
+# do_automerge_tick needs this set and is itself non-model (API + curl
+# only), so both the sweep and the merge must run even during a live
+# Claude cooldown -- a cooldown can run for hours, and an approved,
+# CI-green bot PR shouldn't sit unmerged that whole time just because
+# Claude is unavailable. Before this fix the sweep (and therefore
+# do_automerge_tick, which depends on VALIDATED_REPOS_JSON) sat below the
+# gate, so a live cooldown silently skipped auto-merge fleet-wide for its
+# entire duration with no error, no log, nothing to grep for.
+
+log "validation sweep ($BOT_USER)"
+ALL_REPOS=$(forgejo_list_bot_repos)
+
+# Analysis set: every bot-accessible repo, in the same newline-delimited
+# JSON-object shape as VALIDATED_REPOS_JSON. Validation gates WORK
+# (issue pickup, PR pushes, site-work); it does NOT gate read-only
+# ANALYSIS (the weekly security/dep audit, which only files tickets and
+# never commits). do_maintenance_tick loops this set so a repo that isn't
+# ready for work still gets its dependencies audited; whether a finding
+# becomes a PR (validated) or a human triage ticket (not) is decided
+# per-repo in do_maintenance_for_repo.
+ANALYSIS_REPOS_JSON=$(jq -c '.[]' <<<"$ALL_REPOS")
+VALIDATED_REPOS_JSON=""
+VAL_PASS=0
+VAL_CACHED=0
+VAL_NOTREADY=0
+VAL_INDET=0
+while IFS= read -r repo_line; do
+  [ -z "$repo_line" ] && continue
+  R_NAME=$(jq -r '.full_name' <<<"$repo_line")
+
+  # Cooldown: reuse a recent PASS instead of re-fetching + re-validating
+  # every tick. Decouples validation cost from tick frequency (matters at
+  # the 1-minute cadence as repos are added). Only PASSes are cached; a
+  # not-ready or indeterminate repo re-checks next tick.
+  if validation_fresh "$R_NAME"; then
+    VALIDATED_REPOS_JSON+="${repo_line}"$'\n'
+    VAL_CACHED=$((VAL_CACHED + 1))
+    continue
+  fi
+
+  # Clone-on-access (clone-if-missing else fetch), then validate the clone.
+  # Only a PASS is cached (above), so a not-ready/indeterminate repo re-fetches
+  # every tick -- DELIBERATE: it means a repo starts getting worked the moment
+  # the operator finishes onboarding it, with no cooldown lag. The fetch is a
+  # cheap "already up to date" against the local Forgejo; revisit (e.g. a short
+  # failure-cooldown) only if the not-ready set ever grows large.
+  ensure_repo_local "$R_NAME" || true
+  R_PATH=$(repo_path_for "$R_NAME")
+
+  set +e
+  validate_repo_local "$R_NAME" "$R_PATH" >/dev/null
+  V_RC=$?
+  set -e
+  if [ "$V_RC" -eq 0 ]; then
+    VALIDATED_REPOS_JSON+="${repo_line}"$'\n'
+    validation_mark_ok "$R_NAME"
+    VAL_PASS=$((VAL_PASS + 1))
+  elif [ "$V_RC" -eq 2 ]; then
+    # Indeterminate: no readable clone (the fetch likely failed), so no
+    # check actually ran. Skip for work this tick only; nothing is cached,
+    # so the next tick re-checks.
+    log "validation: $R_NAME indeterminate (no readable clone) -- re-checking next tick"
+    VAL_INDET=$((VAL_INDET + 1))
+  else
+    # Genuinely not ready (a real gap in the clone). No ticket -- onboarding
+    # is a manual operator step; just skip this repo for work this tick.
+    log "validation: $R_NAME not ready for agentic work -- skipping (run bin/validate-repo.sh $R_NAME for the checklist)"
+    VAL_NOTREADY=$((VAL_NOTREADY + 1))
+  fi
+done < <(jq -c '.[]' <<<"$ALL_REPOS")
+log "validation: ${VAL_PASS} pass, ${VAL_CACHED} cached, ${VAL_NOTREADY} not-ready, ${VAL_INDET} indeterminate"
+
+# -- Auto-merge on approve (needs the validated set, just built above; non-model
+# -- API only). Merges a human-approved bot PR on an opt-in repo and stamps the
+# pending deploy that the barrier (top of the tick) then watches to healthy.
+# One-thing-then-exit, like the rest of the cascade. Deliberately above the
+# claude_health_blocked gate below -- see the validation-sweep comment above.
+do_automerge_tick && exit 0
 
 if claude_health_blocked; then
   log "claude health: backoff active (kind=$(claude_health_kind)) -- skipping all model work this tick"
@@ -2997,89 +3096,13 @@ if [ "$ORPHAN_COUNT" -gt 0 ]; then
   done < <(jq -c '.[] | {repo: .repository.full_name, num: .number}' <<<"$ORPHANS")
 fi
 
-# -- Validation sweep ------------------------------------------
+# -- Validation sweep already ran above (igor#386) --------------
 #
-# Per-tick pre-flight. Every bot-accessible repo is CLONED (or its
-# existing clone fetched) and then validated against that LOCAL clone --
-# zero per-file API calls. Cloning is gated on ACCESS, not on validation:
-# we pull down every repo the bot can see, then decide per-repo whether it
-# is ready for WORK. Reading a git clone is all-or-nothing, so validation
-# can't be fooled by one file's read blipping -- the old per-file API failure
-# mode that filed bogus onboarding tickets on healthy repos. With NO clone
-# yet, a blocked clone is `indeterminate` (skip + retry). Once a clone
-# EXISTS, a failed refresh-fetch validates the last-fetched state --
-# stale-but-valid ON PURPOSE: readiness barely changes tick-to-tick, and the
-# WORK step re-fetches before it acts, so nothing is ever done on stale data.
-# A repo that fails validation is simply skipped for work, SILENTLY;
-# onboarding is a manual operator step (`bin/validate-repo.sh <repo>` prints
-# a failing checklist).
-#
-# Builds VALIDATED_REPOS_JSON: newline-separated JSON lines, one per repo
-# ready for work, same shape that `jq -c '.[]' <<<$(forgejo_list_bot_repos)`
-# would produce. Downstream WORK loops iterate this set.
-
-log "validation sweep ($BOT_USER)"
-ALL_REPOS=$(forgejo_list_bot_repos)
-
-# Analysis set: every bot-accessible repo, in the same newline-delimited
-# JSON-object shape as VALIDATED_REPOS_JSON. Validation gates WORK
-# (issue pickup, PR pushes, site-work); it does NOT gate read-only
-# ANALYSIS (the weekly security/dep audit, which only files tickets and
-# never commits). do_maintenance_tick loops this set so a repo that isn't
-# ready for work still gets its dependencies audited; whether a finding
-# becomes a PR (validated) or a human triage ticket (not) is decided
-# per-repo in do_maintenance_for_repo.
-ANALYSIS_REPOS_JSON=$(jq -c '.[]' <<<"$ALL_REPOS")
-VALIDATED_REPOS_JSON=""
-VAL_PASS=0
-VAL_CACHED=0
-VAL_NOTREADY=0
-VAL_INDET=0
-while IFS= read -r repo_line; do
-  [ -z "$repo_line" ] && continue
-  R_NAME=$(jq -r '.full_name' <<<"$repo_line")
-
-  # Cooldown: reuse a recent PASS instead of re-fetching + re-validating
-  # every tick. Decouples validation cost from tick frequency (matters at
-  # the 1-minute cadence as repos are added). Only PASSes are cached; a
-  # not-ready or indeterminate repo re-checks next tick.
-  if validation_fresh "$R_NAME"; then
-    VALIDATED_REPOS_JSON+="${repo_line}"$'\n'
-    VAL_CACHED=$((VAL_CACHED + 1))
-    continue
-  fi
-
-  # Clone-on-access (clone-if-missing else fetch), then validate the clone.
-  # Only a PASS is cached (above), so a not-ready/indeterminate repo re-fetches
-  # every tick -- DELIBERATE: it means a repo starts getting worked the moment
-  # the operator finishes onboarding it, with no cooldown lag. The fetch is a
-  # cheap "already up to date" against the local Forgejo; revisit (e.g. a short
-  # failure-cooldown) only if the not-ready set ever grows large.
-  ensure_repo_local "$R_NAME" || true
-  R_PATH=$(repo_path_for "$R_NAME")
-
-  set +e
-  validate_repo_local "$R_NAME" "$R_PATH" >/dev/null
-  V_RC=$?
-  set -e
-  if [ "$V_RC" -eq 0 ]; then
-    VALIDATED_REPOS_JSON+="${repo_line}"$'\n'
-    validation_mark_ok "$R_NAME"
-    VAL_PASS=$((VAL_PASS + 1))
-  elif [ "$V_RC" -eq 2 ]; then
-    # Indeterminate: no readable clone (the fetch likely failed), so no
-    # check actually ran. Skip for work this tick only; nothing is cached,
-    # so the next tick re-checks.
-    log "validation: $R_NAME indeterminate (no readable clone) -- re-checking next tick"
-    VAL_INDET=$((VAL_INDET + 1))
-  else
-    # Genuinely not ready (a real gap in the clone). No ticket -- onboarding
-    # is a manual operator step; just skip this repo for work this tick.
-    log "validation: $R_NAME not ready for agentic work -- skipping (run bin/validate-repo.sh $R_NAME for the checklist)"
-    VAL_NOTREADY=$((VAL_NOTREADY + 1))
-  fi
-done < <(jq -c '.[]' <<<"$ALL_REPOS")
-log "validation: ${VAL_PASS} pass, ${VAL_CACHED} cached, ${VAL_NOTREADY} not-ready, ${VAL_INDET} indeterminate"
+# VALIDATED_REPOS_JSON / ANALYSIS_REPOS_JSON were built earlier, above the
+# claude_health_blocked gate, so do_automerge_tick could run during a
+# Claude cooldown too. do_maintenance_tick below is NOT eligible for that
+# treatment (it calls Claude), so its "nothing validated" fallback stays
+# gated here, after the health check.
 
 if [ -z "$VALIDATED_REPOS_JSON" ]; then
   # No repo is safe for agentic WORK this tick. Read-only analysis is
@@ -3091,12 +3114,6 @@ if [ -z "$VALIDATED_REPOS_JSON" ]; then
   do_maintenance_tick || true
   exit 0
 fi
-
-# -- Auto-merge on approve (needs the validated set, just built above; non-model
-# -- API only). Merges a human-approved bot PR on an opt-in repo and stamps the
-# pending deploy that the barrier (top of the tick) then watches to healthy.
-# One-thing-then-exit, like the rest of the cascade.
-do_automerge_tick && exit 0
 
 # -- Scheduled maintenance (moved) -----------------------------
 #
