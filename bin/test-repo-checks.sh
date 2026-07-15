@@ -70,6 +70,34 @@ ok "go.mod (implicit go test) passes"    check_test_signal
 f="$(new_fixture)"; : >"$f/Cargo.toml"; commit_fixture "$f"
 ok "Cargo.toml (implicit cargo test)"    check_test_signal
 
+echo "== check_deploy_smoke_signal: deploy-verifiable static site substitutes for unit tests =="
+f="$(new_fixture)"
+printf '%s' '{"smoke":{"url":"https://snail.io"}}' >"$f/agent.json"
+printf '%s' '<meta name="deploy-sha" content="${sha}">' >"$f/vite.config.ts"
+printf '%s' '{"scripts":{"build":"tsc && vite build"}}' >"$f/package.json"
+commit_fixture "$f"
+ok "smoke.url + deploy-sha marker passes"        check_deploy_smoke_signal
+ok "...and satisfies check_test_signal too"      check_test_signal
+
+f="$(new_fixture)"
+printf '%s' '{"smoke":{"url":"https://snail.io"}}' >"$f/agent.json"
+printf '%s' '{"scripts":{"build":"tsc && vite build"}}' >"$f/package.json"
+commit_fixture "$f"
+no "smoke.url without a deploy-sha marker fails"  check_deploy_smoke_signal
+no "...and check_test_signal still fails too"     check_test_signal
+
+f="$(new_fixture)"
+printf '%s' '<meta name="deploy-sha" content="${sha}">' >"$f/vite.config.ts"
+printf '%s' '{"scripts":{"build":"tsc && vite build"}}' >"$f/package.json"
+commit_fixture "$f"
+no "deploy-sha marker without agent.json fails"   check_deploy_smoke_signal
+
+f="$(new_fixture)"
+printf '%s' '{"smoke":{}}' >"$f/agent.json"
+printf '%s' '<meta name="deploy-sha" content="${sha}">' >"$f/vite.config.ts"
+commit_fixture "$f"
+no "agent.json without .smoke.url fails"          check_deploy_smoke_signal
+
 echo "== check_ci_workflow: pull_request + verify step required =="
 DEPLOY_ONLY=$'name: deploy\non:\n  push:\n    branches: [master]\njobs:\n  deploy:\n    steps:\n      - run: rsync -a _site/ host:/var/www'
 PR_CI=$'name: ci\non:\n  pull_request:\njobs:\n  test:\n    steps:\n      - run: npm ci\n      - run: npm test'
