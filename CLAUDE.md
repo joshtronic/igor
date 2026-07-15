@@ -383,7 +383,11 @@ respective tools on the host; install or skip.
   propagation, monit owns liveness. The merge itself passes
   `delete_branch_after_merge` (the repo's "delete by default" is only a UI-form
   default; an API merge must opt in explicitly), so the head branch is cleaned
-  up. Both are non-model (API + curl), so they run even during a Claude cooldown.
+  up. Both are non-model (API + curl), so they run even during a Claude cooldown --
+  `do_automerge_tick` needs `VALIDATED_REPOS_JSON`, so the validation sweep that
+  builds it also sits above the gate (igor#386: it used to sit below, so a live
+  cooldown silently starved auto-merge fleet-wide for the cooldown's whole
+  duration even though the merge itself needs no model call).
   **Phase 1 is alert-only -- NO auto-revert.** NEVER the harness's own repo: a watcher can't reliably watch
   itself (a broken self-deploy could crash the very tick meant to smoke-test it),
   so igor stays a manual merge -- enforced by `AUTOMERGE_SELF_REPO` AND by having
