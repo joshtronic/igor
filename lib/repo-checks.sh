@@ -193,20 +193,24 @@ check_ci_workflow() {
 # Runs the checks against the fetched clone and prints a markdown checklist
 # (safe to drop into an issue body or print for the operator). Returns:
 #   0 -- the GATE passed; the repo is ready for agentic WORK
-#   1 -- the GATE FAILED; the repo genuinely lacks a Validate action and is
-#        skipped for work this tick (surfaced, not silent, when it has open
-#        `Agent`-labeled work -- see the sweep in tick.sh)
+#   1 -- the GATE FAILED; the repo lacks a real test signal and/or a Validate
+#        action and is skipped for work this tick (surfaced, not silent, when it
+#        has open `Agent`-labeled work -- see the sweep in tick.sh)
 #   2 -- INDETERMINATE: the clone is missing or its refs are unreadable (the
 #        fetch likely failed), so no check actually ran -- skip and retry.
 #
-# THE GATE is a single hard requirement: a real Validate action
-# (check_ci_workflow). The doc/test/lint signals are ADVISORY -- printed to
-# guide onboarding, but they no longer gate work. As pure existence checks they
-# gave both false confidence (a lint config no CI runs; a stub test) and false
-# negatives (a repo whose CI really runs tsc/vitest but carries no lint
-# dotfile). The honest question is "does a real check run on every PR here",
-# which check_ci_workflow answers (pull_request-triggered + a verify step,
-# deploy-only rejected). This mirrors the `Agent`-label demotion in #375/#376.
+# THE GATE is two hard requirements that together mean "a change here can be
+# CI-verified": a real Validate action (check_ci_workflow -- pull_request-
+# triggered + a verify step, deploy-only rejected) AND a real test signal
+# (check_test_signal -- a genuine test runner or a deploy-smoke marker, not the
+# npm stub). Both kept because the maintenance pass treats "validated" as
+# "a dep bump here can be CI-verified" to auto-open PRs (see CLAUDE.md). The
+# CLAUDE.md / README / lint signals are ADVISORY -- printed to guide onboarding
+# but no longer gating: docs aren't safety-relevant, and check_lint_signal is a
+# pure existence check (a lint config no CI runs) that both gave false
+# confidence AND false-negatived repos with a real tsc/vitest CI gate but no
+# lint dotfile (snail.io, knowthetable). Mirrors the `Agent`-label demotion in
+# #375/#376.
 #
 # <repo-label> keeps the call signature self-documenting -- callers already
 # print it in their own header (bin/validate-repo.sh, tick.sh) and the
@@ -240,16 +244,21 @@ validate_repo_local() {
     return 2
   fi
 
-  # THE GATE -- a real Validate action (see the header note). Every PR the agent
-  # opens here runs a check that actually verifies the change; a red check
-  # blocking the merge is enforced downstream (reviewer / auto-merge-on-approve),
-  # not at this layer (branch protection isn't readable with the bot token).
+  # THE GATE -- two hard requirements that together mean "a change here can be
+  # CI-verified". A red check blocking the merge is enforced downstream (reviewer
+  # / auto-merge-on-approve), not at this layer (branch protection isn't readable
+  # with the bot token).
   check_ci_workflow
   _gate $? "Validate action present (runs on \`pull_request\` and verifies the change)" \
     "add a Forgejo Actions workflow at \`.forgejo/workflows/<name>.yml\` that runs on \`pull_request\` and executes a real check (lint / test / build / typecheck)"
 
-  # ADVISORY -- quality-of-life signals; they help the agent do good work but do
-  # NOT gate eligibility (the Validate action above catches breakage regardless).
+  check_test_signal
+  _gate $? "Test signal present (a real way to verify a change)" \
+    "add a \`\"test\"\` script in package.json, \`pytest\`, a \`test:\` Make target, a Cargo/Go project, or a deploy-smoke marker (\`agent.json\` \`.smoke.url\` + a \`deploy-sha\` marker)"
+
+  # ADVISORY -- guidance, not gates. CLAUDE.md/README aren't safety-relevant, and
+  # check_lint_signal is a pure existence check (a lint config no CI runs) that
+  # false-negatived repos with a real CI gate but no lint dotfile.
   check_claude_md
   _advise $? "CLAUDE.md present at repo root" \
     "add \`CLAUDE.md\` with project conventions (test commands, code style, gotchas)"
@@ -257,10 +266,6 @@ validate_repo_local() {
   check_readme
   _advise $? "README present at repo root" \
     "add a README (\`README.md\` / \`.rst\` / \`.txt\` / no-ext all accepted)"
-
-  check_test_signal
-  _advise $? "Test runner detected" \
-    "a \`\"test\"\` script in package.json, \`pytest\`, a \`test:\` Make target, a Cargo/Go project, or a deploy-smoke marker (\`agent.json\` \`.smoke.url\` + a \`deploy-sha\` marker)"
 
   check_lint_signal
   _advise $? "Linter config detected" \
