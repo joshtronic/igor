@@ -6,6 +6,9 @@
 #   check_test_signal  -- rejects the npm default stub, accepts a real test.
 #   check_ci_workflow  -- requires a pull_request-triggered build/test/lint
 #                         workflow; a deploy-only workflow no longer counts.
+#   validate_repo_local -- gates ONLY on check_ci_workflow (a real Validate
+#                         action); doc/test/lint signals are advisory and no
+#                         longer bench a repo that has real CI.
 # Skip-safe: needs git + jq; exits 0 with a notice if either is absent.
 set -uo pipefail
 
@@ -139,6 +142,32 @@ V=0; validate_repo_local demo/x "$CLONE" >/dev/null 2>&1 || V=$?
 if [ "$V" -eq 1 ]; then printf '  + incomplete repo -> rc 1 (not ready)\n'; else printf '  x incomplete repo should rc 1, got %s\n' "$V"; FAIL=$((FAIL + 1)); fi
 V=0; validate_repo_local demo/x "$TMPROOT/does-not-exist" >/dev/null 2>&1 || V=$?
 if [ "$V" -eq 2 ]; then printf '  + missing clone -> rc 2 (indeterminate)\n'; else printf '  x missing clone should rc 2, got %s\n' "$V"; FAIL=$((FAIL + 1)); fi
+
+echo "== validate_repo_local: the GATE is the Validate action, not the dotfiles =="
+# A repo with a real pull_request Validate action but NO lint config, NO
+# CLAUDE.md and NO README -- previously benched on the existence-only lint/doc
+# checks -- now validates, because its CI actually verifies every PR. This is
+# the snail.io / knowthetable case that motivated the gate collapse.
+MBARE="$TMPROOT/minimal.git"; git init -q --bare -b master "$MBARE"
+MWORK="$(new_fixture)"
+printf '%s' '{"scripts":{"typecheck":"tsc --noEmit"}}' >"$MWORK/package.json"
+mkdir -p "$MWORK/.forgejo/workflows"; printf '%s' "$PR_CI" >"$MWORK/.forgejo/workflows/validate.yml"
+git -C "$MWORK" add -A; git -C "$MWORK" commit -q -m minimal
+git -C "$MWORK" remote add origin "$MBARE"; git -C "$MWORK" push -q origin master
+MCLONE="$TMPROOT/minimal-clone"; git clone -q "$MBARE" "$MCLONE"
+ok "Validate action + no lint/doc dotfiles -> validates (rc 0)" validate_repo_local demo/minimal "$MCLONE"
+
+# The inverse: every advisory dotfile present but NO Validate action -> not
+# ready. The action is the one hard gate.
+NBARE="$TMPROOT/noci.git"; git init -q --bare -b master "$NBARE"
+NWORK="$(new_fixture)"
+: >"$NWORK/CLAUDE.md"; : >"$NWORK/README.md"; : >"$NWORK/.markdownlint.json"
+printf '%s' '{"scripts":{"test":"jest"}}' >"$NWORK/package.json"
+git -C "$NWORK" add -A; git -C "$NWORK" commit -q -m noci
+git -C "$NWORK" remote add origin "$NBARE"; git -C "$NWORK" push -q origin master
+NCLONE="$TMPROOT/noci-clone"; git clone -q "$NBARE" "$NCLONE"
+V=0; validate_repo_local demo/noci "$NCLONE" >/dev/null 2>&1 || V=$?
+if [ "$V" -eq 1 ]; then printf '  + all advisory dotfiles but no Validate action -> rc 1 (not ready)\n'; else printf '  x expected rc 1, got %s\n' "$V"; FAIL=$((FAIL + 1)); fi
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-repo-checks: all passed"
