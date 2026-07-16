@@ -63,7 +63,9 @@ browser_reap_select_victims() {
     case "$etimes" in *[!0-9]*) continue ;; esac
     [ "$etimes" -ge "$BROWSER_REAP_STALE_SECS" ] || continue
 
-    base=$(basename "${cmd%% *}")
+    # `--` guards against a login shell's leading-dash argv[0] (ps shows it as
+    # `-bash`), which basename would otherwise parse as an option and error on.
+    base=$(basename -- "${cmd%% *}")
     _browser_reap_is_protected "$base" && continue
 
     if _browser_reap_is_browser_binary "$base" || _browser_reap_cmd_matches "$cmd"; then

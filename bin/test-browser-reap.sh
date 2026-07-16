@@ -62,6 +62,20 @@ spared "claude basename is protected even when ancient" "$T5A" 1005
 T5B='1006 1 9999 node /app/mcp-server/index.js --playwright'
 spared "node basename is protected even with a playwright-looking cmdline" "$T5B" 1006
 
+echo "== login shell (argv0 '-bash') -> no basename error, spared (igor#392) =="
+# A login shell's argv[0] is '-bash', so ${cmd%% *} is '-bash'; basename must
+# not treat it as an option. Under the harness's errexit that error aborted the
+# whole selection loop, so real victims after such a row were never reaped.
+T6='1009 1 9999 -bash'
+err=$(browser_reap_select_victims <<<"$T6" 2>&1 >/dev/null)
+if [ -n "$err" ]; then
+  printf '  x leading-dash argv0 emitted an error: %s\n' "$err"
+  FAIL=$((FAIL + 1))
+else
+  printf '  + %s\n' "leading-dash argv0 produces no basename/option error"
+fi
+spared "login shell is not a reap victim" "$T6" 1009
+
 echo "== boundary: etimes exactly at threshold -> killed; one below -> spared =="
 TB1='1007 1 3600 /usr/lib/chromium/headless_shell --headless'
 killed "etimes == 3600 (>=) is stale" "$TB1" 1007
