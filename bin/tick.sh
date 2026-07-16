@@ -2999,8 +2999,17 @@ while IFS= read -r repo_line; do
     VAL_INDET=$((VAL_INDET + 1))
   else
     # Genuinely not ready (a real gap in the clone). No ticket -- onboarding
-    # is a manual operator step; just skip this repo for work this tick.
-    log "validation: $R_NAME not ready for agentic work -- skipping (run bin/validate-repo.sh $R_NAME for the checklist)"
+    # is a manual operator step. But blocked work must NOT vanish silently: if
+    # the repo has open Agent-labeled tickets, they can't be picked up until
+    # it's onboarded, so say so plainly (a bare "skipping" line is how
+    # knowthetable/snail's audio tickets rotted unnoticed until a human caught
+    # the missing feature). Best-effort API read; never aborts the sweep.
+    NA_BLOCKED=$(forgejo_find_claimable "$R_NAME" "${FORGEJO_REVIEWER:-}" 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
+    if [ "${NA_BLOCKED:-0}" -gt 0 ]; then
+      log "validation: $R_NAME not ready for agentic work but has $NA_BLOCKED open Agent-labeled issue(s) that CANNOT be picked up until it's onboarded (run bin/validate-repo.sh $R_NAME for the checklist)"
+    else
+      log "validation: $R_NAME not ready for agentic work -- skipping (run bin/validate-repo.sh $R_NAME for the checklist)"
+    fi
     VAL_NOTREADY=$((VAL_NOTREADY + 1))
   fi
 done < <(jq -c '.[]' <<<"$ALL_REPOS")

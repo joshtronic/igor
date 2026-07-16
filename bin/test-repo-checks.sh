@@ -6,6 +6,10 @@
 #   check_test_signal  -- rejects the npm default stub, accepts a real test.
 #   check_ci_workflow  -- requires a pull_request-triggered build/test/lint
 #                         workflow; a deploy-only workflow no longer counts.
+#   validate_repo_local -- gates on check_test_signal AND check_ci_workflow (a
+#                         real test signal + a real Validate action); the
+#                         CLAUDE.md/README/lint signals are advisory and no
+#                         longer bench a repo that has real CI.
 # Skip-safe: needs git + jq; exits 0 with a notice if either is absent.
 set -uo pipefail
 
@@ -139,6 +143,45 @@ V=0; validate_repo_local demo/x "$CLONE" >/dev/null 2>&1 || V=$?
 if [ "$V" -eq 1 ]; then printf '  + incomplete repo -> rc 1 (not ready)\n'; else printf '  x incomplete repo should rc 1, got %s\n' "$V"; FAIL=$((FAIL + 1)); fi
 V=0; validate_repo_local demo/x "$TMPROOT/does-not-exist" >/dev/null 2>&1 || V=$?
 if [ "$V" -eq 2 ]; then printf '  + missing clone -> rc 2 (indeterminate)\n'; else printf '  x missing clone should rc 2, got %s\n' "$V"; FAIL=$((FAIL + 1)); fi
+
+echo "== validate_repo_local: gate = test signal + Validate action; lint/docs advisory =="
+# A repo with a real test signal + a pull_request Validate action but NO lint
+# config, NO CLAUDE.md and NO README -- previously benched on the existence-only
+# lint/doc checks -- now validates. This is the snail.io / knowthetable case
+# (real tsc/vitest CI, no lint dotfile) the change unblocks.
+MBARE="$TMPROOT/minimal.git"; git init -q --bare -b master "$MBARE"
+MWORK="$(new_fixture)"
+printf '%s' '{"scripts":{"test":"vitest run"}}' >"$MWORK/package.json"
+mkdir -p "$MWORK/.forgejo/workflows"; printf '%s' "$PR_CI" >"$MWORK/.forgejo/workflows/validate.yml"
+git -C "$MWORK" add -A; git -C "$MWORK" commit -q -m minimal
+git -C "$MWORK" remote add origin "$MBARE"; git -C "$MWORK" push -q origin master
+MCLONE="$TMPROOT/minimal-clone"; git clone -q "$MBARE" "$MCLONE"
+ok "test signal + Validate action, no lint/doc -> validates (rc 0)" validate_repo_local demo/minimal "$MCLONE"
+
+# No Validate action -> not ready, even with every advisory dotfile + a test.
+NBARE="$TMPROOT/noci.git"; git init -q --bare -b master "$NBARE"
+NWORK="$(new_fixture)"
+: >"$NWORK/CLAUDE.md"; : >"$NWORK/README.md"; : >"$NWORK/.markdownlint.json"
+printf '%s' '{"scripts":{"test":"jest"}}' >"$NWORK/package.json"
+git -C "$NWORK" add -A; git -C "$NWORK" commit -q -m noci
+git -C "$NWORK" remote add origin "$NBARE"; git -C "$NWORK" push -q origin master
+NCLONE="$TMPROOT/noci-clone"; git clone -q "$NBARE" "$NCLONE"
+V=0; validate_repo_local demo/noci "$NCLONE" >/dev/null 2>&1 || V=$?
+if [ "$V" -eq 1 ]; then printf '  + all dotfiles + test but no Validate action -> rc 1 (not ready)\n'; else printf '  x expected rc 1, got %s\n' "$V"; FAIL=$((FAIL + 1)); fi
+
+# No test signal -> not ready, even WITH a Validate action. check_test_signal
+# stays a hard gate so "validated" keeps meaning "a change here can be
+# CI-verified" (the invariant the maintenance pass relies on).
+TBARE="$TMPROOT/notest.git"; git init -q --bare -b master "$TBARE"
+TWORK="$(new_fixture)"
+: >"$TWORK/CLAUDE.md"; : >"$TWORK/README.md"
+printf '%s' '{"scripts":{"build":"vite build"}}' >"$TWORK/package.json"   # build only, no test
+mkdir -p "$TWORK/.forgejo/workflows"; printf '%s' "$PR_CI" >"$TWORK/.forgejo/workflows/validate.yml"
+git -C "$TWORK" add -A; git -C "$TWORK" commit -q -m notest
+git -C "$TWORK" remote add origin "$TBARE"; git -C "$TWORK" push -q origin master
+TCLONE="$TMPROOT/notest-clone"; git clone -q "$TBARE" "$TCLONE"
+V=0; validate_repo_local demo/notest "$TCLONE" >/dev/null 2>&1 || V=$?
+if [ "$V" -eq 1 ]; then printf '  + Validate action but no test signal -> rc 1 (not ready)\n'; else printf '  x expected rc 1, got %s\n' "$V"; FAIL=$((FAIL + 1)); fi
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-repo-checks: all passed"
