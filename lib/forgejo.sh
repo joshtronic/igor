@@ -10,19 +10,26 @@
 : "${FORGEJO_URL:?FORGEJO_URL must be set}"
 : "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set}"
 
-# --max-time: a wedged Forgejo must fail fast, not stall the tick --
-# an untimed curl once sat ~2.5 minutes mid-validation before failing.
-# 30s is generous for small JSON calls on the same network.
+# Fail-fast timeouts so a brief git.sherver.org blip can't wedge a tick.
+# --connect-timeout bounds the connect phase: a few-second server hiccup
+# either rides through or fails fast, instead of stalling. --max-time bounds
+# a connected-but-unresponsive server. Tightened from a bare --max-time 30
+# after a ~few-second blip hung a tick ~30s (curl exit 28), aborting it under
+# errexit and tripping the task-fail healthcheck (igor#395). An untimed curl
+# once sat ~2.5 min mid-validation before failing; these are the fail-fast
+# successors. Hardcoded -- one operator, bake the value in.
+FORGEJO_CONNECT_TIMEOUT=5
+FORGEJO_MAX_TIME=15
 _fj() {
   local method="$1" path="$2" body="${3:-}"
   if [ -n "$body" ]; then
-    curl -sf --max-time 30 -X "$method" \
+    curl -sf --connect-timeout "$FORGEJO_CONNECT_TIMEOUT" --max-time "$FORGEJO_MAX_TIME" -X "$method" \
       -H "Authorization: token $FORGEJO_TOKEN" \
       -H "Content-Type: application/json" \
       -d "$body" \
       "$FORGEJO_URL/api/v1${path}"
   else
-    curl -sf --max-time 30 -X "$method" \
+    curl -sf --connect-timeout "$FORGEJO_CONNECT_TIMEOUT" --max-time "$FORGEJO_MAX_TIME" -X "$method" \
       -H "Authorization: token $FORGEJO_TOKEN" \
       "$FORGEJO_URL/api/v1${path}"
   fi
@@ -110,7 +117,7 @@ forgejo_unassign_all() {
 # uses -f, so a non-2xx body survives for the caller to classify.
 _forgejo_post_reviewers() {
   local url="$1" payload="$2"
-  curl -s -w $'\n%{http_code}' --max-time 30 -X POST \
+  curl -s -w $'\n%{http_code}' --connect-timeout "$FORGEJO_CONNECT_TIMEOUT" --max-time "$FORGEJO_MAX_TIME" -X POST \
     -H "Authorization: token $FORGEJO_TOKEN" \
     -H "Content-Type: application/json" \
     -d "$payload" "$url"
@@ -206,7 +213,7 @@ forgejo_attach_image() {
     printf 'forgejo_attach_image: skip %s (%s bytes > %s cap)\n' "$name" "$size" "$FORGEJO_ATTACH_MAX_BYTES" >&2
     return 1
   fi
-  curl -sf --max-time 60 -X POST \
+  curl -sf --connect-timeout "$FORGEJO_CONNECT_TIMEOUT" --max-time 60 -X POST \
     -H "Authorization: token $FORGEJO_TOKEN" \
     -F "attachment=@${file};filename=${name}" \
     "$FORGEJO_URL/api/v1/repos/${repo}/issues/${number}/assets?name=${name}" \
