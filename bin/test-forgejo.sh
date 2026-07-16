@@ -19,6 +19,21 @@ eq() {  # <desc> <expected> <actual>
   else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi
 }
 
+# _fj must pass fail-fast timeouts so a brief git.sherver.org blip can't wedge a
+# tick (igor#395): a --max-time 30 with no --connect-timeout once hung a tick
+# ~30s and tripped the task-fail healthcheck. Shim curl to capture the args the
+# REAL _fj builds (run before the fixtures below stub _fj out).
+echo "== _fj: fail-fast connect + max timeouts (igor#395) =="
+curl() { printf '%s\n' "$*"; }
+FJ_ARGS=$(_fj GET /version)
+unset -f curl
+eq "_fj sets --connect-timeout ${FORGEJO_CONNECT_TIMEOUT}" "true" \
+  "$(grep -q -- "--connect-timeout ${FORGEJO_CONNECT_TIMEOUT}" <<<"$FJ_ARGS" && echo true || echo false)"
+eq "_fj sets --max-time ${FORGEJO_MAX_TIME} (fail-fast, not the old 30)" "true" \
+  "$(grep -q -- "--max-time ${FORGEJO_MAX_TIME}" <<<"$FJ_ARGS" && echo true || echo false)"
+eq "the connect timeout is fail-fast (< old 30s max)" "true" \
+  "$([ "$FORGEJO_CONNECT_TIMEOUT" -lt 30 ] && echo true || echo false)"
+
 # Fixture: what Forgejo returns when it IGNORES the labels=Agent filter (a repo
 # with no Agent label) -- a mix of Agent-labeled and unlabeled/other issues,
 # assignees, and a blocked one.
