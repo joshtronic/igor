@@ -304,12 +304,16 @@ forgejo_pr_review_comments() {
   printf '%s' "$all"
 }
 
-# Open PRs authored by the given user on this repo, as JSON
-# array of {number, title, head}. Used to brief Claude on
-# what's in flight so he doesn't duplicate work.
+# Open PRs authored by the given user on this repo, as JSON array of
+# {number, title, head}, OLDEST-FIRST. The PR-review and auto-merge ticks
+# pick which PR to work through this helper, so sort=oldest keeps them
+# consistent with the issue grind (forgejo_find_claimable, also
+# oldest-first) -- nothing, issue or PR, starves at the back of a deep
+# queue. Also briefs Claude on what's in flight so he doesn't duplicate
+# work (order-agnostic there).
 forgejo_list_open_bot_prs() {
   local repo="$1" user="$2"
-  _fj GET "/repos/${repo}/pulls?state=open&limit=50" \
+  _fj GET "/repos/${repo}/pulls?state=open&sort=oldest&limit=50" \
     | jq --arg u "$user" \
         '[.[] | select(.user.login == $u)
           | {number, title, head: .head.ref}]'
