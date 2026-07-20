@@ -115,6 +115,7 @@ unset env_file_hint
 . "$AGENT_HOME/lib/ceo.sh"
 # shellcheck source=lib/automerge.sh
 . "$AGENT_HOME/lib/automerge.sh"
+. "$AGENT_HOME/lib/ship-report.sh"
 # shellcheck source=lib/feedback.sh
 . "$AGENT_HOME/lib/feedback.sh"
 # shellcheck source=lib/deferred.sh
@@ -1782,6 +1783,79 @@ do_seo_tick() {
   return 0
 }
 
+# -- Daily fleet ship-report (opt-in) -----------------------------
+#
+# The safety valve for shadow-review auto-merge: once the human is out of the
+# per-PR gate, this once-a-day email is how they stay in control by exception --
+# what shipped (tagged shadow vs human), what still needs them, what's in flight.
+# FULLY SCRIPTED (no model), so it sits ABOVE the health gate and sends even
+# during a Claude cooldown. Daily stamp under .shipreport; clear it to resend.
+# Assembly/render/stamp live in lib/ship-report.sh; the Forgejo gathering is
+# here, like do_seo_tick's.
+do_shipreport_tick() {
+  # Opt-in gate: same email creds as the other digests.
+  if [ -z "${PRIMARY_RECIPIENTS:-}" ] || [ -z "${SMTP2GO_API_KEY:-}" ] \
+     || [ -z "${SMTP2GO_SENDER:-}" ]; then
+    return 1
+  fi
+  # Morning send: yesterday's 24h window is complete. 10#: %H must not parse octal.
+  local hour; hour=$((10#$(date +%H)))
+  if [ "$hour" -lt 7 ]; then
+    return 1
+  fi
+  if shipreport_sent_today; then
+    return 1
+  fi
+  [ -n "${ANALYSIS_REPOS_JSON:-}" ] || return 1
+
+  local since; since=$(date -u -d "-1 days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+                        || date -u -v-1d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+  local items='[]' line repo reqh merged open
+  while IFS= read -r line; do
+    repo=$(jq -r '.full_name // empty' <<<"$line" 2>/dev/null); [ -n "$repo" ] || continue
+    # Read the carve-out flag directly (no dependency on the auto-merge module).
+    reqh=$(forgejo_repo_get_file "$repo" "${AGENT_CONFIG_FILE:-agent.json}" 2>/dev/null \
+            | jq -r '.automerge.require_human // false' 2>/dev/null)
+    [ "$reqh" = "true" ] || reqh=false
+    merged=$(_fj GET "/repos/${repo}/pulls?state=closed&sort=recentupdate&limit=30" 2>/dev/null \
+      | jq -c --arg u "$BOT_USER" --arg since "$since" --arg repo "$repo" --argjson rh "$reqh" '
+          [ .[]? | select(.user.login == $u)
+            | select((.merged_at // "") != "" and .merged_at >= $since)
+            | {repo:$repo, number, title, url:.html_url, state:"merged",
+               gate:(if $rh then "human" else "shadow" end), require_human:$rh} ]' 2>/dev/null) \
+      || merged='[]'
+    open=$(_fj GET "/repos/${repo}/pulls?state=open&sort=oldest&limit=30" 2>/dev/null \
+      | jq -c --arg u "$BOT_USER" --arg repo "$repo" --argjson rh "$reqh" '
+          [ .[]? | select(.user.login == $u)
+            | {repo:$repo, number, title, url:.html_url, state:"open", gate:"", require_human:$rh} ]' 2>/dev/null) \
+      || open='[]'
+    items=$(jq -c --argjson m "${merged:-[]}" --argjson o "${open:-[]}" '. + $m + $o' <<<"$items" 2>/dev/null || printf '%s' "$items")
+  done <<<"$ANALYSIS_REPOS_JSON"
+
+  local report; report=$(printf '%s' "$items" | shipreport_build)
+  if shipreport_is_empty "$report"; then
+    log "shipreport: quiet 24h -- nothing to report (stamping done)"
+    shipreport_mark_sent
+    return 0
+  fi
+
+  local ns nsh nif html text subject recipients
+  ns=$(jq -r '.needs_you | length' <<<"$report")
+  nsh=$(jq -r '.shipped | length' <<<"$report")
+  nif=$(jq -r '.inflight | length' <<<"$report")
+  html=$(shipreport_render_html <<<"$report")
+  text=$(shipreport_render_text <<<"$report")
+  subject="[Ship Report] $(date +%F) -- ${nsh} shipped, ${ns} need you, ${nif} in flight"
+  recipients=$(recipients_with_primary "${SHIPREPORT_RECIPIENTS:-}")
+  if email_send "$subject" "$html" "$text" "$recipients"; then
+    log "shipreport: sent (${nsh} shipped, ${ns} needs-you, ${nif} in-flight) to $recipients"
+  else
+    log "warning: shipreport email failed (continuing)"
+  fi
+  shipreport_mark_sent
+  return 0
+}
+
 # -- Sports digest (daily, opt-in) --------------------------------
 #
 # The ELI5 sports-tutor email: harness-side ESPN fetch (lib/espn.sh),
@@ -3025,6 +3099,7 @@ do_automerge_tick && exit 0
 if claude_health_blocked; then
   log "claude health: backoff active (kind=$(claude_health_kind)) -- skipping all model work this tick"
   do_seo_tick || true
+  do_shipreport_tick || true
   exit 0
 fi
 
@@ -3812,6 +3887,14 @@ fi
 # ticket the discovery step below picks up once that repo is validated.
 # One domain per tick spreads the GSC/email load across the 1-min beat.
 if do_seo_tick; then
+  exit 0
+fi
+
+# Daily fleet ship-report. Scripted (no model), so it ALSO runs in the
+# health-blocked branch above -- it sends even during a Claude cooldown. Opt-in
+# via PRIMARY_RECIPIENTS + SMTP2GO; no-ops before 07:00 local or once today's
+# already sent. Once-daily; the safety valve for shadow-review auto-merge.
+if do_shipreport_tick; then
   exit 0
 fi
 
