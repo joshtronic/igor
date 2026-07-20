@@ -72,6 +72,11 @@ Repos whose real defect class a diff-reviewer can't judge stay human-gated:
 - **igor.bot** — the blog; freshness/quality/duplication (the 2026-07-20 duplicate
   post is the worked example — the shadow called it "otherwise mergeable"). Flag
   `require_human: true`.
+- **porksicle.com** — the games platform. A game change has to be **play-tested**
+  to know it actually works, which a diff review can't do — and porksicle gets
+  active autonomous work, so the exposure is real. Flag `require_human: true`.
+  (The thin standalone games — snail.io, etc. — stay shadow-gated: rarely changed,
+  low exposure. Revisit if one starts getting steady work.)
 - **igor** — the harness itself. Has **no `agent.json`/`smoke.url`** → never
   auto-merge-eligible, AND is hard-excluded by `AUTOMERGE_SELF_REPO`. Its blast
   radius (a broken self-deploy crashes the tick meant to smoke-test it) is
