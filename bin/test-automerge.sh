@@ -70,6 +70,14 @@ no "require_human: no automerge key -> shadow gate"   automerge_require_human ac
 forgejo_repo_get_file() { return 1; }
 no "require_human: no agent.json -> shadow gate"      automerge_require_human acme/site
 
+echo "== automerge_will_take (do_review_tick suppresses the human request) =="
+forgejo_repo_get_file() { printf '%s' '{"smoke":{"url":"x"}}'; }   # default (shadow-gated) repo
+ok "will_take: default repo + APPROVE -> auto-merge takes it"     automerge_will_take acme/site APPROVE
+no "will_take: default repo + COMMENT -> human still asked"       automerge_will_take acme/site COMMENT
+no "will_take: default repo + REQUEST_CHANGES -> not a take"      automerge_will_take acme/site REQUEST_CHANGES
+forgejo_repo_get_file() { printf '%s' '{"automerge":{"require_human":true}}'; }   # carve-out
+no "will_take: carve-out + APPROVE -> human is the gate"          automerge_will_take acme/site APPROVE
+
 echo "== automerge_reviewer_blocks (human veto on a shadow-gated repo) =="
 _fj() { printf '%s' "$FJ"; }
 FJ='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","submitted_at":"2026-02-01T00:00:00Z"}]'
