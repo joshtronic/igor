@@ -372,17 +372,64 @@ _ceo_gsc_totals() {
   ' <<<"$1" 2>/dev/null || printf '{"clicks":0,"impressions":0,"ctr":0,"position":0}'
 }
 
+# _ceo_gsc_render_top <gsc-response-json> <topN> <label> -- markdown table of the
+# top <topN> rows by impressions from a single-dimension (query or page) GSC
+# response, or a "no data" note when the response has no rows. <label> is both
+# the table's leading column header and the noun in the no-data note.
+_ceo_gsc_render_top() {
+  local data="$1" topn="$2" label="$3" rows
+  rows=$(jq -r --argjson n "$topn" '
+    (.rows // []) | sort_by(-.impressions) | .[0:$n][]
+    | [ (.keys[0] // "?"), (.impressions|tostring), (.clicks|tostring),
+        (((.ctr * 10000 | round) / 100)|tostring),
+        (((.position * 100 | round) / 100)|tostring) ] | @tsv
+  ' <<<"$data" 2>/dev/null || true)
+  if [ -z "$rows" ]; then
+    printf '_no %s data this cycle_\n' "$label"
+    return
+  fi
+  printf '| %s | impressions | clicks | CTR | position |\n|---|---|---|---|---|\n' "$label"
+  while IFS=$'\t' read -r key imp clk ctr pos; do
+    printf '| %s | %s | %s | %s%% | %s |\n' "$key" "$imp" "$clk" "$ctr" "$pos"
+  done <<<"$rows"
+}
+
+# _ceo_gsc_concentration <gsc-query-dim-response-json> -- one-line head-term
+# concentration signal: what share of impressions the top-5 queries account
+# for, out of how many distinct queries. This is the discriminator the board
+# keeps filing questions to have the operator compute by hand (a few head
+# terms hitting the wrong pages vs a long tail of weak-snippet queries).
+_ceo_gsc_concentration() {
+  jq -r '
+    (.rows // []) as $r
+    | ($r | length) as $m
+    | ($r | map(.impressions) | add // 0) as $tot
+    | ($r | sort_by(-.impressions) | .[0:5] | map(.impressions) | add // 0) as $top5
+    | if $tot > 0 then
+        "**Concentration:** top-5 queries = " + ((($top5 / $tot) * 10000 | round) / 100 | tostring) + "% of impressions across " + ($m|tostring) + " distinct queries."
+      else
+        "**Concentration:** no query data this cycle."
+      end
+  ' <<<"$1" 2>/dev/null || printf '**Concentration:** no query data this cycle.'
+}
+
 # ceo_read_gsc <repo> -- markdown of the repo's Google Search Console scoreboard
 # (clicks / impressions / CTR / avg position), current 28-day window vs the prior
-# 28 days. Fetched ON DEMAND every time the CEO runs -- it does NOT wait for the
-# monthly SEO pass; the boss reads the scoreboard whenever it wants. Keyed on
-# agent.json `.seo.domain` (the same field the SEO pass uses); empty (return 0)
-# when no domain is declared, so non-SEO repos digest exactly as before. Reuses
-# the SEO window + the GSC client; both windows come from this one call, so the
-# trend is self-contained (no persisted state). A missing/failed fetch is a
-# "scoreboard dark, do NOT guess" note, never a crash.
+# 28 days, PLUS a query/page breakdown of the current window (top-10 by
+# impressions each, and a top-5 concentration signal) so the board can
+# self-diagnose the funnel -- head-term concentration vs long tail, or
+# ranking-fine-but-CTR-weak -- instead of filing a question asking the operator
+# to pull the breakdown by hand. Fetched ON DEMAND every time the CEO runs -- it
+# does NOT wait for the monthly SEO pass; the boss reads the scoreboard whenever
+# it wants. Keyed on agent.json `.seo.domain` (the same field the SEO pass
+# uses); empty (return 0) when no domain is declared, so non-SEO repos digest
+# exactly as before. Reuses the SEO window + the GSC client; both windows come
+# from this one call, so the trend is self-contained (no persisted state). A
+# missing/failed fetch is a "scoreboard dark, do NOT guess" note, never a
+# crash; the breakdown queries degrade to their own per-table "no data" note
+# rather than taking the whole scoreboard dark with them.
 ceo_read_gsc() {
-  local repo="$1" domain token start end pstart pend cur prev ctot ptot
+  local repo="$1" domain token start end pstart pend cur prev ctot ptot top_q top_p
   domain=$(forgejo_repo_get_file "$repo" "${AGENT_CONFIG_FILE:-agent.json}" 2>/dev/null \
     | jq -r '.seo.domain // empty' 2>/dev/null || true)
   [ -n "$domain" ] || return 0
@@ -406,6 +453,15 @@ ceo_read_gsc() {
   printf '| impressions | %s | %s |\n' "$(jq -r '.impressions'              <<<"$ctot")" "$(jq -r '.impressions'              <<<"$ptot")"
   printf '| CTR | %s%% | %s%% |\n'     "$(jq -r '(.ctr * 10000 | round) / 100'  <<<"$ctot")" "$(jq -r '(.ctr * 10000 | round) / 100'  <<<"$ptot")"
   printf '| avg position | %s | %s |\n' "$(jq -r '(.position * 100 | round) / 100' <<<"$ctot")" "$(jq -r '(.position * 100 | round) / 100' <<<"$ptot")"
+
+  top_q=$(gsc_query "$token" "$domain" "$start" "$end" "query" 2>/dev/null || printf '{"rows":[]}')
+  top_p=$(gsc_query "$token" "$domain" "$start" "$end" "page" 2>/dev/null || printf '{"rows":[]}')
+  printf '\nUse the breakdown below to diagnose the funnel yourself -- head-term concentration vs long tail, or ranking-fine-but-CTR-weak -- rather than filing a question for it.\n\n'
+  printf '### Top queries by impressions\n\n'
+  _ceo_gsc_render_top "$top_q" 10 "query"
+  printf '\n%s\n\n' "$(_ceo_gsc_concentration "$top_q")"
+  printf '### Top pages by impressions\n\n'
+  _ceo_gsc_render_top "$top_p" 10 "page"
 }
 
 # ceo_read_ga <repo> -- markdown of the repo's Google Analytics on-site
