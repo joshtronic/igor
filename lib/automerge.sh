@@ -53,6 +53,18 @@ automerge_require_human() {
         | jq -r '.automerge.require_human // false' 2>/dev/null)" = "true" ]
 }
 
+# automerge_will_take <repo> <verdict> -- exit 0 if the auto-merge tick will merge
+# on this shadow verdict alone: a default (shadow-gated) repo with an APPROVE.
+# Used by do_review_tick to skip requesting the human when the merge is going to
+# happen without them anyway -- requesting would just be noise for a self-merging
+# PR (awareness comes via the ship-report). This is only about the APPROVAL
+# signal; CI/mergeable/behind still gate the real merge. A COMMENT (won't
+# auto-merge) or a require_human carve-out returns 1 -> the human is still asked.
+automerge_will_take() {
+  local repo="$1" verdict="$2"
+  [ "$verdict" = "APPROVE" ] && ! automerge_require_human "$repo"
+}
+
 # automerge_approved_by <repo> <pr> <user> -- exit 0 if <user>'s CURRENT review
 # on the PR is an APPROVED (the human green-light). NOT "ever approved": Forgejo
 # keeps the full review history, so an old APPROVED followed by a later

@@ -2894,8 +2894,17 @@ ${review_body}
     case "$verdict" in
       APPROVE|COMMENT)
         review_reset_rework "$key"
+        # Only request the human when the auto-merge won't handle it: a default
+        # (shadow-gated) repo with an APPROVE merges on this signal, so requesting
+        # the human is just noise for a PR that merges itself (awareness comes via
+        # the daily ship-report). A COMMENT (won't auto-merge) or a carve-out
+        # (human review IS the gate) still routes to the human.
         if [ -n "${FORGEJO_REVIEWER:-}" ]; then
-          review_request_human "$target_repo" "$target_num" "verdict=${verdict}"
+          if automerge_will_take "$target_repo" "$verdict"; then
+            log "review: ${key} shadow APPROVE on a shadow-gated repo -- auto-merge handles it, not requesting a human"
+          else
+            review_request_human "$target_repo" "$target_num" "verdict=${verdict}"
+          fi
         fi
         ;;
       REQUEST_CHANGES)
