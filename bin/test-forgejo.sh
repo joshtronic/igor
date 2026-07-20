@@ -116,6 +116,18 @@ forgejo_repo_has_label acme/x Agent; eq "empty label set -> rc 1 (absent)" "1" "
 _fj() { return 22; }
 forgejo_repo_has_label acme/x Agent; eq "API read failed -> rc 2 (indeterminate)" "2" "$?"
 
+# forgejo_list_open_bot_prs: the PR-review + auto-merge ticks pick PRs through
+# this helper, so it must request sort=oldest -- matching the issue grind
+# (forgejo_find_claimable) so a PR can't starve at the back of a deep queue. The
+# _fj call pipes to jq (a subshell), so capture its URL to a temp file, not a var.
+echo "== forgejo_list_open_bot_prs: oldest-first, consistent with the grind =="
+LOBP_CAP=$(mktemp)
+_fj() { printf '%s\n' "$*" >"$LOBP_CAP"; printf '%s' '[]'; }
+forgejo_list_open_bot_prs acme/x bot >/dev/null
+eq "requests sort=oldest (review + merge match the issue grind)" \
+  "true" "$(grep -q 'sort=oldest' "$LOBP_CAP" && echo true || echo false)"
+rm -f "$LOBP_CAP"
+
 if [ "$FAIL" -eq 0 ]; then echo "test-forgejo: all checks passed"; exit 0; fi
 echo "test-forgejo: $FAIL check(s) FAILED"
 exit 1
