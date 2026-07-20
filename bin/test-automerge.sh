@@ -305,7 +305,7 @@ automerge_require_human() { return 1; }      # default: shadow-gated repo
 automerge_approved_by() { return 0; }        # (irrelevant on the shadow path)
 
 # Default (shadow-gated) repo: the shadow verdict APPROVE is the gate.
-echo '{"review":{"acme/site#7":{"verdict":"APPROVE"}}}' > "$STATE"
+echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
 ok "automerge: default repo + shadow APPROVE -> merges (rc0)"  do_automerge_tick
 eq "automerge: recorded deploy repo"       "acme/site" "$(jq -r '.deploy.repo // ""' "$STATE")"
 eq "automerge: recorded merge sha"         "mergesha7" "$(jq -r '.deploy.sha // ""' "$STATE")"
@@ -319,13 +319,20 @@ echo '{"review":{"acme/site#7":{"verdict":"REQUEST_CHANGES"}}}' > "$STATE"
 no "automerge: shadow RC blocks merge (rc1)"          do_automerge_tick
 eq "automerge: RC records nothing"          ""        "$(jq -r '.deploy.repo // ""' "$STATE")"
 
+# Stale APPROVE: the verdict is APPROVE but recorded for an OLDER sha than the
+# current head (a real new commit landed and hasn't been re-reviewed) -> must NOT
+# merge the unreviewed head. This is the fail-open the sha-binding closes.
+echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"oldsha0"}}}' > "$STATE"
+no "automerge: shadow APPROVE for a STALE sha -> no merge (rc1)"  do_automerge_tick
+eq "automerge: stale-APPROVE records nothing" ""      "$(jq -r '.deploy.repo // ""' "$STATE")"
+
 echo "== do_automerge_tick multi-repo iteration (production stream shape) =="
 # VALIDATED_REPOS_JSON is a NEWLINE-DELIMITED STREAM, not an array. The loop must
 # iterate every line: skip the first repo (no agent.json -> ineligible) and merge
 # the eligible second one. A single-object stub can't catch a broken iteration.
 VALIDATED_REPOS_JSON="$(printf '%s\n%s\n' '{"full_name":"acme/first"}' '{"full_name":"acme/second"}')"
 automerge_smoke_url() { case "$1" in acme/second) echo "https://x" ;; *) echo "" ;; esac; }
-echo '{"review":{"acme/second#7":{"verdict":"APPROVE"}}}' > "$STATE"
+echo '{"review":{"acme/second#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
 ok "automerge: iterates stream, skips ineligible, merges 2nd"  do_automerge_tick
 eq "automerge: merged the eligible repo"   "acme/second" "$(jq -r '.deploy.repo // ""' "$STATE")"
 
@@ -333,7 +340,7 @@ echo "== do_automerge_tick: behind base -> update branch, do NOT merge =="
 export VALIDATED_REPOS_JSON='{"full_name":"acme/site"}'
 automerge_smoke_url() { echo "https://x"; }
 forgejo_list_open_bot_prs() { echo '[{"number":7}]'; }
-echo '{"review":{"acme/site#7":{"verdict":"APPROVE"}}}' > "$STATE"
+echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
 MERGED=0; automerge_do_merge() { MERGED=1; echo "sha"; }
 UPDATED=""; automerge_update_branch() { UPDATED="$1#$2"; return 0; }
 automerge_behind_count() { echo 3; }
@@ -342,7 +349,7 @@ eq "automerge: behind base did NOT merge"        "0"             "$MERGED"
 eq "automerge: behind base updated the branch"   "acme/site#7"   "$UPDATED"
 eq "automerge: behind base recorded no deploy"   ""              "$(jq -r '.deploy.repo // ""' "$STATE")"
 automerge_behind_count() { echo -1; }   # can't determine -> skip, never blind-update
-UPDATED=""; echo '{"review":{"acme/site#7":{"verdict":"APPROVE"}}}' > "$STATE"
+UPDATED=""; echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
 no "automerge: inconclusive up-to-date -> no merge/update (rc1)"  do_automerge_tick
 eq "automerge: inconclusive did not update"      ""              "$UPDATED"
 
@@ -360,7 +367,7 @@ automerge_approved_by() { return 0; }
 automerge_behind_count() { echo 0; }
 _fj() { echo '{"head":{"sha":"headsha7"}}'; }
 MERGED=0; automerge_do_merge() { MERGED=1; echo "sha"; }
-echo '{"review":{"acme/site#7":{"verdict":"APPROVE"}}}' > "$STATE"
+echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
 AUTOMERGE_BLOCK_COOLDOWN_SECS=3600
 automerge_block_record "$STATE" "acme/site#7" "headsha7" "HTTP 405: nope"
 AUTOMERGE_OUT=$(do_automerge_tick 2>&1); AUTOMERGE_RC=$?
@@ -386,12 +393,12 @@ ok "automerge: flagged repo + human APPROVED (no shadow verdict) -> merges" do_a
 eq "automerge: flagged merge recorded"     "acme/site" "$(jq -r '.deploy.repo // ""' "$STATE")"
 # Flagged repo, human has NOT approved -> no merge, even with a shadow APPROVE present.
 automerge_approved_by() { return 1; }
-echo '{"review":{"acme/site#7":{"verdict":"APPROVE"}}}' > "$STATE"
+echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
 no "automerge: flagged repo, no human approve -> no merge"     do_automerge_tick
 # Default repo, shadow APPROVE but the HUMAN requested changes -> veto, no merge.
 automerge_require_human() { return 1; }
 automerge_reviewer_blocks() { return 0; }
-echo '{"review":{"acme/site#7":{"verdict":"APPROVE"}}}' > "$STATE"
+echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
 no "automerge: default repo, human RC vetoes shadow APPROVE"   do_automerge_tick
 automerge_reviewer_blocks() { return 1; }
 

@@ -370,7 +370,7 @@ do_automerge_tick() {
   # one deploy at a time (the barrier guards this too, but belt + suspenders)
   [ -f "$sf" ] && [ -n "$(jq -r '.deploy.repo // ""' "$sf" 2>/dev/null)" ] && return 1
 
-  local repo url req_human prs pr head verdict key ci sha behind
+  local repo url req_human prs pr head verdict reviewed_sha key ci sha behind
   local behind_repo="" behind_pr="" behind_n=""
   while IFS= read -r repo; do
     [ -n "$repo" ] || continue
@@ -380,6 +380,10 @@ do_automerge_tick() {
     while IFS= read -r pr; do
       if [ -z "$pr" ] || [ "$pr" = "null" ]; then continue; fi
       key="${repo}#${pr}"
+      # Fetch the head sha up front: the default path binds the shadow APPROVE to
+      # it (below), and the CI check needs it.
+      head=$(_fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null | jq -r '.head.sha // ""')
+      [ -n "$head" ] || continue
       verdict=$(jq -r --arg k "$key" '.review[$k].verdict // ""' "$sf" 2>/dev/null)
       # Approval gate. A flagged repo needs the HUMAN reviewer's live APPROVED
       # review (today's behavior). A default repo merges on the SHADOW review's
@@ -392,15 +396,20 @@ do_automerge_tick() {
           log "automerge: ${key} human-approved but shadow verdict is REQUEST_CHANGES -- not merging"; continue
         fi
       else
-        if [ "$verdict" != "APPROVE" ]; then
-          log "automerge: ${key} no shadow APPROVE (verdict='${verdict:-none}') -- routes to human, not auto-merging"; continue
+        # The shadow APPROVE must be for the CURRENT head. review_record stores the
+        # verdict with the sha it reviewed, so a stale APPROVE for an older commit
+        # -- head has since advanced with a real change not yet re-reviewed -- must
+        # NOT merge the newer, unreviewed code (do_automerge_tick runs before
+        # do_review_tick, so that window is real). A base-merge keeps sha == head
+        # (review_update_sha), so those still qualify.
+        reviewed_sha=$(jq -r --arg k "$key" '.review[$k].sha // ""' "$sf" 2>/dev/null)
+        if [ "$verdict" != "APPROVE" ] || [ "$reviewed_sha" != "$head" ]; then
+          log "automerge: ${key} no current-head shadow APPROVE (verdict='${verdict:-none}' reviewed=${reviewed_sha:0:8} head=${head:0:8}) -- not auto-merging"; continue
         fi
         if automerge_reviewer_blocks "$repo" "$pr" "$FORGEJO_REVIEWER"; then
           log "automerge: ${key} shadow-APPROVE but ${FORGEJO_REVIEWER} requested changes -- not merging"; continue
         fi
       fi
-      head=$(_fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null | jq -r '.head.sha // ""')
-      [ -n "$head" ] || continue
       ci=$(forgejo_commit_status "$repo" "$head")
       if [ "$ci" != "success" ]; then
         log "automerge: ${key} CI=${ci:-unknown} -- not merging"; continue
