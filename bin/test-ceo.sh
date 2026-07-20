@@ -377,8 +377,29 @@ _G_CFG=''   # what the agent.json read returns
 forgejo_repo_get_file() { printf '%s' "$_G_CFG"; }
 gsc_access_token() { printf 'tok'; }
 seo_window() { printf '2026-06-01 2026-06-28 2026-05-04 2026-05-31'; }
-# two rows -> clicks 15, impressions 200, CTR 7.5%, impression-weighted position 10
-gsc_query() { printf '%s' '{"rows":[{"clicks":10,"impressions":100,"position":5},{"clicks":5,"impressions":100,"position":15}]}'; }
+# dispatch on the dimension arg ($5): "date" -> the aggregate scoreboard rows
+# (clicks 15, impressions 200, CTR 7.5%, impression-weighted position 10);
+# "query" -> 6 rows, top-5 impressions = 1150 of 1200 total (95.83%);
+# "page" -> 3 rows, for the top-pages table.
+gsc_query() {
+  case "$5" in
+    date) printf '%s' '{"rows":[{"clicks":10,"impressions":100,"position":5},{"clicks":5,"impressions":100,"position":15}]}' ;;
+    query) printf '%s' '{"rows":[
+        {"keys":["install widget"],"clicks":40,"impressions":400,"ctr":0.1,"position":3},
+        {"keys":["buy widget"],"clicks":15,"impressions":300,"ctr":0.05,"position":5},
+        {"keys":["widget price"],"clicks":10,"impressions":200,"ctr":0.05,"position":6},
+        {"keys":["cheap widget"],"clicks":3,"impressions":150,"ctr":0.02,"position":9},
+        {"keys":["widget reviews"],"clicks":2,"impressions":100,"ctr":0.02,"position":11},
+        {"keys":["widget coupon"],"clicks":1,"impressions":50,"ctr":0.02,"position":14}
+      ]}' ;;
+    page) printf '%s' '{"rows":[
+        {"keys":["https://x/blog/a"],"clicks":20,"impressions":250,"ctr":0.08,"position":4},
+        {"keys":["https://x/blog/b"],"clicks":5,"impressions":180,"ctr":0.0278,"position":9},
+        {"keys":["https://x/blog/c"],"clicks":1,"impressions":90,"ctr":0.0111,"position":13}
+      ]}' ;;
+    *) printf '%s' '{"rows":[]}' ;;
+  esac
+}
 
 # no .seo.domain -> clean no-op (non-SEO repos digest exactly as before)
 _G_CFG='{"smoke":{"url":"https://x"}}'
@@ -391,6 +412,7 @@ out=$(GOOGLE_SERVICE_ACCOUNT='' ceo_read_gsc acme/x)
 has   "gsc: unconfigured -> still names the domain" "$out" "vpsshowdown.com"
 has   "gsc: unconfigured -> 'not configured' note"  "$out" "not configured"
 hasnt "gsc: unconfigured -> no numbers table"       "$out" "avg position"
+hasnt "gsc: unconfigured -> no query breakdown"     "$out" "Top queries"
 
 # .seo.domain + GSC configured -> numbers block with aggregated totals + trend
 out=$(GOOGLE_SERVICE_ACCOUNT=x ceo_read_gsc acme/x)
@@ -401,10 +423,38 @@ has "gsc: CTR 7.5%"                   "$out" "7.5%"
 has "gsc: weighted avg position (10)" "$out" "avg position | 10"
 has "gsc: window dates surfaced"      "$out" "2026-06-01"
 
-# token refresh failure -> dark note, never a crash
+# top queries / top pages tables, sorted by impressions descending
+has "gsc: top queries header"      "$out" "| query | impressions | clicks | CTR | position |"
+has "gsc: top query row (400 imp)" "$out" "| install widget | 400 | 40 | 10% | 3 |"
+has "gsc: top pages header"        "$out" "| page | impressions | clicks | CTR | position |"
+has "gsc: top page row (250 imp)"  "$out" "| https://x/blog/a | 250 | 20 | 8% | 4 |"
+
+# concentration signal: top-5 of 6 query rows = 1150/1200 impressions
+has "gsc: concentration line" "$out" "top-5 queries = 95.83% of impressions across 6 distinct queries"
+
+# prose nudges the board to self-diagnose instead of filing a question
+has "gsc: prose points at the breakdown" "$out" "diagnose the funnel"
+
+# query/page breakdown queries come back empty (e.g. no rows for the window) ->
+# each table degrades to its own "no data" note; the aggregate scoreboard
+# (a separate "date"-dim fetch) is untouched, never a crash
+gsc_query() {
+  case "$5" in
+    date) printf '%s' '{"rows":[{"clicks":10,"impressions":100,"position":5},{"clicks":5,"impressions":100,"position":15}]}' ;;
+    *) printf '%s' '{"rows":[]}' ;;
+  esac
+}
+out=$(GOOGLE_SERVICE_ACCOUNT=x ceo_read_gsc acme/x)
+has "gsc: empty breakdown -> scoreboard still numbers" "$out" "impressions | 200"
+has "gsc: empty query breakdown -> no-data note"       "$out" "no query data this cycle"
+has "gsc: empty page breakdown -> no-data note"        "$out" "no page data this cycle"
+has "gsc: empty query breakdown -> concentration note" "$out" "no query data this cycle"
+
+# token refresh failure -> dark note, never a crash (breakdown never attempted)
 gsc_access_token() { return 1; }
 out=$(GOOGLE_SERVICE_ACCOUNT=x ceo_read_gsc acme/x)
-has "gsc: token mint fail -> note" "$out" "token mint failed"
+has   "gsc: token mint fail -> note"        "$out" "token mint failed"
+hasnt "gsc: token mint fail -> no breakdown" "$out" "Top queries"
 
 unset -f forgejo_repo_get_file gsc_access_token gsc_query seo_window
 
