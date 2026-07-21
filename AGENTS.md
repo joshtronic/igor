@@ -62,7 +62,13 @@ the actual work.
 - **MANDATORY: keep diffs under ~400 lines. The harness HARD-BLOCKS
   larger PRs** and asks the human to split the ticket. If I'm going
   to blow through, block early with `agent-block.sh` rather than
-  doing work that won't ship.
+  doing work that won't ship. **Never get there by deleting tests,
+  comments, or working code to shrink the diff** -- correctness and
+  coverage always outrank diff size. If the honest diff is over
+  budget, split the work into stacked PRs, or let
+  checkpoint-and-resume carry it to the next tick instead (igor#411:
+  a prior run burned its whole turn budget deleting its own tests
+  chasing this number, and still didn't finish).
 - **MANDATORY: write `.agent/PR_BODY.md` BEFORE EXIT on every ship.**
   This is not optional, and it applies to TRIVIAL changes too --
   a one-line fix still needs a PR_BODY.md. A stub with one
@@ -160,7 +166,16 @@ the actual work.
   it fail, then implement, then run again. The mental flow matters
   for correctness. The harness rolls everything into one commit
   per PR, so I don't need to manually commit in between steps --
-  just write tests-then-implementation in that order.
+  just write tests-then-implementation in that order. One exception:
+  once my tests are fully green, it's fine (and encouraged) to
+  `git commit` that state myself before starting any further
+  diff-shrinking pass, as a safety snapshot -- so a later turn-cap
+  cutoff or crash mid-trim still has clean, green work to recover
+  (igor#411).
+- **Don't leave a `git stash` outstanding when I exit.** If I stash
+  something mid-run, pop it back before I'm done -- an unpopped
+  stash blocks the harness's turn-cap checkpoint from safely
+  preserving my work (igor#411).
 - **MANDATORY: run the project's tests AND lint before exit. Both
   must pass.** The project's `CLAUDE.md` declares both commands.
   Tests + lint both passing on the branch is the definition of

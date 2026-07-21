@@ -53,6 +53,12 @@ eq "decision: nonzero + turn cap + no stash -> checkpoint"   "checkpoint" "$(che
 eq "decision: nonzero, NOT turn cap -> discard (crash)"      "discard"    "$(checkpoint_decision 1 0 0)"
 eq "decision: turn cap but unrestored stash -> discard"      "discard"    "$(checkpoint_decision 1 1 1)"
 eq "decision: SIGKILL (137) not turn cap -> discard"         "discard"    "$(checkpoint_decision 137 0 0)"
+# igor#411: a confirmed turn cap with real dirty work must not be discarded
+# just because a stash existed -- only an UNRECONCILED (never-popped or
+# conflicted) stash still vetoes the checkpoint.
+eq "decision: turn cap + stash reconciled -> checkpoint"     "checkpoint" "$(checkpoint_decision 1 1 1 1)"
+eq "decision: turn cap + stash, reconcile failed -> discard" "discard"    "$(checkpoint_decision 1 1 1 0)"
+eq "decision: turn cap, no stash, reconciled flag ignored"   "checkpoint" "$(checkpoint_decision 1 1 0 1)"
 
 echo "== WIP title round-trip =="
 ok    "is_wip: a WIP title"                       checkpoint_is_wip "WIP: feat: thing"
