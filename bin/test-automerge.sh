@@ -51,8 +51,14 @@ ok "approved_by: later COMMENT keeps APPROVED"         automerge_approved_by acm
 FJ='[{"user":{"login":"josh"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z"},{"user":{"login":"josh"},"state":"REQUEST_CHANGES","submitted_at":"2026-02-01T00:00:00Z","dismissed":true}]'
 ok "approved_by: dismissed RC -> prior APPROVED stands" automerge_approved_by acme/x 1 josh
 # a stale APPROVED (head moved past what was reviewed) is not a merge signal.
-FJ='[{"user":{"login":"josh"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z","stale":true}]'
-no "approved_by: stale APPROVED -> not a merge signal"  automerge_approved_by acme/x 1 josh
+# A stale-but-NOT-dismissed APPROVED still counts: Forgejo's `dismissed` flag, not
+# `stale`, is the authoritative "no longer counts." A repo that doesn't dismiss
+# stale approvals keeps them -- so this un-strands a base-merge-staled approval.
+FJ='[{"user":{"login":"josh"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z","stale":true,"dismissed":false,"official":true}]'
+ok "approved_by: stale but NOT dismissed APPROVED -> still counts"  automerge_approved_by acme/x 1 josh
+# A DISMISSED APPROVED does not count (the repo dismissed it on a new commit).
+FJ='[{"user":{"login":"josh"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z","stale":true,"dismissed":true}]'
+no "approved_by: dismissed APPROVED -> does not count"  automerge_approved_by acme/x 1 josh
 FJ='{"state":"open","mergeable":true}'
 ok "mergeable: open + mergeable"           automerge_mergeable acme/x 1
 FJ='{"state":"open","mergeable":false}'
@@ -90,45 +96,6 @@ FJ='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","submitted_at":"2026-02-
 no "reviewer_blocks: stale RC -> no block"               automerge_reviewer_blocks acme/x 1 josh
 FJ='[{"user":{"login":"other"},"state":"REQUEST_CHANGES","submitted_at":"2026-02-01T00:00:00Z"}]'
 no "reviewer_blocks: someone else RC -> no block"        automerge_reviewer_blocks acme/x 1 josh
-
-echo "== automerge_stale_approval_is_basemerge (rescue a base-merge-staled approval) =="
-# _fj serves: reviews on .../reviews, the head commit on .../git/commits/..., the
-# PR object (for .base.ref) on .../pulls/N, the base tip on .../branches/..., and
-# the ancestry check on .../compare/BASE...PARENT. COMPARE maps each candidate
-# non-approved parent sha to its "commits ahead of base tip" count: 0 = the parent
-# is on the base branch (ancestor-or-equal), >0 = it carries commits base lacks.
-_fj() {
-  case "$2" in
-    */reviews)      printf '%s' "$REVIEWS" ;;
-    */git/commits/*) printf '%s' "$HEADCOMMIT" ;;
-    */branches/*)   printf '%s' '{"commit":{"id":"masterTip"}}' ;;
-    */compare/*)    printf '%s' "$(jq -rn --arg k "${2##*...}" --argjson m "$COMPARE" '{total_commits: ($m[$k] // -1)}')" ;;
-    */pulls/*)      printf '%s' '{"base":{"ref":"master"}}' ;;
-  esac
-}
-# master1 is on the base branch (0 commits ahead of the tip); evil1 carries 2 unreviewed commits.
-COMPARE='{"master1":0,"evil1":2}'
-# Stale APPROVED, head is a MERGE commit whose parents are the approved commit + a base-branch commit -> rescue.
-REVIEWS='[{"user":{"login":"josh"},"state":"APPROVED","stale":true,"commit_id":"aaa","submitted_at":"2026-01-01T00:00:00Z"}]'
-HEADCOMMIT='{"parents":[{"sha":"aaa"},{"sha":"master1"}]}'
-ok "basemerge: stale approve + head is a base-merge of it -> rescue"  automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
-# Stale APPROVED, head is a merge of the approved commit + a HOSTILE non-base branch
-# (unreviewed files) -> must NOT rescue: "is a parent" != "same diff vs base".
-HEADCOMMIT='{"parents":[{"sha":"aaa"},{"sha":"evil1"}]}'
-no "basemerge: stale approve merged with a non-base branch -> no rescue" automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
-# Stale APPROVED but head is a NORMAL new commit (single parent) -> do NOT rescue.
-HEADCOMMIT='{"parents":[{"sha":"aaa"}]}'
-no "basemerge: stale approve on a real new commit -> no rescue"       automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
-# Stale APPROVED, head is a merge but the approved commit is NOT a parent -> no.
-HEADCOMMIT='{"parents":[{"sha":"bbb"},{"sha":"master1"}]}'
-no "basemerge: stale approve, commit not a parent of head -> no rescue" automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
-# LIVE approval (not stale) -> handled by automerge_approved_by, not here.
-REVIEWS='[{"user":{"login":"josh"},"state":"APPROVED","stale":false,"commit_id":"aaa","submitted_at":"2026-01-01T00:00:00Z"}]'
-HEADCOMMIT='{"parents":[{"sha":"aaa"},{"sha":"master1"}]}'
-no "basemerge: live (non-stale) approval -> not this helper's job"    automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
-# Stale REQUEST_CHANGES (not an APPROVED) -> no rescue.
-REVIEWS='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","stale":true,"commit_id":"aaa","submitted_at":"2026-01-01T00:00:00Z"}]'
-no "basemerge: stale RC (not APPROVED) -> no rescue"                  automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
 
 echo "== live-URL smoke (real fn, stubbed curl) =="
 curl() { echo "$SMOKE_CODE"; }
