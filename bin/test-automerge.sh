@@ -310,7 +310,7 @@ automerge_update_branch() { UPDATED="$1#$2"; return 0; }
 automerge_do_merge() { echo "mergesha7"; }
 _fj() { echo '{"head":{"sha":"headsha7"}}'; }
 automerge_require_human() { return 1; }      # default: shadow-gated repo
-automerge_approved_by() { return 0; }        # (irrelevant on the shadow path)
+automerge_approved_by() { return 1; }        # no human review -> exercises the shadow path
 
 # Default (shadow-gated) repo: the shadow verdict APPROVE is the gate.
 echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
@@ -333,6 +333,18 @@ eq "automerge: RC records nothing"          ""        "$(jq -r '.deploy.repo // 
 echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"oldsha0"}}}' > "$STATE"
 no "automerge: shadow APPROVE for a STALE sha -> no merge (rc1)"  do_automerge_tick
 eq "automerge: stale-APPROVE records nothing" ""      "$(jq -r '.deploy.repo // ""' "$STATE")"
+
+# Human override: the shadow only COMMENTed, but a human FORGEJO_REVIEWER APPROVED
+# -> merges (a human can merge any repo by approving). This is the #59/#61 case.
+automerge_approved_by() { return 0; }        # human approved
+echo '{"review":{"acme/site#7":{"verdict":"COMMENT"}}}' > "$STATE"
+ok "automerge: human APPROVED overrides a shadow COMMENT -> merges"  do_automerge_tick
+eq "automerge: human-override recorded deploy" "acme/site" "$(jq -r '.deploy.repo // ""' "$STATE")"
+# ... but a shadow REQUEST_CHANGES blocks even a human approve (overriding a
+# flagged problem is a deliberate MANUAL merge, not an auto-merge).
+echo '{"review":{"acme/site#7":{"verdict":"REQUEST_CHANGES"}}}' > "$STATE"
+no "automerge: shadow RC blocks even a human approve"  do_automerge_tick
+automerge_approved_by() { return 1; }        # reset: no human for the sections below
 
 echo "== do_automerge_tick multi-repo iteration (production stream shape) =="
 # VALIDATED_REPOS_JSON is a NEWLINE-DELIMITED STREAM, not an array. The loop must
