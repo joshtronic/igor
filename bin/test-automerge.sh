@@ -51,8 +51,14 @@ ok "approved_by: later COMMENT keeps APPROVED"         automerge_approved_by acm
 FJ='[{"user":{"login":"josh"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z"},{"user":{"login":"josh"},"state":"REQUEST_CHANGES","submitted_at":"2026-02-01T00:00:00Z","dismissed":true}]'
 ok "approved_by: dismissed RC -> prior APPROVED stands" automerge_approved_by acme/x 1 josh
 # a stale APPROVED (head moved past what was reviewed) is not a merge signal.
-FJ='[{"user":{"login":"josh"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z","stale":true}]'
-no "approved_by: stale APPROVED -> not a merge signal"  automerge_approved_by acme/x 1 josh
+# A stale-but-NOT-dismissed APPROVED still counts: Forgejo's `dismissed` flag, not
+# `stale`, is the authoritative "no longer counts." A repo that doesn't dismiss
+# stale approvals keeps them -- so this un-strands a base-merge-staled approval.
+FJ='[{"user":{"login":"josh"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z","stale":true,"dismissed":false,"official":true}]'
+ok "approved_by: stale but NOT dismissed APPROVED -> still counts"  automerge_approved_by acme/x 1 josh
+# A DISMISSED APPROVED does not count (the repo dismissed it on a new commit).
+FJ='[{"user":{"login":"josh"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z","stale":true,"dismissed":true}]'
+no "approved_by: dismissed APPROVED -> does not count"  automerge_approved_by acme/x 1 josh
 FJ='{"state":"open","mergeable":true}'
 ok "mergeable: open + mergeable"           automerge_mergeable acme/x 1
 FJ='{"state":"open","mergeable":false}'
@@ -91,44 +97,44 @@ no "reviewer_blocks: stale RC -> no block"               automerge_reviewer_bloc
 FJ='[{"user":{"login":"other"},"state":"REQUEST_CHANGES","submitted_at":"2026-02-01T00:00:00Z"}]'
 no "reviewer_blocks: someone else RC -> no block"        automerge_reviewer_blocks acme/x 1 josh
 
-echo "== automerge_stale_approval_is_basemerge (rescue a base-merge-staled approval) =="
-# _fj serves: reviews on .../reviews, the head commit on .../git/commits/..., the
-# PR object (for .base.ref) on .../pulls/N, the base tip on .../branches/..., and
-# the ancestry check on .../compare/BASE...PARENT. COMPARE maps each candidate
-# non-approved parent sha to its "commits ahead of base tip" count: 0 = the parent
-# is on the base branch (ancestor-or-equal), >0 = it carries commits base lacks.
+echo "== automerge_approval_covers_head (a stale approval must still be the approved net diff) =="
+# _fj dispatches by path: reviews, the PR object (.base.ref), the base branch tip,
+# the head/parent commits (COMMITS: sha -> {parents}), and the base-membership
+# check (COMPARE: sha -> commits ahead of base tip; 0 = on the base branch). Order
+# matters -- */reviews before */pulls/* so the reviews path wins.
 _fj() {
   case "$2" in
-    */reviews)      printf '%s' "$REVIEWS" ;;
-    */git/commits/*) printf '%s' "$HEADCOMMIT" ;;
-    */branches/*)   printf '%s' '{"commit":{"id":"masterTip"}}' ;;
-    */compare/*)    printf '%s' "$(jq -rn --arg k "${2##*...}" --argjson m "$COMPARE" '{total_commits: ($m[$k] // -1)}')" ;;
-    */pulls/*)      printf '%s' '{"base":{"ref":"master"}}' ;;
+    */reviews)       printf '%s' "$REVIEWS" ;;
+    */branches/*)    printf '%s' '{"commit":{"id":"basetip"}}' ;;
+    */compare/*)     printf '%s' "$(jq -rn --arg k "${2##*...}" --argjson m "$COMPARE" '{total_commits: ($m[$k] // -1)}')" ;;
+    */git/commits/*) printf '%s' "$(jq -rn --arg k "${2##*/}" --argjson m "$COMMITS" '$m[$k] // {"parents":[]}')" ;;
+    */pulls/*)       printf '%s' '{"base":{"ref":"master"}}' ;;
   esac
 }
-# master1 is on the base branch (0 commits ahead of the tip); evil1 carries 2 unreviewed commits.
-COMPARE='{"master1":0,"evil1":2}'
-# Stale APPROVED, head is a MERGE commit whose parents are the approved commit + a base-branch commit -> rescue.
-REVIEWS='[{"user":{"login":"josh"},"state":"APPROVED","stale":true,"commit_id":"aaa","submitted_at":"2026-01-01T00:00:00Z"}]'
-HEADCOMMIT='{"parents":[{"sha":"aaa"},{"sha":"master1"}]}'
-ok "basemerge: stale approve + head is a base-merge of it -> rescue"  automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
-# Stale APPROVED, head is a merge of the approved commit + a HOSTILE non-base branch
-# (unreviewed files) -> must NOT rescue: "is a parent" != "same diff vs base".
-HEADCOMMIT='{"parents":[{"sha":"aaa"},{"sha":"evil1"}]}'
-no "basemerge: stale approve merged with a non-base branch -> no rescue" automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
-# Stale APPROVED but head is a NORMAL new commit (single parent) -> do NOT rescue.
-HEADCOMMIT='{"parents":[{"sha":"aaa"}]}'
-no "basemerge: stale approve on a real new commit -> no rescue"       automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
-# Stale APPROVED, head is a merge but the approved commit is NOT a parent -> no.
-HEADCOMMIT='{"parents":[{"sha":"bbb"},{"sha":"master1"}]}'
-no "basemerge: stale approve, commit not a parent of head -> no rescue" automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
-# LIVE approval (not stale) -> handled by automerge_approved_by, not here.
-REVIEWS='[{"user":{"login":"josh"},"state":"APPROVED","stale":false,"commit_id":"aaa","submitted_at":"2026-01-01T00:00:00Z"}]'
-HEADCOMMIT='{"parents":[{"sha":"aaa"},{"sha":"master1"}]}'
-no "basemerge: live (non-stale) approval -> not this helper's job"    automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
-# Stale REQUEST_CHANGES (not an APPROVED) -> no rescue.
-REVIEWS='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","stale":true,"commit_id":"aaa","submitted_at":"2026-01-01T00:00:00Z"}]'
-no "basemerge: stale RC (not APPROVED) -> no rescue"                  automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
+# base1/base2 sit on the base branch (0 ahead of the tip); evil1 carries 3 unreviewed commits.
+COMPARE='{"base1":0,"base2":0,"evil1":3}'
+COMMITS='{
+  "m2":{"parents":[{"sha":"m1"},{"sha":"base2"}]},
+  "m1":{"parents":[{"sha":"aaa"},{"sha":"base1"}]},
+  "bbb":{"parents":[{"sha":"aaa"}]},
+  "evilm":{"parents":[{"sha":"aaa"},{"sha":"evil1"}]}
+}'
+# josh approved commit aaa; the approval is now stale (head moved) but not dismissed.
+REVIEWS='[{"user":{"login":"josh"},"state":"APPROVED","commit_id":"aaa","stale":true,"dismissed":false,"submitted_at":"2026-01-01T00:00:00Z"}]'
+ok "covers_head: head IS the approved commit (live) -> covers"        automerge_approval_covers_head acme/x 1 josh aaa
+ok "covers_head: single base-merge of the approved commit -> covers"  automerge_approval_covers_head acme/x 1 josh m1
+# The multi-level case the #409 direct-parent helper broke on: aaa is 2 base-merges back.
+ok "covers_head: MULTI-LEVEL base-merge chain -> covers"              automerge_approval_covers_head acme/x 1 josh m2
+# A merge with a NON-base (hostile) parent adds unreviewed content -> must NOT cover.
+no "covers_head: merge with an off-base parent -> not covered"        automerge_approval_covers_head acme/x 1 josh evilm
+# A real new single-parent commit pushed after approval -> not covered (the reviewer's scenario).
+no "covers_head: real new commit after approval -> not covered"       automerge_approval_covers_head acme/x 1 josh bbb
+# No commit_id on the approval -> fail closed (can't prove same net diff).
+REVIEWS='[{"user":{"login":"josh"},"state":"APPROVED","stale":true,"submitted_at":"2026-01-01T00:00:00Z"}]'
+no "covers_head: approval without commit_id -> fail closed"          automerge_approval_covers_head acme/x 1 josh m1
+# Latest counting review is a REQUEST_CHANGES (not APPROVED) -> not covered.
+REVIEWS='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","commit_id":"aaa","submitted_at":"2026-01-01T00:00:00Z"}]'
+no "covers_head: latest review is RC -> not covered"                 automerge_approval_covers_head acme/x 1 josh aaa
 
 echo "== live-URL smoke (real fn, stubbed curl) =="
 curl() { echo "$SMOKE_CODE"; }
@@ -350,6 +356,7 @@ automerge_do_merge() { echo "mergesha7"; }
 _fj() { echo '{"head":{"sha":"headsha7"}}'; }
 automerge_require_human() { return 1; }      # default: shadow-gated repo
 automerge_approved_by() { return 1; }        # no human review -> exercises the shadow path
+automerge_approval_covers_head() { return 0; }  # default: the approval covers the head (base-merge/live)
 
 # Default (shadow-gated) repo: the shadow verdict APPROVE is the gate.
 echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
@@ -383,6 +390,20 @@ eq "automerge: human-override recorded deploy" "acme/site" "$(jq -r '.deploy.rep
 # flagged problem is a deliberate MANUAL merge, not an auto-merge).
 echo '{"review":{"acme/site#7":{"verdict":"REQUEST_CHANGES"}}}' > "$STATE"
 no "automerge: shadow RC blocks even a human approve"  do_automerge_tick
+# The reviewer's scenario (#410): a human approved, then a NEW commit landed that
+# the approval no longer covers (not a base-merge). automerge_approved_by still
+# counts the stale approval, but covers_head vetoes -- unreviewed code must NOT
+# merge on a stale approval. Shadow COMMENT (no fresh sha-bound APPROVE) -> no merge.
+automerge_approved_by() { return 0; }        # human approved (now stale)
+automerge_approval_covers_head() { return 1; }  # ...but the head is new, unreviewed content
+echo '{"review":{"acme/site#7":{"verdict":"COMMENT"}}}' > "$STATE"
+no "automerge: human approve staled by new content -> no merge"  do_automerge_tick
+eq "automerge: staled-approve records nothing" ""     "$(jq -r '.deploy.repo // ""' "$STATE")"
+# Same PR, but the shadow HAS a fresh APPROVE bound to the current head: the shadow
+# reviewed this exact code, so the merge still proceeds via the shadow path.
+echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
+ok "automerge: staled human approve but fresh shadow APPROVE -> merges"  do_automerge_tick
+automerge_approval_covers_head() { return 0; }  # reset
 automerge_approved_by() { return 1; }        # reset: no human for the sections below
 
 echo "== do_automerge_tick multi-repo iteration (production stream shape) =="
@@ -450,6 +471,13 @@ automerge_approved_by() { return 0; }
 echo '{}' > "$STATE"
 ok "automerge: flagged repo + human APPROVED (no shadow verdict) -> merges" do_automerge_tick
 eq "automerge: flagged merge recorded"     "acme/site" "$(jq -r '.deploy.repo // ""' "$STATE")"
+# Flagged repo, human approved but the approval no longer covers the head (new
+# content since) -> no merge, no shadow fallback on a require_human repo.
+automerge_approval_covers_head() { return 1; }
+echo '{}' > "$STATE"
+no "automerge: flagged repo, approve staled by new content -> no merge" do_automerge_tick
+eq "automerge: flagged staled-approve records nothing" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
+automerge_approval_covers_head() { return 0; }  # reset
 # Flagged repo, human has NOT approved -> no merge, even with a shadow APPROVE present.
 automerge_approved_by() { return 1; }
 echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"

@@ -65,15 +65,20 @@ automerge_will_take() {
   [ "$verdict" = "APPROVE" ] && ! automerge_require_human "$repo"
 }
 
-# automerge_approved_by <repo> <pr> <user> -- exit 0 if <user>'s CURRENT review
-# on the PR is an APPROVED (the human green-light). NOT "ever approved": Forgejo
-# keeps the full review history, so an old APPROVED followed by a later
-# REQUEST_CHANGES must NOT count as approval. We key on the user's LATEST
-# decision review (APPROVED / REQUEST_CHANGES -- a COMMENT review never changes
-# the verdict) and trust Forgejo's own `stale`/`dismissed` flags, the same way
-# the REQUEST_CHANGES pickup in tick.sh does. A dismissed review is dropped (it
-# was explicitly withdrawn); a stale APPROVED does not merge (the head moved past
-# what the human looked at). So a walked-back approval can never auto-merge.
+# automerge_approved_by <repo> <pr> <user> -- exit 0 if <user>'s CURRENT review on
+# the PR is an official, non-dismissed APPROVED (the human green-light). NOT "ever
+# approved": Forgejo keeps the full review history, so an old APPROVED followed by
+# a later REQUEST_CHANGES must NOT count -- we key on the user's LATEST decision
+# review (APPROVED / REQUEST_CHANGES; a COMMENT never changes the verdict).
+#
+# We trust Forgejo's `dismissed` flag as the authoritative "does this approval
+# still count," NOT `stale`. `stale` only means the head moved since the review;
+# whether that INVALIDATES the approval is the repo's branch-protection choice
+# ("dismiss stale approvals"), which Forgejo encodes by setting `dismissed`. So a
+# stale-but-not-dismissed approval still stands -- exactly as a manual merge would
+# honor it, and it's a base-merge-staled approval that this un-strands -- without
+# imposing a stricter policy than the repo is configured for. (`official` guards
+# against a non-counting review from an unauthorized user.)
 automerge_approved_by() {
   local repo="$1" pr="$2" user="$3"
   _fj GET "/repos/${repo}/pulls/${pr}/reviews" 2>/dev/null \
@@ -85,8 +90,70 @@ automerge_approved_by() {
         ]
         | sort_by(.submitted_at)
         | last
-        | (. != null) and (.state == "APPROVED") and ((.stale // false) == false)
+        | (. != null) and (.state == "APPROVED") and ((.official // true) == true)
       ' >/dev/null 2>&1
+}
+
+# automerge_approval_covers_head <repo> <pr> <user> <head> -- exit 0 if <user>'s
+# latest counting APPROVED review still covers the CURRENT head: either the head
+# IS the approved commit (a live approval), or the head is only BASE-MERGES on top
+# of it (same net diff vs base -- the auto-merge's own require-up-to-date update,
+# which stales the approval without changing what the human saw). Exit 1 if any
+# NEW content landed after the approval -- a real commit no human reviewed.
+#
+# This is the security guard the #409 helper enforced, restored after #410 keyed
+# automerge_approved_by on `dismissed` (which alone accepts ANY stale approval,
+# including one staled by an agent pushing new commits -- the PR tip is
+# agent-controlled). #410's bug was checking the approved commit is a DIRECT parent
+# of the head, which the MULTI-LEVEL base-merges ctj#59 hit broke (the approved
+# commit was several base-merges back). We instead WALK the first-parent chain from
+# the head down to the approved commit: a Forgejo "update branch" base-merge makes
+# the PR head the FIRST parent and the base commit a later parent, so the
+# first-parent line is the PR's own commit history. Reaching the approved commit
+# with every skipped merge's other parents sitting on the base branch means nothing
+# but base-merges happened. A single-parent commit that ISN'T the approved commit,
+# or a merge whose other parent is off the base branch (a hostile merge), is new
+# unreviewed content -> fail closed. Robust to any number of base-merge levels.
+automerge_approval_covers_head() {
+  local repo="$1" pr="$2" user="$3" head="$4"
+  local approved base_ref base_tip cur obj n first p ahead walk=0
+  approved=$(_fj GET "/repos/${repo}/pulls/${pr}/reviews" 2>/dev/null \
+    | jq -r --arg u "$user" '
+        [ .[]? | select(.user.login == $u)
+          | select((.dismissed // false) == false)
+          | select(.state == "APPROVED" or .state == "REQUEST_CHANGES") ]
+        | sort_by(.submitted_at) | last
+        | if (. != null) and (.state == "APPROVED") then (.commit_id // "") else "" end' 2>/dev/null)
+  [ -n "$approved" ] || return 1   # no counting approval, or Forgejo gave no commit_id -> fail closed
+
+  base_ref=$(_fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null | jq -r '.base.ref // ""' 2>/dev/null)
+  [ -n "$base_ref" ] || return 1
+  base_tip=$(_fj GET "/repos/${repo}/branches/${base_ref}" 2>/dev/null | jq -r '.commit.id // ""' 2>/dev/null)
+  [ -n "$base_tip" ] || return 1
+
+  cur="$head"
+  while [ "$walk" -lt 50 ]; do     # bound the walk; base-merges are few
+    walk=$((walk + 1))
+    [ "$cur" = "$approved" ] && return 0
+    obj=$(_fj GET "/repos/${repo}/git/commits/${cur}" 2>/dev/null)
+    n=$(jq -r '.parents | length' <<<"$obj" 2>/dev/null)
+    [ -n "$n" ] && [ "$n" != "null" ] || return 1
+    [ "$n" -ge 2 ] || return 1     # single-parent commit that isn't the approved one -> new content
+    first=$(jq -r '.parents[0].sha // ""' <<<"$obj" 2>/dev/null)
+    [ -n "$first" ] || return 1
+    # Every NON-first parent (the merged-in base commits) must sit on the base
+    # branch: compare base_tip...p echoes the commits p is ahead of the tip, so 0
+    # means p introduces nothing beyond base. Anything else is an off-base (hostile)
+    # merge -> fail closed.
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      ahead=$(_fj GET "/repos/${repo}/compare/${base_tip}...${p}" 2>/dev/null \
+        | jq -r 'if type == "object" then (.total_commits // (.commits | length) // -1) else -1 end' 2>/dev/null)
+      [ "$ahead" = "0" ] || return 1
+    done < <(jq -r '.parents[1:][].sha // empty' <<<"$obj" 2>/dev/null)
+    cur="$first"
+  done
+  return 1   # walk exceeded the bound without reaching the approved commit -- fail closed
 }
 
 # automerge_reviewer_blocks <repo> <pr> <user> -- exit 0 if <user>'s CURRENT
@@ -107,65 +174,6 @@ automerge_reviewer_blocks() {
         | last
         | (. != null) and (.state == "REQUEST_CHANGES") and ((.stale // false) == false)
       ' >/dev/null 2>&1
-}
-
-# automerge_stale_approval_is_basemerge <repo> <pr> <user> <head> -- exit 0 if
-# <user>'s latest review is a STALE (Forgejo-flagged) APPROVED whose approved
-# commit is a parent of the current head, the head is a merge commit, AND every
-# OTHER parent is an ancestor of the base branch tip -- i.e. the head is only a
-# BASE-MERGE of the approved commit (same net diff vs base), so the approval
-# should still stand. This rescues a human approval that the auto-merge's OWN
-# branch-update (base-merge to satisfy require-up-to-date) staled -- the
-# human-side twin of review_update_sha's base-merge handling for the shadow
-# verdict. A stale APPROVED on a REAL new commit (a normal 1-parent head) does
-# NOT qualify, so unreviewed code never merges on a walked-back head.
-#
-# The base-branch constraint is the security-critical part: "approved commit is
-# A parent" is necessary but NOT sufficient. A head of the shape
-# merge(approved_commit, evil_branch), where evil_branch carries new unreviewed
-# files, also has 2 parents with the approved commit among them -- yet its diff
-# vs base now includes evil_branch's changes that no human approved. The PR tip
-# is agent-controlled, so a rogue/misbehaving agent could push exactly that
-# shape. A TRUE base-merge always has its non-approved parent(s) on the base
-# branch, so we require every non-approved parent to be an ancestor of (or equal
-# to) the current base-branch tip. Anything off the base branch fails closed.
-automerge_stale_approval_is_basemerge() {
-  local repo="$1" pr="$2" user="$3" head="$4" review approved_commit head_obj
-  local base_ref base_tip others p ahead
-  review=$(_fj GET "/repos/${repo}/pulls/${pr}/reviews" 2>/dev/null \
-    | jq -c --arg u "$user" '
-        [ .[]? | select(.user.login == $u)
-          | select((.dismissed // false) == false)
-          | select(.state == "APPROVED" or .state == "REQUEST_CHANGES") ]
-        | sort_by(.submitted_at) | last // {}' 2>/dev/null)
-  [ "$(jq -r '.state // ""' <<<"$review" 2>/dev/null)" = "APPROVED" ] || return 1
-  [ "$(jq -r '.stale // false' <<<"$review" 2>/dev/null)" = "true" ] || return 1
-  approved_commit=$(jq -r '.commit_id // ""' <<<"$review" 2>/dev/null)
-  [ -n "$approved_commit" ] || return 1
-
-  # Head must be a merge commit with the approved commit among its parents.
-  head_obj=$(_fj GET "/repos/${repo}/git/commits/${head}" 2>/dev/null)
-  jq -e --arg c "$approved_commit" \
-      '(.parents | length) >= 2 and ([.parents[].sha] | any(. == $c))' \
-      <<<"$head_obj" >/dev/null 2>&1 || return 1
-
-  # Every OTHER parent must sit on the base branch. Fetch the base branch's
-  # CURRENT tip (not .base.sha, which Forgejo pins at PR-open time) and assert
-  # each non-approved parent is an ancestor-or-equal of it: compare A...B echoes
-  # the commits B is ahead of A, so 0 means B introduces nothing beyond A.
-  base_ref=$(_fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null | jq -r '.base.ref // ""' 2>/dev/null)
-  [ -n "$base_ref" ] || return 1
-  base_tip=$(_fj GET "/repos/${repo}/branches/${base_ref}" 2>/dev/null | jq -r '.commit.id // ""' 2>/dev/null)
-  [ -n "$base_tip" ] || return 1
-  others=$(jq -r --arg c "$approved_commit" '.parents[].sha | select(. != $c)' <<<"$head_obj" 2>/dev/null)
-  [ -n "$others" ] || return 1
-  while IFS= read -r p; do
-    [ -n "$p" ] || continue
-    ahead=$(_fj GET "/repos/${repo}/compare/${base_tip}...${p}" 2>/dev/null \
-      | jq -r 'if type == "object" then (.total_commits // (.commits | length) // -1) else -1 end' 2>/dev/null)
-    [ "$ahead" = "0" ] || return 1
-  done <<<"$others"
-  return 0
 }
 
 # automerge_mergeable <repo> <pr> -- exit 0 if the PR is open AND cleanly mergeable.
@@ -462,9 +470,12 @@ do_automerge_tick() {
       # REQUEST_CHANGES vetoes: the shadow's on the human path, the human's on the
       # default path -- we never merge over a "no".
       if [ "$req_human" = "1" ]; then
-        if ! automerge_approved_by "$repo" "$pr" "$FORGEJO_REVIEWER" \
-           && ! automerge_stale_approval_is_basemerge "$repo" "$pr" "$FORGEJO_REVIEWER" "$head"; then
-          continue
+        automerge_approved_by "$repo" "$pr" "$FORGEJO_REVIEWER" || continue
+        # A stale-but-not-dismissed approval counts (automerge_approved_by), but
+        # ONLY if the current head is the SAME net diff the human approved -- a
+        # base-merge, never new agent-pushed content the human never saw.
+        if ! automerge_approval_covers_head "$repo" "$pr" "$FORGEJO_REVIEWER" "$head"; then
+          log "automerge: ${key} approval predates the current head's content (not a base-merge) -- not merging"; continue
         fi
         if [ "$verdict" = "REQUEST_CHANGES" ]; then
           log "automerge: ${key} human-approved but shadow verdict is REQUEST_CHANGES -- not merging"; continue
@@ -487,8 +498,8 @@ do_automerge_tick() {
           log "automerge: ${key} ${FORGEJO_REVIEWER} requested changes -- not merging"; continue
         fi
         if automerge_approved_by "$repo" "$pr" "$FORGEJO_REVIEWER" \
-           || automerge_stale_approval_is_basemerge "$repo" "$pr" "$FORGEJO_REVIEWER" "$head"; then
-          : # human approved (live, or a stale approval on a same-content base-merge)
+           && automerge_approval_covers_head "$repo" "$pr" "$FORGEJO_REVIEWER" "$head"; then
+          : # human approved THIS net diff (live, or a base-merge-staled approval) -> merge
         elif [ "$verdict" = "APPROVE" ] && [ "$reviewed_sha" = "$head" ]; then
           : # the shadow approved the current head -> merge
         else
