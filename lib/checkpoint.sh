@@ -59,19 +59,29 @@ checkpoint_hit_turn_cap() {
       >/dev/null 2>&1
 }
 
-# checkpoint_decision <claude_exit> <hit_turn_cap:0|1> <has_unrestored_stash:0|1>
+# checkpoint_decision <claude_exit> <hit_turn_cap:0|1> <has_stash:0|1> \
+#                      [<stash_reconciled:0|1>]
 # -- the disposition of a tier-1 worktree after the claude run:
 #   commit     exit 0: work is done -> commit + finalize the PR (ready to review)
-#   checkpoint nonzero, hit the turn cap, no stash: snapshot the WIP + resume
-#   discard    anything else -- a real crash; or a turn-cap cut-off left with an
-#              unrestored `git stash` we can't safely commit over -> the existing
-#              ship-safety discard.
+#   checkpoint nonzero, hit the turn cap, and either no stash was ever present
+#              or it was cleanly reconciled (popped back in) before this call
+#              -> snapshot the WIP + resume
+#   discard    anything else -- a real crash; or a turn-cap cut-off left with a
+#              `git stash` that is NOT reconciled (untouched, or the pop
+#              conflicted) -> the existing ship-safety discard.
 # The stash guard preserves the porksicle#114 invariant: never auto-commit over
 # an unrestored `git stash` (committing -A would silently drop its contents).
+# igor#411: that guard used to veto EVERY turn-cap checkpoint the instant any
+# stash existed, discarding real green work over a stash that could simply be
+# popped back in. `stash_reconciled` (default 0, so a plain 3-arg call keeps
+# the original safe behavior) lets a caller that has ALREADY done that
+# reconciliation -- a real `git stash pop`, in tick.sh, since this function is
+# pure logic with no git access of its own -- relax the guard for exactly that
+# case, never for an untouched or conflicted stash.
 checkpoint_decision() {
-  local exit_code="$1" hit_cap="$2" has_stash="$3"
+  local exit_code="$1" hit_cap="$2" has_stash="$3" stash_reconciled="${4:-0}"
   if [ "$exit_code" -eq 0 ]; then printf 'commit'; return; fi
-  if [ "$hit_cap" = "1" ] && [ "$has_stash" != "1" ]; then
+  if [ "$hit_cap" = "1" ] && { [ "$has_stash" != "1" ] || [ "$stash_reconciled" = "1" ]; }; then
     printf 'checkpoint'; return
   fi
   printf 'discard'

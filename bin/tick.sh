@@ -4227,19 +4227,36 @@ cd "$WORKTREE"
 
 # Disposition of the worktree after the run (lib/checkpoint.sh):
 #   commit     -- claude finished (exit 0): commit + finalize the PR
-#   checkpoint -- turn cap hit, no stash: snapshot the WIP and resume next tick
-#   discard    -- a real crash; or a turn-cap cut-off left with an unrestored
-#                 `git stash` we can't safely commit over -> ship-safety discard
+#   checkpoint -- turn cap hit, and either no stash or the stash was cleanly
+#                 reconciled below: snapshot the WIP and resume next tick
+#   discard    -- a real crash; or a turn-cap cut-off left with a `git stash`
+#                 that could not be safely reconciled -> ship-safety discard
 # The stash guard preserves the porksicle#114 invariant: a nonzero exit can mean
 # the run died mid-workflow before restoring a `git stash` it took, so committing
-# -A would ship a scratch tree OVER the stashed real edits. The `:-1` default on
-# CLAUDE_EXIT fails SAFE (unset/empty -> treated as nonzero). Only a CLEAN
-# max-turns cut-off (a real result event, no stash) earns a checkpoint.
+# -A would ship a scratch tree OVER the stashed real edits. igor#411: that guard
+# used to veto EVERY turn-cap checkpoint the instant a stash existed, discarding
+# real green work over a stash that could simply be popped back in. On a
+# confirmed turn cap we now attempt exactly that reconciliation first: a clean
+# `git stash pop` merges the stash's content into the (already green) working
+# tree, so the checkpoint commit captures both; a conflicted pop leaves the
+# stash untouched and falls back to the original discard (the worktree is
+# force-removed on exit regardless -- see `cleanup()` above -- so a tree left
+# mid-conflict is harmless). The `:-1` default on CLAUDE_EXIT fails SAFE
+# (unset/empty -> treated as nonzero).
 CLAUDE_STREAM="$(dirname "$CLAUDE_LOG")/claude-stream.jsonl"
 HIT_TURN_CAP=0; checkpoint_hit_turn_cap "$CLAUDE_STREAM" && HIT_TURN_CAP=1
 HAS_STASH=0; [ -n "$(git stash list 2>/dev/null)" ] && HAS_STASH=1
-DISPOSITION=$(checkpoint_decision "${CLAUDE_EXIT:-1}" "$HIT_TURN_CAP" "$HAS_STASH")
-log "disposition: $DISPOSITION (exit=${CLAUDE_EXIT:-?} turn_cap=${HIT_TURN_CAP} stash=${HAS_STASH} resume=${IS_RESUME})"
+STASH_RECONCILED=0
+if [ "$HIT_TURN_CAP" = "1" ] && [ "$HAS_STASH" = "1" ]; then
+  if git stash pop --quiet 2>/dev/null; then
+    STASH_RECONCILED=1
+    log "checkpoint: reconciled an outstanding git stash via 'git stash pop'"
+  else
+    log "checkpoint: git stash pop conflicted -- leaving it stashed, falling back to discard"
+  fi
+fi
+DISPOSITION=$(checkpoint_decision "${CLAUDE_EXIT:-1}" "$HIT_TURN_CAP" "$HAS_STASH" "$STASH_RECONCILED")
+log "disposition: $DISPOSITION (exit=${CLAUDE_EXIT:-?} turn_cap=${HIT_TURN_CAP} stash=${HAS_STASH} reconciled=${STASH_RECONCILED} resume=${IS_RESUME})"
 
 DIRTY_PATHS=$(git status --porcelain 2>/dev/null \
   | awk '$2 !~ /^\.agent\// { print $2 }')

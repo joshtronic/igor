@@ -32,7 +32,11 @@ approvable one) -- say what you couldn't see.
 The author works under a fixed contract. Hold the PR to it:
 
 - **Scope.** Focused on the one issue. No unrelated refactors, no
-  drive-by changes. Diffs are meant to stay under ~400 lines.
+  drive-by changes. Diffs are meant to stay under ~400 lines -- but
+  that budget means split into stacked PRs or checkpoint, never
+  delete tests or working code to shrink a diff. A PR that trimmed
+  real test coverage or substance to fit under budget is a
+  REQUEST_CHANGES on that basis alone (igor#411).
 - **Honest checklist.** Every checked item in the description MUST
   correspond to a real change in the diff. A checkbox describing work
   that isn't in the diff is a fabrication -- flag it specifically. This

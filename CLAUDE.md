@@ -99,9 +99,11 @@ respective tools on the host; install or skip.
 - **Checkpoint-and-resume** (`lib/checkpoint.sh`, tier-1 issue work only)
   makes the turn cap non-destructive. After the claude run, the worktree's
   disposition is one of: `commit` (exit 0 -> finalize the PR), `checkpoint`
-  (a clean `max_turns` result event with no unrestored `git stash` -> snapshot
-  the WIP), or `discard` (a real crash, or a turn cap left with a stash we
-  can't safely commit over -> the porksicle#114 ship-safety discard). A
+  (a clean `max_turns` result event with no stash, or one cleanly reconciled
+  via `git stash pop` first -> snapshot the WIP), or `discard` (a real crash,
+  or a turn cap left with a stash that pop couldn't reconcile -> the
+  porksicle#114 ship-safety discard, relaxed per igor#411 so a stash alone no
+  longer vetoes an otherwise-recoverable checkpoint). A
   `checkpoint` commits the in-progress work and publishes it as a **draft
   (`WIP:` title) PR** that the review + merge loops SKIP and the discovery/claim
   gate RESUMES (carving the next worktree from that branch, with a "continue,
