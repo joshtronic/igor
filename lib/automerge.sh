@@ -408,18 +408,28 @@ do_automerge_tick() {
           log "automerge: ${key} human-approved but shadow verdict is REQUEST_CHANGES -- not merging"; continue
         fi
       else
-        # The shadow APPROVE must be for the CURRENT head. review_record stores the
-        # verdict with the sha it reviewed, so a stale APPROVE for an older commit
-        # -- head has since advanced with a real change not yet re-reviewed -- must
-        # NOT merge the newer, unreviewed code (do_automerge_tick runs before
-        # do_review_tick, so that window is real). A base-merge keeps sha == head
-        # (review_update_sha), so those still qualify.
+        # Default (shadow-gated). Never merge over a REQUEST_CHANGES -- the shadow's
+        # OR the human's. Then merge on EITHER signal: a human FORGEJO_REVIEWER
+        # APPROVED review (a human can merge ANY repo by approving -- e.g. the
+        # shadow only COMMENTed but the human reviewed and approved), OR the
+        # shadow's APPROVE for the CURRENT head. review_record stores the verdict
+        # with the sha it reviewed, so a stale APPROVE for an older commit (head
+        # advanced with a real change not yet re-reviewed) must NOT merge the
+        # unreviewed code; a base-merge keeps sha == head (review_update_sha), so
+        # those still qualify.
         reviewed_sha=$(jq -r --arg k "$key" '.review[$k].sha // ""' "$sf" 2>/dev/null)
-        if [ "$verdict" != "APPROVE" ] || [ "$reviewed_sha" != "$head" ]; then
-          log "automerge: ${key} no current-head shadow APPROVE (verdict='${verdict:-none}' reviewed=${reviewed_sha:0:8} head=${head:0:8}) -- not auto-merging"; continue
+        if [ "$verdict" = "REQUEST_CHANGES" ]; then
+          log "automerge: ${key} shadow verdict is REQUEST_CHANGES -- not merging"; continue
         fi
         if automerge_reviewer_blocks "$repo" "$pr" "$FORGEJO_REVIEWER"; then
-          log "automerge: ${key} shadow-APPROVE but ${FORGEJO_REVIEWER} requested changes -- not merging"; continue
+          log "automerge: ${key} ${FORGEJO_REVIEWER} requested changes -- not merging"; continue
+        fi
+        if automerge_approved_by "$repo" "$pr" "$FORGEJO_REVIEWER"; then
+          : # human approved -> merge (human override on any repo)
+        elif [ "$verdict" = "APPROVE" ] && [ "$reviewed_sha" = "$head" ]; then
+          : # the shadow approved the current head -> merge
+        else
+          log "automerge: ${key} not mergeable yet (shadow verdict='${verdict:-none}' reviewed=${reviewed_sha:0:8} head=${head:0:8}; no human approve) -- not auto-merging"; continue
         fi
       fi
       ci=$(forgejo_commit_status "$repo" "$head")
