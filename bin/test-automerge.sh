@@ -91,6 +91,27 @@ no "reviewer_blocks: stale RC -> no block"               automerge_reviewer_bloc
 FJ='[{"user":{"login":"other"},"state":"REQUEST_CHANGES","submitted_at":"2026-02-01T00:00:00Z"}]'
 no "reviewer_blocks: someone else RC -> no block"        automerge_reviewer_blocks acme/x 1 josh
 
+echo "== automerge_stale_approval_is_basemerge (rescue a base-merge-staled approval) =="
+# _fj serves reviews on .../reviews and the head commit on .../git/commits/...
+_fj() { case "$2" in */reviews) printf '%s' "$REVIEWS" ;; */git/commits/*) printf '%s' "$HEADCOMMIT" ;; esac; }
+# Stale APPROVED, head is a MERGE commit whose parent is the approved commit -> rescue.
+REVIEWS='[{"user":{"login":"josh"},"state":"APPROVED","stale":true,"commit_id":"aaa","submitted_at":"2026-01-01T00:00:00Z"}]'
+HEADCOMMIT='{"parents":[{"sha":"aaa"},{"sha":"master1"}]}'
+ok "basemerge: stale approve + head is a base-merge of it -> rescue"  automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
+# Stale APPROVED but head is a NORMAL new commit (single parent) -> do NOT rescue.
+HEADCOMMIT='{"parents":[{"sha":"aaa"}]}'
+no "basemerge: stale approve on a real new commit -> no rescue"       automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
+# Stale APPROVED, head is a merge but the approved commit is NOT a parent -> no.
+HEADCOMMIT='{"parents":[{"sha":"bbb"},{"sha":"master1"}]}'
+no "basemerge: stale approve, commit not a parent of head -> no rescue" automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
+# LIVE approval (not stale) -> handled by automerge_approved_by, not here.
+REVIEWS='[{"user":{"login":"josh"},"state":"APPROVED","stale":false,"commit_id":"aaa","submitted_at":"2026-01-01T00:00:00Z"}]'
+HEADCOMMIT='{"parents":[{"sha":"aaa"},{"sha":"master1"}]}'
+no "basemerge: live (non-stale) approval -> not this helper's job"    automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
+# Stale REQUEST_CHANGES (not an APPROVED) -> no rescue.
+REVIEWS='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","stale":true,"commit_id":"aaa","submitted_at":"2026-01-01T00:00:00Z"}]'
+no "basemerge: stale RC (not APPROVED) -> no rescue"                  automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
+
 echo "== live-URL smoke (real fn, stubbed curl) =="
 curl() { echo "$SMOKE_CODE"; }
 SMOKE_CODE=200; ok "smoke: 200 -> up"          automerge_smoke https://x
