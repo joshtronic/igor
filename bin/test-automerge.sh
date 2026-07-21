@@ -92,12 +92,30 @@ FJ='[{"user":{"login":"other"},"state":"REQUEST_CHANGES","submitted_at":"2026-02
 no "reviewer_blocks: someone else RC -> no block"        automerge_reviewer_blocks acme/x 1 josh
 
 echo "== automerge_stale_approval_is_basemerge (rescue a base-merge-staled approval) =="
-# _fj serves reviews on .../reviews and the head commit on .../git/commits/...
-_fj() { case "$2" in */reviews) printf '%s' "$REVIEWS" ;; */git/commits/*) printf '%s' "$HEADCOMMIT" ;; esac; }
-# Stale APPROVED, head is a MERGE commit whose parent is the approved commit -> rescue.
+# _fj serves: reviews on .../reviews, the head commit on .../git/commits/..., the
+# PR object (for .base.ref) on .../pulls/N, the base tip on .../branches/..., and
+# the ancestry check on .../compare/BASE...PARENT. COMPARE maps each candidate
+# non-approved parent sha to its "commits ahead of base tip" count: 0 = the parent
+# is on the base branch (ancestor-or-equal), >0 = it carries commits base lacks.
+_fj() {
+  case "$2" in
+    */reviews)      printf '%s' "$REVIEWS" ;;
+    */git/commits/*) printf '%s' "$HEADCOMMIT" ;;
+    */branches/*)   printf '%s' '{"commit":{"id":"masterTip"}}' ;;
+    */compare/*)    printf '%s' "$(jq -rn --arg k "${2##*...}" --argjson m "$COMPARE" '{total_commits: ($m[$k] // -1)}')" ;;
+    */pulls/*)      printf '%s' '{"base":{"ref":"master"}}' ;;
+  esac
+}
+# master1 is on the base branch (0 commits ahead of the tip); evil1 carries 2 unreviewed commits.
+COMPARE='{"master1":0,"evil1":2}'
+# Stale APPROVED, head is a MERGE commit whose parents are the approved commit + a base-branch commit -> rescue.
 REVIEWS='[{"user":{"login":"josh"},"state":"APPROVED","stale":true,"commit_id":"aaa","submitted_at":"2026-01-01T00:00:00Z"}]'
 HEADCOMMIT='{"parents":[{"sha":"aaa"},{"sha":"master1"}]}'
 ok "basemerge: stale approve + head is a base-merge of it -> rescue"  automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
+# Stale APPROVED, head is a merge of the approved commit + a HOSTILE non-base branch
+# (unreviewed files) -> must NOT rescue: "is a parent" != "same diff vs base".
+HEADCOMMIT='{"parents":[{"sha":"aaa"},{"sha":"evil1"}]}'
+no "basemerge: stale approve merged with a non-base branch -> no rescue" automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
 # Stale APPROVED but head is a NORMAL new commit (single parent) -> do NOT rescue.
 HEADCOMMIT='{"parents":[{"sha":"aaa"}]}'
 no "basemerge: stale approve on a real new commit -> no rescue"       automerge_stale_approval_is_basemerge acme/x 1 josh HEAD
