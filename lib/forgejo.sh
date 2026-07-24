@@ -344,9 +344,26 @@ forgejo_pr_diff() {
 # the same CI signal the eventual auto-merge gate will key on. Empty/
 # unknown on API failure (NON-fatal: the caller treats it as "unknown").
 forgejo_commit_status() {
-  local repo="$1" sha="$2" resp
+  local repo="$1" sha="$2" resp state
   resp=$(_fj GET "/repos/${repo}/commits/${sha}/status" 2>/dev/null) || { printf ''; return; }
-  jq -r '.state // ""' <<<"$resp" 2>/dev/null || printf ''
+  state=$(jq -r '.state // ""' <<<"$resp" 2>/dev/null || printf '')
+  # v16 fold (igor#414): Forgejo v16 marks a SKIPPED Actions check as its own
+  # non-success individual status, which can knock the COMBINED .state off
+  # "success" even though nothing failed or is still running -- which would
+  # silently stop auto-merge fleet-wide. Rescue it: if there is at least one
+  # status and EVERY individual status is terminal and non-failing (none
+  # pending/failure/error -- i.e. success/skipped/warning only), the head is
+  # green. v15-safe: pre-v16 a green head already reports combined "success", so
+  # this never rewrites an existing answer; it only catches the new skipped case.
+  if [ "$state" != "success" ]; then
+    jq -e '
+      (.statuses // []) as $s
+      | ($s | length > 0)
+        and (all($s[]?; ((.status // "") | ascii_downcase) as $st
+                        | $st != "pending" and $st != "failure" and $st != "error"))
+    ' <<<"$resp" >/dev/null 2>&1 && state="success"
+  fi
+  printf '%s' "$state"
 }
 
 # Number on the open PR with the given head branch, or empty if none.

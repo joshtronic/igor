@@ -128,6 +128,26 @@ eq "requests sort=oldest (review + merge match the issue grind)" \
   "true" "$(grep -q 'sort=oldest' "$LOBP_CAP" && echo true || echo false)"
 rm -f "$LOBP_CAP"
 
+# forgejo_commit_status: the CI-green signal the auto-merge / deploy-barrier /
+# review ticks all key on. v16 marks a SKIPPED Actions check as its own
+# non-success individual status, which can knock the COMBINED .state off
+# "success" even though nothing failed -- and would then silently stop
+# auto-merge. The fold rescues that WITHOUT ever greening a head that carries a
+# real pending/failure/error (igor#414). Each case runs in a $() subshell, so
+# the per-case _fj stub doesn't leak.
+echo "== forgejo_commit_status: v16 skipped-check fold (igor#414) =="
+cs() { local fx="$1"; _fj() { printf '%s' "$fx"; }; forgejo_commit_status acme/x deadbeef; }
+eq "combined success -> success (baseline, unchanged)" "success" \
+  "$(cs '{"state":"success","statuses":[{"status":"success"}]}')"
+eq "v16: combined off-success but all statuses success/skipped -> folded green" "success" \
+  "$(cs '{"state":"warning","statuses":[{"status":"success","context":"CI"},{"status":"skipped","context":"Deploy"}]}')"
+eq "a real failure is NEVER folded green" "failure" \
+  "$(cs '{"state":"failure","statuses":[{"status":"success"},{"status":"failure"}]}')"
+eq "a still-running (pending) check is NEVER folded green" "pending" \
+  "$(cs '{"state":"pending","statuses":[{"status":"success"},{"status":"pending"}]}')"
+eq "no statuses at all is not falsely greened" "" \
+  "$(cs '{"state":"","statuses":[]}')"
+
 if [ "$FAIL" -eq 0 ]; then echo "test-forgejo: all checks passed"; exit 0; fi
 echo "test-forgejo: $FAIL check(s) FAILED"
 exit 1
