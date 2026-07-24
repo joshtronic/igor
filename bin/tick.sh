@@ -3319,6 +3319,7 @@ if [ -n "$REVIEW_PR" ]; then
 
     PR_DETAILS=$(forgejo_get_pr "$PR_REPO" "$PR_NUMBER" 2>/dev/null || echo '{}')
     PR_HEAD=$(jq -r '.head.ref // ""' <<<"$PR_DETAILS")
+    PR_HEAD_SHA=$(jq -r '.head.sha // ""' <<<"$PR_DETAILS")
     PR_BASE=$(jq -r '.base.ref // ""' <<<"$PR_DETAILS")
     PR_BODY=$(jq -r '.body // ""' <<<"$PR_DETAILS")
 
@@ -3474,6 +3475,13 @@ CONFLICT_EOF
 )
     fi
 
+    # v16 goodie (igor#415): if the PR head's CI is RED, pull the failing Actions
+    # job-log tails into the rework prompt so the agent fixes the build, not just
+    # the review comments. Empty (no-op) when CI is green or on pre-v16 Forgejo,
+    # so it's safe to build unconditionally. Mirrors the PR_MERGE_CONFLICT_MSG
+    # pattern -- interpolated as a bare line in both heredoc branches below.
+    PR_CI_FAILURE_MSG=$(forgejo_failing_ci_logs "$PR_REPO" "$PR_HEAD_SHA")
+
     if [ -n "$BINDING_RC_BODY" ]; then
       PR_USER_MSG=$(cat <<EOF
 You opened PR ${PR_REPO}#${PR_NUMBER}: ${PR_TITLE}
@@ -3488,6 +3496,7 @@ If the requested changes are not actionable -- a fundamental design disagreement
 unclear requirements, or something you need the human to weigh in on -- exit without
 commits. The harness will escalate to the human reviewer.
 ${PR_MERGE_CONFLICT_MSG}
+${PR_CI_FAILURE_MSG}
 
 Base: ${PR_BASE}
 Branch: ${PR_HEAD}
@@ -3532,6 +3541,7 @@ your commits and request the reviewer's review again (the PR is left
 unassigned -- assigned-to-you means it's your turn, unassigned means
 it's back in the human's court).
 ${PR_MERGE_CONFLICT_MSG}
+${PR_CI_FAILURE_MSG}
 
 If you genuinely have nothing to change -- for example the comments
 were questions you can answer in a reply rather than code, or the

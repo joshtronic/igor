@@ -366,6 +366,66 @@ forgejo_commit_status() {
   printf '%s' "$state"
 }
 
+# --- v16 Actions job logs (igor#415) -----------------------------------------
+# Feed *why* CI failed into the rework prompt. Given a PR head sha whose CI is
+# RED, collect the failing Actions run's job-log tails so the rework agent can
+# fix the build break, not only the review comments. These are v16-only REST
+# endpoints; on v15 they 404 -> _fj/curl returns non-zero -> we degrade to an
+# empty string. So the caller can invoke this UNCONDITIONALLY: it is also empty
+# when CI is green (no failing run/job to report). No version probe -- same
+# graceful-no-op convention as forgejo_commit_status (igor#414). The endpoint
+# shapes were verified against a live Forgejo v16.0.1 instance.
+FORGEJO_ACTIONS_LOG_MAX_TIME=30    # a job log is heavier than a JSON call
+FORGEJO_CI_LOG_TAIL_LINES=100      # per failing job: keep the last N lines (the error sits at the tail)
+FORGEJO_CI_LOG_MAX_JOBS=3          # cap total jobs injected so the rework prompt stays bounded
+
+# Plain-text log for one Actions job id, or empty on any failure (incl. a v15
+# 404). Own curl (not _fj): the endpoint returns text/plain and a job log can be
+# large enough to want a longer timeout than _fj's fail-fast JSON budget.
+forgejo_action_job_log() {
+  local repo="$1" job_id="$2"
+  [ -n "$job_id" ] || { printf ''; return; }
+  curl -sf --connect-timeout "$FORGEJO_CONNECT_TIMEOUT" --max-time "$FORGEJO_ACTIONS_LOG_MAX_TIME" \
+    -H "Authorization: token $FORGEJO_TOKEN" \
+    "$FORGEJO_URL/api/v1/repos/${repo}/actions/jobs/${job_id}/logs" 2>/dev/null || printf ''
+}
+
+# A markdown block of the failing CI job-log tails for <repo> <sha>, or empty if
+# nothing is failing / the Actions API is unavailable (v15). Self-gating: safe to
+# call on every rework -- it returns empty unless there is a genuinely FAILED job.
+forgejo_failing_ci_logs() {
+  local repo="$1" sha="$2" runs rids rid jobs jid jname jstat log tail_log block out="" n=0
+  [ -n "$sha" ] || { printf ''; return; }
+  runs=$(_fj GET "/repos/${repo}/actions/runs?head_sha=${sha}&limit=20" 2>/dev/null) || { printf ''; return; }
+  # Runs for this head whose status is a real failure (not success/skipped/pending/running).
+  rids=$(jq -r '(.workflow_runs // [])[]
+                | select((.status // "") as $s | $s == "failure" or $s == "error")
+                | .id' <<<"$runs" 2>/dev/null) || { printf ''; return; }
+  [ -n "$rids" ] || { printf ''; return; }
+  while IFS= read -r rid; do
+    [ -n "$rid" ] || continue
+    [ "$n" -ge "$FORGEJO_CI_LOG_MAX_JOBS" ] && break
+    jobs=$(_fj GET "/repos/${repo}/actions/runs/${rid}/jobs" 2>/dev/null) || continue
+    # /jobs returns a BARE list; keep only the failed jobs.
+    while IFS=$'\t' read -r jid jname jstat; do
+      [ -n "$jid" ] || continue
+      [ "$n" -ge "$FORGEJO_CI_LOG_MAX_JOBS" ] && break
+      log=$(forgejo_action_job_log "$repo" "$jid")
+      [ -n "$log" ] || continue
+      tail_log=$(printf '%s' "$log" | tail -n "$FORGEJO_CI_LOG_TAIL_LINES")
+      block=$(printf '\n### Job `%s` (%s) -- last %s lines of its log\n```\n%s\n```\n' \
+                "$jname" "$jstat" "$FORGEJO_CI_LOG_TAIL_LINES" "$tail_log")
+      out="${out}${block}"
+      n=$((n + 1))
+    done < <(jq -r '.[]
+                    | select((.status // "") as $s | $s == "failure" or $s == "error")
+                    | [(.id | tostring), (.name // "job"), (.status // "")]
+                    | @tsv' <<<"$jobs" 2>/dev/null)
+  done <<<"$rids"
+  [ -n "$out" ] || { printf ''; return; }
+  printf '\n## CI is failing on this PR head -- fix the build too\n\nThe CI checks on this PR head are RED. Below are the tails of the failing Actions job logs (the error is usually near the end). Diagnose and fix the CI failure as part of this rework, and make sure the project tests + lint pass before you exit.\n%s' "$out"
+}
+
 # Number on the open PR with the given head branch, or empty if none.
 # Used to make PR-open idempotent across harness crashes: if a previous
 # tick pushed but died before opening, we find the orphan branch already
