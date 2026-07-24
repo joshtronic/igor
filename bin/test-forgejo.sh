@@ -148,6 +148,43 @@ eq "a still-running (pending) check is NEVER folded green" "pending" \
 eq "no statuses at all is not falsely greened" "" \
   "$(cs '{"state":"","statuses":[]}')"
 
+# forgejo_failing_ci_logs / forgejo_action_job_log (igor#415): on a PR head whose
+# CI is RED, pull the failing Actions job-log tails into the rework prompt. These
+# are v16-only endpoints, so the function MUST no-op (empty) on v15 (404) and on
+# green CI -- that self-gating is what makes it safe to call on every rework. Each
+# case stubs _fj (dispatch on path) + curl (the job log) inside a $() subshell so
+# the stubs don't leak. Endpoint shapes were verified against a live v16.0.1.
+echo "== forgejo_failing_ci_logs: v16 CI-failure logs into rework (igor#415) =="
+fcl() {  # <runs-json> <jobs-json> <job-log-text>
+  local RUNS="$1" JOBS="$2" JOBLOG="$3"
+  _fj() { case "$2" in
+            *"/actions/runs?head_sha="*) printf '%s' "$RUNS" ;;
+            *"/jobs")                     printf '%s' "$JOBS" ;;
+            *)                            printf '' ;;
+          esac; }
+  curl() { printf '%s' "$JOBLOG"; }
+  forgejo_failing_ci_logs acme/x deadbeefsha
+}
+FCL_RUNS='{"workflow_runs":[{"id":1406,"status":"failure"},{"id":1407,"status":"success"}]}'
+FCL_JOBS='[{"id":1853,"name":"check-sync","status":"failure"},{"id":1854,"name":"lint","status":"success"}]'
+FCL_LOG=$(printf 'line one\nboom: build failed exit 1\nJob failed')
+OUT=$(fcl "$FCL_RUNS" "$FCL_JOBS" "$FCL_LOG")
+eq "failing CI -> heading present" "true" \
+  "$(grep -q 'CI is failing on this PR head' <<<"$OUT" && echo true || echo false)"
+eq "failing CI -> failed job (check-sync) block shown" "true" \
+  "$(grep -q 'Job .check-sync' <<<"$OUT" && echo true || echo false)"
+eq "failing CI -> the failing log tail is included" "true" \
+  "$(grep -q 'boom: build failed exit 1' <<<"$OUT" && echo true || echo false)"
+eq "failing CI -> passing job (lint) is excluded" "false" \
+  "$(grep -q 'Job .lint' <<<"$OUT" && echo true || echo false)"
+eq "green CI -> empty (no failing run to report)" "" \
+  "$(fcl '{"workflow_runs":[{"id":1,"status":"success"}]}' '[]' 'unused')"
+# v15 / pre-Actions-API: the runs endpoint 404s -> _fj nonzero -> empty (no-op).
+fcl_v15() { _fj() { return 22; }; forgejo_failing_ci_logs acme/x deadbeef; }
+eq "v15 / Actions API 404 -> empty (graceful no-op, v15-safe)" "" "$(fcl_v15)"
+eq "empty sha -> empty (nothing to look up)" "" "$(forgejo_failing_ci_logs acme/x '')"
+eq "job log: empty job id -> empty (guard)" "" "$(forgejo_action_job_log acme/x '')"
+
 if [ "$FAIL" -eq 0 ]; then echo "test-forgejo: all checks passed"; exit 0; fi
 echo "test-forgejo: $FAIL check(s) FAILED"
 exit 1
