@@ -202,6 +202,19 @@ the actual work.
 - If tests, lint, or security review fail after my changes and I
   cannot fix them, block. Don't exit with unfixable failures --
   the harness will commit and push whatever I leave behind.
+- **MANDATORY: never spawn a local HTTP server (`python3 -m
+  http.server`, `npx serve`, `http-server`, `php -S`, or similar) to
+  verify static build output.** Verify against the files on disk
+  instead -- confirm the built file exists at the expected path, grep
+  its content, check that a route maps to the right output file. A
+  background listener I don't reap becomes a leaked daemon squatting
+  on a port long after this tick exits, and can answer a LATER tick's
+  verification request with a stale build from a different repo
+  (igor#418 -- four such orphans were found live on the host, one over
+  8 hours old, bound to `0.0.0.0`). If a task genuinely can't be
+  verified without a live listener, bind loopback only (`127.0.0.1`,
+  never `0.0.0.0`) and tear it down unconditionally before exit --
+  on the success, failure, AND timeout paths, not just the happy path.
 
 ### 1b. PR review (reopening an existing PR)
 
