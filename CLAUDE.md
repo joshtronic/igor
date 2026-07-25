@@ -263,15 +263,23 @@ respective tools on the host; install or skip.
   recent commits) keeps a chronic failure to ONE ticket, not one/hour. Empty journal = unit runs elsewhere or didn't run =
   skip; no canary/uptime semantics, no news is good news -- UNLESS the
   unit has a companion `<base>.timer` file declared alongside it
-  (`logwatch_timer_transitioned`, igor#420): the timer's OWN journal for
-  the window is checked for a Stopped/Started transition, which only
-  systemd logs on an actual state change, never on ordinary firing. A
-  transition explains the silence (an operator pause, e.g.
-  `systemctl stop agent.timer`) and stays a skip; its absence means the
-  timer was continuously active, so an empty service journal is no
-  longer silently skipped -- it's passed to the reviewer as a "Timer
-  status" note and, for a unit that's supposed to fire every minute, is
-  itself failure-worthy. The harness
+  (`logwatch_timer_verdict`, igor#420): the timer's own disposition
+  across the window is judged from three signals -- a Stopped/Started
+  transition since the window opened (systemd logs those only on an
+  actual state change, never on ordinary firing), its last transition in
+  the preceding `LOGWATCH_TIMER_LOOKBACK_HOURS`, and `systemctl
+  is-active` right now. `paused` (any of: a transition, already stopped
+  going in, stopped now) explains the silence -- an operator pause, e.g.
+  `systemctl stop agent.timer` -- and stays a skip, as does `unknown`;
+  the in-window check ALONE would call every hour after the first of a
+  multi-hour pause "continuously active" and file a ticket asserting the
+  opposite of the truth. Only `active` (positive evidence it ran the
+  whole window) turns an empty service journal into a "Timer status"
+  note for the reviewer, and only when the timer file's DECLARED
+  schedule fires at least hourly (`logwatch_timer_subhourly` parses
+  `OnUnitActiveSec`/`OnUnitInactiveSec`/`OnCalendar`) -- a daily timer is
+  silent 23 hours a day by design, and an unparseable one counts as
+  unverified. The harness
   discovers itself this way (`systemd/agent.service`); only its
   known-benign blurb is special-cased, keyed off the UNIT name. The
   contract is failure-smell, not narration: retries that succeeded,
