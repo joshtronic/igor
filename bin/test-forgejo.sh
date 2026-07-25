@@ -224,6 +224,33 @@ eq "GET: persistent timeout -> bounded attempts (not infinite)" \
   "$((FORGEJO_RETRY_COUNT + 1))" "$(cat "$RETRY_STATE")"
 rm -f "$RETRY_STATE"
 
+# An HTTP error is an ANSWER, not a hiccup. With `-sf`, curl exits 22 for every
+# HTTP >= 400: the v15 Actions-API 404 probe above is the NORMAL response there,
+# a 403 is a rate-limit that wants backing off rather than hammering, a 401 is a
+# bad token. Retrying any of them triples the request count and the wall clock
+# for a result that will not change -- and on an unhealthy instance that turns a
+# fast guarded miss into a slow one, which is the failure mode this whole change
+# exists to avoid. Only transport codes (7/28/35/52/56) are retryable.
+RETRY_STATE=$(mktemp)
+curl() {
+  local n; n=$(cat "$RETRY_STATE" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" >"$RETRY_STATE"
+  return 22
+}
+OUT=$(_fj GET /repos/acme/x/actions/runs); RC=$?
+eq "GET: HTTP error (curl 22) -> attempted exactly once, never retried" "1" "$(cat "$RETRY_STATE")"
+eq "GET: HTTP error -> curl's own exit code is preserved" "22" "$RC"
+rm -f "$RETRY_STATE"
+
+RETRY_STATE=$(mktemp)
+curl() {
+  local n; n=$(cat "$RETRY_STATE" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" >"$RETRY_STATE"
+  return 7
+}
+_fj GET /repos/acme/x/pulls >/dev/null 2>&1
+eq "GET: connect failure (curl 7) IS retried (transport, not HTTP)" \
+  "$((FORGEJO_RETRY_COUNT + 1))" "$(cat "$RETRY_STATE")"
+rm -f "$RETRY_STATE"
+
 RETRY_STATE=$(mktemp)
 curl() {
   local n; n=$(cat "$RETRY_STATE" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" >"$RETRY_STATE"
@@ -272,11 +299,21 @@ eq "fetch failure under set -e -o pipefail does not abort the caller" "0" "$?"
 
 # Structural regression net: the PR-review pickup Signal-1 loop in tick.sh
 # must call the guarded helper, not re-inline the unguarded fetch+jq this
-# issue fixed.
+# issue fixed. Anchored to the ASSIGNMENT, not a bare name match -- the diff
+# adds a comment mentioning the helper two lines above the call, so a plain
+# `grep -q <name>` would pass on the comment alone and could never fail for
+# the reason it exists.
 echo "== tick.sh: PR-review pickup Signal 1 uses the guarded helper (igor#425) =="
 TICK="$HERE/tick.sh"
-eq "tick.sh calls forgejo_pr_actionable_request_changes" "true" \
-  "$(grep -q 'forgejo_pr_actionable_request_changes' "$TICK" && echo true || echo false)"
+eq "tick.sh assigns latest_review from the guarded helper (code, not a comment)" "1" \
+  "$(grep -cE '^[[:space:]]*latest_review=\$\(forgejo_pr_actionable_request_changes ' "$TICK")"
+# And the unguarded shape is gone: the crash was a bare `$(_fj-fed fn | jq)`
+# assignment, whose pipeline status is curl's under `pipefail`. Every surviving
+# forgejo_pr_non_bot_reviews call site in tick.sh must carry an `|| echo`
+# fallback -- the one that didn't is what took the tick down.
+eq "every forgejo_pr_non_bot_reviews call in tick.sh is || echo-guarded" \
+  "$(grep -c 'forgejo_pr_non_bot_reviews' "$TICK")" \
+  "$(grep 'forgejo_pr_non_bot_reviews' "$TICK" | grep -c '|| echo')"
 
 if [ "$FAIL" -eq 0 ]; then echo "test-forgejo: all checks passed"; exit 0; fi
 echo "test-forgejo: $FAIL check(s) FAILED"

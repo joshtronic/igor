@@ -20,9 +20,9 @@
 # successors. Hardcoded -- one operator, bake the value in.
 FORGEJO_CONNECT_TIMEOUT=5
 FORGEJO_MAX_TIME=15
-# Bounded retry, GET/HEAD only (igor#425). A read is safe to repeat, so a
-# transient stall (curl exit 28, timeout; or any other transport hiccup) costs
-# one retry instead of the whole tick -- previously an unguarded caller's
+# Bounded retry, GET/HEAD only, TRANSPORT failures only (igor#425). A read is
+# safe to repeat, so a transient stall (curl exit 28, timeout) costs one retry
+# instead of the whole tick -- previously an unguarded caller's
 # `x=$(_fj GET ... | jq ...)` propagated curl's raw exit code fatally under
 # `set -e -o pipefail` (the PR-review pickup loop's Signal 1 scan hit this
 # live). POST/PATCH/DELETE are NEVER retried here: they can land server-side
@@ -31,6 +31,16 @@ FORGEJO_MAX_TIME=15
 # own separate transient-retry). Hardcoded -- one operator, bake it in.
 FORGEJO_RETRY_COUNT=2
 FORGEJO_RETRY_DELAY=1
+# curl exit codes worth a second look: connect failed, timed out, SSL connect
+# error, empty reply, recv failure. Deliberately NOT 22 -- with `-sf` curl
+# exits 22 for every HTTP >= 400, which is an ANSWER, not a hiccup: the
+# Actions-API 404 is the normal response on Forgejo v15, a 403 is a
+# rate-limiter that wants backing off rather than two more requests, a 401 is
+# a bad token. Retrying those triples the request count and the worst-case
+# wall clock (15s -> 47s per call) for a result that won't change -- turning a
+# fast guarded miss on an unhealthy instance into a slow one, which is the
+# failure mode this whole change exists to avoid.
+FORGEJO_RETRY_CURL_CODES='7 28 35 52 56'
 _fj() {
   local method="$1" path="$2" body="${3:-}"
   local attempts=1
@@ -41,17 +51,23 @@ _fj() {
   if [ -n "$body" ]; then
     extra=(-H "Content-Type: application/json" -d "$body")
   fi
+  # The response is buffered rather than streamed: an attempt that may be
+  # retried can't emit a partial body first. Every _fj response is small JSON
+  # a caller command-substitutes anyway (the one raw-text endpoint, the
+  # Actions job log, has its own curl below and is untouched by this), so the
+  # cost is a trailing newline that `$( )` would have stripped regardless.
   local attempt out rc=0
   for ((attempt = 1; attempt <= attempts; attempt++)); do
     if out=$(curl -sf --connect-timeout "$FORGEJO_CONNECT_TIMEOUT" --max-time "$FORGEJO_MAX_TIME" -X "$method" \
         -H "Authorization: token $FORGEJO_TOKEN" \
-        "${extra[@]}" \
+        "${extra[@]+"${extra[@]}"}" \
         "$FORGEJO_URL/api/v1${path}"); then
       printf '%s' "$out"
       return 0
     else
       rc=$?
     fi
+    [[ " $FORGEJO_RETRY_CURL_CODES " == *" $rc "* ]] || return "$rc"
     [ "$attempt" -lt "$attempts" ] && sleep "$FORGEJO_RETRY_DELAY"
   done
   return "$rc"

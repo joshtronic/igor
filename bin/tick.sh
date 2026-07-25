@@ -3267,8 +3267,10 @@ while IFS= read -r repo_line; do
     # Best-effort by construction (igor#425): forgejo_pr_actionable_request_changes
     # degrades to empty on a fetch failure rather than propagating a nonzero
     # exit, so one transient timeout scanning a PR here can't abort the whole
-    # tick under `set -e -o pipefail` -- it used to.
-    latest_review=$(forgejo_pr_actionable_request_changes "$repo_full" "$pr_num" "$BOT_USER" 2>/dev/null || echo '')
+    # tick under `set -e -o pipefail` -- it used to. The guarantee lives in the
+    # helper (it ends in `return 0`), so no `|| echo` belt is added here on top
+    # of it -- a fallback that can never fire only hides where the guarantee is.
+    latest_review=$(forgejo_pr_actionable_request_changes "$repo_full" "$pr_num" "$BOT_USER" 2>/dev/null)
     [ -z "$latest_review" ] && continue
     # Synthesize the PR record into the same shape forgejo_my_assigned_prs
     # returns so the downstream flow can consume it uniformly.
