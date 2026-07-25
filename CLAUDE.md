@@ -261,7 +261,17 @@ respective tools on the host; install or skip.
   daily pass only ever read the 00:00-01:00 window -- 23 hours a day were
   unwatched; hourly closes that blind spot. Dedup (open-issue titles +
   recent commits) keeps a chronic failure to ONE ticket, not one/hour. Empty journal = unit runs elsewhere or didn't run =
-  skip; no canary/uptime semantics, no news is good news. The harness
+  skip; no canary/uptime semantics, no news is good news -- UNLESS the
+  unit has a companion `<base>.timer` file declared alongside it
+  (`logwatch_timer_transitioned`, igor#420): the timer's OWN journal for
+  the window is checked for a Stopped/Started transition, which only
+  systemd logs on an actual state change, never on ordinary firing. A
+  transition explains the silence (an operator pause, e.g.
+  `systemctl stop agent.timer`) and stays a skip; its absence means the
+  timer was continuously active, so an empty service journal is no
+  longer silently skipped -- it's passed to the reviewer as a "Timer
+  status" note and, for a unit that's supposed to fire every minute, is
+  itself failure-worthy. The harness
   discovers itself this way (`systemd/agent.service`); only its
   known-benign blurb is special-cased, keyed off the UNIT name. The
   contract is failure-smell, not narration: retries that succeeded,

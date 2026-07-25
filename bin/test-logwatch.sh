@@ -10,6 +10,9 @@
 #   - logwatch_strip_backoff_noise -- removes only the backoff's own
 #     narration lines from a journal, so a genuine unrelated failure
 #     in the same window still stands out.
+#   - logwatch_timer_transitioned -- distinguishes a timer-explained
+#     silence from a real one, so a deliberate `systemctl stop
+#     agent.timer` doesn't get misread as a stuck tick (igor#420).
 #
 # Skip-safe: exits 0 with a notice if jq is absent.
 set -uo pipefail
@@ -148,6 +151,37 @@ has "chronic path's unfiltered journal still carries the backoff narration" "$NO
 
 echo "-- unrelated-failure-during-backoff-still-files: transient backoff, but a real failure shares the window -> it survives stripping --"
 has "unrelated failure line survives suppress_noise=1 stripping" "$(logwatch_strip_backoff_noise "$MIXED")" "unbound variable in do_seo_tick"
+
+echo "== logwatch_timer_transitioned (igor#420) =="
+# do_logwatch_tick's decision, exercised on the pure function it's built
+# from (see bin/tick.sh's logwatch_review_unit): when a companion
+# *.timer unit's own journal for the window shows a Stopped/Started
+# transition, any silence in the paired service's journal is explained
+# by that operator-initiated pause and no finding is filed for it. When
+# it shows no transition, the timer is presumed to have run
+# continuously -- so an EMPTY service journal for that same window
+# becomes itself a finding (a per-minute unit producing nothing is the
+# failure), while a NON-empty, normal-looking journal files nothing (no
+# gap to explain in the first place).
+
+STOPPED_STARTED="$(cat <<'EOF'
+Jul 24 19:42:14 igor.sherver.org systemd[805]: Stopped agent.timer - Agent tick timer -- fires the next tick.
+Jul 24 21:46:32 igor.sherver.org systemd[805]: Started agent.timer - Agent tick timer -- fires the next tick.
+EOF
+)"
+yes "window containing a Stopped/Started pair -> transitioned (gap explained, no finding filed)" \
+  logwatch_timer_transitioned "$STOPPED_STARTED"
+
+no "empty timer journal (continuously active, no state change logged) -> not transitioned" \
+  logwatch_timer_transitioned ""
+# -> service journal empty in this case: real fault, finding filed.
+# -> service journal has normal per-minute ticks: nothing to explain, no finding filed.
+
+no "'Starting'/'Stopping' (in-progress, not completed) do not count as a transition" \
+  logwatch_timer_transitioned "Jul 24 19:42:10 igor.sherver.org systemd[805]: Stopping agent.timer - Agent tick timer -- fires the next tick..."
+
+no "a Started/Stopped line for a DIFFERENT unit does not count" \
+  logwatch_timer_transitioned "Jul 24 21:01:00 igor.sherver.org systemd[805]: Started agent.service - Agent tick."
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-logwatch: all checks passed"

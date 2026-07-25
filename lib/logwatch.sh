@@ -89,6 +89,25 @@ logwatch_chronic_backoff() {
   [ "${count:-0}" -ge "$LOGWATCH_CHRONIC_BACKOFF_DAYS" ]
 }
 
+# logwatch_timer_transitioned <timer_journal>
+# 0 (true) when <timer_journal> (journalctl output for a *.timer unit,
+# already scoped to the window under review) contains a Stopped or
+# Started transition line. systemd only emits these on an actual unit
+# state change -- an operator's `systemctl stop/start`, or boot/
+# shutdown -- never on the timer's ordinary per-minute firing, so their
+# presence means a deliberate pause explains any apparent gap in the
+# paired service's journal for the same window. Their ABSENCE, paired
+# with an empty journal for the service itself, means the opposite: the
+# timer was continuously active and the service still produced
+# nothing -- itself the failure for a unit that's supposed to fire
+# every minute (igor#420: a `Stopped`/`Started agent.timer` pair was
+# previously invisible to the reviewer, which guessed a long-running
+# tick from the resulting silence instead).
+logwatch_timer_transitioned() {
+  local timer_journal="$1"
+  grep -qE '(Stopped|Started) .*\.timer' <<<"$timer_journal"
+}
+
 # logwatch_strip_backoff_noise <journal>
 # Remove only the lines that ARE the backoff's own narration --
 # health's alert-emailed line, tick.sh's "backoff active" skip-gate

@@ -2419,17 +2419,21 @@ logwatch_mark_done() {
   mv "$tmp" "$state_file"
 }
 
-# logwatch_review_unit <repo> <unit> [suppress_noise]
+# logwatch_review_unit <repo> <unit> [suppress_noise] [timer_unit]
 # Review ONE unit's just-closed-hour journal; file tickets on <repo>.
 # suppress_noise=1 strips lines that are pure narration of a
 # TRANSIENT Claude health backoff (logwatch_strip_backoff_noise)
 # before review, so a genuine unrelated failure in the same window
 # still files even while the backoff itself stays unticketed; omit
 # (or a chronic backoff, see do_logwatch_tick) to review the journal
-# as-is. Returns 0 if a model call ran (the tick did real work), 1 if
-# the unit was skipped (empty journal).
+# as-is. timer_unit, when the unit has a companion *.timer file
+# declared alongside it (per-minute cadence), disambiguates a silent
+# window instead of leaving the reviewer to guess from timestamps
+# (igor#420) -- see logwatch_timer_transitioned. Returns 0 if a model
+# call ran (the tick did real work), 1 if the unit was skipped (empty
+# journal, timer-explained).
 logwatch_review_unit() {
-  local repo="$1" unit="$2" suppress_noise="${3:-0}"
+  local repo="$1" unit="$2" suppress_noise="${3:-0}" timer_unit="${4:-}"
   local win_start win_end win_label start journal
   win_start=$(date -d '1 hour ago' '+%Y-%m-%d %H:00:00')   # the just-closed clock hour
   win_end=$(date '+%Y-%m-%d %H:00:00')
@@ -2442,9 +2446,37 @@ logwatch_review_unit() {
   if [ "$suppress_noise" = "1" ]; then
     journal=$(logwatch_strip_backoff_noise "$journal")
   fi
+
+  local timer_transitioned=0 timer_note="" timer_section=""
+  if [ -n "$timer_unit" ]; then
+    local timer_journal
+    timer_journal=$(journalctl --user -u "$timer_unit" \
+      --since "$win_start" --until "$win_end" \
+      --no-pager 2>/dev/null | grep -v '^-- No entries --$')
+    logwatch_timer_transitioned "$timer_journal" && timer_transitioned=1
+  fi
+
   if [ -z "$journal" ]; then
-    log "logwatch: ${unit}: no entries in the past hour -- skipping"
-    return 1
+    if [ -n "$timer_unit" ] && [ "$timer_transitioned" -eq 0 ]; then
+      # Timer-driven unit, no state change logged for the timer itself
+      # (presumed continuously active), yet the unit produced nothing --
+      # itself the failure, not something to silently skip past.
+      journal="(no journal entries for ${unit} in this window)"
+      timer_note="${timer_unit} was continuously active this window (no Stopped/Started transition observed) -- ${unit} is driven by it and expected to produce journal entries every time it fires. This silence is NOT explained by the timer and is itself failure-worthy."
+    else
+      log "logwatch: ${unit}: no entries in the past hour -- skipping"
+      return 1
+    fi
+  elif [ "$timer_transitioned" -eq 1 ]; then
+    timer_note="${timer_unit} was stopped and/or started at some point during this window (an operator-initiated pause) -- any apparent gap in ${unit}'s activity is explained by that pause. Do NOT file a tick-gap/silence finding for it."
+  fi
+
+  if [ -n "$timer_note" ]; then
+    timer_section="
+
+## Timer status for ${win_label}
+
+${timer_note}"
   fi
 
   local open_titles recent_commits
@@ -2491,6 +2523,10 @@ Do NOT file for:
 - a symptom that a recent commit (subjects provided) plausibly
   already fixes -- when a commit subject and a log symptom line up,
   the fix wins: do not file
+- a gap or silence in this journal when a \"Timer status\" section
+  below says the paired timer was stopped/started in this window --
+  trust that over inferring a long-running or stuck process from
+  timestamps alone
 ${blurb}
 
 DO file for:
@@ -2499,6 +2535,9 @@ DO file for:
 - the unit crashing or exiting nonzero with no benign explanation
 - output indicative of a bug: stack traces, unbound variables,
   parse errors, shell warnings
+- a \"Timer status\" section below stating the paired timer was
+  continuously active while this unit produced no journal entries at
+  all -- for a timer-driven unit that silence is itself the failure
 
 Output STRICT JSON only -- no preamble, no fences:
 {\"findings\": [{\"title\": \"...\", \"severity\": \"low|medium|high\", \"body\": \"...\"}]}
@@ -2520,6 +2559,7 @@ ${open_titles:-(none)}
 ## Recent commit subjects on ${repo} (fixes here may already cover symptoms below)
 
 ${recent_commits:-(none)}
+${timer_section}
 
 ## Journal: ${unit}, ${win_label}
 
@@ -2633,17 +2673,24 @@ do_logwatch_tick() {
 
   # Discovery: every bot-accessible repo that declares systemd units.
   # ANALYSIS_REPOS_JSON (not the validated set) -- like maintenance,
-  # this pass only reads and files issues, never commits.
-  local reviewed=0 repo_line r_name units unit
+  # this pass only reads and files issues, never commits. A unit with a
+  # companion <base>.timer file in the same dir is timer-driven; that
+  # pairing is what lets logwatch_review_unit disambiguate a silent
+  # window instead of guessing (igor#420).
+  local reviewed=0 repo_line r_name dir_listing units timers unit base timer_unit
   while IFS= read -r repo_line; do
     [ -z "$repo_line" ] && continue
     r_name=$(jq -r '.full_name' <<<"$repo_line")
-    units=$(forgejo_repo_list_dir "$r_name" "systemd" 2>/dev/null \
-      | grep -E '\.service$' || true)
+    dir_listing=$(forgejo_repo_list_dir "$r_name" "systemd" 2>/dev/null)
+    units=$(grep -E '\.service$' <<<"$dir_listing" || true)
     [ -z "$units" ] && continue
+    timers=$(grep -E '\.timer$' <<<"$dir_listing" || true)
     while IFS= read -r unit; do
       [ -z "$unit" ] && continue
-      if logwatch_review_unit "$r_name" "$unit" "$suppress_noise"; then
+      base="${unit%.service}"
+      timer_unit=""
+      grep -qxF "${base}.timer" <<<"$timers" && timer_unit="${base}.timer"
+      if logwatch_review_unit "$r_name" "$unit" "$suppress_noise" "$timer_unit"; then
         reviewed=$((reviewed + 1))
       fi
     done <<<"$units"
