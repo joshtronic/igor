@@ -3264,20 +3264,16 @@ while IFS= read -r repo_line; do
     [ -z "$pr_num" ] && continue
     pr_details_json=$(forgejo_get_pr "$repo_full" "$pr_num" 2>/dev/null || echo '{}')
     [ "$(jq -r '.number // ""' <<<"$pr_details_json")" = "" ] && continue
-    latest_review=$(forgejo_pr_non_bot_reviews "$repo_full" "$pr_num" "$BOT_USER" 2>/dev/null \
-      | jq -c '.[-1] // empty')
+    # Best-effort by construction (igor#425): forgejo_pr_actionable_request_changes
+    # degrades to empty on a fetch failure rather than propagating a nonzero
+    # exit, so one transient timeout scanning a PR here can't abort the whole
+    # tick under `set -e -o pipefail` -- it used to.
+    latest_review=$(forgejo_pr_actionable_request_changes "$repo_full" "$pr_num" "$BOT_USER" 2>/dev/null || echo '')
     [ -z "$latest_review" ] && continue
-    review_state=$(jq -r '.state // ""' <<<"$latest_review")
-    review_stale=$(jq -r '.stale // false' <<<"$latest_review")
-    review_dismissed=$(jq -r '.dismissed // false' <<<"$latest_review")
-    if [ "$review_state" = "REQUEST_CHANGES" ] \
-        && [ "$review_stale" = "false" ] \
-        && [ "$review_dismissed" = "false" ]; then
-      # Synthesize the PR record into the same shape forgejo_my_assigned_prs
-      # returns so the downstream flow can consume it uniformly.
-      REVIEW_PR=$(jq -c --arg r "$repo_full" '. + {repository: {full_name: $r}}' <<<"$pr_details_json")
-      REVIEW_PR_TRIGGER="REQUEST_CHANGES review (not stale, not dismissed)"
-    fi
+    # Synthesize the PR record into the same shape forgejo_my_assigned_prs
+    # returns so the downstream flow can consume it uniformly.
+    REVIEW_PR=$(jq -c --arg r "$repo_full" '. + {repository: {full_name: $r}}' <<<"$pr_details_json")
+    REVIEW_PR_TRIGGER="REQUEST_CHANGES review (not stale, not dismissed)"
   done < <(jq -r '.[].number' <<<"$rc_open_prs" 2>/dev/null)
 done <<<"$VALIDATED_REPOS_JSON"
 

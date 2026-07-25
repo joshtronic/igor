@@ -185,6 +185,99 @@ eq "v15 / Actions API 404 -> empty (graceful no-op, v15-safe)" "" "$(fcl_v15)"
 eq "empty sha -> empty (nothing to look up)" "" "$(forgejo_failing_ci_logs acme/x '')"
 eq "job log: empty job id -> empty (guard)" "" "$(forgejo_action_job_log acme/x '')"
 
+# _fj bounded retry, GET/HEAD only (igor#425): a stalled read (curl exit 28,
+# timeout) used to propagate fatally -- an unguarded caller like
+# `x=$(_fj GET ... | jq ...)` in tick.sh's PR-review pickup loop would abort
+# the WHOLE TICK under `set -e -o pipefail` on one transient blip. A GET/HEAD
+# is idempotent, so it should retry instead. POST/PATCH/DELETE must NEVER
+# retry here -- they can land server-side and still time out client-side, and
+# a naive retry would double-post/double-act. Stub `curl` itself (not `_fj`)
+# with a call-counter file so the real retry loop runs; no-op `sleep` so the
+# retry delay doesn't actually pause the test (same pattern as the
+# forgejo_request_review retry tests above). Re-source first: earlier
+# fixtures above redefine `_fj` itself (bash function defs aren't scoped to
+# their enclosing function), so the real _fj must be restored before testing
+# it directly.
+echo "== _fj: bounded retry on GET/HEAD, never on writes (igor#425) =="
+. "$HERE/../lib/forgejo.sh"
+sleep() { :; }
+
+RETRY_STATE=$(mktemp)
+curl() {
+  local n; n=$(cat "$RETRY_STATE" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" >"$RETRY_STATE"
+  if [ "$n" -eq 1 ]; then return 28; else printf '{"ok":true}'; return 0; fi
+}
+OUT=$(_fj GET /repos/acme/x/pulls/1/reviews); RC=$?
+eq "GET: timeout then success -> rc 0" "0" "$RC"
+eq "GET: timeout then success -> returns the successful body" '{"ok":true}' "$OUT"
+eq "GET: retried exactly once (2 attempts total)" "2" "$(cat "$RETRY_STATE")"
+rm -f "$RETRY_STATE"
+
+RETRY_STATE=$(mktemp)
+curl() {
+  local n; n=$(cat "$RETRY_STATE" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" >"$RETRY_STATE"
+  return 28
+}
+OUT=$(_fj GET /repos/acme/x/pulls/1/reviews); RC=$?
+eq "GET: persistent timeout -> gives up, rc != 0" "true" "$([ "$RC" -ne 0 ] && echo true || echo false)"
+eq "GET: persistent timeout -> bounded attempts (not infinite)" \
+  "$((FORGEJO_RETRY_COUNT + 1))" "$(cat "$RETRY_STATE")"
+rm -f "$RETRY_STATE"
+
+RETRY_STATE=$(mktemp)
+curl() {
+  local n; n=$(cat "$RETRY_STATE" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" >"$RETRY_STATE"
+  return 28
+}
+_fj POST /repos/acme/x/issues/1/comments '{"body":"hi"}' >/dev/null 2>&1
+eq "POST: never retried even on failure (exactly 1 attempt)" "1" "$(cat "$RETRY_STATE")"
+rm -f "$RETRY_STATE"
+unset -f curl sleep
+
+# forgejo_pr_actionable_request_changes (igor#425): the Signal-1 pickup check
+# factored out of tick.sh's PR-review loop specifically so a fetch failure
+# degrades to "no signal" instead of propagating a fatal exit. Stubs `_fj`
+# directly (like the fixtures above), so these don't depend on the retry loop.
+echo "== forgejo_pr_actionable_request_changes: pickup signal, best-effort (igor#425) =="
+parc() { local fx="$1"; _fj() { printf '%s' "$fx"; }; forgejo_pr_actionable_request_changes acme/x 42 bot; }
+
+LIVE_RC='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","stale":false,"dismissed":false,"submitted_at":"2026-01-01T00:00:00Z"}]'
+eq "live REQUEST_CHANGES -> returns that review" "REQUEST_CHANGES" "$(jq -r '.state' <<<"$(parc "$LIVE_RC")")"
+
+STALE_RC='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","stale":true,"dismissed":false,"submitted_at":"2026-01-01T00:00:00Z"}]'
+eq "stale REQUEST_CHANGES -> not actionable (empty)" "" "$(parc "$STALE_RC")"
+
+DISMISSED_RC='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","stale":false,"dismissed":true,"submitted_at":"2026-01-01T00:00:00Z"}]'
+eq "dismissed REQUEST_CHANGES -> not actionable (empty)" "" "$(parc "$DISMISSED_RC")"
+
+APPROVED_RC='[{"user":{"login":"josh"},"state":"APPROVED","stale":false,"dismissed":false,"submitted_at":"2026-01-01T00:00:00Z"}]'
+eq "latest review APPROVED -> empty (no request-changes signal)" "" "$(parc "$APPROVED_RC")"
+
+eq "no reviews at all -> empty" "" "$(parc '[]')"
+
+# The regression this guards: a transient fetch failure (curl exit 28) on this
+# read must degrade to "no signal", NOT propagate a nonzero exit that would
+# abort the caller's scan loop under `set -e -o pipefail` -- exactly the crash
+# this issue reports (two exit-28 ticks landing in this PR-review pickup scan).
+frc_fail() { _fj() { return 28; }; forgejo_pr_actionable_request_changes acme/x 42 bot; }
+eq "fetch failure -> empty (best-effort, not fatal)" "" "$(frc_fail)"
+
+(
+  set -euo pipefail
+  _fj() { return 28; }
+  RESULT=$(forgejo_pr_actionable_request_changes acme/x 42 bot)
+  [ -z "$RESULT" ]
+)
+eq "fetch failure under set -e -o pipefail does not abort the caller" "0" "$?"
+
+# Structural regression net: the PR-review pickup Signal-1 loop in tick.sh
+# must call the guarded helper, not re-inline the unguarded fetch+jq this
+# issue fixed.
+echo "== tick.sh: PR-review pickup Signal 1 uses the guarded helper (igor#425) =="
+TICK="$HERE/tick.sh"
+eq "tick.sh calls forgejo_pr_actionable_request_changes" "true" \
+  "$(grep -q 'forgejo_pr_actionable_request_changes' "$TICK" && echo true || echo false)"
+
 if [ "$FAIL" -eq 0 ]; then echo "test-forgejo: all checks passed"; exit 0; fi
 echo "test-forgejo: $FAIL check(s) FAILED"
 exit 1

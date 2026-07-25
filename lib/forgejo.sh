@@ -20,19 +20,41 @@
 # successors. Hardcoded -- one operator, bake the value in.
 FORGEJO_CONNECT_TIMEOUT=5
 FORGEJO_MAX_TIME=15
+# Bounded retry, GET/HEAD only (igor#425). A read is safe to repeat, so a
+# transient stall (curl exit 28, timeout; or any other transport hiccup) costs
+# one retry instead of the whole tick -- previously an unguarded caller's
+# `x=$(_fj GET ... | jq ...)` propagated curl's raw exit code fatally under
+# `set -e -o pipefail` (the PR-review pickup loop's Signal 1 scan hit this
+# live). POST/PATCH/DELETE are NEVER retried here: they can land server-side
+# and still time out client-side, and a naive retry would double-post/
+# double-act (see forgejo_comment, forgejo_assign, forgejo_request_review's
+# own separate transient-retry). Hardcoded -- one operator, bake it in.
+FORGEJO_RETRY_COUNT=2
+FORGEJO_RETRY_DELAY=1
 _fj() {
   local method="$1" path="$2" body="${3:-}"
+  local attempts=1
+  case "$method" in
+    GET|HEAD) attempts=$((FORGEJO_RETRY_COUNT + 1)) ;;
+  esac
+  local -a extra=()
   if [ -n "$body" ]; then
-    curl -sf --connect-timeout "$FORGEJO_CONNECT_TIMEOUT" --max-time "$FORGEJO_MAX_TIME" -X "$method" \
-      -H "Authorization: token $FORGEJO_TOKEN" \
-      -H "Content-Type: application/json" \
-      -d "$body" \
-      "$FORGEJO_URL/api/v1${path}"
-  else
-    curl -sf --connect-timeout "$FORGEJO_CONNECT_TIMEOUT" --max-time "$FORGEJO_MAX_TIME" -X "$method" \
-      -H "Authorization: token $FORGEJO_TOKEN" \
-      "$FORGEJO_URL/api/v1${path}"
+    extra=(-H "Content-Type: application/json" -d "$body")
   fi
+  local attempt out rc=0
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if out=$(curl -sf --connect-timeout "$FORGEJO_CONNECT_TIMEOUT" --max-time "$FORGEJO_MAX_TIME" -X "$method" \
+        -H "Authorization: token $FORGEJO_TOKEN" \
+        "${extra[@]}" \
+        "$FORGEJO_URL/api/v1${path}"); then
+      printf '%s' "$out"
+      return 0
+    else
+      rc=$?
+    fi
+    [ "$attempt" -lt "$attempts" ] && sleep "$FORGEJO_RETRY_DELAY"
+  done
+  return "$rc"
 }
 
 # All open issues with label:Agent, no Status/Blocked, and no
@@ -99,6 +121,30 @@ forgejo_pr_non_bot_reviews() {
         [.[] | select(.user.login != $b)]
         | sort_by(.submitted_at)
       '
+}
+
+# The PR-review pickup's Signal-1 check: does this PR's latest non-bot review
+# amount to a live, unaddressed "request changes"? Returns that review's JSON
+# on stdout if the latest one is REQUEST_CHANGES and neither stale nor
+# dismissed; empty otherwise -- including on a fetch failure. Best-effort by
+# construction (igor#425): every step degrades to empty rather than
+# propagating a nonzero exit, so a caller scanning many PRs
+# (`latest=$(forgejo_pr_actionable_request_changes ...)`) can't have one
+# transient timeout abort the whole scan under `set -e -o pipefail`.
+forgejo_pr_actionable_request_changes() {
+  local repo="$1" number="$2" bot="$3" reviews latest state stale dismissed
+  reviews=$(forgejo_pr_non_bot_reviews "$repo" "$number" "$bot" 2>/dev/null) || reviews='[]'
+  latest=$(jq -c '.[-1] // empty' <<<"$reviews" 2>/dev/null) || latest=""
+  [ -z "$latest" ] && { printf ''; return 0; }
+  state=$(jq -r '.state // ""' <<<"$latest" 2>/dev/null || printf '')
+  stale=$(jq -r '.stale // false' <<<"$latest" 2>/dev/null || printf 'false')
+  dismissed=$(jq -r '.dismissed // false' <<<"$latest" 2>/dev/null || printf 'false')
+  if [ "$state" = "REQUEST_CHANGES" ] && [ "$stale" = "false" ] && [ "$dismissed" = "false" ]; then
+    printf '%s' "$latest"
+  else
+    printf ''
+  fi
+  return 0
 }
 
 forgejo_assign() {
