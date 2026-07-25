@@ -1222,15 +1222,6 @@ maintenance_eligible() {
 # Igor-driven (scheduled chore). Runs after Igor's own daily work in
 # the cascade; no time-of-day gate (the shift window was removed).
 do_maintenance_tick() {
-  # Stale headless-browser and static-file-server reaps run first and
-  # unconditionally, ahead of the weekly per-repo eligibility gate below
-  # -- neither is itself a per-repo audit, just host-level cleanup that
-  # should self-heal every time this function is reached (igor#388,
-  # igor#418). Non-model (ps + kill only); silent no-op when nothing is
-  # stale.
-  browser_reap_sweep
-  http_reap_sweep
-
   local repo_line r_name
   local eligible=()
   while IFS= read -r repo_line; do
@@ -2981,6 +2972,21 @@ build_deps_section() {
 # then scheduled maintenance, then the claimable-issue grind. The
 # daily/weekly slots are throttled so Igor's own work can't flood
 # the day; tickets soak up whatever time is left and roll over.
+
+# -- Stale process reaps (host-level cleanup) --------------------
+#
+# Headless browsers (igor#388) and static-file servers (igor#418) leak out
+# of ticks: reparented to init, alive for hours, and in igor#418's case
+# squatting a port that a LATER tick's build verification then talked to.
+# Both sweeps used to live inside do_maintenance_tick, which only runs on
+# a tick that falls all the way down the cascade -- so a busy stretch left
+# the orphans alive exactly as long as igor#418 reported (8+ hours). They
+# belong here instead: unconditional, every tick, above both the health
+# gate and the deploy barrier, since neither sweep calls a model (ps +
+# kill only) and neither cares whether a deploy is in flight. Silent
+# no-op when nothing is stale, which is the normal case.
+browser_reap_sweep
+http_reap_sweep
 
 # -- Claude health: probe, alert, global backoff gate ------------
 #

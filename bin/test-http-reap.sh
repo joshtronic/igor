@@ -53,8 +53,21 @@ killed "etimes 500 >= 300, python -m SimpleHTTPServer" "$T2B" 1010
 echo "== stale non-server (2h node build) -> spared (signature must match) =="
 T3='1003 1 7200 node build.js --watch'
 spared "node basename, no server signature" "$T3" 1003
-T3B='1003b 1 7200 /usr/bin/rustc --edition 2021 main.rs'
-spared "unrelated compiler, no server signature, etimes alone is not enough" "$T3B" 1003b
+T3B='1013 1 7200 /usr/bin/rustc --edition 2021 main.rs'
+spared "unrelated compiler, no server signature, etimes alone is not enough" "$T3B" 1013
+
+echo "== malformed pid -> row skipped by the numeric-pid guard =="
+# Same otherwise-reapable cmdline as T1, so the ONLY reason it's spared is
+# the non-numeric pid guard -- keeps the guard covered deliberately rather
+# than by accident.
+T3C='1003b 1 500 python3 -m http.server 8099'
+spared "non-numeric pid is never selected" "$T3C" 1003b
+
+echo "== unrelated proc whose ARGS mention a server -> spared =="
+T3D='1012 1 7200 tail -F /var/log/http-server.log'
+spared "tail on a server logfile is not an interpreter" "$T3D" 1012
+T3E='1014 1 7200 grep -r http.server /home/agent/src'
+spared "grep for the signature is not an interpreter" "$T3E" 1014
 
 echo "== stale http-server (npm package) -> killed =="
 T4='1004 1 900 http-server dist -p 8792'

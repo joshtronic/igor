@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # http-reap.sh -- kill stale static-file-server process trees at the top
-# of every maintenance tick. In-tick static-build verification (checking
+# of every tick. In-tick static-build verification (checking
 # that a route resolves under `_site`/`dist`/etc.) has been done by
 # spawning a throwaway `python3 -m http.server`-style listener and never
 # reaping it (igor#418): four such orphans were found live on the host,
@@ -29,7 +29,11 @@ HTTP_REAP_STALE_SECS=300
 # Never selected, no matter the age or cmdline -- the harness's own
 # driver process. Guards against a false-positive substring match (e.g.
 # an MCP node process whose module path happens to contain
-# "http-server") ever reaping the thing running the reaper.
+# "http-server") ever reaping the thing running the reaper. Protecting
+# `node` wholesale is why node-hosted servers that don't expose their own
+# argv[0] (`npx serve`) are directive-only, never reaped: the reaper is a
+# backstop for the common leaks, and mistaking the harness's own node for
+# a leak is worse than missing one.
 _http_reap_is_protected() {
   case "$1" in
     claude | node) return 0 ;;
@@ -45,9 +49,23 @@ _http_reap_is_server_binary() {
   esac
 }
 
-# Cmdline substrings that mark a process as a throwaway static-file
-# server even when the binary basename doesn't match one of the above
-# (e.g. `python3 -m http.server`, where the basename is just `python3`).
+# Interpreters that are a static-file server only when their ARGS say so
+# (`python3 -m http.server`, `php -S`). The cmdline substring match below
+# is gated on one of these basenames so an unrelated long-lived process
+# that merely MENTIONS a signature in its args -- `tail -F
+# http-server.log`, `grep -r http.server src/`, an editor open on this
+# file -- can never become a SIGKILL candidate.
+_http_reap_is_interpreter() {
+  case "$1" in
+    python* | php*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Cmdline substrings that mark an interpreter process as a throwaway
+# static-file server even when the binary basename doesn't match one of
+# the above (e.g. `python3 -m http.server`, where the basename is just
+# `python3`).
 _http_reap_cmd_matches() {
   case "$1" in
     *http.server* | *SimpleHTTPServer* | *http-server* | *"php -S"*) return 0 ;;
@@ -60,8 +78,8 @@ _http_reap_cmd_matches() {
 # separated; cmd is the remainder of the line, so internal spaces in the
 # command survive). Echoes one pid per line for every process that is
 # BOTH stale (etimes >= HTTP_REAP_STALE_SECS) AND matches a static-file
-# server signature (binary basename or cmdline substring) AND isn't
-# protected. No side effects -- never kills anything, so it's safe to
+# server signature (a known server binary basename, or an interpreter
+# basename whose args carry a server signature) AND isn't protected. No side effects -- never kills anything, so it's safe to
 # unit-test against a mock table.
 http_reap_select_victims() {
   local pid etimes cmd base
@@ -78,7 +96,8 @@ http_reap_select_victims() {
     base=$(basename -- "${cmd%% *}")
     _http_reap_is_protected "$base" && continue
 
-    if _http_reap_is_server_binary "$base" || _http_reap_cmd_matches "$cmd"; then
+    if _http_reap_is_server_binary "$base" \
+      || { _http_reap_is_interpreter "$base" && _http_reap_cmd_matches "$cmd"; }; then
       echo "$pid"
     fi
   done
@@ -97,7 +116,7 @@ _http_reap_kill_tree() {
 }
 
 # http_reap_sweep -- effectful entry point, called at the top of every
-# maintenance tick. Snapshots the process table, selects victims via the
+# tick. Snapshots the process table, selects victims via the
 # pure predicate above, kills each victim's whole tree, and logs one
 # line per victim (pid, etime, truncated cmdline). Silent no-op when
 # nothing is stale -- the normal case.
