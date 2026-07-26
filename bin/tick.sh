@@ -1222,6 +1222,13 @@ maintenance_eligible() {
 # Igor-driven (scheduled chore). Runs after Igor's own daily work in
 # the cascade; no time-of-day gate (the shift window was removed).
 do_maintenance_tick() {
+  # Stale headless-browser reap runs first and unconditionally, ahead of
+  # the weekly per-repo eligibility gate below -- it's not itself a
+  # per-repo audit, just a host-level cleanup that should self-heal every
+  # time this function is reached (igor#388). Non-model (ps + kill only);
+  # silent no-op when nothing is stale.
+  browser_reap_sweep
+
   local repo_line r_name
   local eligible=()
   while IFS= read -r repo_line; do
@@ -3044,19 +3051,21 @@ build_deps_section() {
 # daily/weekly slots are throttled so Igor's own work can't flood
 # the day; tickets soak up whatever time is left and roll over.
 
-# -- Stale process reaps (host-level cleanup) --------------------
+# -- Stale static-file-server reap (host-level cleanup) ----------
 #
-# Headless browsers (igor#388) and static-file servers (igor#418) leak out
-# of ticks: reparented to init, alive for hours, and in igor#418's case
-# squatting a port that a LATER tick's build verification then talked to.
-# Both sweeps used to live inside do_maintenance_tick, which only runs on
-# a tick that falls all the way down the cascade -- so a busy stretch left
-# the orphans alive exactly as long as igor#418 reported (8+ hours). They
-# belong here instead: unconditional, every tick, above both the health
-# gate and the deploy barrier, since neither sweep calls a model (ps +
-# kill only) and neither cares whether a deploy is in flight. Silent
-# no-op when nothing is stale, which is the normal case.
-browser_reap_sweep
+# Static-file servers leak out of ticks (igor#418): parented to init,
+# alive for hours, squatting a port that a LATER tick's build
+# verification then talks to -- so one tick's leak answers another
+# tick's curl with a stale build from a different repo. That's why this
+# sweep is every tick rather than riding do_maintenance_tick, which only
+# runs on a tick that falls all the way down the cascade: on a busy
+# stretch the wrong-build window stays open exactly as long as igor#418
+# reported (8+ hours). Above both the health gate and the deploy barrier,
+# since it calls no model (ps + kill only) and doesn't care whether a
+# deploy is in flight. Silent no-op when nothing is stale, the normal
+# case. The headless-browser sweep (igor#388) stays inside
+# do_maintenance_tick -- its predicate has no orphan guard yet, so
+# raising its cadence is its own change, not this one.
 http_reap_sweep
 
 # -- Claude health: probe, alert, global backoff gate ------------

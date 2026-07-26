@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # browser-reap.sh -- kill stale headless-browser (chrome/playwright) process
-# trees at the top of every tick. This is a headless server:
+# trees at the top of every maintenance tick. This is a headless server:
 # there is no desktop browser, so every chrome/chromium/headless_shell/
 # playwright process is automation (screenshots, visual self-verification,
 # deploy smoke). A legitimate capture finishes in seconds to low
@@ -87,7 +87,7 @@ _browser_reap_kill_tree() {
 }
 
 # browser_reap_sweep -- effectful entry point, called at the top of every
-# tick. Snapshots the process table, selects victims via the
+# maintenance tick. Snapshots the process table, selects victims via the
 # pure predicate above, kills each victim's whole tree, and logs one line
 # per victim (pid, etime, truncated cmdline). Silent no-op when nothing is
 # stale -- the normal case.
