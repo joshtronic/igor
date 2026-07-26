@@ -3341,7 +3341,10 @@ while IFS= read -r repo_line; do
     # tick under `set -e -o pipefail` -- it used to. The guarantee lives in the
     # helper (it ends in `return 0`), so no `|| echo` belt is added here on top
     # of it -- a fallback that can never fire only hides where the guarantee is.
-    latest_review=$(forgejo_pr_actionable_request_changes "$repo_full" "$pr_num" "$BOT_USER" 2>/dev/null)
+    # Stderr is deliberately NOT redirected: this is the scan igor#424 was
+    # filed about (a tick died `status=28` with no error line), and the
+    # give-up line _fj now logs there has to survive to reach the journal.
+    latest_review=$(forgejo_pr_actionable_request_changes "$repo_full" "$pr_num" "$BOT_USER")
     [ -z "$latest_review" ] && continue
     # Synthesize the PR record into the same shape forgejo_my_assigned_prs
     # returns so the downstream flow can consume it uniformly.

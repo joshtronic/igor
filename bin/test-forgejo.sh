@@ -282,6 +282,20 @@ curl() {
 _fj POST /repos/acme/x/issues/1/comments '{"body":"hi"}' >/dev/null 2>&1
 eq "POST: never retried even on failure (exactly 1 attempt)" "1" "$(cat "$RETRY_STATE")"
 rm -f "$RETRY_STATE"
+
+# Buffering the body to make a retry decision must not change the BYTES a
+# caller sees. `$( )` strips trailing newlines, so a command-substituting
+# caller can't tell -- but one that PIPES `_fj` into `read` can: at EOF with
+# no delimiter, `read` returns nonzero and the final (often only) line is
+# lost. Re-emitting the newline restores curl's stream exactly; an empty body
+# stays empty, so a 204 doesn't grow a phantom line.
+curl() { printf '{"ok":true}\n'; }
+eq "_fj output survives a pipe into read (trailing newline preserved)" \
+  "got:{\"ok\":true}" \
+  "$(_fj GET /version | while IFS= read -r l; do printf 'got:%s\n' "$l"; done)"
+curl() { printf ''; }
+eq "_fj emits nothing for an empty body (no phantom newline)" "0" \
+  "$(_fj GET /version | wc -c)"
 unset -f curl sleep
 
 # forgejo_pr_actionable_request_changes (igor#425): the Signal-1 pickup check
@@ -320,6 +334,22 @@ eq "fetch failure -> empty (best-effort, not fatal)" "" "$(frc_fail)"
 )
 eq "fetch failure under set -e -o pipefail does not abort the caller" "0" "$?"
 
+# ...and the igor#424 half has to reach THIS path, not just a bare `_fj`. The
+# reported crash was an exit-28 in exactly this call chain, so the give-up
+# line is worthless if either hop between `_fj` and the caller swallows
+# stderr. Exercises the REAL _fj through the REAL helper (only `curl` and
+# `sleep` are stubbed) -- a `2>/dev/null` anywhere in between fails this.
+. "$HERE/../lib/forgejo.sh"
+sleep() { :; }
+curl() { return 28; }
+PICKUP_ERR=$(forgejo_pr_actionable_request_changes acme/x 42 bot 2>&1 >/dev/null)
+PICKUP_OUT=$(forgejo_pr_actionable_request_changes acme/x 42 bot 2>/dev/null); PICKUP_RC=$?
+unset -f curl sleep
+eq "give-up line survives the pickup helper (igor#424's actual reported path)" "true" \
+  "$(grep -q 'GET /repos/acme/x/pulls/42/reviews failed after' <<<"$PICKUP_ERR" && echo true || echo false)"
+eq "the diagnostic does not leak into the helper's stdout" "" "$PICKUP_OUT"
+eq "logging the give-up does not make the helper fatal" "0" "$PICKUP_RC"
+
 # Structural regression net: the PR-review pickup Signal-1 loop in tick.sh
 # must call the guarded helper, not re-inline the unguarded fetch+jq this
 # issue fixed. Anchored to the ASSIGNMENT, not a bare name match -- the diff
@@ -330,12 +360,22 @@ echo "== tick.sh: PR-review pickup Signal 1 uses the guarded helper (igor#425) =
 TICK="$HERE/tick.sh"
 eq "tick.sh assigns latest_review from the guarded helper (code, not a comment)" "1" \
   "$(grep -cE '^[[:space:]]*latest_review=\$\(forgejo_pr_actionable_request_changes ' "$TICK")"
+# That call must NOT redirect stderr. The helper's `return 0` is what makes it
+# non-fatal, so a `2>/dev/null` on top buys nothing and costs igor#424's
+# give-up line -- the one place it was asked for.
+eq "the pickup call lets the give-up line through (no 2>/dev/null)" "0" \
+  "$(grep -cE 'latest_review=\$\(forgejo_pr_actionable_request_changes .*2>/dev/null' "$TICK")"
 # And the unguarded shape is gone: the crash was a bare `$(_fj-fed fn | jq)`
 # assignment, whose pipeline status is curl's under `pipefail`. Every surviving
 # forgejo_pr_non_bot_reviews call site in tick.sh must carry an `|| echo`
-# fallback -- the one that didn't is what took the tick down.
+# fallback -- the one that didn't is what took the tick down. Counted, then
+# asserted nonzero: an equality between two greps that both find nothing is a
+# test that passes by having nothing to check.
+NBR_CALLS=$(grep -c 'forgejo_pr_non_bot_reviews' "$TICK")
+eq "there is still a forgejo_pr_non_bot_reviews call site to check (not vacuous)" "true" \
+  "$([ "$NBR_CALLS" -gt 0 ] && echo true || echo false)"
 eq "every forgejo_pr_non_bot_reviews call in tick.sh is || echo-guarded" \
-  "$(grep -c 'forgejo_pr_non_bot_reviews' "$TICK")" \
+  "$NBR_CALLS" \
   "$(grep 'forgejo_pr_non_bot_reviews' "$TICK" | grep -c '|| echo')"
 
 if [ "$FAIL" -eq 0 ]; then echo "test-forgejo: all checks passed"; exit 0; fi
