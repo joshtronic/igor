@@ -88,6 +88,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/maintenance-checks.sh"
 # shellcheck source=lib/browser-reap.sh
 . "$AGENT_HOME/lib/browser-reap.sh"
+# shellcheck source=lib/http-reap.sh
+. "$AGENT_HOME/lib/http-reap.sh"
 # shellcheck source=lib/cost.sh
 . "$AGENT_HOME/lib/cost.sh"
 # shellcheck source=lib/claude.sh
@@ -3049,6 +3051,23 @@ build_deps_section() {
 # daily/weekly slots are throttled so Igor's own work can't flood
 # the day; tickets soak up whatever time is left and roll over.
 
+# -- Stale static-file-server reap (host-level cleanup) ----------
+#
+# Static-file servers leak out of ticks (igor#418): parented to init,
+# alive for hours, squatting a port that a LATER tick's build
+# verification then talks to -- so one tick's leak answers another
+# tick's curl with a stale build from a different repo. That's why this
+# sweep is every tick rather than riding do_maintenance_tick, which only
+# runs on a tick that falls all the way down the cascade: on a busy
+# stretch the wrong-build window stays open exactly as long as igor#418
+# reported (8+ hours). Above both the health gate and the deploy barrier,
+# since it calls no model (ps + kill only) and doesn't care whether a
+# deploy is in flight. Silent no-op when nothing is stale, the normal
+# case. The headless-browser sweep (igor#388) stays inside
+# do_maintenance_tick -- its predicate has no orphan guard yet, so
+# raising its cadence is its own change, not this one.
+http_reap_sweep
+
 # -- Claude health: probe, alert, global backoff gate ------------
 #
 # Before any work: run the daily canary (probe + once-daily alert
@@ -4632,7 +4651,9 @@ Address it, then remove \`Status/Blocked\` to re-queue. (If the note above says 
     # so the PR carries visual proof, not just a text reference. Best-effort.
     if [ -n "$NEW_PR_NUMBER" ] && [ -d "$WORKTREE/.agent/screenshots" ]; then
       SHOT_N=$(forgejo_attach_pr_screenshots "$FORGEJO_REPO" "$NEW_PR_NUMBER" "$WORKTREE/.agent/screenshots" 2>/dev/null || echo 0)
-      [ "${SHOT_N:-0}" -gt 0 ] && log "attached $SHOT_N screenshot(s) to #$NEW_PR_NUMBER" || true
+      if [ "${SHOT_N:-0}" -gt 0 ]; then
+        log "attached $SHOT_N screenshot(s) to #$NEW_PR_NUMBER"
+      fi
     fi
   fi
 

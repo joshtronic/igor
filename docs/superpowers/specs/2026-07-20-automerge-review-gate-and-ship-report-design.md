@@ -23,12 +23,14 @@ ship-report** as the safety valve. Both ship together.
 ## Part 1 — Review-gate auto-merge
 
 ### The reframe
+
 This is not "turn auto-merge on/off." Every `smoke.url` repo already auto-merges;
 what varies is **whose review gate-keeps it** — the human or the shadow. The
 change flips the default gate from human to shadow, with a per-repo opt-out that
 pins a repo back to the human gate.
 
 ### The flag
+
 A per-repo `agent.json` key (idiomatic — sits alongside `.smoke`, `.seo`,
 `.feedback`):
 
@@ -43,6 +45,7 @@ A per-repo `agent.json` key (idiomatic — sits alongside `.smoke`, `.seo`,
   `APPROVE`** (the new default).
 
 ### The gate change in `do_automerge_tick`
+
 For each eligible PR (repo has `smoke.url`), all existing gates are unchanged —
 **CI green, cleanly mergeable, not-behind, and never on a `REQUEST_CHANGES`**.
 Only the *approval* signal changes:
@@ -65,6 +68,7 @@ Only the *approval* signal changes:
   repo, anytime.
 
 ### Carve-outs
+
 Repos whose real defect class a diff-reviewer can't judge stay human-gated:
 
 - **joshing.you** — identity/visual ("is this actually a Josh? is the screenshot
@@ -91,6 +95,7 @@ fail-closed property is provided by the pre-existing `smoke.url` eligibility gat
 (a new/unknown repo can't auto-merge at all until deliberately onboarded).
 
 ### Rollout order (matters)
+
 1. **Flags first.** PR the `automerge.require_human` flag into joshing.you and
    igor.bot `agent.json` (and, for uniformity/visibility, create a minimal
    `agent.json` carrying the flag for igor). These are **inert** until the harness
@@ -104,6 +109,7 @@ fail-closed property is provided by the pre-existing `smoke.url` eligibility gat
 The counterweight to removing Josh from the per-PR gate.
 
 ### Contents (three sections, priority order)
+
 1. **Needs you** — carve-out PRs (joshing.you, igor.bot) awaiting Josh's review;
    `REQUEST_CHANGES` escalations; deploy-barrier failures (stale build, broken
    sitemap, failed CI on an auto-merge). The don't-let-it-languish list.
@@ -115,6 +121,7 @@ The counterweight to removing Josh from the per-PR gate.
    miss something.)
 
 ### Mechanics
+
 - **Fully scripted, no model call.** The report is pure fact (which PRs merged,
   deploy status, what's pending), assembled from the Forgejo API + the `.deploy`
   state — like the SEO and deploy-barrier emails. It therefore sits **above the
@@ -128,6 +135,7 @@ The counterweight to removing Josh from the per-PR gate.
   digests, gated on `PRIMARY_RECIPIENTS` + SMTP2GO, reusing `email.sh`.
 
 ## Testing
+
 - `bin/test-automerge*.sh`: extend for the new gate — a `require_human` repo needs
   a human APPROVED (shadow `APPROVE` alone does NOT merge it); a default repo
   merges on shadow `APPROVE`; a shadow `COMMENT` does NOT merge either; existing
@@ -138,6 +146,7 @@ The counterweight to removing Josh from the per-PR gate.
   and it makes no model call.
 
 ## Non-goals (this phase)
+
 - **No auto-revert.** Phase-1 stays alert-only: the ship-report + deploy-barrier
   alerts are the control surface; a bad auto-merge is reverted by hand.
 - **No per-PR-class gating within a repo** (e.g. auto-merging igor.bot's `/now`
@@ -146,6 +155,7 @@ The counterweight to removing Josh from the per-PR gate.
 - **No priority-aware / concurrency changes** to the work loop — out of scope.
 
 ## Rollout sequence
+
 1. Spec (this doc).
 2. PR: carve-out `agent.json` flags (flags-first).
 3. PR: `do_automerge_tick` gate change + tests.
