@@ -253,14 +253,30 @@ respective tools on the host; install or skip.
   `.sports` never wipes what the reader has been taught.
 - The logwatch pass (`do_logwatch_tick`) is convention-driven, NO env
   knob: a root-level `systemd/` directory in any bot-accessible repo
-  declares "I run as a service", and once per clock hour (reviewing the
-  hour that JUST CLOSED -- window-completeness, not a send-hour: the
-  window read must be complete, which the previous hour always is, so
-  there's no midnight gate) each declared unit's LOCAL user journal gets
-  one `claude_call` on `AGENT_MODEL_REVIEW` hunting hard failures. The
-  daily pass only ever read the 00:00-01:00 window -- 23 hours a day were
-  unwatched; hourly closes that blind spot. Dedup (open-issue titles +
-  recent commits) keeps a chronic failure to ONE ticket, not one/hour. Empty journal = unit runs elsewhere or didn't run =
+  declares "I run as a service", and once per DAY (reviewing YESTERDAY,
+  whole and closed -- a partial day can't be measured against a
+  recurrence bar) each declared unit's LOCAL user journal is swept. Note
+  the full 24h is read, not one hour of it: the original daily pass read
+  only 00:00-01:00 and left 23 hours unwatched, which is what drove the
+  move to hourly in the first place. Hourly then created a worse problem
+  (igor#432) -- an hour of context cannot distinguish a transient from a
+  chronic, so every blip read as a defect and each one cost a full
+  build/review/rework cycle. Now a deterministic pre-pass
+  (`logwatch_recurring`) counts failure signatures across the day and
+  only signatures recurring `LOGWATCH_MIN_OCCURRENCES` (3) times reach
+  the `claude_call` on `AGENT_MODEL_REVIEW`; a one-off drops to a
+  greppable digest line instead of a ticket. A standing red state needs
+  no special rule -- it recurs by definition. Two filters make the count
+  mean anything: only `systemd[N]:` and `[agent]` lines are evidence (the
+  Claude session's PROSE is streamed into this same journal and talks
+  about failures constantly), and the reviewer is told to report the
+  observation WITHOUT a cause, since a confidently wrong cause steers the
+  fix wrong. The known cost is recall: a real problem visible only in
+  model narration (a red lint baseline, a session saying it couldn't do
+  something) no longer files -- those want their own mechanism (CI
+  gating lint; a structured harness warning), not a noisier logwatch.
+  Dedup (open-issue titles + recent commits) keeps a chronic failure to
+  ONE ticket. Empty journal = unit runs elsewhere or didn't run =
   skip; no canary/uptime semantics, no news is good news -- UNLESS the
   unit has a companion `<base>.timer` file declared alongside it
   (`logwatch_timer_verdict`, igor#420): the timer's own disposition

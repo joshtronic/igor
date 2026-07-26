@@ -1,10 +1,39 @@
 #!/usr/bin/env bash
-# lib/logwatch.sh -- pure helper for the hourly logwatch pass
+# lib/logwatch.sh -- pure helpers for the DAILY logwatch pass
 # (bin/tick.sh do_logwatch_tick). Split out from tick.sh only so it's
 # unit-testable in isolation; the rest of the pass (journal reads, the
 # review-tier model call, ticket filing) stays in tick.sh.
 #
 # Source order: no dependencies beyond jq.
+#
+# -- Why daily-with-a-recurrence-bar (igor#432) -------------------
+#
+# The pass used to run hourly and file on a SINGLE occurrence. Over five
+# verified tickets that produced one false positive (an operator pause), one
+# duplicate carrying a wrong cause, one real symptom with a wrong cause, and
+# two good ones. Each ticket, right or wrong, then cost a full build → review
+# → rework cycle, so a ~40% diagnosis hit rate at the top of the funnel set
+# the work rate for everything downstream.
+#
+# Two structural problems, both fixed here:
+#
+#   1. An hour of context cannot tell a transient from a chronic. They look
+#      identical. So every blip read as a defect and got chased. A 24h window
+#      can COUNT, and a count is exactly that discriminator.
+#
+#   2. Filing was triggered by the same threshold as looking. Looking costs
+#      one model call; filing commits the fleet to an agentic cycle. The bar
+#      for the second is now recurrence (LOGWATCH_MIN_OCCURRENCES), not
+#      existence.
+#
+# A standing red state (a red lint baseline, an expired token) needs no
+# separate rule: it recurs by definition, so the same bar catches it while a
+# one-off blip drops to a digest line in the journal.
+#
+# The trade is deliberate: precision over recall. A genuine one-off defect
+# that never repeats will now be logged and not filed. That is the intended
+# direction -- an unfiled transient costs a grep; a filed phantom costs a
+# build, a review, and a rework.
 
 # logwatch_health_backoff_in_window <state_file> <win_start_epoch> <win_end_epoch>
 # 0 (true) when the CURRENT Claude health record (lib/claude.sh's
@@ -282,4 +311,137 @@ logwatch_strip_backoff_noise() {
   local journal="$1"
   grep -vE 'claude health: backoff active \(kind=|health: (auth|limit) alert emailed|logwatch: [^:]+: (review call failed|no parseable review)' \
     <<<"$journal"
+}
+
+# -- Recurrence gate (igor#432) -----------------------------------
+#
+# How many times a distinct failure signature must appear inside the reviewed
+# day before it is worth a ticket. Three, not two: two is a coin-flip that a
+# retry-plus-alert pair can reach on its own, and the whole point is to stop
+# treating a blip as a defect. Hardcoded per the "strong opinions" convention.
+LOGWATCH_MIN_OCCURRENCES=3
+
+# WHO said it. Only two sources count as evidence:
+#
+#   systemd[N]:  unit lifecycle -- exits, failures, start/stop
+#   [agent]      the harness's own structured log lines
+#
+# Everything else in this journal is the CLAUDE SESSION'S PROSE, streamed
+# verbatim, and it is fatal to a syntactic filter: the model narrates about
+# failures constantly ("make lint reports the same two pre-existing
+# warnings...", "Blocking -- retry scope", "Fixed the root cause"), so a smell
+# match on prose is a near-guaranteed false positive. Measured against a real
+# day: without this filter 37 signatures matched and the only one to reach the
+# bar was `invoking claude for PR review (timeout Nm)` -- routine narration --
+# while the two genuine exit-28s sat below it. Git plumbing ("Preparing
+# worktree", "remote:", branch names that happen to contain the word timeout)
+# is excluded for the same reason; a git failure that matters still surfaces
+# as an [agent] warning or a nonzero unit exit.
+LOGWATCH_SOURCE='systemd\[[0-9]+\]: |\[agent\] '
+
+# Lines worth counting at all, among those sources. A failure smell,
+# deliberately syntactic rather than semantic: deciding what a line MEANS is
+# the reviewer's job, and the reviewer being confidently wrong about meaning is
+# what this whole change is walking back. This only answers "could this be a
+# failure?"
+#
+# Note "timed out" rather than a bare "timeout": the harness logs its own
+# configured limits ("invoking claude (timeout 30m)") on every single tick, so
+# the bare word matches a routine line hundreds of times a day and would clear
+# any recurrence bar by itself.
+LOGWATCH_SMELL='Failed with result|Main process exited|Traceback|command not found|unbound variable|: line [0-9]+:|[Ee]rror|ERROR|[Ww]arning|WARN|[Ff]ailed|[Ff]ailure|cannot |Cannot |No such file|Permission denied|timed out'
+
+# _logwatch_normalize_stream -- the normalization, applied to a STREAM.
+#
+# One sed over the whole journal, not one sed per line. That distinction is
+# the difference between a pass that finishes and one that doesn't: a real day
+# of agent.service is ~9,500 lines, and a per-line subprocess costs minutes and
+# would eat the tick budget whole.
+#
+# Collapses each line to a stable SIGNATURE so one condition recurring all day
+# counts as one thing rather than 700 distinct lines. Strips the syslog prefix
+# (timestamp, host, `unit[pid]:`), then flattens hex-ish tokens and digit runs
+# -- pids, epochs, durations, byte counts and shas all differ between
+# occurrences of the SAME failure.
+_logwatch_normalize_stream() {
+  sed -E \
+    -e 's/^[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} [^ ]+ //' \
+    -e 's/^[A-Za-z0-9_.@-]+\[[0-9]+\]: //' \
+    -e 's/\b[0-9a-f]{7,40}\b/HEX/g' \
+    -e 's/[0-9]+/N/g' \
+    -e 's/[[:space:]]+/ /g' \
+    -e 's/^ //; s/ $//'
+}
+
+# logwatch_normalize_line <line> -- single-line wrapper, for tests and for
+# reading. The bulk paths use the stream form above.
+logwatch_normalize_line() {
+  printf '%s\n' "$1" | _logwatch_normalize_stream
+}
+
+# _logwatch_smell_signatures <journal> -- every failure-smell signature in the
+# journal, one per line, unsorted. Four processes for the whole journal
+# regardless of its size.
+_logwatch_smell_signatures() {
+  printf '%s\n' "$1" \
+    | grep -E "$LOGWATCH_SOURCE" \
+    | grep -E "$LOGWATCH_SMELL" \
+    | _logwatch_normalize_stream \
+    | grep -v '^$' || true
+}
+
+# logwatch_recurring <journal> [min_occurrences]
+# The heart of the gate. Keeps only failure-smell lines from trusted sources,
+# groups them by signature, and prints one row per signature that met the bar:
+#
+#   <count>\t<signature>
+#
+# Signatures below the bar are omitted entirely -- they become the digest line
+# the caller logs, not a ticket. Prints nothing when nothing recurred, which is
+# the expected common case on a healthy day.
+logwatch_recurring() {
+  local journal="$1" min="${2:-$LOGWATCH_MIN_OCCURRENCES}"
+  _logwatch_smell_signatures "$journal" \
+    | sort | uniq -c | sort -rn \
+    | awk -v m="$min" '{ c=$1; $1=""; sub(/^ /,""); if (c+0 >= m+0) printf "%d\t%s\n", c, $0 }'
+}
+
+# logwatch_distinct_transients <journal> [min_occurrences]
+# How many distinct failure signatures were seen but did NOT meet the bar. The
+# caller logs this so a suppressed day stays greppable -- "nothing recurred"
+# and "the pass never ran" must not look alike.
+logwatch_distinct_transients() {
+  local journal="$1" min="${2:-$LOGWATCH_MIN_OCCURRENCES}"
+  _logwatch_smell_signatures "$journal" \
+    | sort | uniq -c \
+    | awk -v m="$min" '{ if ($1+0 < m+0) n++ } END { print n+0 }'
+}
+
+# logwatch_samples <journal> <signature> [max]
+# Up to <max> verbatim lines (default 3) whose signature matches, so a finding
+# carries real evidence with real timestamps rather than the flattened form.
+# First and last matter most -- they bound when the condition started and
+# whether it was still going -- so take from both ends.
+#
+# `paste` of the normalized stream against the original gives signature and
+# source line side by side in one pass, instead of re-normalizing per line.
+logwatch_samples() {
+  local journal="$1" want="$2" max="${3:-3}"
+  local -a hits=()
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] && hits+=("$line")
+  done < <(paste -d '\t' \
+             <(printf '%s\n' "$journal" | _logwatch_normalize_stream) \
+             <(printf '%s\n' "$journal") \
+           | awk -F'\t' -v w="$want" '$1 == w { sub(/^[^\t]*\t/, ""); print }')
+  local n=${#hits[@]}
+  [ "$n" -eq 0 ] && return 0
+  if [ "$n" -le "$max" ]; then
+    printf '%s\n' "${hits[@]}"
+    return 0
+  fi
+  printf '%s\n' "${hits[0]}"
+  [ "$max" -ge 3 ] && printf '%s\n' "${hits[$((n / 2))]}"
+  printf '%s\n' "${hits[$((n - 1))]}"
 }
