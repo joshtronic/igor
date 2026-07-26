@@ -54,6 +54,13 @@ The test for shipping: would a careful maintainer agree this
 needed doing this week? If you're reaching, you have your answer
 -- exit clean.
 
+Verifying a build or a route: check the files under the build output
+directory directly (existence, content, grep). Never spawn a local
+HTTP server (`python3 -m http.server` or similar) to test routing --
+a listener that isn't reaped outlives this pass and can answer a
+later tick's verification with a stale build from a different repo
+(igor#418).
+
 When you do ship, write `.agent/PR_BODY.md` with this exact shape:
 
     ## What this PR does
