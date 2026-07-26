@@ -89,6 +89,88 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+echo "== a suite that FAILS is reported, not swallowed =="
+# The runner runs under `set -e`, where a bare `out=$(bash "$t")` assignment
+# aborts the script the instant a suite exits nonzero -- taking the suite's
+# output, the verdict line, and every later suite with it. That is why the
+# capture lives in suite_run_report and why this block exists.
+FIXTURES=$(mktemp -d)
+trap 'rm -rf "$FIXTURES"' EXIT
+cat >"$FIXTURES/test-aa-fails.sh" <<'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+echo "fixture-fails: 1 FAILED"
+exit 1
+EOF
+cat >"$FIXTURES/test-zz-passes.sh" <<'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+echo "fixture-passes: all checks passed"
+EOF
+
+FAILED_OUT=$(suite_run_report "$FIXTURES/test-aa-fails.sh" 2>&1)
+FAILED_RC=$?
+if [ "$FAILED_RC" -eq 1 ]; then
+  printf '  + %s\n' "a nonzero suite makes suite_run_report return 1"
+else
+  printf '  x %s: returned %s, expected 1\n' "failing suite" "$FAILED_RC"
+  FAIL=$((FAIL + 1))
+fi
+case "$FAILED_OUT" in
+  *"fixture-fails: 1 FAILED"*) printf '  + %s\n' "the failing suite's own output is still printed" ;;
+  *) printf '  x %s\n' "failing suite's output was swallowed"; FAIL=$((FAIL + 1)) ;;
+esac
+case "$FAILED_OUT" in
+  *"x $FIXTURES/test-aa-fails.sh failed"*) printf '  + %s\n' "it is reported as 'x <suite> failed'" ;;
+  *) printf '  x %s: got [%s]\n' "failing suite verdict" "$FAILED_OUT"; FAIL=$((FAIL + 1)) ;;
+esac
+
+# The runner's actual loop, `set -e` and all, over a failing suite followed by
+# a passing one. Both the later suite and the post-loop line must survive.
+LOOP_OUT=$(bash -c '
+  set -euo pipefail
+  . "$1/lib/suite-guard.sh"
+  loop_fail=0
+  for t in "$2"/test-*.sh; do
+    suite_run_report "$t" || loop_fail=1
+  done
+  echo "loop finished loop_fail=$loop_fail"' _ "$HERE" "$FIXTURES" 2>&1)
+case "$LOOP_OUT" in
+  *"fixture-passes: all checks passed"*"loop finished loop_fail=1"*)
+    printf '  + %s\n' "a failing suite does not abort the set -e runner loop" ;;
+  *)
+    printf '  x %s: got [%s]\n' "runner loop aborted early" "$LOOP_OUT"
+    FAIL=$((FAIL + 1)) ;;
+esac
+
+echo "== a passing suite still reports a pass =="
+PASS_OUT=$(suite_run_report "$FIXTURES/test-zz-passes.sh" 2>&1)
+PASS_RC=$?
+if [ "$PASS_RC" -eq 0 ]; then
+  printf '  + %s\n' "a clean suite returns 0"
+else
+  printf '  x %s: returned %s, expected 0\n' "passing suite" "$PASS_RC"
+  FAIL=$((FAIL + 1))
+fi
+case "$PASS_OUT" in
+  *"+ $FIXTURES/test-zz-passes.sh passed"*) printf '  + %s\n' "it is reported as '+ <suite> passed'" ;;
+  *) printf '  x %s: got [%s]\n' "passing suite verdict" "$PASS_OUT"; FAIL=$((FAIL + 1)) ;;
+esac
+
+echo "== a silent suite emits no stray blank line =="
+cat >"$FIXTURES/silent.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+SILENT_OUT=$(suite_run_report "$FIXTURES/silent.sh" 2>&1)
+silent_lines=$(printf '%s\n' "$SILENT_OUT" | grep -c . || true)
+if [ "$silent_lines" -eq 1 ]; then
+  printf '  + %s\n' "silent suite prints only its verdict line"
+else
+  printf '  x %s: expected 1 line, got %s [%s]\n' "silent suite" "$silent_lines" "$SILENT_OUT"
+  FAIL=$((FAIL + 1))
+fi
+
 if [ "$FAIL" -eq 0 ]; then
   echo "test-suite-guard: all checks passed"
 else
