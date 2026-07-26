@@ -77,15 +77,26 @@ _http_reap_cmd_matches() {
 # stdin, one process per line: "pid ppid etimes cmd..." (whitespace
 # separated; cmd is the remainder of the line, so internal spaces in the
 # command survive). Echoes one pid per line for every process that is
-# BOTH stale (etimes >= HTTP_REAP_STALE_SECS) AND matches a static-file
-# server signature (a known server binary basename, or an interpreter
-# basename whose args carry a server signature) AND isn't protected. No side effects -- never kills anything, so it's safe to
-# unit-test against a mock table.
+# orphaned (ppid 1) AND stale (etimes >= HTTP_REAP_STALE_SECS) AND
+# matches a static-file server signature (a known server binary
+# basename, or an interpreter basename whose args carry a server
+# signature) AND isn't protected. No side effects -- never kills
+# anything, so it's safe to unit-test against a mock table.
+#
+# The ppid check is what separates a LEAK from a server somebody is
+# using. Every orphan in igor#418 was reparented to init when its tick
+# exited, so ppid 1 is the leak's actual signature; age and cmdline
+# alone would also select `python3 -m http.server` that the operator
+# started from a shell five minutes ago and still has open, and SIGKILL
+# it out from under them with nothing but a journal line to show for it.
+# It also spares a listener a currently-RUNNING tick legitimately owns,
+# which the age check by itself would kill mid-verification.
 http_reap_select_victims() {
-  local pid etimes cmd base
-  while read -r pid _ etimes cmd; do
+  local pid ppid etimes cmd base
+  while read -r pid ppid etimes cmd; do
     [ -z "$pid" ] && continue
     case "$pid" in *[!0-9]*) continue ;; esac
+    [ "$ppid" = "1" ] || continue
     [ -n "$etimes" ] || continue
     case "$etimes" in *[!0-9]*) continue ;; esac
     [ "$etimes" -ge "$HTTP_REAP_STALE_SECS" ] || continue

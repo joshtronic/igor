@@ -100,12 +100,26 @@ killed "etimes == 300 (>=) is stale" "$TB1" 1007
 TB2='1008 1 299 python3 -m http.server 8000'
 spared "etimes == 299 (<) is not yet stale" "$TB2" 1008
 
+echo "== ppid: only ORPHANS are reaped, not servers somebody is running =="
+# The leak signature is reparenting to init when the tick exits. An
+# otherwise-identical row with a live parent is a server the operator (or a
+# still-running tick) started and is using -- SIGKILLing it would be worse
+# than the leak this reaps. Same cmdline and age in both rows, so parentage
+# is the ONLY difference.
+T7A='1015 1 500 python3 -m http.server 8099'
+killed "orphaned (ppid 1) stale server is reaped" "$T7A" 1015
+T7B='1016 40000 500 python3 -m http.server 8099'
+spared "same cmdline + age but a live parent -> spared" "$T7B" 1016
+T7C='1017 40000 99999 python3 -m http.server 8099'
+spared "a shell-parented server is spared no matter how old" "$T7C" 1017
+
 echo "== multi-row table -> only the matching stale row is selected =="
-MULTI=$(printf '%s\n%s\n%s\n%s\n' \
+MULTI=$(printf '%s\n%s\n%s\n%s\n%s\n' \
   '2001 1 500 python3 -m http.server 8099' \
   '2002 1 500 node build.js' \
   '2003 1 20 python3 -m http.server 8100' \
-  '2004 1 8000 /usr/local/bin/claude --dangerously-skip-permissions')
+  '2004 1 8000 /usr/local/bin/claude --dangerously-skip-permissions' \
+  '2005 40000 500 python3 -m http.server 8101')
 victims=$(http_reap_select_victims <<<"$MULTI")
 if [ "$victims" = "2001" ]; then
   printf '  + %s\n' "exactly the stale server row is selected, siblings spared"
