@@ -185,6 +185,199 @@ eq "v15 / Actions API 404 -> empty (graceful no-op, v15-safe)" "" "$(fcl_v15)"
 eq "empty sha -> empty (nothing to look up)" "" "$(forgejo_failing_ci_logs acme/x '')"
 eq "job log: empty job id -> empty (guard)" "" "$(forgejo_action_job_log acme/x '')"
 
+# _fj bounded retry, GET/HEAD only (igor#425): a stalled read (curl exit 28,
+# timeout) used to propagate fatally -- an unguarded caller like
+# `x=$(_fj GET ... | jq ...)` in tick.sh's PR-review pickup loop would abort
+# the WHOLE TICK under `set -e -o pipefail` on one transient blip. A GET/HEAD
+# is idempotent, so it should retry instead. POST/PATCH/DELETE must NEVER
+# retry here -- they can land server-side and still time out client-side, and
+# a naive retry would double-post/double-act. Stub `curl` itself (not `_fj`)
+# with a call-counter file so the real retry loop runs; no-op `sleep` so the
+# retry delay doesn't actually pause the test (same pattern as the
+# forgejo_request_review retry tests above). Re-source first: earlier
+# fixtures above redefine `_fj` itself (bash function defs aren't scoped to
+# their enclosing function), so the real _fj must be restored before testing
+# it directly.
+echo "== _fj: bounded retry on GET/HEAD, never on writes (igor#425) =="
+. "$HERE/../lib/forgejo.sh"
+sleep() { :; }
+
+RETRY_STATE=$(mktemp)
+curl() {
+  local n; n=$(cat "$RETRY_STATE" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" >"$RETRY_STATE"
+  if [ "$n" -eq 1 ]; then return 28; else printf '{"ok":true}'; return 0; fi
+}
+OUT=$(_fj GET /repos/acme/x/pulls/1/reviews); RC=$?
+eq "GET: timeout then success -> rc 0" "0" "$RC"
+eq "GET: timeout then success -> returns the successful body" '{"ok":true}' "$OUT"
+eq "GET: retried exactly once (2 attempts total)" "2" "$(cat "$RETRY_STATE")"
+rm -f "$RETRY_STATE"
+
+RETRY_STATE=$(mktemp)
+curl() {
+  local n; n=$(cat "$RETRY_STATE" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" >"$RETRY_STATE"
+  return 28
+}
+OUT=$(_fj GET /repos/acme/x/pulls/1/reviews); RC=$?
+eq "GET: persistent timeout -> gives up, rc != 0" "true" "$([ "$RC" -ne 0 ] && echo true || echo false)"
+eq "GET: persistent timeout -> bounded attempts (not infinite)" \
+  "$((FORGEJO_RETRY_COUNT + 1))" "$(cat "$RETRY_STATE")"
+rm -f "$RETRY_STATE"
+
+# An HTTP error is an ANSWER, not a hiccup. With `-sf`, curl exits 22 for every
+# HTTP >= 400: the v15 Actions-API 404 probe above is the NORMAL response there,
+# a 403 is a rate-limit that wants backing off rather than hammering, a 401 is a
+# bad token. Retrying any of them triples the request count and the wall clock
+# for a result that will not change -- and on an unhealthy instance that turns a
+# fast guarded miss into a slow one, which is the failure mode this whole change
+# exists to avoid. Only transport codes (7/28/35/52/56) are retryable.
+RETRY_STATE=$(mktemp)
+curl() {
+  local n; n=$(cat "$RETRY_STATE" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" >"$RETRY_STATE"
+  return 22
+}
+OUT=$(_fj GET /repos/acme/x/actions/runs); RC=$?
+eq "GET: HTTP error (curl 22) -> attempted exactly once, never retried" "1" "$(cat "$RETRY_STATE")"
+eq "GET: HTTP error -> curl's own exit code is preserved" "22" "$RC"
+ERRTXT=$(_fj GET /repos/acme/x/actions/runs 2>&1 >/dev/null)
+eq "GET: HTTP error stays SILENT (a 404 for an absent agent.json is the common path)" \
+  "" "$ERRTXT"
+rm -f "$RETRY_STATE"
+
+# igor#424: a tick died `status=28` with no error line at all, leaving nothing to
+# separate a network blip from a harness bug. Exhausting every retry on a
+# transport failure must say so -- and must say it on STDERR, or the message
+# lands inside the caller's `$( )` and becomes the value.
+RETRY_STATE=$(mktemp)
+curl() {
+  local n; n=$(cat "$RETRY_STATE" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" >"$RETRY_STATE"
+  return 28
+}
+GIVEUP_ERR=$(_fj GET /repos/acme/x/pulls/1/reviews 2>&1 >/dev/null)
+GIVEUP_OUT=$(_fj GET /repos/acme/x/pulls/1/reviews 2>/dev/null)
+eq "exhausted retries -> logs the give-up" "true" \
+  "$(grep -q 'failed after' <<<"$GIVEUP_ERR" && echo true || echo false)"
+eq "give-up line names the curl exit code" "true" \
+  "$(grep -q 'curl exit 28' <<<"$GIVEUP_ERR" && echo true || echo false)"
+eq "give-up line names the method and path" "true" \
+  "$(grep -q 'GET /repos/acme/x/pulls/1/reviews' <<<"$GIVEUP_ERR" && echo true || echo false)"
+eq "give-up goes to stderr, NOT into the caller's captured stdout" "" "$GIVEUP_OUT"
+rm -f "$RETRY_STATE"
+
+RETRY_STATE=$(mktemp)
+curl() {
+  local n; n=$(cat "$RETRY_STATE" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" >"$RETRY_STATE"
+  return 7
+}
+_fj GET /repos/acme/x/pulls >/dev/null 2>&1
+eq "GET: connect failure (curl 7) IS retried (transport, not HTTP)" \
+  "$((FORGEJO_RETRY_COUNT + 1))" "$(cat "$RETRY_STATE")"
+rm -f "$RETRY_STATE"
+
+RETRY_STATE=$(mktemp)
+curl() {
+  local n; n=$(cat "$RETRY_STATE" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" >"$RETRY_STATE"
+  return 28
+}
+_fj POST /repos/acme/x/issues/1/comments '{"body":"hi"}' >/dev/null 2>&1
+eq "POST: never retried even on failure (exactly 1 attempt)" "1" "$(cat "$RETRY_STATE")"
+rm -f "$RETRY_STATE"
+
+# Buffering the body to make a retry decision must not change the BYTES a
+# caller sees. `$( )` strips trailing newlines, so a command-substituting
+# caller can't tell -- but one that PIPES `_fj` into `read` can: at EOF with
+# no delimiter, `read` returns nonzero and the final (often only) line is
+# lost. Re-emitting the newline restores curl's stream exactly; an empty body
+# stays empty, so a 204 doesn't grow a phantom line.
+curl() { printf '{"ok":true}\n'; }
+eq "_fj output survives a pipe into read (trailing newline preserved)" \
+  "got:{\"ok\":true}" \
+  "$(_fj GET /version | while IFS= read -r l; do printf 'got:%s\n' "$l"; done)"
+curl() { printf ''; }
+eq "_fj emits nothing for an empty body (no phantom newline)" "0" \
+  "$(_fj GET /version | wc -c)"
+unset -f curl sleep
+
+# forgejo_pr_actionable_request_changes (igor#425): the Signal-1 pickup check
+# factored out of tick.sh's PR-review loop specifically so a fetch failure
+# degrades to "no signal" instead of propagating a fatal exit. Stubs `_fj`
+# directly (like the fixtures above), so these don't depend on the retry loop.
+echo "== forgejo_pr_actionable_request_changes: pickup signal, best-effort (igor#425) =="
+parc() { local fx="$1"; _fj() { printf '%s' "$fx"; }; forgejo_pr_actionable_request_changes acme/x 42 bot; }
+
+LIVE_RC='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","stale":false,"dismissed":false,"submitted_at":"2026-01-01T00:00:00Z"}]'
+eq "live REQUEST_CHANGES -> returns that review" "REQUEST_CHANGES" "$(jq -r '.state' <<<"$(parc "$LIVE_RC")")"
+
+STALE_RC='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","stale":true,"dismissed":false,"submitted_at":"2026-01-01T00:00:00Z"}]'
+eq "stale REQUEST_CHANGES -> not actionable (empty)" "" "$(parc "$STALE_RC")"
+
+DISMISSED_RC='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","stale":false,"dismissed":true,"submitted_at":"2026-01-01T00:00:00Z"}]'
+eq "dismissed REQUEST_CHANGES -> not actionable (empty)" "" "$(parc "$DISMISSED_RC")"
+
+APPROVED_RC='[{"user":{"login":"josh"},"state":"APPROVED","stale":false,"dismissed":false,"submitted_at":"2026-01-01T00:00:00Z"}]'
+eq "latest review APPROVED -> empty (no request-changes signal)" "" "$(parc "$APPROVED_RC")"
+
+eq "no reviews at all -> empty" "" "$(parc '[]')"
+
+# The regression this guards: a transient fetch failure (curl exit 28) on this
+# read must degrade to "no signal", NOT propagate a nonzero exit that would
+# abort the caller's scan loop under `set -e -o pipefail` -- exactly the crash
+# this issue reports (two exit-28 ticks landing in this PR-review pickup scan).
+frc_fail() { _fj() { return 28; }; forgejo_pr_actionable_request_changes acme/x 42 bot; }
+eq "fetch failure -> empty (best-effort, not fatal)" "" "$(frc_fail)"
+
+(
+  set -euo pipefail
+  _fj() { return 28; }
+  RESULT=$(forgejo_pr_actionable_request_changes acme/x 42 bot)
+  [ -z "$RESULT" ]
+)
+eq "fetch failure under set -e -o pipefail does not abort the caller" "0" "$?"
+
+# ...and the igor#424 half has to reach THIS path, not just a bare `_fj`. The
+# reported crash was an exit-28 in exactly this call chain, so the give-up
+# line is worthless if either hop between `_fj` and the caller swallows
+# stderr. Exercises the REAL _fj through the REAL helper (only `curl` and
+# `sleep` are stubbed) -- a `2>/dev/null` anywhere in between fails this.
+. "$HERE/../lib/forgejo.sh"
+sleep() { :; }
+curl() { return 28; }
+PICKUP_ERR=$(forgejo_pr_actionable_request_changes acme/x 42 bot 2>&1 >/dev/null)
+PICKUP_OUT=$(forgejo_pr_actionable_request_changes acme/x 42 bot 2>/dev/null); PICKUP_RC=$?
+unset -f curl sleep
+eq "give-up line survives the pickup helper (igor#424's actual reported path)" "true" \
+  "$(grep -q 'GET /repos/acme/x/pulls/42/reviews failed after' <<<"$PICKUP_ERR" && echo true || echo false)"
+eq "the diagnostic does not leak into the helper's stdout" "" "$PICKUP_OUT"
+eq "logging the give-up does not make the helper fatal" "0" "$PICKUP_RC"
+
+# Structural regression net: the PR-review pickup Signal-1 loop in tick.sh
+# must call the guarded helper, not re-inline the unguarded fetch+jq this
+# issue fixed. Anchored to the ASSIGNMENT, not a bare name match -- the diff
+# adds a comment mentioning the helper two lines above the call, so a plain
+# `grep -q <name>` would pass on the comment alone and could never fail for
+# the reason it exists.
+echo "== tick.sh: PR-review pickup Signal 1 uses the guarded helper (igor#425) =="
+TICK="$HERE/tick.sh"
+eq "tick.sh assigns latest_review from the guarded helper (code, not a comment)" "1" \
+  "$(grep -cE '^[[:space:]]*latest_review=\$\(forgejo_pr_actionable_request_changes ' "$TICK")"
+# That call must NOT redirect stderr. The helper's `return 0` is what makes it
+# non-fatal, so a `2>/dev/null` on top buys nothing and costs igor#424's
+# give-up line -- the one place it was asked for.
+eq "the pickup call lets the give-up line through (no 2>/dev/null)" "0" \
+  "$(grep -cE 'latest_review=\$\(forgejo_pr_actionable_request_changes .*2>/dev/null' "$TICK")"
+# And the unguarded shape is gone: the crash was a bare `$(_fj-fed fn | jq)`
+# assignment, whose pipeline status is curl's under `pipefail`. Every surviving
+# forgejo_pr_non_bot_reviews call site in tick.sh must carry an `|| echo`
+# fallback -- the one that didn't is what took the tick down. Counted, then
+# asserted nonzero: an equality between two greps that both find nothing is a
+# test that passes by having nothing to check.
+NBR_CALLS=$(grep -c 'forgejo_pr_non_bot_reviews' "$TICK")
+eq "there is still a forgejo_pr_non_bot_reviews call site to check (not vacuous)" "true" \
+  "$([ "$NBR_CALLS" -gt 0 ] && echo true || echo false)"
+eq "every forgejo_pr_non_bot_reviews call in tick.sh is || echo-guarded" \
+  "$NBR_CALLS" \
+  "$(grep 'forgejo_pr_non_bot_reviews' "$TICK" | grep -c '|| echo')"
+
 if [ "$FAIL" -eq 0 ]; then echo "test-forgejo: all checks passed"; exit 0; fi
 echo "test-forgejo: $FAIL check(s) FAILED"
 exit 1

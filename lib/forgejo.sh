@@ -10,6 +10,12 @@
 : "${FORGEJO_URL:?FORGEJO_URL must be set}"
 : "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set}"
 
+# bin/tick.sh defines log() before sourcing this; bin/agent-*.sh and the unit
+# tests may not. Same fallback shape as lib/http-reap.sh.
+if ! declare -F log >/dev/null; then
+  log() { printf '[agent] %s\n' "$*"; }
+fi
+
 # Fail-fast timeouts so a brief git.sherver.org blip can't wedge a tick.
 # --connect-timeout bounds the connect phase: a few-second server hiccup
 # either rides through or fails fast, instead of stalling. --max-time bounds
@@ -20,19 +26,79 @@
 # successors. Hardcoded -- one operator, bake the value in.
 FORGEJO_CONNECT_TIMEOUT=5
 FORGEJO_MAX_TIME=15
+# Bounded retry, GET/HEAD only, TRANSPORT failures only (igor#425). A read is
+# safe to repeat, so a transient stall (curl exit 28, timeout) costs one retry
+# instead of the whole tick -- previously an unguarded caller's
+# `x=$(_fj GET ... | jq ...)` propagated curl's raw exit code fatally under
+# `set -e -o pipefail` (the PR-review pickup loop's Signal 1 scan hit this
+# live). POST/PATCH/DELETE are NEVER retried here: they can land server-side
+# and still time out client-side, and a naive retry would double-post/
+# double-act (see forgejo_comment, forgejo_assign, forgejo_request_review's
+# own separate transient-retry). Hardcoded -- one operator, bake it in.
+#
+# The worst case this buys is 3 x FORGEJO_MAX_TIME + 2 x FORGEJO_RETRY_DELAY
+# ~= 47s for a single read, and the PR-review scan does a read per PR per
+# repo -- so a genuinely unreachable git.sherver.org makes a tick slow.
+# Accepted rather than capped by a global deadline: it costs 3x only when the
+# instance is down, in which case the tick has no work it can do anyway, and
+# the price of the alternative is paid on the healthy path. Ticks are
+# idempotent and systemd will not start one while the last is still running,
+# so a slow tick delays the next beat instead of piling up. The two knobs that
+# actually bound this are already conservative: 15s max-time (chosen in
+# igor#395 to be fail-fast) and a retry budget of 2.
+FORGEJO_RETRY_COUNT=2
+FORGEJO_RETRY_DELAY=1
+# curl exit codes worth a second look: connect failed, timed out, SSL connect
+# error, empty reply, recv failure. Deliberately NOT 22 -- with `-sf` curl
+# exits 22 for every HTTP >= 400, which is an ANSWER, not a hiccup: the
+# Actions-API 404 is the normal response on Forgejo v15, a 403 is a
+# rate-limiter that wants backing off rather than two more requests, a 401 is
+# a bad token. Retrying those triples the request count and the worst-case
+# wall clock (15s -> 47s per call) for a result that won't change -- turning a
+# fast guarded miss on an unhealthy instance into a slow one, which is the
+# failure mode this whole change exists to avoid.
+FORGEJO_RETRY_CURL_CODES='7 28 35 52 56'
 _fj() {
   local method="$1" path="$2" body="${3:-}"
+  local attempts=1
+  case "$method" in
+    GET|HEAD) attempts=$((FORGEJO_RETRY_COUNT + 1)) ;;
+  esac
+  local -a extra=()
   if [ -n "$body" ]; then
-    curl -sf --connect-timeout "$FORGEJO_CONNECT_TIMEOUT" --max-time "$FORGEJO_MAX_TIME" -X "$method" \
-      -H "Authorization: token $FORGEJO_TOKEN" \
-      -H "Content-Type: application/json" \
-      -d "$body" \
-      "$FORGEJO_URL/api/v1${path}"
-  else
-    curl -sf --connect-timeout "$FORGEJO_CONNECT_TIMEOUT" --max-time "$FORGEJO_MAX_TIME" -X "$method" \
-      -H "Authorization: token $FORGEJO_TOKEN" \
-      "$FORGEJO_URL/api/v1${path}"
+    extra=(-H "Content-Type: application/json" -d "$body")
   fi
+  # The response is buffered rather than streamed: an attempt that may be
+  # retried can't emit a partial body first. `$( )` strips the trailing
+  # newline, so it is re-emitted here to hand back curl's byte stream
+  # unchanged -- a command-substituting caller couldn't tell either way, but
+  # one that PIPES `_fj` into `read` can: at EOF with no delimiter `read`
+  # returns nonzero and drops the final (often only) line. An empty body stays
+  # empty so a 204 doesn't grow a phantom line.
+  local attempt out rc=0
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if out=$(curl -sf --connect-timeout "$FORGEJO_CONNECT_TIMEOUT" --max-time "$FORGEJO_MAX_TIME" -X "$method" \
+        -H "Authorization: token $FORGEJO_TOKEN" \
+        "${extra[@]+"${extra[@]}"}" \
+        "$FORGEJO_URL/api/v1${path}"); then
+      [ -n "$out" ] && printf '%s\n' "$out"
+      return 0
+    else
+      rc=$?
+    fi
+    [[ " $FORGEJO_RETRY_CURL_CODES " == *" $rc "* ]] || return "$rc"
+    [ "$attempt" -lt "$attempts" ] && sleep "$FORGEJO_RETRY_DELAY"
+  done
+  # Every attempt burned on a retryable transport failure. Say so -- igor#424
+  # was filed because a tick died `status=28` with no error line, no trace and
+  # nothing to distinguish a network blip from a harness bug. Only this
+  # exhausted-transport case logs: an HTTP status returned above is an ANSWER
+  # (a 404 for an absent agent.json is the COMMON path) and would be pure
+  # noise. To stderr, not stdout, so it can't contaminate the caller's
+  # command substitution on a path where the caller may `|| true` and use the
+  # captured value anyway.
+  log "forgejo: ${method} ${path} failed after ${attempts} attempt(s) (curl exit ${rc})" >&2
+  return "$rc"
 }
 
 # All open issues with label:Agent, no Status/Blocked, and no
@@ -92,13 +158,46 @@ forgejo_get_issue() {
 # Returns a JSON array of review objects (state, commit_id,
 # submitted_at, user, etc.). Filters out the bot's own reviews so
 # they don't drown out real reviewer signal.
+#
+# jq's own stderr is suppressed HERE rather than by the callers (igor#424):
+# both of them want the parse noise gone on a malformed body, but blanketing
+# the whole function with `2>/dev/null` also swallows `_fj`'s give-up line,
+# and a pipeline's two stages can't be separated from outside. Narrowing it to
+# the stage that produces the noise leaves the transport diagnostic audible.
 forgejo_pr_non_bot_reviews() {
   local repo="$1" number="$2" bot="$3"
   _fj GET "/repos/${repo}/pulls/${number}/reviews" \
     | jq -c --arg b "$bot" '
         [.[] | select(.user.login != $b)]
         | sort_by(.submitted_at)
-      '
+      ' 2>/dev/null
+}
+
+# The PR-review pickup's Signal-1 check: does this PR's latest non-bot review
+# amount to a live, unaddressed "request changes"? Returns that review's JSON
+# on stdout if the latest one is REQUEST_CHANGES and neither stale nor
+# dismissed; empty otherwise -- including on a fetch failure. Best-effort by
+# construction (igor#425): every step degrades to empty rather than
+# propagating a nonzero exit, so a caller scanning many PRs
+# (`latest=$(forgejo_pr_actionable_request_changes ...)`) can't have one
+# transient timeout abort the whole scan under `set -e -o pipefail`.
+forgejo_pr_actionable_request_changes() {
+  local repo="$1" number="$2" bot="$3" reviews latest state stale dismissed
+  # No `2>/dev/null` on this call: the fetch failure it degrades is exactly
+  # the one igor#424 asked to be able to SEE, and `_fj` logs it on stderr.
+  # jq's noise is already suppressed inside the callee.
+  reviews=$(forgejo_pr_non_bot_reviews "$repo" "$number" "$bot") || reviews='[]'
+  latest=$(jq -c '.[-1] // empty' <<<"$reviews" 2>/dev/null) || latest=""
+  [ -z "$latest" ] && { printf ''; return 0; }
+  state=$(jq -r '.state // ""' <<<"$latest" 2>/dev/null || printf '')
+  stale=$(jq -r '.stale // false' <<<"$latest" 2>/dev/null || printf 'false')
+  dismissed=$(jq -r '.dismissed // false' <<<"$latest" 2>/dev/null || printf 'false')
+  if [ "$state" = "REQUEST_CHANGES" ] && [ "$stale" = "false" ] && [ "$dismissed" = "false" ]; then
+    printf '%s' "$latest"
+  else
+    printf ''
+  fi
+  return 0
 }
 
 forgejo_assign() {
