@@ -239,6 +239,29 @@ curl() {
 OUT=$(_fj GET /repos/acme/x/actions/runs); RC=$?
 eq "GET: HTTP error (curl 22) -> attempted exactly once, never retried" "1" "$(cat "$RETRY_STATE")"
 eq "GET: HTTP error -> curl's own exit code is preserved" "22" "$RC"
+ERRTXT=$(_fj GET /repos/acme/x/actions/runs 2>&1 >/dev/null)
+eq "GET: HTTP error stays SILENT (a 404 for an absent agent.json is the common path)" \
+  "" "$ERRTXT"
+rm -f "$RETRY_STATE"
+
+# igor#424: a tick died `status=28` with no error line at all, leaving nothing to
+# separate a network blip from a harness bug. Exhausting every retry on a
+# transport failure must say so -- and must say it on STDERR, or the message
+# lands inside the caller's `$( )` and becomes the value.
+RETRY_STATE=$(mktemp)
+curl() {
+  local n; n=$(cat "$RETRY_STATE" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" >"$RETRY_STATE"
+  return 28
+}
+GIVEUP_ERR=$(_fj GET /repos/acme/x/pulls/1/reviews 2>&1 >/dev/null)
+GIVEUP_OUT=$(_fj GET /repos/acme/x/pulls/1/reviews 2>/dev/null)
+eq "exhausted retries -> logs the give-up" "true" \
+  "$(grep -q 'failed after' <<<"$GIVEUP_ERR" && echo true || echo false)"
+eq "give-up line names the curl exit code" "true" \
+  "$(grep -q 'curl exit 28' <<<"$GIVEUP_ERR" && echo true || echo false)"
+eq "give-up line names the method and path" "true" \
+  "$(grep -q 'GET /repos/acme/x/pulls/1/reviews' <<<"$GIVEUP_ERR" && echo true || echo false)"
+eq "give-up goes to stderr, NOT into the caller's captured stdout" "" "$GIVEUP_OUT"
 rm -f "$RETRY_STATE"
 
 RETRY_STATE=$(mktemp)

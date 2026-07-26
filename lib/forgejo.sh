@@ -10,6 +10,12 @@
 : "${FORGEJO_URL:?FORGEJO_URL must be set}"
 : "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set}"
 
+# bin/tick.sh defines log() before sourcing this; bin/agent-*.sh and the unit
+# tests may not. Same fallback shape as lib/http-reap.sh.
+if ! declare -F log >/dev/null; then
+  log() { printf '[agent] %s\n' "$*"; }
+fi
+
 # Fail-fast timeouts so a brief git.sherver.org blip can't wedge a tick.
 # --connect-timeout bounds the connect phase: a few-second server hiccup
 # either rides through or fails fast, instead of stalling. --max-time bounds
@@ -70,6 +76,15 @@ _fj() {
     [[ " $FORGEJO_RETRY_CURL_CODES " == *" $rc "* ]] || return "$rc"
     [ "$attempt" -lt "$attempts" ] && sleep "$FORGEJO_RETRY_DELAY"
   done
+  # Every attempt burned on a retryable transport failure. Say so -- igor#424
+  # was filed because a tick died `status=28` with no error line, no trace and
+  # nothing to distinguish a network blip from a harness bug. Only this
+  # exhausted-transport case logs: an HTTP status returned above is an ANSWER
+  # (a 404 for an absent agent.json is the COMMON path) and would be pure
+  # noise. To stderr, not stdout, so it can't contaminate the caller's
+  # command substitution on a path where the caller may `|| true` and use the
+  # captured value anyway.
+  log "forgejo: ${method} ${path} failed after ${attempts} attempt(s) (curl exit ${rc})" >&2
   return "$rc"
 }
 
