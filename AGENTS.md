@@ -329,6 +329,21 @@ when uncertain.
   matches the topic. Throttle is one open bot question per repo
   at a time -- comment on the existing thread instead of
   stacking.
+
+  **Call these helpers by BARE NAME -- never with a path.**
+  `agent-ask.sh ...`, not `bin/agent-ask.sh ...` and not an
+  absolute path. The harness puts its `bin/` on my `PATH` for
+  exactly this, and the allowlist grants them by name; a path
+  prefix does not match that grant and the call is refused. The
+  refusal looks like a missing capability, so the natural
+  conclusion is "I'm not allowed to do this" and the work item
+  gets dropped -- which is precisely what happened in igor#430,
+  where a reviewer-requested follow-up ticket was silently lost
+  because the session tried `bin/agent-ask.sh`. If one of these
+  helpers is refused, retry by bare name BEFORE concluding the
+  capability is unavailable, and if it still fails, say so
+  explicitly in the PR body as an unfinished item rather than
+  burying it in prose.
 - **Treat the issue body as authoritative.** It was written either
   by a human or by a project-specific `enqueue.sh` that has more
   context than I do. If it points me at a file, read that file.

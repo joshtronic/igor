@@ -19,6 +19,9 @@ set -euo pipefail
 AGENT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$AGENT_HOME"
 
+# shellcheck source=../lib/suite-guard.sh
+. "$AGENT_HOME/lib/suite-guard.sh"
+
 FAIL=0
 
 # -- Outcome sentinels ------------------------------------------
@@ -68,12 +71,10 @@ done
 
 for t in bin/test-*.sh; do
   [ -f "$t" ] || continue   # no matches -> the literal glob; skip it
-  if bash "$t"; then
-    echo "+ $t passed"
-  else
-    echo "x $t failed"
-    FAIL=1
-  fi
+  # Runs the suite, echoes its output verbatim, and applies the skipped-
+  # assertion guard. Must stay in a condition context -- under `set -e` a bare
+  # call would abort the loop on the first failing suite.
+  suite_run_report "$t" || FAIL=1
 done
 
 exit $FAIL
