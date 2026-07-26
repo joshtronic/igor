@@ -14,6 +14,23 @@ for t in basename grep awk; do
   command -v "$t" >/dev/null 2>&1 || { echo "test-http-reap: $t unavailable -- skipping"; exit 0; }
 done
 
+# The predicate reads each candidate's cgroup from /proc to tell an orphaned
+# leak from a daemon systemd supervises. Stub that lookup for the WHOLE file
+# so no row's verdict depends on whatever the host happens to be running
+# under those pids -- unknown pids answer "" (cgroup unreadable), which the
+# predicate treats as unsupervised.
+# shellcheck disable=SC2034  # read by http_reap_select_victims in the sourced lib
+HTTP_REAP_OWN_UNIT=agent.service
+_http_reap_cgroup_path() {
+  case "$1" in
+    3001) echo '/system.slice/static-site.service' ;;
+    3002) echo '/user.slice/user-1001.slice/user@1001.service/app.slice/agent.service' ;;
+    3003) echo '/user.slice/user-1001.slice/session-5.scope' ;;
+    3005) echo '/system.slice/static-site.service/worker' ;;
+    *) echo '' ;;
+  esac
+}
+
 FAIL=0
 killed() {
   # killed <desc> <table> <pid> -- assert pid IS in the victim set
@@ -112,6 +129,25 @@ T7B='1016 40000 500 python3 -m http.server 8099'
 spared "same cmdline + age but a live parent -> spared" "$T7B" 1016
 T7C='1017 40000 99999 python3 -m http.server 8099'
 spared "a shell-parented server is spared no matter how old" "$T7C" 1017
+
+echo "== cgroup: a daemon systemd supervises is not an orphan =="
+# ppid 1 is EVERY systemd service, so parentage alone can't separate a leaked
+# tick child from a supervised static server: reaping the latter just makes
+# systemd restart it, so the sweep would flap it once a tick, forever. The
+# discriminator is the cgroup -- a foreign `.service` unit means somebody
+# else owns the process. Four rows, identical but for their cgroup.
+T8A='3001 1 5000 php -S 0.0.0.0:8080 -t /srv/site/dist'
+spared "supervised by its own .service unit -> not ours to kill" "$T8A" 3001
+T8B='3002 1 5000 python3 -m http.server 8099'
+killed "a leak in the harness's OWN unit cgroup is still reaped" "$T8B" 3002
+T8C='3003 1 5000 python3 -m http.server 8099'
+killed "a leak in a session/tmux .scope is reaped -- a scope is not a daemon" "$T8C" 3003
+T8D='3004 1 5000 python3 -m http.server 8099'
+killed "an unreadable cgroup does not veto the reap" "$T8D" 3004
+# Nested one level under the unit's own cgroup (systemd does this itself,
+# e.g. systemd-udevd.service/udev) -- the walk has to look past the leaf.
+T8E='3005 1 5000 php -S 0.0.0.0:8080 -t /srv/site/dist'
+spared "a cgroup NESTED under a foreign .service is still supervised" "$T8E" 3005
 
 echo "== multi-row table -> only the matching stale row is selected =="
 MULTI=$(printf '%s\n%s\n%s\n%s\n%s\n' \
