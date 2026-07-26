@@ -448,6 +448,7 @@ automerge_behind_count() { echo 0; }
 _fj() { echo '{"head":{"sha":"headsha7"}}'; }
 MERGED=0; automerge_do_merge() { MERGED=1; echo "sha"; }
 echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
+# shellcheck disable=SC2034  # read by lib/automerge.sh (sourced above), not by this file
 AUTOMERGE_BLOCK_COOLDOWN_SECS=3600
 automerge_block_record "$STATE" "acme/site#7" "headsha7" "HTTP 405: nope"
 AUTOMERGE_OUT=$(do_automerge_tick 2>&1); AUTOMERGE_RC=$?
