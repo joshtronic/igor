@@ -19,6 +19,9 @@ set -euo pipefail
 AGENT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$AGENT_HOME"
 
+# shellcheck source=../lib/suite-guard.sh
+. "$AGENT_HOME/lib/suite-guard.sh"
+
 FAIL=0
 
 # -- Outcome sentinels ------------------------------------------
@@ -68,11 +71,23 @@ done
 
 for t in bin/test-*.sh; do
   [ -f "$t" ] || continue   # no matches -> the literal glob; skip it
-  if bash "$t"; then
-    echo "+ $t passed"
-  else
+  # Captured rather than streamed so the guard below can inspect it; echoed
+  # verbatim either way, so nothing is hidden by capturing.
+  suite_out=$(bash "$t" 2>&1)
+  suite_rc=$?
+  printf '%s\n' "$suite_out"
+  if [ "$suite_rc" -ne 0 ]; then
     echo "x $t failed"
     FAIL=1
+  elif suite_output_skipped "$suite_out"; then
+    # Exit 0 is not enough: these suites verdict on a FAIL counter, and a line
+    # the shell refused to run never increments it (igor#430).
+    echo "x $t exited 0 but the shell refused to run one of its lines --"
+    echo "  a skipped assertion cannot fail, so this is NOT a pass:"
+    suite_skipped_lines "$suite_out" | sed 's/^/    /'
+    FAIL=1
+  else
+    echo "+ $t passed"
   fi
 done
 
