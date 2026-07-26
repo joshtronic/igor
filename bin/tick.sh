@@ -4650,7 +4650,9 @@ Address it, then remove \`Status/Blocked\` to re-queue. (If the note above says 
     # so the PR carries visual proof, not just a text reference. Best-effort.
     if [ -n "$NEW_PR_NUMBER" ] && [ -d "$WORKTREE/.agent/screenshots" ]; then
       SHOT_N=$(forgejo_attach_pr_screenshots "$FORGEJO_REPO" "$NEW_PR_NUMBER" "$WORKTREE/.agent/screenshots" 2>/dev/null || echo 0)
-      [ "${SHOT_N:-0}" -gt 0 ] && log "attached $SHOT_N screenshot(s) to #$NEW_PR_NUMBER" || true
+      if [ "${SHOT_N:-0}" -gt 0 ]; then
+        log "attached $SHOT_N screenshot(s) to #$NEW_PR_NUMBER"
+      fi
     fi
   fi
 
