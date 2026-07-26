@@ -10,6 +10,9 @@
 #   - logwatch_strip_backoff_noise -- removes only the backoff's own
 #     narration lines from a journal, so a genuine unrelated failure
 #     in the same window still stands out.
+#   - logwatch_timer_transitioned -- distinguishes a timer-explained
+#     silence from a real one, so a deliberate `systemctl stop
+#     agent.timer` doesn't get misread as a stuck tick (igor#420).
 #
 # Skip-safe: exits 0 with a notice if jq is absent.
 set -uo pipefail
@@ -148,6 +151,126 @@ has "chronic path's unfiltered journal still carries the backoff narration" "$NO
 
 echo "-- unrelated-failure-during-backoff-still-files: transient backoff, but a real failure shares the window -> it survives stripping --"
 has "unrelated failure line survives suppress_noise=1 stripping" "$(logwatch_strip_backoff_noise "$MIXED")" "unbound variable in do_seo_tick"
+
+echo "== logwatch_timer_transitioned (igor#420) =="
+# do_logwatch_tick's decision, exercised on the pure function it's built
+# from (see bin/tick.sh's logwatch_review_unit): when a companion
+# *.timer unit's own journal for the window shows a Stopped/Started
+# transition, any silence in the paired service's journal is explained
+# by that operator-initiated pause and no finding is filed for it. When
+# it shows no transition, the timer is presumed to have run
+# continuously -- so an EMPTY service journal for that same window
+# becomes itself a finding (a per-minute unit producing nothing is the
+# failure), while a NON-empty, normal-looking journal files nothing (no
+# gap to explain in the first place).
+
+STOPPED_STARTED="$(cat <<'EOF'
+Jul 24 19:42:14 igor.sherver.org systemd[805]: Stopped agent.timer - Agent tick timer -- fires the next tick.
+Jul 24 21:46:32 igor.sherver.org systemd[805]: Started agent.timer - Agent tick timer -- fires the next tick.
+EOF
+)"
+yes "window containing a Stopped/Started pair -> transitioned (gap explained, no finding filed)" \
+  logwatch_timer_transitioned "$STOPPED_STARTED"
+
+no "empty timer journal (continuously active, no state change logged) -> not transitioned" \
+  logwatch_timer_transitioned ""
+# -> service journal empty in this case: real fault, finding filed.
+# -> service journal has normal per-minute ticks: nothing to explain, no finding filed.
+
+no "'Starting'/'Stopping' (in-progress, not completed) do not count as a transition" \
+  logwatch_timer_transitioned "Jul 24 19:42:10 igor.sherver.org systemd[805]: Stopping agent.timer - Agent tick timer -- fires the next tick..."
+
+no "a Started/Stopped line for a DIFFERENT unit does not count" \
+  logwatch_timer_transitioned "Jul 24 21:01:00 igor.sherver.org systemd[805]: Started agent.service - Agent tick."
+
+no "a transition for a DIFFERENT timer does not count when the unit is named" \
+  logwatch_timer_transitioned "Jul 24 21:01:00 igor.sherver.org systemd[805]: Stopped backup.timer - Backup." "agent.timer"
+
+yes "a transition for the NAMED timer counts" \
+  logwatch_timer_transitioned "$STOPPED_STARTED" "agent.timer"
+
+echo "== logwatch_timer_verdict (igor#421 review) =="
+# The in-window transition check alone can't tell "continuously active"
+# from "stopped for hours": systemd logs a state CHANGE, so a pause
+# spanning 10:30-14:00 leaves the 11:00, 12:00 and 13:00 windows with no
+# transition at all. The verdict therefore folds in two more signals --
+# the last transition BEFORE the window, and the timer's state RIGHT NOW
+# -- and only says "active" (the one verdict that lets an empty service
+# journal file a finding) on positive evidence of continuous activity.
+
+STARTED_ONLY="Jul 24 21:46:32 igor.sherver.org systemd[805]: Started agent.timer - Agent tick timer."
+STOPPED_ONLY="Jul 24 19:42:14 igor.sherver.org systemd[805]: Stopped agent.timer - Agent tick timer."
+
+eq "transition inside the window -> paused (the #420 case)" \
+  "paused" "$(logwatch_timer_verdict "$STOPPED_STARTED" "" "active" "agent.timer")"
+eq "no transition, stopped before the window, still stopped -> paused (hour 2+ of a long pause)" \
+  "paused" "$(logwatch_timer_verdict "" "$STOPPED_ONLY" "inactive" "agent.timer")"
+eq "no transition anywhere, but the timer is stopped right now -> paused" \
+  "paused" "$(logwatch_timer_verdict "" "" "inactive" "agent.timer")"
+eq "no transition, started before the window, active now -> active (silence is unexplained)" \
+  "active" "$(logwatch_timer_verdict "" "$STARTED_ONLY" "active" "agent.timer")"
+eq "no evidence either way but active now -> active" \
+  "active" "$(logwatch_timer_verdict "" "" "active" "agent.timer")"
+eq "systemctl gave us nothing -> unknown (never file on a guess)" \
+  "unknown" "$(logwatch_timer_verdict "" "" "" "agent.timer")"
+
+echo "== logwatch_timer_lookback_since =="
+# The prior-state read must look BACKWARD. `date -d "<stamp> -24 hours"`
+# reads the -24 as a UTC offset and lands a day and change in the
+# FUTURE -- an empty journal every time, which reads as "no prior
+# transition" and quietly undoes the fix above.
+eq "lookback walks back a full day" \
+  "2026-07-23 21:00:00" "$(logwatch_timer_lookback_since '2026-07-24 21:00:00')"
+eq "lookback across a year boundary" \
+  "2025-12-31 00:00:00" "$(logwatch_timer_lookback_since '2026-01-01 00:00:00')"
+
+echo "== logwatch_timer_subhourly (igor#421 review) =="
+# "Has a companion .timer" does not mean "fires within the hour". A
+# daily timer would otherwise hit the empty-journal branch for 23 of 24
+# hourly passes. Only a schedule that provably fires at least once an
+# hour may turn silence into a finding.
+
+AGENT_TIMER="$(cat <<'EOF'
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=1min
+Persistent=true
+EOF
+)"
+yes "OnUnitInactiveSec=1min -> fires within the hour (the harness's own agent.timer)" \
+  logwatch_timer_subhourly "$AGENT_TIMER"
+yes "OnUnitActiveSec=30min -> fires within the hour" \
+  logwatch_timer_subhourly "[Timer]
+OnUnitActiveSec=30min"
+yes "OnUnitActiveSec=1h -> exactly hourly, still counts" \
+  logwatch_timer_subhourly "[Timer]
+OnUnitActiveSec=1h"
+no "OnUnitActiveSec=6h -> too slow to expect an entry every hour" \
+  logwatch_timer_subhourly "[Timer]
+OnUnitActiveSec=6h"
+no "OnBootSec alone -> one-shot, no recurrence to expect" \
+  logwatch_timer_subhourly "[Timer]
+OnBootSec=2min"
+yes "OnCalendar=*-*-* *:*:00 -> every minute" \
+  logwatch_timer_subhourly "[Timer]
+OnCalendar=*-*-* *:*:00"
+yes "OnCalendar=*:0/5 -> every five minutes" \
+  logwatch_timer_subhourly "[Timer]
+OnCalendar=*:0/5"
+yes "OnCalendar=hourly -> once an hour" \
+  logwatch_timer_subhourly "[Timer]
+OnCalendar=hourly"
+no "OnCalendar=daily -> once a day" \
+  logwatch_timer_subhourly "[Timer]
+OnCalendar=daily"
+no "OnCalendar=*-*-* 03:00:00 -> a fixed hour, silent the other 23" \
+  logwatch_timer_subhourly "[Timer]
+OnCalendar=*-*-* 03:00:00"
+no "commented-out schedule does not count" \
+  logwatch_timer_subhourly "[Timer]
+# OnUnitInactiveSec=1min"
+no "unreadable/empty timer file -> cadence unverifiable, no finding" \
+  logwatch_timer_subhourly ""
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-logwatch: all checks passed"
