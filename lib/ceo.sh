@@ -720,9 +720,19 @@ ceo_digest_thread() {
     '[ .[]? | select(.user.login == $b) | .created_at ] | sort | last // ""' \
     <<<"$comments" 2>/dev/null || true)
   printf '### Your digest #%s -- %s\n\n%s\n\n### The board thread\n' "$num" "$title" "$body"
+  # An EMPTY watermark means the CEO has never replied here -- the first steering
+  # round, and the common one -- so every reviewer comment is unanswered and gets
+  # the flag. (Reading it as "nothing is new" would hand the model a thread with
+  # zero pending items on exactly the case this path exists for.)
+  #
+  # Every LINE gets the "> " quote, not just the first: a multi-line comment whose
+  # tail lines landed unquoted would sit flush against the prompt's own "###"
+  # headers, so a comment containing "NEW -- " or a section header of its own could
+  # blend into the surrounding structure.
   jq -r --arg lb "$last_b" '
-    .[]? | "> " + (if ($lb != "" and .created_at > $lb) then "NEW -- " else "" end)
-         + "[\(.user.login)] \(.body)"
+    .[]? | ((if ($lb == "" or .created_at > $lb) then "NEW -- " else "" end)
+            + "[\(.user.login)] \(.body)")
+         | split("\n") | map("> " + .) | join("\n")
   ' <<<"$comments" 2>/dev/null || true
 }
 
@@ -807,6 +817,48 @@ ceo_file_digest_work() {
   [ -n "$num" ] || return 1
   forgejo_add_label "$repo" "$num" "Agent" 2>/dev/null \
     || log "warning: ceo: could not apply Agent label on ${repo}#${num}"
+  return 0
+}
+
+# ceo_commit_digest_steering <repo> <num> <parsed-digest-steering-json> -- post the
+# CEO's reply on the digest thread, then file each ===WORK=== block as an
+# Agent-labeled, UNASSIGNED ticket the grind works (igor#433 requirement 6: no
+# second greenlight round-trip -- the board gave the direction in its comment).
+# rc=1 if the reply POST failed, with NOTHING filed.
+#
+# The ORDER is the point. The reply IS the watermark
+# (ceo_digest_pending_steering_number reads the CEO's own last comment), so filing
+# first and replying second means a failed reply leaves the watermark parked: the
+# next tick re-selects the same digest, re-runs the model, and re-files the same
+# work -- Agent-labeled and unassigned, i.e. straight into the autonomous queue,
+# where ceo_codecheck_proposal (which gates on the CODE, not on open CEO tickets)
+# won't catch the duplicate. Reply-first inverts the failure: a reply that lands
+# followed by a failed work POST costs one reply overstating what got queued, and
+# it's logged.
+#
+# Same code-check gate as proposals (the CEO drafts blind to the code) so it can't
+# re-file already-done work. Not counted against CEO_MAX_OPEN -- that cap tracks
+# items awaiting a human call, not work the board already approved.
+ceo_commit_digest_steering() {
+  local repo="$1" num="$2" parsed="$3" reply work w wtitle wbody filed
+  reply=$(jq -r '.reply // ""' <<<"$parsed")
+  _fj POST "/repos/${repo}/issues/${num}/comments" \
+    "$(jq -n --arg b "$reply" '{body:$b}')" >/dev/null 2>&1 || return 1
+  work=$(jq -c '.work // []' <<<"$parsed")
+  filed=0
+  while IFS= read -r w; do
+    [ -n "$w" ] || continue
+    wtitle=$(jq -r '.title' <<<"$w"); wbody=$(jq -r '.body' <<<"$w")
+    if [ "$(ceo_codecheck_proposal "$repo" "$wtitle" "$wbody")" = "DROP" ]; then
+      continue
+    fi
+    if ceo_file_digest_work "$repo" "$wtitle" "$wbody"; then
+      filed=$((filed + 1))
+    else
+      log "warning: ceo: failed to file digest-steering work on ${repo} (the reply is already posted)"
+    fi
+  done < <(jq -c '.[]?' <<<"$work")
+  [ "$filed" -gt 0 ] && log "ceo: filed ${filed} work ticket(s) from board steering on ${repo}"
   return 0
 }
 
