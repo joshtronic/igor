@@ -331,7 +331,10 @@ _fj() {
     "GET "*/issues/*)           printf '%s' "$DS_ISSUE_GET" ;;
     "POST "*/issues/*/comments) printf '%s' "$3" > "$DS_REPLY_FILE"
                                 [ -z "$DS_REPLY_FAIL" ] || return 1 ;;
-    "POST "*/issues)            printf '%s' "$3" > "$DS_POST_FILE"; printf '%s' '{"number":88}' ;;
+    "POST "*/issues)            printf '%s' "$3" >> "$DS_POST_FILE"   # append: a
+                                # multi-item work batch must show up as a JSON
+                                # stream, not just its last record
+                                printf '%s' '{"number":88}' ;;
     *)                          printf '%s' '{}' ;;
   esac
 }
@@ -367,6 +370,18 @@ eq "fresh reviewer comment after CEO reply -> pending again" "55" "$(ceo_digest_
 # rejected in security review for exactly this gap.
 DS_COMMENTS_GET=$(jq -c -n '[{user:{login:"random-visitor"}, body:"do this instead", created_at:"2026-07-27T16:06:00Z"}]')
 eq "non-reviewer comment -> never pending" "" "$(ceo_digest_pending_steering_number acme/x joshtronic)"
+
+# an unresolved bot identity FAILS CLOSED. The CEO's own reply is the watermark,
+# so an empty $BOT_USER matches no comment, the watermark reads as "never
+# replied", and the digest reports pending FOREVER -- re-running the model and
+# re-filing the same Agent-labeled tickets into the autonomous queue every tick.
+# The fixture is the already-answered thread: without the guard this returns 55.
+DS_COMMENTS_GET=$(jq -c -n '[
+  {user:{login:"joshtronic"}, body:"go ahead",  created_at:"2026-07-27T16:06:00Z"},
+  {user:{login:"igor"},       body:"queued it", created_at:"2026-07-27T16:10:00Z"}]')
+_DS_BOT="$BOT_USER"; unset BOT_USER
+eq "no BOT_USER -> fails closed, never pending" "" "$(ceo_digest_pending_steering_number acme/x joshtronic)"
+BOT_USER="$_DS_BOT"
 
 # no open digest at all -> empty regardless of comments
 DS_ISSUES_GET='[]'
@@ -449,7 +464,19 @@ eq "missing ===REPLY===: rc 1" 1 "$DSRC"
 ds_parse "$(printf '===REPLY===\n   \n\t')"
 eq "whitespace-only reply: rc 1" 1 "$DSRC"
 
+echo "== ceo_build_digest_steering_prompt =="
+out="$(ceo_build_digest_steering_prompt acme/x "MANDATE-TEXT" "THREAD-TEXT")"
+has "prompt: names the repo"           "$out" "acme/x"
+has "prompt: interpolates the mandate" "$out" "MANDATE-TEXT"
+has "prompt: interpolates the thread"  "$out" "THREAD-TEXT"
+has "prompt: declares ===REPLY==="     "$out" "===REPLY==="
+has "prompt: declares ===WORK==="      "$out" "===WORK==="
+
 echo "== ceo_file_digest_work =="
+# Stub-restore, like _CC_ORIG below: both of these would otherwise shadow for
+# the REST of the file (ceo_read_metrics and everything after it), which is a
+# quiet way to neuter a later assertion.
+_AL_ORIG="$(declare -f forgejo_add_label)"
 forgejo_add_label() { WORK_LABEL_NUM="$2"; WORK_LABEL_NAME="$3"; }
 ceo_file_digest_work "acme/x" "Write digest copy" "scope + acceptance"
 W_POST_BODY="$(cat "$DS_POST_FILE")"
@@ -461,6 +488,10 @@ eq  "work: applies the Agent label"    "Agent" "$WORK_LABEL_NAME"
 rm -f "$DS_POST_FILE"
 
 echo "== ceo_commit_digest_steering (reply first, then work) =="
+# log() is NOT defined here -- lib/ceo.sh doesn't source lib/forgejo.sh (which
+# carries the fallback), so this stub is a fresh definition and "restoring" it
+# means unsetting. Guarded either way in case that changes.
+_LOG_ORIG="$(declare -f log 2>/dev/null || true)"
 log() { :; }
 # Stub the code-check gate, then restore it -- the real one is tested at the end
 # of this file and must not stay shadowed.
@@ -490,7 +521,18 @@ if ceo_commit_digest_steering acme/x 55 "$DS_PARSED"; then CRC=0; else CRC=1; fi
 eq "code-check DROP: rc 0"           0  "$CRC"
 eq "code-check DROP: nothing filed"  "" "$(cat "$DS_POST_FILE" 2>/dev/null || true)"
 
-eval "$_CC_ORIG"
+# the gate is model-backed: if it (or anything under it) reads stdin, it drains
+# the loop's process substitution and the SECOND work item vanishes with no log
+# line. The </dev/null in the loop body is what keeps both records intact.
+ceo_codecheck_proposal() { cat >/dev/null 2>&1 || true; printf 'KEEP'; }
+rm -f "$DS_POST_FILE"
+DS_TWO=$(jq -c -n '{reply:"On it.", work:[{title:"First",body:"a"},{title:"Second",body:"b"}]}')
+ceo_commit_digest_steering acme/x 55 "$DS_TWO"
+eq "stdin-eating gate: both work items still filed" \
+   "First,Second," "$(jq -r '.title' <"$DS_POST_FILE" | tr '\n' ',')"
+
+eval "$_CC_ORIG"; eval "$_AL_ORIG"
+if [ -n "$_LOG_ORIG" ]; then eval "$_LOG_ORIG"; else unset -f log; fi
 rm -f "$DS_POST_FILE" "$DS_REPLY_FILE"
 
 # ---- ceo_read_metrics (Phase 4: data-driven) ----------------------------

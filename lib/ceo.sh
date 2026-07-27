@@ -685,6 +685,16 @@ ceo_prior_digest_steering() {
 ceo_digest_pending_steering_number() {
   local repo="$1" reviewer="$2" num comments last_r last_b
   [ -n "$reviewer" ] || return 0
+  # Fail CLOSED on an unresolved bot identity. The CEO's own reply IS the
+  # watermark, so an empty $BOT_USER matches no comment, the watermark reads as
+  # "never replied", and this reports pending FOREVER -- every tick re-running
+  # the model and re-filing the same Agent-labeled, unassigned tickets straight
+  # into the autonomous queue. That is the exact failure the reply-first ordering
+  # in ceo_commit_digest_steering exists to prevent, reached by another door.
+  # tick.sh resolves BOT_USER or exits 3 before any of this runs, so this (and
+  # the ${BOT_USER:-} defaults below) is belt-and-braces for a lib sourced
+  # standalone -- cheap, and the failure mode it guards is unbounded.
+  [ -n "${BOT_USER:-}" ] || return 0
   num=$(ceo_prior_digest_number "$repo")
   [ -n "$num" ] || return 0
   comments=$(_fj GET "/repos/${repo}/issues/${num}/comments" 2>/dev/null)
@@ -692,7 +702,7 @@ ceo_digest_pending_steering_number() {
     '[ .[]? | select(.user.login == $r) | .created_at ] | sort | last // empty' \
     <<<"${comments:-[]}" 2>/dev/null || true)
   [ -n "$last_r" ] || return 0
-  last_b=$(jq -r --arg b "${BOT_USER:-}" \
+  last_b=$(jq -r --arg b "$BOT_USER" \
     '[ .[]? | select(.user.login == $b) | .created_at ] | sort | last // empty' \
     <<<"${comments:-[]}" 2>/dev/null || true)
   if [ -z "$last_b" ] || [[ "$last_r" > "$last_b" ]]; then
@@ -846,13 +856,17 @@ ceo_commit_digest_steering() {
     "$(jq -n --arg b "$reply" '{body:$b}')" >/dev/null 2>&1 || return 1
   work=$(jq -c '.work // []' <<<"$parsed")
   filed=0
+  # </dev/null on the loop body's calls: ceo_codecheck_proposal is model-backed,
+  # and anything under it that read stdin would eat the rest of the records off
+  # the process substitution -- silently dropping the second work item with no
+  # log line to show for it.
   while IFS= read -r w; do
     [ -n "$w" ] || continue
     wtitle=$(jq -r '.title' <<<"$w"); wbody=$(jq -r '.body' <<<"$w")
-    if [ "$(ceo_codecheck_proposal "$repo" "$wtitle" "$wbody")" = "DROP" ]; then
+    if [ "$(ceo_codecheck_proposal "$repo" "$wtitle" "$wbody" </dev/null)" = "DROP" ]; then
       continue
     fi
-    if ceo_file_digest_work "$repo" "$wtitle" "$wbody"; then
+    if ceo_file_digest_work "$repo" "$wtitle" "$wbody" </dev/null; then
       filed=$((filed + 1))
     else
       log "warning: ceo: failed to file digest-steering work on ${repo} (the reply is already posted)"
