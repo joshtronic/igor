@@ -272,6 +272,109 @@ no "commented-out schedule does not count" \
 no "unreadable/empty timer file -> cadence unverifiable, no finding" \
   logwatch_timer_subhourly ""
 
+echo "== logwatch_normalize_line: a signature stable across occurrences (igor#432) =="
+# The same failure recurring all day differs only in timestamp, pid and the
+# volatile numbers inside it. If those don't collapse, 700 occurrences of one
+# condition count as 700 distinct things and nothing ever meets the bar.
+N1=$(logwatch_normalize_line 'Jul 25 00:32:37 igor.sherver.org systemd[805]: agent.service: Main process exited, code=exited, status=28/n/a')
+N2=$(logwatch_normalize_line 'Jul 26 11:54:35 igor.sherver.org systemd[991]: agent.service: Main process exited, code=exited, status=28/n/a')
+eq "same failure on different days/pids -> identical signature" "$N1" "$N2"
+eq "signature drops the syslog prefix" "agent.service: Main process exited, code=exited, status=N/n/a" "$N1"
+
+N3=$(logwatch_normalize_line 'Jul 25 00:32:37 h systemd[805]: agent.service: Main process exited, code=exited, status=1/FAILURE')
+if [ "$N1" != "$N3" ]; then ok "a DIFFERENT failure keeps a different signature"
+else bad "distinct failures collapsed into one signature"; fi
+
+N4=$(logwatch_normalize_line 'Jul 25 21:10:21 h tick.sh[2597922]: [agent] review: joshtronic/igor#427 head 5212f914 -> APPROVE')
+N5=$(logwatch_normalize_line 'Jul 25 21:12:59 h tick.sh[2604823]: [agent] review: joshtronic/igor#428 head 3d54a9ee -> APPROVE')
+eq "shas and issue numbers flatten so per-PR lines group" "$N4" "$N5"
+
+echo "== logwatch_recurring: only what met the bar (igor#432) =="
+# A day with one transient blip and one genuinely chronic condition. The blip
+# is the exact shape that used to get filed and chased.
+DAY=$(cat <<'EOF'
+Jul 25 00:32:37 h systemd[805]: agent.service: Main process exited, code=exited, status=28/n/a
+Jul 25 01:00:01 h tick.sh[100]: [agent] no claimable work -- idle
+Jul 25 02:00:01 h tick.sh[101]: [agent] warning: could not log time on acme/x#1
+Jul 25 03:00:01 h tick.sh[102]: [agent] warning: could not log time on acme/x#2
+Jul 25 04:00:01 h tick.sh[103]: [agent] warning: could not log time on acme/x#3
+Jul 25 05:00:01 h tick.sh[104]: [agent] warning: could not log time on acme/x#4
+Jul 25 06:00:01 h tick.sh[105]: [agent] no claimable work -- idle
+EOF
+)
+REC=$(logwatch_recurring "$DAY")
+has "the 4x warning is reported" "$REC" "could not log time"
+if grep -q 'Main process exited' <<<"$REC"; then
+  bad "a single exit-28 met the bar -- the transient is still being filed"
+else
+  ok "the ONE-OFF exit-28 does NOT meet the bar (the igor#424/#419 class)"
+fi
+eq "count is carried, tab-separated" "4" "$(awk -F'\t' '/could not log time/{print $1}' <<<"$REC")"
+if grep -q 'no claimable work' <<<"$REC"; then
+  bad "a routine idle line was counted as a failure smell"
+else
+  ok "routine non-failure lines are never counted, however often they repeat"
+fi
+
+eq "clean journal -> nothing recurred" "" "$(logwatch_recurring 'Jul 25 01:00:01 h tick.sh[1]: [agent] no claimable work -- idle')"
+eq "empty journal -> empty" "" "$(logwatch_recurring '')"
+
+echo "== the bar is configurable for testing, and 3 is the shipped value =="
+eq "LOGWATCH_MIN_OCCURRENCES is 3" "3" "$LOGWATCH_MIN_OCCURRENCES"
+has "lowering the bar to 1 surfaces the transient" "$(logwatch_recurring "$DAY" 1)" "Main process exited"
+
+echo "== logwatch_distinct_transients: suppressed things stay greppable =="
+# "Nothing recurred" and "the pass never ran" must not look identical in the
+# journal, or a silently broken pass reads as a clean day.
+eq "counts the distinct below-bar signatures" "1" "$(logwatch_distinct_transients "$DAY")"
+eq "clean day -> 0 transients" "0" "$(logwatch_distinct_transients 'Jul 25 01:00:01 h tick.sh[1]: [agent] idle')"
+
+echo "== logwatch_samples: verbatim evidence, not the flattened form =="
+SIG=$(awk -F'\t' '/could not log time/{print $2}' <<<"$REC")
+SAMP=$(logwatch_samples "$DAY" "$SIG")
+eq "returns at most 3 samples" "3" "$(printf '%s\n' "$SAMP" | grep -c .)"
+has "samples are the ORIGINAL lines, timestamps intact" "$SAMP" "Jul 25 02:00:01"
+has "samples bound the condition: the last occurrence is included" "$SAMP" "acme/x#4"
+
+echo "== source filter: the model's own prose is never evidence (igor#432) =="
+# The Claude session's narration is streamed verbatim into this journal, and it
+# talks about failures constantly. Measured on a real day, without this filter
+# 37 signatures matched and the ONLY one to clear the bar was routine
+# narration, while the two genuine exit-28s sat below it.
+PROSE=$(cat <<'EOF'
+Jul 25 21:47:01 h tick.sh[100]: `agent-ask.sh` is blocked by this session's permission profile, so I can't file that follow-up.
+Jul 25 21:47:02 h tick.sh[100]: `make lint` reports the same two pre-existing warnings as before -- neither is in the lines this PR touches.
+Jul 25 21:47:03 h tick.sh[100]: Fixed the root cause: an unguarded pipe aborted the whole tick under set -e.
+Jul 25 21:47:04 h tick.sh[100]: **Blocking -- retry scope.** Anything else returns curl's own status immediately.
+Jul 25 21:47:05 h tick.sh[100]: No failures across the whole suite. Let's confirm the exit status.
+EOF
+)
+eq "five prose lines about failures -> nothing counted" "" "$(logwatch_recurring "$PROSE" 1)"
+eq "and none of them register as transients either" "0" "$(logwatch_distinct_transients "$PROSE" 1)"
+
+# Same words, but emitted by systemd and by the harness's own [agent] logger.
+TRUSTED=$(cat <<'EOF'
+Jul 25 00:32:37 h systemd[805]: agent.service: Failed with result 'exit-code'.
+Jul 25 11:54:35 h systemd[805]: agent.service: Failed with result 'exit-code'.
+Jul 25 14:00:00 h tick.sh[101]: [agent] warning: could not log time on acme/x#1
+EOF
+)
+has "systemd lines ARE counted" "$(logwatch_recurring "$TRUSTED" 1)" "Failed with result"
+has "[agent] lines ARE counted" "$(logwatch_recurring "$TRUSTED" 1)" "could not log time"
+
+echo "== 'timeout' as a configured limit is not a failure =="
+# The harness logs its own timeout setting on every tick; a bare-word match
+# would clear any recurrence bar by itself, every single day.
+ROUTINE=$(printf '%s\n%s\n%s\n%s\n' \
+  'Jul 25 01:00:00 h tick.sh[1]: [agent] invoking claude (timeout 30m)' \
+  'Jul 25 02:00:00 h tick.sh[2]: [agent] invoking claude (timeout 30m)' \
+  'Jul 25 03:00:00 h tick.sh[3]: [agent] invoking claude (timeout 30m)' \
+  'Jul 25 04:00:00 h tick.sh[4]: [agent] invoking claude (timeout 30m)')
+eq "4x 'invoking claude (timeout 30m)' -> not a finding" "" "$(logwatch_recurring "$ROUTINE")"
+has "but a real 'timed out' IS counted" \
+  "$(logwatch_recurring 'Jul 25 01:00:00 h tick.sh[1]: [agent] deploy barrier timed out waiting for sha' 1)" \
+  "timed out"
+
 if [ "$FAIL" -eq 0 ]; then
   echo "test-logwatch: all checks passed"
 else

@@ -2382,14 +2382,14 @@ own once calls succeed again."
 # assigned-to-reviewer), so unassigning is optional. Review time is
 # logged on each filed ticket.
 #
-# State: one ".logwatch" object {hour, backoff_days} in
+# State: one ".logwatch" object {day, backoff_days} in
 # discretionary-state.json. Stamped once ATTEMPTED (slot semantics): a
 # wedged pass must not retry model calls every tick for the rest of
-# the day. The after-01:00 gate is window-completeness (the hour being
-# analyzed must have closed), not a send-hour preference.
+# the day. The window is always YESTERDAY, whole and closed -- a
+# partial day cannot be measured against a recurrence bar.
 #
 # A Claude health backoff (auth/limit, lib/claude.sh's .health) that
-# overlapped the reviewed hour -- see lib/logwatch.sh's
+# overlapped the reviewed day -- see lib/logwatch.sh's
 # logwatch_health_backoff_in_window -- gets its own narration lines
 # stripped from the journal rather than suppressing the whole pass, so
 # an unrelated failure in the same window still files (igor#340). Once
@@ -2400,29 +2400,33 @@ own once calls succeed again."
 
 LOGWATCH_MARKER='<!-- agent:logwatch -->'
 
-logwatch_done_this_hour() {
-  local state_file hour
+# The day under review: yesterday, whole and closed. Never today -- a partial
+# day cannot be counted against a recurrence bar without under-reporting
+# everything that had not happened yet when the pass ran.
+logwatch_window_day() { date -d 'yesterday' +%Y-%m-%d; }
+
+logwatch_done_today() {
+  local state_file
   state_file=$(discretionary_state_file)
   [ -f "$state_file" ] || return 1
-  hour=$(date -d '1 hour ago' +%Y-%m-%dT%H)   # the just-closed hour we review
-  [ "$(jq -r '.logwatch.hour // ""' "$state_file" 2>/dev/null)" = "$hour" ]
+  [ "$(jq -r '.logwatch.day // ""' "$state_file" 2>/dev/null)" = "$(logwatch_window_day)" ]
 }
 
 logwatch_mark_done() {
-  local state_file tmp hour
+  local state_file tmp day
   state_file=$(discretionary_state_file)
-  hour=$(date -d '1 hour ago' +%Y-%m-%dT%H)
+  day=$(logwatch_window_day)
   [ -f "$state_file" ] || echo '{}' > "$state_file"
   tmp=$(mktemp)
-  # Merge, not replace -- a bare `.logwatch = {hour: ...}` would wipe
+  # Merge, not replace -- a bare `.logwatch = {day: ...}` would wipe
   # `.logwatch.backoff_days` (igor#340's chronic-day tracking) every
-  # single hour, since this stamp runs before that tracking is read.
-  jq --arg h "$hour" '.logwatch = ((.logwatch // {}) + {hour: $h})' "$state_file" > "$tmp"
+  # pass, since this stamp runs before that tracking is read.
+  jq --arg d "$day" '.logwatch = ((.logwatch // {}) + {day: $d})' "$state_file" > "$tmp"
   mv "$tmp" "$state_file"
 }
 
 # logwatch_review_unit <repo> <unit> [suppress_noise] [timer_unit] [timer_subhourly]
-# Review ONE unit's just-closed-hour journal; file tickets on <repo>.
+# Review ONE unit's just-closed-DAY journal; file tickets on <repo>.
 # suppress_noise=1 strips lines that are pure narration of a
 # TRANSIENT Claude health backoff (logwatch_strip_backoff_noise)
 # before review, so a genuine unrelated failure in the same window
@@ -2432,22 +2436,26 @@ logwatch_mark_done() {
 # declared alongside it, disambiguates a silent window instead of
 # leaving the reviewer to guess from timestamps (igor#420) -- see
 # logwatch_timer_verdict. timer_subhourly=1 says that timer's DECLARED
-# schedule fires at least once an hour, which is what makes one silent
-# hour evidence of anything at all (logwatch_timer_subhourly); a daily
-# timer is silent by design. Returns 0 if a model call ran (the tick
+# schedule fires at least once an hour, which is what makes a silent
+# DAY evidence of anything at all (logwatch_timer_subhourly); a daily
+# timer is silent for most of a day by design. Returns 0 if a model call ran (the tick
 # did real work), 1 if the unit was skipped (empty journal, or one a
 # paused/unverifiable timer explains).
 logwatch_review_unit() {
   local repo="$1" unit="$2" suppress_noise="${3:-0}" timer_unit="${4:-}" timer_subhourly="${5:-0}"
   local win_start win_end win_label start journal
-  win_start=$(date -d '1 hour ago' '+%Y-%m-%d %H:00:00')   # the just-closed clock hour
-  win_end=$(date '+%Y-%m-%d %H:00:00')
-  win_label="$(date -d '1 hour ago' '+%Y-%m-%d %H:00')-$(date '+%H:00')"
+  win_start="$(logwatch_window_day) 00:00:00"                 # yesterday, whole
+  win_end="$(date +%Y-%m-%d) 00:00:00"
+  win_label=$(logwatch_window_day)
   start=$(date +%s)
 
+  # No tail -c here. A day of agent.service is far past any sane byte cap, and
+  # truncating it would silently bias every count -- the recurrence gate below
+  # is what shrinks this to a payload, not a byte limit that throws away the
+  # early hours.
   journal=$(journalctl --user -u "$unit" \
     --since "$win_start" --until "$win_end" \
-    --no-pager 2>/dev/null | grep -v '^-- No entries --$' | tail -c 60000)
+    --no-pager 2>/dev/null | grep -v '^-- No entries --$')
   if [ "$suppress_noise" = "1" ]; then
     journal=$(logwatch_strip_backoff_noise "$journal")
   fi
@@ -2470,20 +2478,59 @@ logwatch_review_unit() {
     timer_state=$(logwatch_timer_verdict "$tj_since" "$tj_prior" "$tj_state" "$timer_unit")
   fi
 
+  local silence_finding=0
   if [ -z "$journal" ]; then
     if [ "$timer_state" = "active" ] && [ "$timer_subhourly" = "1" ]; then
-      # The timer provably ran the whole window AND its declared
-      # schedule fires at least hourly, yet the unit produced
-      # nothing -- itself the failure, not something to skip past.
-      journal="(no journal entries for ${unit} in this window)"
-      timer_note="${timer_unit} was active for this entire window (no Stopped/Started transition since it opened, and still active now) and its unit file declares a schedule that fires at least once an hour. ${unit} is driven by it and expected to produce journal entries every time it fires. This silence is NOT explained by the timer and is itself failure-worthy."
+      # A whole DAY of silence from an at-least-hourly unit whose timer never
+      # stopped. That is chronic by definition, so it bypasses the recurrence
+      # gate below -- there are no lines to count precisely because the
+      # failure is that there are none.
+      silence_finding=1
+      timer_note="${timer_unit} was active for the ENTIRE day (no Stopped/Started transition, and still active now) and its unit file declares a schedule that fires at least once an hour. ${unit} is driven by it and should have produced journal entries all day. It produced none. This silence is not explained by the timer."
     else
-      log "logwatch: ${unit}: no entries in the past hour -- skipping (timer: ${timer_state:-none})"
+      log "logwatch: ${unit}: no entries for ${win_label} -- skipping (timer: ${timer_state:-none})"
       return 1
     fi
   elif [ "$timer_state" = "paused" ]; then
-    timer_note="${timer_unit} was not active for this entire window (a Stopped/Started transition, or it is stopped right now) -- an operator-initiated pause. Any apparent gap in ${unit}'s activity is explained by that pause. Do NOT file a tick-gap/silence finding for it."
+    timer_note="${timer_unit} was not active for the whole day (a Stopped/Started transition, or it is stopped right now) -- an operator-initiated pause. Any apparent gap in ${unit}'s activity is explained by that pause. Do NOT report a tick-gap/silence finding for it."
   fi
+
+  # -- Recurrence gate (igor#432) --------------------------------
+  #
+  # Everything below runs on a DIGEST of failure signatures that met the
+  # bar, not on the day's raw journal. Two things fall out of that: a
+  # transient can no longer become a ticket, and the payload stops being a
+  # day of logs. On a clean day this returns before any model call at all.
+  local digest="" recurring transient_n sig cnt samples
+  recurring=$(logwatch_recurring "$journal")
+  transient_n=$(logwatch_distinct_transients "$journal")
+  if [ -n "$recurring" ]; then
+    while IFS=$'\t' read -r cnt sig; do
+      [ -n "$sig" ] || continue
+      samples=$(logwatch_samples "$journal" "$sig")
+      digest="${digest}### Seen ${cnt}x on ${win_label}
+
+Signature: \`${sig}\`
+
+\`\`\`
+${samples}
+\`\`\`
+
+"
+    done <<<"$recurring"
+  fi
+
+  if [ -z "$digest" ] && [ "$silence_finding" -eq 0 ]; then
+    # Greppable on purpose: "nothing recurred" and "the pass never ran" must
+    # not look the same in the journal.
+    log "logwatch: ${unit}: ${win_label} clean -- nothing recurred ${LOGWATCH_MIN_OCCURRENCES}x (${transient_n} one-off signature(s) seen, not filed)"
+    return 0
+  fi
+  if [ "$transient_n" -gt 0 ]; then
+    log "logwatch: ${unit}: ${transient_n} one-off signature(s) below the ${LOGWATCH_MIN_OCCURRENCES}x bar -- not filed"
+  fi
+  [ -n "$digest" ] || digest="(no recurring log signatures -- the finding is the absence of output; see Timer status)
+"
 
   if [ -n "$timer_note" ]; then
     timer_section="## Timer status for ${win_label}
@@ -2509,60 +2556,71 @@ Service-specific context -- this unit is the agent harness ITSELF
 ticket-worthy: report already-sent statuses; "not ready for agentic
 work -- skipping" validation lines; single "indeterminate (no readable
 clone)" validation lines; "no claimable work -- idle" ticks; cooldown
-waits; "already ran this hour" logwatch statuses. Claude auth/usage-limit
+waits; "already ran" logwatch statuses. Claude auth/usage-limit
 backoffs and health alert emails ARE ticket-worthy.
 EOF
 )
   fi
 
   local system user
-  system="You are the hourly log reviewer for systemd services owned by an
-unattended agent's operator. Each repo that runs as a service
-declares its unit files in-repo; you receive ONE service's journal
-for the clock hour that just closed, plus dedup
-signals from the owning repo: open issue titles and recent commit
-subjects.
+  system="You are the daily log reviewer for systemd services owned by an
+unattended agent's operator. Each repo that runs as a service declares its
+unit files in-repo. You receive ONE service's failure signatures for the day
+that just closed, plus dedup signals from the owning repo: open issue titles
+and recent commit subjects.
 
-Your job: find HARD failures and unresolved anomalies worth filing
-as tickets on the owning repo. You are a failure-smell detector, not
-a log narrator.
+What you receive has ALREADY been filtered. Every signature below recurred at
+least ${LOGWATCH_MIN_OCCURRENCES} times in the day; one-off blips were dropped
+before they reached you. So \"is this transient?\" is settled -- do not
+re-litigate it, and do not ask for more of the log.
 
-Do NOT file for:
-- a retry that subsequently succeeded -- retrying is the system
-  working as designed
-- routine successful output, however verbose
-- one-off blips that self-healed within the window
-- anything substantially covered by an already-open issue (titles
-  provided) -- chronic conditions get ONE ticket, not one per day
-- a symptom that a recent commit (subjects provided) plausibly
-  already fixes -- when a commit subject and a log symptom line up,
-  the fix wins: do not file
-- a gap or silence in this journal when a \"Timer status\" section
-  below says the paired timer was paused -- trust that over inferring
-  a long-running or stuck process from timestamps alone
+REPORT WHAT HAPPENED. DO NOT EXPLAIN WHY.
+
+This is the hard rule and the reason this reviewer was rewritten. Findings
+used to carry a confident cause, and the cause was wrong often enough to send
+the fix in the wrong direction -- one ticket blamed a permission profile for
+what was a path prefix on a command, and the obvious response to that cause
+would have been to widen a permission. A finding with no cause costs nothing
+when it is incomplete. A finding with a wrong cause costs a wrong fix.
+
+So: no \"most likely\", no \"this suggests\", no \"caused by\", no proposed
+mechanism, no guess at which file is at fault. State what recurred, how often,
+and quote the evidence. Whoever picks the ticket up does the diagnosis with
+the code in front of them, which you do not have.
+
+Do NOT report:
+- a retry that subsequently succeeded -- retrying is the system working
+- routine successful output, however verbose or however often repeated
+- anything substantially covered by an already-open issue (titles provided)
+- a symptom that a recent commit (subjects provided) plausibly already
+  fixes -- when a commit subject and a symptom line up, the fix wins
+- a gap or silence when a \"Timer status\" section says the paired timer was
+  paused -- trust that over inferring anything from timestamps
 ${blurb}
 
-DO file for:
-- a run that exhausted its retries or abandoned the window
-- an error with no subsequent success in the window
-- the unit crashing or exiting nonzero with no benign explanation
-- output indicative of a bug: stack traces, unbound variables,
-  parse errors, shell warnings
-- a \"Timer status\" section below stating the paired timer was active
-  for the entire window on an at-least-hourly schedule while this unit
-  produced no journal entries at all -- that silence is itself the
-  failure
+DO report:
+- a recurring error, crash, nonzero exit, stack trace, unbound variable or
+  parse error
+- a condition that ran all day without resolving
+- a \"Timer status\" section stating the timer was active all day on an
+  at-least-hourly schedule while the unit produced no output at all
 
 Output STRICT JSON only -- no preamble, no fences:
 {\"findings\": [{\"title\": \"...\", \"severity\": \"low|medium|high\", \"body\": \"...\"}]}
 
-- findings: [] when the hour was clean. This is the expected common
-  case; do not invent work.
+- findings: [] when nothing warrants a ticket. This is the expected common
+  case; do not invent work. A recurring signature is not automatically a
+  finding -- it still has to look like a defect.
 - At most 2 findings; pick the most material.
-- title: terse, specific, greppable -- it becomes a Forgejo issue
-  title (no prefix, no date).
-- body: markdown -- a short diagnosis, the evidence log lines quoted
-  verbatim in a fenced block, and what \"fixed\" would look like."
+- title: terse, specific, greppable -- it becomes a Forgejo issue title (no
+  prefix, no date). Describe the OBSERVATION, not a theory: \"agent.service
+  exited 28 during the recovery sweep 14x\" not \"curl timeout aborts tick\".
+- body: markdown, and only these two sections:
+    ## What was observed
+    How many times, over what span, and what it looked like. Plain
+    description. No cause.
+    ## Evidence
+    The sample lines quoted verbatim in a fenced block."
 
   user="Service under review: ${unit} (declared by ${repo})
 
@@ -2574,9 +2632,12 @@ ${open_titles:-(none)}
 
 ${recent_commits:-(none)}
 
-${timer_section}## Journal: ${unit}, ${win_label}
+${timer_section}## Recurring failure signatures: ${unit}, ${win_label}
 
-${journal}"
+Each block below recurred at least ${LOGWATCH_MIN_OCCURRENCES}x during the
+day. Anything that happened fewer times was filtered out before you saw it.
+
+${digest}"
 
   local raw findings attempt
   findings=""
@@ -2592,14 +2653,14 @@ ${journal}"
     log "logwatch: ${unit}: unparseable review response (attempt $attempt)"
   done
   if [ -z "$findings" ]; then
-    log "logwatch: ${unit}: no parseable review after 2 attempts -- giving up until next hour"
+    log "logwatch: ${unit}: no parseable review after 2 attempts -- giving up until tomorrow"
     return 0
   fi
 
   local count
   count=$(jq 'length' <<<"$findings")
   if [ "$count" -eq 0 ]; then
-    log "logwatch: ${unit}: clean hour -- nothing to file"
+    log "logwatch: ${unit}: reviewer returned no findings for ${win_label} -- nothing to file"
     return 0
   fi
   if [ "$count" -gt 2 ]; then
@@ -2619,7 +2680,7 @@ ${journal}"
 ---
 service: ${unit}
 severity: ${sev}
-window: ${win_label} (filed by the hourly logwatch pass)
+window: ${win_label} (filed by the daily logwatch pass; recurred >=${LOGWATCH_MIN_OCCURRENCES}x)
 ${LOGWATCH_MARKER}"
     num=$(forgejo_open_issue "$repo" "$title" "$body") \
       || { log "warning: logwatch ticket open failed on $repo (continuing)"; continue; }
@@ -2640,15 +2701,17 @@ ${LOGWATCH_MARKER}"
 }
 
 do_logwatch_tick() {
-  # We review the most recently CLOSED clock hour, so the window is always
-  # complete -- no partial reads, no midnight gate. Once per hour per unit.
-  if logwatch_done_this_hour; then
-    log "logwatch: this hour's pass already ran -- continuing"
+  # We review YESTERDAY, whole and closed, once per day per unit. Daily
+  # rather than hourly because an hour of context cannot tell a transient
+  # from a chronic -- and treating every blip as a defect is what turned
+  # this pass into the fleet's work generator (igor#432).
+  if logwatch_done_today; then
+    log "logwatch: today's pass already ran (reviewed $(logwatch_window_day)) -- continuing"
     return 1
   fi
 
   if ! command -v journalctl >/dev/null 2>&1; then
-    log "logwatch: journalctl not available on this host -- marking done for this hour"
+    log "logwatch: journalctl not available on this host -- marking done for today"
     logwatch_mark_done
     return 1
   fi
@@ -2670,12 +2733,12 @@ do_logwatch_tick() {
   # agent.service known-benign blurb already says these lines ARE
   # ticket-worthy; per-open-issue-title dedup keeps it to one ticket).
   local win_start_str win_end_str win_start_epoch win_end_epoch suppress_noise=0
-  win_start_str=$(date -d '1 hour ago' '+%Y-%m-%d %H:00:00')
-  win_end_str=$(date '+%Y-%m-%d %H:00:00')
+  win_start_str="$(logwatch_window_day) 00:00:00"
+  win_end_str="$(date +%Y-%m-%d) 00:00:00"
   win_start_epoch=$(date -d "$win_start_str" +%s)
   win_end_epoch=$(date -d "$win_end_str" +%s)
   if logwatch_health_backoff_in_window "$(discretionary_state_file)" "$win_start_epoch" "$win_end_epoch"; then
-    logwatch_record_backoff_day "$(discretionary_state_file)" "$(date -d '1 hour ago' +%Y-%m-%d)"
+    logwatch_record_backoff_day "$(discretionary_state_file)" "$(logwatch_window_day)"
     if logwatch_chronic_backoff "$(discretionary_state_file)"; then
       log "logwatch: Claude health backoff chronic (>=${LOGWATCH_CHRONIC_BACKOFF_DAYS} distinct days) -- leaving backoff narration visible to the reviewer"
     else
@@ -2723,10 +2786,10 @@ do_logwatch_tick() {
   done <<<"$ANALYSIS_REPOS_JSON"
 
   if [ "$reviewed" -eq 0 ]; then
-    log "logwatch: no service journals to review this hour -- continuing"
+    log "logwatch: no service journals to review for $(logwatch_window_day) -- continuing"
     return 1
   fi
-  log "logwatch: reviewed $reviewed service journal(s)"
+  log "logwatch: reviewed $reviewed service journal(s) for $(logwatch_window_day)"
   return 0
 }
 
