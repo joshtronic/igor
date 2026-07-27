@@ -149,6 +149,24 @@ forgejo_get_issue() {
   _fj GET "/repos/${repo}/issues/${number}"
 }
 
+# forgejo_append_issue_body <repo> <number> <heading> <text> -- appends
+# <text> under a "## <heading>" section at the end of the issue's current
+# body and PATCHes it back. Used by agent-block.sh (igor#434): the
+# issue-work prompt (bin/tick.sh) feeds ONLY the issue body to the next
+# tick's Claude invocation -- comments are never read -- so a block reason
+# posted solely as a comment can never reach a re-queued run. Appending it
+# to the body is what makes "remove Status/Blocked to re-queue" actually
+# work. Best-effort: a fetch/PATCH failure returns 1 without touching
+# anything, so the caller can still fall back to commenting alone.
+forgejo_append_issue_body() {
+  local repo="$1" number="$2" heading="$3" text="$4"
+  local current new
+  current=$(forgejo_get_issue "$repo" "$number" | jq -r '.body // empty') || return 1
+  new=$(printf '%s\n\n---\n## %s\n\n%s\n' "$current" "$heading" "$text")
+  _fj PATCH "/repos/${repo}/issues/${number}" \
+    "$(jq -n --arg b "$new" '{body: $b}')" >/dev/null
+}
+
 # All non-bot reviews on a PR, sorted oldest-to-newest. Used to
 # detect "request changes" pickup signal -- if the latest non-bot
 # review on the CURRENT head is REQUEST_CHANGES, the reviewer has

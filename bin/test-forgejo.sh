@@ -378,6 +378,75 @@ eq "every forgejo_pr_non_bot_reviews call in tick.sh is || echo-guarded" \
   "$NBR_CALLS" \
   "$(grep 'forgejo_pr_non_bot_reviews' "$TICK" | grep -c '|| echo')"
 
+# forgejo_append_issue_body (igor#434): a block reason posted only as a
+# comment never reaches the next tick's prompt (bin/tick.sh builds it from
+# the issue BODY alone). This is the helper agent-block.sh uses to append
+# findings to the body instead. Stub _fj to dispatch on method: GET returns
+# a fixture issue, PATCH captures the payload it was sent to a temp file
+# (a subshell can't leak it back to a plain var).
+echo "== forgejo_append_issue_body: findings land in the body, not just a comment (igor#434) =="
+AIB_PATCH=$(mktemp)
+_fj() {
+  case "$1" in
+    GET)   printf '%s' '{"number":42,"body":"Original issue text."}' ;;
+    PATCH) printf '%s' "$3" >"$AIB_PATCH" ;;
+  esac
+}
+forgejo_append_issue_body acme/x 42 "Blocked (agent)" "SEC-FINDING-XYZ: unauthorized access"
+eq "append: rc 0 on a successful fetch+PATCH" "0" "$?"
+NEW_BODY=$(jq -r '.body' "$AIB_PATCH")
+eq "append: PATCHes the issues endpoint (not labels/comments)" "1" \
+  "$(grep -c '"body"' "$AIB_PATCH")"
+eq "append: preserves the original body" "true" \
+  "$(grep -qF 'Original issue text.' <<<"$NEW_BODY" && echo true || echo false)"
+eq "append: adds the new text under its own heading" "true" \
+  "$(grep -q '## Blocked (agent)' <<<"$NEW_BODY" && echo true || echo false)"
+eq "append: the findings text itself is present" "true" \
+  "$(grep -qF 'SEC-FINDING-XYZ: unauthorized access' <<<"$NEW_BODY" && echo true || echo false)"
+rm -f "$AIB_PATCH"
+
+# A fetch failure (transient or otherwise) must degrade to rc 1 without
+# calling PATCH at all -- the caller (agent-block.sh) falls back to
+# commenting only, rather than risk clobbering the body with a partial read.
+AIB_PATCH2=$(mktemp)
+_fj() {
+  case "$1" in
+    GET)   return 22 ;;
+    PATCH) printf '%s' "$3" >"$AIB_PATCH2" ;;
+  esac
+}
+forgejo_append_issue_body acme/x 42 "Blocked (agent)" "should not land"
+eq "append: fetch failure -> rc 1" "1" "$?"
+eq "append: fetch failure -> never PATCHes" "0" "$(wc -c <"$AIB_PATCH2")"
+rm -f "$AIB_PATCH2"
+
+# The acceptance test that matters: the appended findings must actually
+# reach the NEXT run's prompt input, not just live "somewhere" in Forgejo.
+# tick.sh builds ISSUE_BODY from `jq -r '.body // ""' <<<"$WINNER"` (the
+# claimable-issue fixture) and then interpolates it verbatim into USER_MSG.
+# Replay that exact shape here with the PATCHed body standing in for what a
+# re-fetch would return on the next tick, and confirm the findings show up
+# in the reconstructed prompt.
+echo "== forgejo_append_issue_body: the findings reach the rebuilt tick.sh prompt (igor#434) =="
+WINNER=$(jq -n --arg b "$NEW_BODY" '{number: 42, title: "some issue", body: $b, labels: []}')
+ISSUE_BODY=$(jq -r '.body // ""' <<<"$WINNER")
+USER_MSG="Body:
+${ISSUE_BODY}"
+eq "the rebuilt USER_MSG contains the previously-blocked findings" "true" \
+  "$(grep -qF 'SEC-FINDING-XYZ: unauthorized access' <<<"$USER_MSG" && echo true || echo false)"
+
+# Structural regression net: agent-block.sh must actually call the helper
+# above (not just have it exist unused in lib/forgejo.sh), and the comment
+# it posts must describe the mechanism that's actually implemented -- today
+# it claimed a workflow (findings reachable via a comment alone) that never
+# worked.
+echo "== agent-block.sh: wires up the body-append + describes the real mechanism (igor#434) =="
+AGENT_BLOCK="$HERE/agent-block.sh"
+eq "agent-block.sh calls forgejo_append_issue_body" "true" \
+  "$(grep -q 'forgejo_append_issue_body' "$AGENT_BLOCK" && echo true || echo false)"
+eq "agent-block.sh's comment references the issue description, not just itself" "true" \
+  "$(grep -q 'issue description' "$AGENT_BLOCK" && echo true || echo false)"
+
 if [ "$FAIL" -eq 0 ]; then echo "test-forgejo: all checks passed"; exit 0; fi
 echo "test-forgejo: $FAIL check(s) FAILED"
 exit 1
