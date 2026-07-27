@@ -27,8 +27,12 @@ REASON="${1:?usage: agent-block.sh \"<reason>\"}"
 # Best-effort: a fetch/PATCH failure here must not stop the comment + label
 # + unassign below -- those are what actually mark the issue blocked. Only
 # claim the mechanism worked (via NOTE) when it actually did.
+#
+# Heading carries the time, not just the date: a ticket can block twice in a
+# day (re-queued, blocked again), and two identical `## Blocked (2026-07-27)`
+# headings read as a formatting bug rather than as two separate attempts.
 NOTE=""
-if forgejo_append_issue_body "$FORGEJO_REPO" "$ISSUE_NUMBER" "Blocked ($(date -u +%Y-%m-%d))" "$REASON"; then
+if forgejo_append_issue_body "$FORGEJO_REPO" "$ISSUE_NUMBER" "Blocked ($(date -u '+%Y-%m-%d %H:%MZ'))" "$REASON"; then
   NOTE=$'\n\n_(Appended to the issue description above -- removing `Status/Blocked` re-queues the ticket with this context already in hand.)_'
 else
   echo "agent-block: warning: could not append findings to the issue body" >&2

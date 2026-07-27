@@ -55,7 +55,7 @@ curl() {
     */labels)             printf '[{"id":1,"name":"Status/Blocked"}]' ;;
     */issues/42)
       case "$method" in
-        GET) printf '%s' "$ISSUE_FIXTURE" ;;
+        GET) [ -n "${ISSUE_GET_FAIL:-}" ] && return 22; printf '%s' "$ISSUE_FIXTURE" ;;
         PATCH)
           case "$data" in
             *'"body"'*)       printf '%s' "$data" >"$BODY_PATCH_CAP" ;;
@@ -74,6 +74,10 @@ echo "== agent-block.sh: end-to-end, real script + stubbed transport (igor#434) 
 # NOT env -i: an exported bash function (curl, above) rides in the process
 # environment as a `BASH_FUNC_curl%%` entry, and env -i wipes the whole
 # environment -- including that -- before the child ever starts.
+#
+# SC2030/SC2031: the subshell-local exports are the POINT -- each scenario
+# below sets up its own child env and must not leak into the next.
+# shellcheck disable=SC2030,SC2031
 (
   unset FORGEJO_REVIEWER  # keep the run hermetic: no ambient reviewer to notify
   export ISSUE_NUMBER=42 FORGEJO_REPO=acme/x AGENT_HOME="$AGENT_HOME" \
@@ -111,6 +115,45 @@ Body:
 ${ISSUE_BODY}"
 has "the rebuilt USER_MSG the next tick would send contains the findings" \
   "$USER_MSG" "SEC-FINDING-XYZ: unauthorized access"
+
+# The other branch, end-to-end: the body append fails (a token blip, a
+# renumbered issue) and the block itself must still land. The append is
+# best-effort precisely because the comment + label + unassign are what
+# actually mark the issue blocked -- and the comment must NOT then claim a
+# mechanism that didn't happen, which is the bug igor#434 fixed in the first
+# place, just in a different guise.
+echo "== agent-block.sh: a failed body append still blocks the issue, and says so honestly (igor#434) =="
+export COMMENT_CAP="$TMP/comment2.json"
+export BODY_PATCH_CAP="$TMP/body-patch2.json"
+export ASSIGN_CAP="$TMP/assign2.json"
+export LABEL_CAP="$TMP/label2.json"
+export ISSUE_GET_FAIL=1
+FAIL_ERR="$TMP/stderr2.txt"
+# shellcheck disable=SC2030,SC2031
+(
+  unset FORGEJO_REVIEWER
+  export ISSUE_NUMBER=42 FORGEJO_REPO=acme/x AGENT_HOME="$AGENT_HOME" \
+         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+  bash "$SCRIPT" "SEC-FINDING-XYZ: unauthorized access" >/dev/null 2>"$FAIL_ERR"
+)
+RC2=$?
+unset ISSUE_GET_FAIL
+eq "append failure is non-fatal -- agent-block.sh still exits 0" "0" "$RC2"
+eq "append failure -> the issue body is never PATCHed" "false" \
+  "$([ -s "$BODY_PATCH_CAP" ] && echo true || echo false)"
+has "append failure is reported on stderr" "$(cat "$FAIL_ERR")" \
+  "could not append findings to the issue body"
+
+COMMENT2=$(jq -r '.body // empty' "$COMMENT_CAP" 2>/dev/null)
+has "append failure -> the comment still carries the findings" \
+  "$COMMENT2" "SEC-FINDING-XYZ: unauthorized access"
+eq "append failure -> the comment does not claim the body was updated" "false" \
+  "$(grep -q 'issue description above' <<<"$COMMENT2" && echo true || echo false)"
+
+eq "append failure -> Status/Blocked is still applied" "1" \
+  "$(jq -r '.labels[0]' "$LABEL_CAP" 2>/dev/null)"
+eq "append failure -> the bot is still unassigned" "[]" \
+  "$(jq -c '.assignees' "$ASSIGN_CAP" 2>/dev/null)"
 
 if [ "$FAIL" -eq 0 ]; then echo "test-agent-block: all checks passed"; exit 0; fi
 echo "test-agent-block: $FAIL check(s) FAILED"

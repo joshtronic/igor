@@ -386,16 +386,19 @@ eq "every forgejo_pr_non_bot_reviews call in tick.sh is || echo-guarded" \
 # (a subshell can't leak it back to a plain var).
 echo "== forgejo_append_issue_body: findings land in the body, not just a comment (igor#434) =="
 AIB_PATCH=$(mktemp)
+AIB_PATH=$(mktemp)
 _fj() {
   case "$1" in
     GET)   printf '%s' '{"number":42,"body":"Original issue text."}' ;;
-    PATCH) printf '%s' "$3" >"$AIB_PATCH" ;;
+    PATCH) printf '%s' "$2" >"$AIB_PATH"; printf '%s' "$3" >"$AIB_PATCH" ;;
   esac
 }
 forgejo_append_issue_body acme/x 42 "Blocked (agent)" "SEC-FINDING-XYZ: unauthorized access"
 eq "append: rc 0 on a successful fetch+PATCH" "0" "$?"
 NEW_BODY=$(jq -r '.body' "$AIB_PATCH")
-eq "append: PATCHes the issues endpoint (not labels/comments)" "1" \
+eq "append: PATCHes the issue endpoint (not labels/comments)" "/repos/acme/x/issues/42" \
+  "$(cat "$AIB_PATH")"
+eq "append: the PATCH payload sets .body" "1" \
   "$(grep -c '"body"' "$AIB_PATCH")"
 eq "append: preserves the original body" "true" \
   "$(grep -qF 'Original issue text.' <<<"$NEW_BODY" && echo true || echo false)"
@@ -403,11 +406,18 @@ eq "append: adds the new text under its own heading" "true" \
   "$(grep -q '## Blocked (agent)' <<<"$NEW_BODY" && echo true || echo false)"
 eq "append: the findings text itself is present" "true" \
   "$(grep -qF 'SEC-FINDING-XYZ: unauthorized access' <<<"$NEW_BODY" && echo true || echo false)"
-rm -f "$AIB_PATCH"
+rm -f "$AIB_PATCH" "$AIB_PATH"
 
 # A fetch failure (transient or otherwise) must degrade to rc 1 without
 # calling PATCH at all -- the caller (agent-block.sh) falls back to
 # commenting only, rather than risk clobbering the body with a partial read.
+#
+# Run with `pipefail` explicitly OFF: the guard must be the function's own,
+# not an option the CALLER happens to have set. `$(fn | jq)` under `set +o
+# pipefail` reports jq's status, and `jq -r '.body // empty'` on empty stdin
+# exits 0 -- so a pipeline-status guard reads a failed fetch as an empty body
+# and PATCHes the block note over the whole issue description. That is exactly
+# the data this helper exists to preserve.
 AIB_PATCH2=$(mktemp)
 _fj() {
   case "$1" in
@@ -415,10 +425,38 @@ _fj() {
     PATCH) printf '%s' "$3" >"$AIB_PATCH2" ;;
   esac
 }
+set +o pipefail
 forgejo_append_issue_body acme/x 42 "Blocked (agent)" "should not land"
-eq "append: fetch failure -> rc 1" "1" "$?"
+eq "append: fetch failure -> rc 1 (even with the caller's pipefail off)" "1" "$?"
+set -o pipefail
 eq "append: fetch failure -> never PATCHes" "0" "$(wc -c <"$AIB_PATCH2")"
 rm -f "$AIB_PATCH2"
+
+# The likelier real-world shape: a 2xx-looking response whose payload is a
+# Forgejo error object, not an issue. It is well-formed JSON, so `.body //
+# empty` yields "" and exits 0 -- an exit-status guard alone waves it through
+# and the PATCH lands the block note as the ENTIRE description. Require the
+# payload to actually look like an issue before writing anything.
+AIB_PATCH3=$(mktemp)
+_fj() {
+  case "$1" in
+    GET)   printf '%s' '{"message":"token is required","url":"https://example.invalid/api/swagger"}' ;;
+    PATCH) printf '%s' "$3" >"$AIB_PATCH3" ;;
+  esac
+}
+forgejo_append_issue_body acme/x 42 "Blocked (agent)" "should not land"
+eq "append: an error payload instead of an issue -> rc 1" "1" "$?"
+eq "append: an error payload instead of an issue -> never PATCHes" "0" "$(wc -c <"$AIB_PATCH3")"
+rm -f "$AIB_PATCH3"
+
+# Restore the real _fj: these fixtures redefine it GLOBALLY, and a later
+# block appended below this one would otherwise silently inherit the last
+# stub instead of the library's.
+unset -f _fj
+# shellcheck source=../lib/forgejo.sh
+. "$HERE/../lib/forgejo.sh"
+eq "the real _fj is restored for anything appended after this block" "true" \
+  "$(declare -f _fj | grep -q 'FORGEJO_MAX_TIME' && echo true || echo false)"
 
 # The acceptance test that matters: the appended findings must actually
 # reach the NEXT run's prompt input, not just live "somewhere" in Forgejo.
