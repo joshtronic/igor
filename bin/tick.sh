@@ -2116,6 +2116,35 @@ _ceo_file_outputs() {
   return 0
 }
 
+# _ceo_file_digest_work <repo> <parsed-digest-steering-json>
+# Files each ===WORK=== block from a digest-steering response DIRECTLY as an
+# Agent-labeled, UNASSIGNED ticket -- no reviewer-assigned proposal round-trip,
+# since the board already gave the direction in its comment (igor#433 requirement
+# 6). Same code-check gate as proposals (the CEO drafts blind to the code) so it
+# can't re-pitch already-done work. Not counted against CEO_MAX_OPEN -- that cap
+# tracks proposals + questions awaiting a human call, not work the board already
+# approved.
+_ceo_file_digest_work() {
+  local repo="$1" parsed="$2" work nwork w wtitle wbody filed
+  work=$(jq -c '.work // []' <<<"$parsed")
+  nwork=$(jq 'length' <<<"$work" 2>/dev/null || echo 0)
+  [ "${nwork:-0}" -gt 0 ] || return 0
+  filed=0
+  while IFS= read -r w; do
+    wtitle=$(jq -r '.title' <<<"$w"); wbody=$(jq -r '.body' <<<"$w")
+    if [ "$(ceo_codecheck_proposal "$repo" "$wtitle" "$wbody")" = "DROP" ]; then
+      continue
+    fi
+    if ceo_file_digest_work "$repo" "$wtitle" "$wbody"; then
+      filed=$((filed + 1))
+    else
+      log "warning: ceo: failed to file digest-steering work on ${repo}"
+    fi
+  done < <(jq -c '.[]' <<<"$work")
+  [ "$filed" -gt 0 ] && log "ceo: filed ${filed} work ticket(s) from board steering on ${repo}"
+  return 0
+}
+
 do_ceo_tick() {
   # The weekly digest is now a respondable Forgejo issue, not email -- no SMTP2GO
   # gate; opt-in is purely the CEO.md mandate (read per-repo below).
@@ -2218,6 +2247,46 @@ do_ceo_tick() {
             forgejo_assign "$repo" "$rnum" "$FORGEJO_REVIEWER" 2>/dev/null || true
             log "ceo: holding proposal ${repo}#${rnum} -- replied + handed back to the board" ;;
         esac
+        return 0   # one model-backed action per tick
+      fi
+
+      # --- Path 1c (igor#433): act on board STEERING left as a COMMENT on the
+      # OPEN weekly digest -- EVERY tick, not week-gated (requirement 2:
+      # composing next week's digest and responding to steering on THIS one are
+      # different actions). Watermark = the CEO's own last reply on the thread,
+      # so a comment already answered doesn't re-fire and needs no new state.
+      # Gated on comment AUTHOR == reviewer (never "not the bot" -- see the
+      # ceo_digest_pending_steering_number comment for why that distinction is
+      # the whole point). The digest stays open + assigned either way
+      # (requirement 3); only a reply is posted, never a close/unassign.
+      local dnum dthread dparsed dreply
+      dnum=$(ceo_digest_pending_steering_number "$repo" "$FORGEJO_REVIEWER")
+      if [ -n "$dnum" ]; then
+        dthread=$(ceo_digest_thread "$repo" "$dnum" "$FORGEJO_REVIEWER")
+        prompt=$(ceo_build_digest_steering_prompt "$repo" "$mandate" "$dthread")
+        dparsed=""
+        for attempt in 1 2; do
+          raw=$(claude_call "$AGENT_MODEL" "ceo-digest-steer" 8000 \
+            "You are the CEO acting on board steering left as a comment on your OPEN weekly digest. This is a focused action, not a digest -- the board already gave you the direction, so act on your own judgment: file real work directly (Agent-labeled, ready for the grind) rather than re-proposing it for a second approval. Reply to the board naming what you did. Follow the output format in the prompt exactly." \
+            "$prompt" 0) \
+            || { log "ceo: digest-steering call failed for ${repo}#${dnum} (attempt ${attempt})"; continue; }
+          if dparsed=$(ceo_parse_digest_steering "$raw"); then break; fi
+          dparsed=""
+        done
+        if [ -z "$dparsed" ]; then
+          # No reply posted -- the watermark doesn't move, so this same board
+          # comment is retried next tick instead of silently dropped.
+          log "ceo: unparseable digest-steering response for ${repo}#${dnum} -- will retry next tick"
+          continue
+        fi
+        _ceo_file_digest_work "$repo" "$dparsed"
+        dreply=$(jq -r '.reply' <<<"$dparsed")
+        if _fj POST "/repos/${repo}/issues/${dnum}/comments" \
+            "$(jq -n --arg b "$dreply" '{body:$b}')" >/dev/null 2>&1; then
+          log "ceo: replied to board steering on ${repo}#${dnum}"
+        else
+          log "warning: ceo: failed to post steering reply on ${repo}#${dnum}"
+        fi
         return 0   # one model-backed action per tick
       fi
     fi
