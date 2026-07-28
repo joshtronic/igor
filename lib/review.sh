@@ -8,6 +8,26 @@
 # prompt sections that collapse to nothing when the fact isn't available --
 # purely additive, no change to the verdict rubric.
 
+# -- Trust model: this module reads the DEFAULT BRANCH, deliberately ------
+#
+# forgejo_repo_get_file calls /repos/{repo}/contents/{path} with NO `ref`, which
+# Forgejo resolves against the repository's default branch. That is what makes the
+# test-runner facts below safe to paste into the prompt unfenced: they are
+# already-merged, already-reviewed content.
+#
+# Do NOT "fix" this by passing the PR head as a ref so the facts reflect the PR's
+# own changes. That is a plausible-sounding improvement and it would open prompt
+# injection against the reviewer that gates auto-merge: a PR could edit its own
+# Makefile or bin/*.sh to inject arbitrary text -- a closing ``` fence, a fake
+# "## Unified diff" heading, an instruction -- into the prompt of the thing
+# deciding whether to merge it. The linked-issue body IS fenced as untrusted
+# (see review_linked_issue_section) precisely because issues can come from
+# lower-trust pipelines; repo files avoid that need only by being trusted.
+#
+# Verified 2026-07-28: a file present only on a PR branch returns EMPTY from this
+# helper, and its blob only with an explicit ref= -- confirming the default-branch
+# read rather than assuming the API default.
+
 REVIEW_ISSUE_BODY_MAX=4000     # linked-issue body, chars
 REVIEW_TEST_SCRIPT_MAX=3000    # each Makefile-referenced script, chars
 
@@ -21,10 +41,18 @@ fi
 # The issue number named by a closing keyword (close/fix/resolve, any
 # inflection), case-insensitive -- the same keyword set
 # pr_body_ensure_closes (lib/checkpoint.sh) writes. First match wins.
+#
+# The leading (^|[^[:alnum:]]) is load-bearing (igor#444). Without it the
+# alternation matches INSIDE a longer word, so "prefixes #12", "suffixes #99",
+# "postfixes #42" and "unfixed #3" all extracted an issue number. That is not a
+# hypothetical here -- "issue prefixes" is standing vocabulary in this fleet's
+# tickets. A false match splices a completely UNRELATED issue's body into the
+# reviewer's prompt as "the requirements this PR claims to satisfy", which is
+# strictly worse than giving it no issue at all.
 review_closed_issue_number() {
   local body="$1"
   printf '%s\n' "$body" \
-    | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+' \
+    | grep -oiE '(^|[^[:alnum:]])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+' \
     | head -1 \
     | grep -oE '[0-9]+'
 }

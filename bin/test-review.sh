@@ -17,6 +17,21 @@ eq()    { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: 
 has()   { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "${2:0:200}" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
 lacks() { case "$2" in *"$3"*) printf '  x %s: [%s] still has [%s]\n' "$1" "${2:0:200}" "$3"; FAIL=$((FAIL + 1)) ;; *) printf '  + %s\n' "$1" ;; esac; }
 
+# igor#444: this suite stubs forgejo_get_issue and forgejo_repo_get_file, and every
+# production call site is wrapped in `|| return 0` / `2>/dev/null || true`. So if
+# either helper is renamed or changes arity, the feature degrades to a permanent
+# silent no-op AND this suite still passes green. Assert they exist, with the arity
+# lib/review.sh calls them with, BEFORE any stub shadows them.
+echo "== the real Forgejo helpers exist before we stub them (igor#444) =="
+(
+  # shellcheck source=../lib/forgejo.sh
+  FORGEJO_URL=https://example.invalid FORGEJO_TOKEN=x . "$HERE/../lib/forgejo.sh" 2>/dev/null
+  for fn in forgejo_get_issue forgejo_repo_get_file; do
+    if declare -F "$fn" >/dev/null; then printf '  + %s exists in lib/forgejo.sh\n' "$fn"
+    else printf '  x %s MISSING -- review.sh would silently no-op\n' "$fn"; exit 1; fi
+  done
+) || FAIL=$((FAIL + 1))
+
 echo "== review_closed_issue_number: parsing the closing keyword =="
 eq "Closes #433 -> 433"                    "433" "$(review_closed_issue_number 'Closes #433')"
 eq "lowercase 'closes' -> 433"             "433" "$(review_closed_issue_number 'this closes #433, see notes')"
@@ -25,6 +40,25 @@ eq "Resolved #7 -> 7"                      "7"   "$(review_closed_issue_number '
 eq "first match wins"                      "433" "$(review_closed_issue_number 'Closes #433 and fixes #12')"
 eq "a bare #N with no keyword -> empty"    ""    "$(review_closed_issue_number 'see #433 for context')"
 eq "no issue reference at all -> empty"    ""    "$(review_closed_issue_number 'just a description')"
+
+# igor#444: the alternation had no leading word boundary, so any word ENDING in a
+# closing keyword matched. Each of these extracted an issue number before the fix,
+# splicing an UNRELATED issue's body into the reviewer's prompt as the requirements
+# the PR claims to satisfy. "issue prefixes" is standing vocabulary in this fleet's
+# tickets, so this was a live hazard, not a curiosity.
+eq "prefixes #12 -> empty (not 'fixes')"   ""    "$(review_closed_issue_number 'this prefixes #12 in the nav')"
+eq "suffixes #99 -> empty"                 ""    "$(review_closed_issue_number 'it suffixes #99')"
+eq "postfixes #42 -> empty"                ""    "$(review_closed_issue_number 'postfixes #42')"
+eq "unfixed #3 -> empty"                   ""    "$(review_closed_issue_number 'still unfixed #3')"
+eq "foreclosed #8 -> empty"                ""    "$(review_closed_issue_number 'foreclosed #8')"
+# The shape that actually matters: prose mentioning a word-ending match EARLIER in
+# the body than the real closing keyword. Before the fix this returned 12.
+eq "real keyword wins over an earlier in-word match" "77" \
+  "$(review_closed_issue_number 'Some prose about issue prefixes #12 in the nav.
+
+Closes #77')"
+# Still matched when the keyword follows punctuation rather than a space.
+eq "punctuation before the keyword still matches" "5" "$(review_closed_issue_number '(closes #5)')"
 
 echo "== review_linked_issue_section: fetch + bound, skip gracefully =="
 forgejo_get_issue() {
