@@ -239,6 +239,18 @@ LOGGED=""; needsyou_pass
 eq "an unchanged set announces NOTHING on rescan" "" "$LOGGED"
 eq "and the clock is not reset"                   "$SINCE" "$(jq -r '.needsyou["acme/site/pr/7"].since' "$STATE")"
 
+# bin/tick.sh runs under `set -euo pipefail`; this suite does not. A nonzero
+# return anywhere but a guarded position would abort the whole tick from inside
+# the scan -- and only every NEEDSYOU_SCAN_EVERY ticks, so it would be rare and
+# baffling. A subshell inherits the stub functions above, so both paths through
+# the pass can be exercised under the flags production actually uses.
+#
+# Run as a STATEMENT, never as an `if` condition: bash suppresses errexit for
+# the whole of a command it is testing, subshell and called functions included,
+# so `if ( set -e; ... )` would pass no matter what the pass did.
+errexit_rc() { ( set -euo pipefail; needsyou_pass ) >/dev/null 2>&1; printf '%s' "$?"; }
+eq "the pass survives set -euo pipefail" "0" "$(errexit_rc)"
+
 # The failure this guards: a transient blip empties the scan, the empty set is
 # persisted, every item loses its `since`, and the next good scan re-announces
 # the lot as new -- the "notification you learn to ignore" this feature exists
@@ -249,6 +261,7 @@ has "an incomplete scan says so"  "$LOGGED" "scan incomplete"
 eq  "it announces nothing"        "0" "$(grep -c 'needs-you: acme' <<<"$LOGGED" || true)"
 eq  "and does NOT drop the set it could not re-confirm" "$WANT" \
   "$(jq -r '.needsyou|keys|join(" ")' "$STATE")"
+eq "an incomplete scan bails cleanly under set -euo pipefail too" "0" "$(errexit_rc)"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-needsyou: all checks passed"
