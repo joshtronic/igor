@@ -92,6 +92,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/browser-reap.sh"
 # shellcheck source=lib/cascade.sh
 . "$AGENT_HOME/lib/cascade.sh"
+# shellcheck source=lib/needsyou.sh
+. "$AGENT_HOME/lib/needsyou.sh"
 # shellcheck source=lib/http-reap.sh
 . "$AGENT_HOME/lib/http-reap.sh"
 # shellcheck source=lib/cost.sh
@@ -4144,6 +4146,15 @@ cascade_bump_tick_file
 CASCADE_TICK=$(cascade_tick_number "$(cascade_state_file_read)")
 
 CASCADE_RESCUED=""
+# What is waiting on the OPERATOR (igor#439, detection half): build that set
+# and log what is NEW. The scan and its predicates live in lib/needsyou.sh,
+# where they are unit-tested; only the throttle is here, because CASCADE_TICK
+# is not assigned until this prelude. Reads ANALYSIS_REPOS_JSON, assigned well
+# above by the validation sweep.
+if [ $(( CASCADE_TICK % NEEDSYOU_SCAN_EVERY )) -eq 0 ]; then
+  needsyou_pass
+fi
+
 CASCADE_STARVED=$(cascade_starved_stage "$(cascade_state_file_read)" "$CASCADE_STAGES" "$CASCADE_TICK")
 if [ -n "$CASCADE_STARVED" ]; then
   log "cascade: ${CASCADE_STARVED} starved -- unreached for $(cascade_stage_age "$(cascade_state_file_read)" "$CASCADE_STARVED" "$CASCADE_TICK") ticks; running it before the usual order"
