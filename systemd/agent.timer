@@ -8,7 +8,16 @@ OnBootSec=2min
 # if a tick runs long (the tick also holds a global flock, so a long tick
 # can never be lapped by the next fire). Override via a drop-in at
 # ~/.config/systemd/user/agent.timer.d/override.conf
-OnUnitInactiveSec=1min
+OnUnitInactiveSec=15s
+# systemd's default is AccuracySec=1min: it batches timer wakeups inside a
+# one-minute window so a sleeping laptop can coalesce them. This is a server
+# that never sleeps, so that default buys nothing and costs up to 60s of
+# latency on EVERY fire, stacked on top of the gap above.
+#
+# Measured before changing it (2026-07-27, 4h19m window): 74 ticks, 58%
+# utilization, 109 minutes idle. The mandated gaps account for ~74 of those
+# minutes; the rest was accuracy slop.
+AccuracySec=1s
 Persistent=true
 
 [Install]
