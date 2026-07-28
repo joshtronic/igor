@@ -105,15 +105,24 @@ reviewnotify_subject() {
 # that produced no commits.
 reviewnotify_body() {
   local repo="${1:-}" number="${2:-}" title="${3:-}" verdict="${4:-}" url="${5:-}"
-  local why
+  local why where
   case "$verdict" in
     COMMENT)         why="Igor reviewed it as COMMENT, which auto-merge will not take -- so it is your call." ;;
     APPROVE)         why="Igor approved it, but this repo is pinned to your review before merge." ;;
     REQUEST_CHANGES) why="Igor requested changes and could not converge on its own -- escalated to you." ;;
     *)               why="Igor has handed this one to you." ;;
   esac
+  # A failed PR fetch still mails -- the operator is still the blocker either
+  # way -- but with no title AND no link it arrives as an alert he cannot act
+  # on. Say that the details are missing and where to go instead, rather than
+  # trailing off into a blank line he has to interpret.
+  if [ -z "$title" ] && [ -z "$url" ]; then
+    where="(Forgejo did not return the PR's details -- open $repo and look for #$number.)"
+  else
+    where="$url"
+  fi
   printf 'Igor requested your review on %s#%s:\n\n  %s\n\n%s\n\n%s\n' \
-    "$repo" "$number" "${title:-untitled}" "$why" "$url"
+    "$repo" "$number" "${title:-untitled}" "$why" "$where"
 }
 
 # review_notify_human <repo> <number> [reviewer]
@@ -175,6 +184,15 @@ review_notify_human() {
   # made NEXT TO the state file, not in mktemp's default /tmp: the mv is only an
   # atomic rename within one filesystem, and a state dir on another mount would
   # silently turn it into copy-then-unlink.
+  #
+  # Read-modify-write AT WRITE TIME, like every other writer of this file
+  # (tick.sh's slot/weekly/seo/sports/review/cascade helpers, needsyou, ceo,
+  # feedback, automerge, deferred, logwatch, claude): each re-reads the file
+  # inside the jq that produces its replacement. Not one snapshots it in memory
+  # early and rewrites it wholesale later, so a mid-tick record here cannot be
+  # clobbered by a later write -- keep it that way. mktemp's 0600 does land on
+  # the state file, but that is the harness-wide status quo, not something this
+  # write introduces: every mktemp+mv writer above does the same.
   tmp=$(mktemp "${state_file}.XXXXXX" 2>/dev/null) || {
     log "warning: reviewnotify: could not stage a state write for ${repo}#${number} -- a duplicate email is possible"
     return 0

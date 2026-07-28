@@ -137,6 +137,8 @@ SENDS_BEFORE=$SENDS
 review_notify_human joshtronic/igor 99
 eq "no PR detail -> still emails (the operator is still blocked)" \
    "$((SENDS_BEFORE + 1))" "$SENDS"
+has "and says the details are missing, instead of a titleless dead end" \
+    "$LAST_BODY" "open joshtronic/igor and look for #99"
 review_notify_human joshtronic/igor 99
 review_notify_human joshtronic/igor 99
 eq "a stuck fetch is capped, not an email per call site per tick" \
@@ -213,6 +215,64 @@ PRIMARY_RECIPIENTS="$SAVED_RCPT"
 PR_SHA=eeee555
 review_notify_human joshtronic/igor 42
 eq "restoring the config re-enables sending" "$((SENDS_BEFORE + 1))" "$SENDS"
+
+echo "== the delivery seam is the REAL email.sh, not a stub of it =="
+# Every assertion above stubs BOTH recipients_with_primary and email_send, so
+# an argument-ORDER drift against lib/email.sh ships green and mails the
+# operator garbage -- silently, because this module is best-effort and returns
+# 0 whichever way the send goes. lib/email.sh is not in this feature's diff, so
+# nothing else pins the two signatures together. Source the real module and
+# replace only curl, its one HTTP seam.
+# shellcheck source=../lib/email.sh
+. "$HERE/lib/email.sh"
+# To a FILE, not a variable: email_send reads curl through `resp=$(curl ...)`,
+# so the stub runs in a command-substitution subshell and any assignment it
+# makes is discarded -- the first cut of this block asserted against an empty
+# string and would have passed on a notifier that sent nothing at all.
+PAYLOAD_F="$TMPDIR_T/curl-payload.json"
+curl() {
+  local a prev=""
+  for a in "$@"; do
+    [ "$prev" = "-d" ] && printf '%s' "$a" > "$PAYLOAD_F"
+    prev="$a"
+  done
+  printf '{"data":{"succeeded":1,"failed":0}}'
+}
+PR_SHA=5555fff
+review_notify_human joshtronic/igor 42
+CURL_PAYLOAD=$(cat "$PAYLOAD_F" 2>/dev/null || printf '')
+eq "arg 1 lands as the subject" \
+   "[Agent] Needs you: joshtronic/igor#42 -- feat: a thing" \
+   "$(jq -r '.subject // ""' <<<"$CURL_PAYLOAD")"
+has "arg 2 lands as the HTML part" \
+    "$(jq -r '.html_body // ""' <<<"$CURL_PAYLOAD")" "<pre>"
+has "arg 3 lands as the plain-text part" \
+    "$(jq -r '.text_body // ""' <<<"$CURL_PAYLOAD")" "Igor requested your review"
+case "$(jq -r '.text_body // ""' <<<"$CURL_PAYLOAD")" in
+  *"<pre>"*) bad "the text part is not a copy of the HTML one" ;;
+  *)         ok  "the text part is not a copy of the HTML one" ;;
+esac
+eq "arg 4 lands as the To line, via the real recipients_with_primary" \
+   "op@example.com" "$(jq -r '.to[0] // ""' <<<"$CURL_PAYLOAD")"
+eq "and carries nobody else" "1" "$(jq -r '.to | length' <<<"$CURL_PAYLOAD")"
+
+echo "== sourcing email.sh + reviewnotify.sh is side-effect-free =="
+# bin/site-work-block.sh and bin/ideation-pipeline.sh now source both purely to
+# make the notifier reachable, and both run under `set -u`. A top-level read of
+# an unset SMTP2GO_*/recipient variable would abort those entry points at
+# STARTUP -- a regression in the PR-opening path itself, far worse than a
+# missed email. Both are side-effect-free today (a conditional `log` fallback
+# and one constant); this is what keeps that true.
+SRC_RC=0
+SRC_ERR=$(env -u SMTP2GO_API_KEY -u SMTP2GO_SENDER -u PRIMARY_RECIPIENTS \
+              -u FORGEJO_REVIEWER -u AGENT_STATE_DIR \
+              bash -uc '. "$1/lib/email.sh" && . "$1/lib/reviewnotify.sh"' _ "$HERE" 2>&1) \
+  || SRC_RC=$?
+if [ "$SRC_RC" -eq 0 ]; then
+  ok "both source clean under set -u with no config set at all"
+else
+  bad "sourcing aborts under set -u -- the PR-opening path would die at startup: $SRC_ERR"
+fi
 
 echo "== the hook is actually wired into forgejo_request_review =="
 # The point of this block: every test above would pass just as happily if
