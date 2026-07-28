@@ -70,6 +70,41 @@ D2=$(needsyou_describe "$MERGED" "acme/site/issue/5" "$((LATER + 1800))")
 has "a fresh item reports minutes" "$D2" "waiting 30m"
 eq "an unknown key describes to nothing" "" "$(needsyou_describe "$MERGED" "nope/x/1" "$LATER")"
 
+echo "== a negative age (clock skew) clamps to zero =="
+eq "since in the future does not render -1m" "" "$(needsyou_describe "$MERGED" "acme/site/pr/12" "$((NOW - 600))" | grep -o -- '-[0-9]*m' || true)"
+has "it reads as zero instead" "$(needsyou_describe "$MERGED" "acme/site/pr/12" "$((NOW - 600))")" "waiting 0m"
+
+echo "== which PR states are actually the OPERATOR's turn =="
+# The distinction that matters: "auto-merge will not take it" is much broader
+# than "you are the blocker". A PR nobody has reviewed yet is the shadow
+# reviewer's turn, and a PR in the rework loop is Igor's -- announcing either
+# is exactly the every-scan noise this feature exists to avoid.
+eq "an UNREVIEWED PR is the reviewer's turn, not yours" "" "$(needsyou_pr_why "" false 0 true)"
+eq "so is a PR whose verdict never parsed" "" "$(needsyou_pr_why "none" false 0 true)"
+eq "an APPROVE on a shadow-gated repo merges itself" "" "$(needsyou_pr_why APPROVE false 0 true)"
+has "an APPROVE on a human-pinned repo IS yours" "$(needsyou_pr_why APPROVE true 0 true)" "pinned to your review"
+has "a COMMENT is yours -- auto-merge won't take it" "$(needsyou_pr_why COMMENT false 0 true)" "COMMENT"
+eq "REQUEST_CHANGES inside the rework loop is IGOR's turn" "" "$(needsyou_pr_why REQUEST_CHANGES false 0 true)"
+eq "still Igor's on the last round before escalation" "" "$(needsyou_pr_why REQUEST_CHANGES false 2 true)"
+has "but an escalation after 3 rounds is yours" "$(needsyou_pr_why REQUEST_CHANGES false 3 true)" "without converging"
+has "and REQUEST_CHANGES on an unverifiable repo is yours" \
+  "$(needsyou_pr_why REQUEST_CHANGES false 0 false)" "CI-verified"
+eq "a garbage round count is treated as zero, not an error" "" "$(needsyou_pr_why REQUEST_CHANGES false '' true)"
+
+echo "== which issues are parked on the operator =="
+ISSUES='[{"number":1,"labels":[{"name":"Agent"}]},
+         {"number":2,"labels":[{"name":"Status/Blocked"},{"name":"Priority/High"}]},
+         {"number":3,"labels":[]},
+         {"number":4,"labels":[{"name":"Status/Need More Info"}]},
+         {"number":5,"labels":[{"name":"Status/In Progress"}]}]'
+LINES=$(needsyou_issue_lines "$ISSUES")
+eq "only Blocked and Need More Info qualify" "2
+4" "$(cut -d'|' -f1 <<<"$LINES")"
+has "the why names the status label" "$LINES" "2|Status/Blocked"
+eq "a non-Status label does not ride along in the why" "2|Status/Blocked" "$(grep '^2|' <<<"$LINES")"
+eq "no issues -> nothing waiting" "" "$(needsyou_issue_lines '[]')"
+eq "garbage issue payload -> nothing waiting" "" "$(needsyou_issue_lines 'not json')"
+
 echo "== malformed input degrades to empty, never crashes =="
 eq "garbage previous -> everything reads as new" "acme/site/pr/12" "$(needsyou_added 'not json' "$PREV")"
 eq "garbage current -> nothing announced" "" "$(needsyou_added "$PREV" 'not json')"

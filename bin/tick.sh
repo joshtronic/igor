@@ -4087,44 +4087,53 @@ fi
 # announced again. A scan is idempotent and self-correcting, and it also picks
 # up anything that entered the queue before this shipped.
 #
-# Throttled to every NEEDSYOU_SCAN_EVERY ticks: it costs one PR-list call per
-# eligible repo, which is the fleet-sweep cost igor#441 is about, so it must not
-# run on every tick. At the post-#447 cadence this is a few minutes' latency on
-# learning you are blocked -- against the status quo of finding out by asking.
+# Throttled to every NEEDSYOU_SCAN_EVERY ticks: it costs a PR-list AND an
+# issue-list call per eligible repo -- 2N, the fleet-sweep cost igor#441 is
+# about -- so it must not run on every tick. At the post-#447 cadence this is a
+# few minutes' latency on learning you are blocked, against the status quo of
+# finding out by asking.
 NEEDSYOU_SCAN_EVERY=20
 
-# A PR needs the human exactly when auto-merge will NOT take it. Deliberately
-# expressed as the negation of the existing predicate rather than a second copy
-# of the rule: automerge_will_take is "APPROVE and the repo is not pinned to a
-# human", it is already unit-tested, and a duplicate would drift from it.
+# Which items are the OPERATOR's turn is decided by needsyou_pr_why /
+# needsyou_issue_lines in lib/needsyou.sh, where it is unit-tested. This
+# function only gathers the facts those predicates need: the recorded shadow
+# verdict, the repo's human-pin, its rework round count, and whether it is
+# validated (rework on an unvalidated repo is handed straight to the human).
 needsyou_scan_set() {
-  local sf repo_line repo prs pr key verdict out='{}' item why kind
+  local sf repo_line repo prs pr verdict out='{}' item why line num
+  local require_human validated issues
   sf=$(discretionary_state_file)
   while IFS= read -r repo_line; do
     [ -n "$repo_line" ] || continue
-    repo=$(jq -r '.full_name' <<<"$repo_line" 2>/dev/null); [ -n "$repo" ] || continue
+    repo=$(jq -r '.full_name // empty' <<<"$repo_line" 2>/dev/null)
+    if [ -z "$repo" ] || [ "$repo" = "null" ]; then continue; fi
 
     prs=$(forgejo_list_open_bot_prs "$repo" "$BOT_USER" 2>/dev/null) || prs=""
+    # Both only matter to the PR predicate, and automerge_require_human reads
+    # the repo's agent.json over the API -- so pay for them only where there is
+    # actually a PR to classify.
+    require_human=false; validated=false
+    if [ -n "$prs" ]; then
+      automerge_require_human "$repo" && require_human=true
+      maintenance_repo_validated "$repo" && validated=true
+    fi
     while IFS= read -r pr; do
       if [ -z "$pr" ] || [ "$pr" = "null" ]; then continue; fi
       verdict=$(jq -r --arg k "${repo}#${pr}" '.review[$k].verdict // ""' "$sf" 2>/dev/null)
-      automerge_will_take "$repo" "$verdict" && continue
-      if automerge_require_human "$repo"; then
-        why="open PR on a repo pinned to your review"
-      else
-        why="shadow verdict ${verdict:-none} -- auto-merge will not take it"
-      fi
+      why=$(needsyou_pr_why "$verdict" "$require_human" \
+              "$(review_rework_rounds "${repo}#${pr}")" "$validated")
+      [ -n "$why" ] || continue
       item=$(needsyou_item "$repo" pr "$pr" "$why" 0)
       out=$(jq -c --arg k "$(needsyou_key "$repo" pr "$pr")" --argjson v "$item" '. + {($k): $v}' <<<"$out")
     done <<<"$prs"
 
-    while IFS= read -r kind; do
-      [ -n "$kind" ] || continue
-      pr=${kind%%|*}; why=${kind#*|}
-      item=$(needsyou_item "$repo" issue "$pr" "$why" 0)
-      out=$(jq -c --arg k "$(needsyou_key "$repo" issue "$pr")" --argjson v "$item" '. + {($k): $v}' <<<"$out")
-    done < <(_fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" 2>/dev/null       | jq -r '.[]? | select([.labels[]?.name] | any(. == "Status/Blocked" or . == "Status/Need More Info"))
-               | "\(.number)|\([.labels[].name] | map(select(startswith("Status/"))) | join(", "))"' 2>/dev/null || true)
+    issues=$(_fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" 2>/dev/null || true)
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      num=${line%%|*}; why=${line#*|}
+      item=$(needsyou_item "$repo" issue "$num" "$why" 0)
+      out=$(jq -c --arg k "$(needsyou_key "$repo" issue "$num")" --argjson v "$item" '. + {($k): $v}' <<<"$out")
+    done <<<"$(needsyou_issue_lines "$issues")"
   done <<<"$ANALYSIS_REPOS_JSON"
   printf '%s' "$out"
 }
@@ -4139,8 +4148,16 @@ needsyou_pass() {
   merged=$(needsyou_merge "$prev" "$cur" "$now")
   added=$(needsyou_added "$prev" "$cur")
 
+  # A write that never lands is not harmless: `prev` then reads as {} forever
+  # and every scan re-announces the whole set, which is the failure mode this
+  # feature is supposed to avoid. So say so rather than swallowing it.
   local tmp; tmp=$(mktemp)
-  if jq --argjson n "$merged" '.needsyou = $n' "$sf" > "$tmp" 2>/dev/null; then mv "$tmp" "$sf"; else rm -f "$tmp"; fi
+  if jq --argjson n "$merged" '.needsyou = $n' "$sf" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$sf"
+  else
+    rm -f "$tmp"
+    log "warning: needs-you: could not write state to ${sf} -- the set will re-announce next scan"
+  fi
 
   if [ -n "$added" ]; then
     while IFS= read -r key; do

@@ -46,7 +46,7 @@ needsyou_item() {
 # than a replace -- otherwise every scan resets the clock and nothing can ever
 # be reported as "waiting three days".
 needsyou_merge() {
-  local prev="${1:-\{\}}" cur="${2:-\{\}}" now="${3:-0}"
+  local prev="${1:-}" cur="${2:-}" now="${3:-0}"
   jq -cn --argjson p "$(_needsyou_obj "$prev")" --argjson c "$(_needsyou_obj "$cur")" \
     --argjson now "$now" '
       $c | with_entries(
@@ -70,6 +70,58 @@ needsyou_removed() {
     '($p | keys) - ($c | keys) | sort | .[]' 2>/dev/null || true
 }
 
+# needsyou_pr_why <verdict> <require_human> <rework_rounds> <repo_validated>
+# Why an open bot PR is waiting on the OPERATOR, or EMPTY when it is not.
+#
+# The first cut of this asked `! automerge_will_take`, which is much broader
+# than "the human is the blocker": it is also true of a PR nobody has reviewed
+# yet (the shadow reviewer's turn) and of one inside the rework loop (Igor's
+# turn, for up to 3 rounds). Both of those flip in and out of the set on their
+# own, so announcing them is exactly the "usually says nothing needs you" noise
+# this feature exists to avoid. So the verdicts that mean HUMAN are enumerated
+# instead, mirroring do_review_tick's own routing:
+#
+#   ""/none        the review has not happened yet   -> reviewer
+#   APPROVE        auto-merge takes it               -> nobody, unless the repo
+#                                                       pins itself to a human
+#   COMMENT        auto-merge will not take it       -> human
+#   REQUEST_CHANGES  rework rounds 1..3              -> Igor
+#                    escalated (>=3) or unverifiable -> human
+needsyou_pr_why() {
+  local verdict="${1:-}" require_human="${2:-false}" rounds="${3:-0}" validated="${4:-true}"
+  case "$rounds" in ''|*[!0-9]*) rounds=0 ;; esac
+  case "$verdict" in
+    APPROVE)
+      [ "$require_human" = "true" ] || return 0
+      printf 'Igor approved it and this repo is pinned to your review'
+      ;;
+    COMMENT)
+      printf 'Igor reviewed it as COMMENT -- auto-merge will not take that, so it is your call'
+      ;;
+    REQUEST_CHANGES)
+      if [ "$validated" != "true" ]; then
+        printf 'Igor requested changes on a repo whose rework cannot be CI-verified -- handed to you'
+      elif [ "$rounds" -ge 3 ]; then
+        printf 'Igor requested changes %s times without converging -- escalated to you' "$rounds"
+      fi
+      ;;
+  esac
+  return 0
+}
+
+# needsyou_issue_lines <issues_json>
+# "<number>|<why>" for each open issue the harness has parked on the operator:
+# Status/Blocked (Igor gave up and said what it needs) or Status/Need More Info.
+# The why is the issue's Status/* labels, so the line reads as the tracker does;
+# other labels (Agent, Priority/*) are not why it is waiting.
+needsyou_issue_lines() {
+  jq -rn --argjson issues "$(_needsyou_arr "${1:-}")" '
+    $issues[]?
+    | select([.labels[]?.name] | any(. == "Status/Blocked" or . == "Status/Need More Info"))
+    | "\(.number)|\([.labels[]?.name] | map(select(startswith("Status/"))) | join(", "))"
+  ' 2>/dev/null || true
+}
+
 # needsyou_describe <set_json> <key> <now_epoch>
 # One human line for an item: what it is, why it is waiting, and how long.
 # Shared by the log line here and by delivery later, so both phrase it the same.
@@ -80,7 +132,9 @@ needsyou_describe() {
     ($s[$k] // empty) as $i
     | if $i == null then empty
       else
-        (($now - ($i.since // $now)) / 60 | floor) as $mins
+        # Clamped at 0: a hand-edited state file or clock skew can put `since`
+        # in the future, and "waiting -1m" reads as a bug in the notifier.
+        (([$now - ($i.since // $now), 0] | max) / 60 | floor) as $mins
         | ( if $mins < 60 then "\($mins)m"
             elif $mins < 1440 then "\(($mins/60)|floor)h"
             else "\(($mins/1440)|floor)d" end ) as $age
@@ -97,5 +151,14 @@ _needsyou_obj() {
   local v="${1:-}"
   [ -n "$v" ] || { printf '{}'; return 0; }
   jq -ce . >/dev/null 2>&1 <<<"$v" || { printf '{}'; return 0; }
+  printf '%s' "$v"
+}
+
+# _needsyou_arr <json> -- the same, for an API list payload: the argument as a
+# JSON array, or [] when empty, unparseable, or an error object.
+_needsyou_arr() {
+  local v="${1:-}"
+  [ -n "$v" ] || { printf '[]'; return 0; }
+  jq -ce 'type == "array"' >/dev/null 2>&1 <<<"$v" || { printf '[]'; return 0; }
   printf '%s' "$v"
 }
