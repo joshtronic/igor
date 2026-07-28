@@ -101,6 +101,14 @@ DIRECTIVE=""
 . "$AGENT_HOME/lib/claude.sh"
 # shellcheck source=../lib/security-gate.sh
 . "$AGENT_HOME/lib/security-gate.sh"
+# This block opens a PR and requests the operator's review, and the hook that
+# emails him about it lives on the FUNCTION, not the call site -- so a process
+# that never sources reviewnotify.sh requests the review and tells him nothing
+# (igor#439). email.sh first: reviewnotify sends through email_send.
+# shellcheck source=../lib/email.sh
+. "$AGENT_HOME/lib/email.sh"
+# shellcheck source=../lib/reviewnotify.sh
+. "$AGENT_HOME/lib/reviewnotify.sh"
 
 # -- args ------------------------------------------------------
 

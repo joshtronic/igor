@@ -295,7 +295,7 @@ forgejo_request_review() {
         # Best-effort: the request already landed, and a notification failure
         # must not turn a success into a failure.
         if declare -F review_notify_human >/dev/null; then
-          review_notify_human "$repo" "$number" || true
+          review_notify_human "$repo" "$number" "$reviewer" || true
         fi
         return 0
         ;;

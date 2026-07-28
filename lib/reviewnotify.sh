@@ -14,6 +14,14 @@
 # rounds, a rework that produced no commits) and every one of them means the
 # same thing. Hooking callers would mean remembering to hook the eleventh.
 #
+# That buys nothing across a PROCESS boundary, though. lib/forgejo.sh fires the
+# hook only if something defined it, so an entry point that reaches a review
+# request without sourcing this file sends nothing -- the same "forgot to hook
+# the caller" failure, moved one level down. Three entry points can reach one:
+# bin/tick.sh, bin/site-work-block.sh and bin/ideation-pipeline.sh (the latter
+# two via forgejo_open_pr). bin/check-sync.sh asserts that set rather than
+# trusting this comment to stay true.
+#
 # DEDUP IS THE WHOLE POINT. forgejo_request_review is idempotent on purpose --
 # re-requesting an already-requested reviewer is a harmless 201 -- so callers
 # fire it freely, including repeatedly for the same PR. Mailing on every call
@@ -24,8 +32,9 @@
 # earns a second mail.
 #
 # State: discretionary-state.json under ".review_notified", shaped
-# { "<repo>#<number>": "<head sha>" }. Regenerable -- losing it costs at most
-# one duplicate email per open PR. Not pruned, for the same reason ".review"
+# { "<repo>#<number>": "<head sha>" } (or an hour bucket when the head could
+# not be read -- see reviewnotify_dedup_head). Regenerable -- losing it costs at
+# most one duplicate email per open PR. Not pruned, for the same reason ".review"
 # next to it is not: an entry is one short string, a merged PR is never
 # re-requested, and years of them are still a rounding error in a file jq
 # already rewrites every tick.
@@ -55,6 +64,33 @@ reviewnotify_should_send() {
   [ "$seen" != "$head" ]
 }
 
+# reviewnotify_dedup_head <head>
+# What the dedup actually keys on: the real head sha when the PR fetch worked,
+# an hour bucket when it did not.
+#
+# Failing open on a bad fetch is right, but the first cut failed open
+# UNBOUNDED: it sent and recorded nothing, so ~10 call sites against a
+# persistently broken fetch (a narrowed token, a moved endpoint) is an email
+# per call per tick -- the flood the dedup exists to prevent, arriving through
+# the escape hatch. The bucket degrades that to at most one an hour, and costs
+# nothing once the fetch recovers, because a real sha is a key nothing has seen.
+reviewnotify_dedup_head() {
+  local head="${1:-}"
+  if [ -n "$head" ]; then
+    printf '%s' "$head"
+  else
+    printf 'nohead-%s' "$(( $(date +%s) / 3600 ))"
+  fi
+}
+
+# reviewnotify_escape_html <text>
+# The PR title comes back from the Forgejo API, so it is the one string on this
+# path Igor did not write. Low stakes in a mail client, but escaping the three
+# characters that can open a tag costs nothing.
+reviewnotify_escape_html() {
+  printf '%s' "${1:-}" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
 # reviewnotify_subject <repo> <number> <title>
 # Readable on a phone lock screen without opening it: which repo, which PR,
 # what it is.
@@ -80,7 +116,7 @@ reviewnotify_body() {
     "$repo" "$number" "${title:-untitled}" "$why" "$url"
 }
 
-# review_notify_human <repo> <number>
+# review_notify_human <repo> <number> [reviewer]
 # The hook forgejo_request_review fires after a request lands. Named as a plain
 # function, not wired by argument, so lib/forgejo.sh stays a pure API wrapper --
 # it fires this only if something defined it.
@@ -89,15 +125,27 @@ reviewnotify_body() {
 # happened, so nothing here may fail the request that triggered it. Returns 0
 # always.
 review_notify_human() {
-  local repo="$1" number="$2"
-  local state_file state pr head title url verdict subject body recipients tmp
+  local repo="$1" number="$2" reviewer="${3:-}"
+  local state_file state pr head key title url verdict subject body recipients tmp
 
   [ -n "${SMTP2GO_API_KEY:-}" ] && [ -n "${SMTP2GO_SENDER:-}" ] || return 0
+
+  # This mail says "you are the blocker", so it belongs only to a request FOR
+  # the operator. Every call site passes FORGEJO_REVIEWER today; the check is
+  # for the day one doesn't. Fails open when either side is unset -- that is a
+  # misconfigured tick, not evidence of a third-party reviewer.
+  if [ -n "$reviewer" ] && [ -n "${FORGEJO_REVIEWER:-}" ] && [ "$reviewer" != "$FORGEJO_REVIEWER" ]; then
+    return 0
+  fi
+
   recipients=$(recipients_with_primary "")
   [ -n "$recipients" ] || return 0
 
   state_file=$(_reviewnotify_state_file)
-  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  # A fresh host has no state dir yet. Without this the create below fails,
+  # every write after it fails, and dedup is off for good behind one warning.
+  mkdir -p "$(dirname "$state_file")" 2>/dev/null || true
+  [ -f "$state_file" ] || echo '{}' > "$state_file" 2>/dev/null || true
   state=$(cat "$state_file" 2>/dev/null || printf '{}')
 
   # One fetch for all three fields. The live head is authoritative; the copy in
@@ -107,25 +155,29 @@ review_notify_human() {
   title=$(jq -r '.title // ""' <<<"$pr" 2>/dev/null || printf '')
   url=$(jq -r '.html_url // ""' <<<"$pr" 2>/dev/null || printf '')
 
-  reviewnotify_should_send "$state" "$repo" "$number" "$head" || return 0
+  key=$(reviewnotify_dedup_head "$head")
+  reviewnotify_should_send "$state" "$repo" "$number" "$key" || return 0
 
   verdict=$(jq -r --arg k "${repo}#${number}" '.review[$k].verdict // ""' <<<"$state" 2>/dev/null || printf '')
   subject=$(reviewnotify_subject "$repo" "$number" "$title")
   body=$(reviewnotify_body "$repo" "$number" "$title" "$verdict" "$url")
 
-  if ! email_send "$subject" "<pre>${body}</pre>" "$body" "$recipients"; then
+  if ! email_send "$subject" "<pre>$(reviewnotify_escape_html "$body")</pre>" "$body" "$recipients"; then
     log "warning: reviewnotify: email failed for ${repo}#${number} -- not recording, will retry on the next request"
     return 0
   fi
   log "reviewnotify: emailed ${recipients} about ${repo}#${number} (head ${head:0:8})"
 
   # Recorded only after a send actually lands, so a failed send retries rather
-  # than marking the operator notified about mail he never got. Skipped when the
-  # PR fetch gave no head -- there is nothing to key on, and writing an empty
-  # value would suppress the next genuine notification.
-  [ -n "$head" ] || return 0
-  tmp=$(mktemp)
-  if jq --arg k "${repo}#${number}" --arg s "$head" \
+  # than marking the operator notified about mail he never got. The temp file is
+  # made NEXT TO the state file, not in mktemp's default /tmp: the mv is only an
+  # atomic rename within one filesystem, and a state dir on another mount would
+  # silently turn it into copy-then-unlink.
+  tmp=$(mktemp "${state_file}.XXXXXX" 2>/dev/null) || {
+    log "warning: reviewnotify: could not stage a state write for ${repo}#${number} -- a duplicate email is possible"
+    return 0
+  }
+  if jq --arg k "${repo}#${number}" --arg s "$key" \
       '.review_notified //= {} | .review_notified[$k] = $s' "$state_file" > "$tmp" 2>/dev/null; then
     mv "$tmp" "$state_file"
   else

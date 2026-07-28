@@ -84,9 +84,11 @@ export AGENT_STATE_DIR="$TMPDIR_T"
 STATE="$TMPDIR_T/discretionary-state.json"
 export SMTP2GO_API_KEY=k SMTP2GO_SENDER=s PRIMARY_RECIPIENTS=op@example.com
 
-SENDS=0; LAST_SUBJECT=""; LAST_BODY=""; SEND_RC=0
+SENDS=0; LAST_SUBJECT=""; LAST_HTML=""; LAST_BODY=""; SEND_RC=0
 recipients_with_primary() { printf '%s' "${PRIMARY_RECIPIENTS:-}"; }
-email_send() { SENDS=$((SENDS + 1)); LAST_SUBJECT="$1"; LAST_BODY="$3"; return "$SEND_RC"; }
+email_send() {
+  SENDS=$((SENDS + 1)); LAST_SUBJECT="$1"; LAST_HTML="$2"; LAST_BODY="$3"; return "$SEND_RC"
+}
 PR_SHA=aaaa111
 forgejo_get_pr() {
   jq -n --arg s "$PR_SHA" \
@@ -129,14 +131,67 @@ PR_SHA=dddd444
 review_notify_human joshtronic/igor 42
 has "COMMENT verdict is explained in the body" "$LAST_BODY" "auto-merge will not take"
 
-echo "== a PR whose fetch fails still alerts, but is not marked seen =="
+echo "== a PR whose fetch fails alerts, but not once per call =="
 forgejo_get_pr() { return 1; }
 SENDS_BEFORE=$SENDS
 review_notify_human joshtronic/igor 99
 eq "no PR detail -> still emails (the operator is still blocked)" \
    "$((SENDS_BEFORE + 1))" "$SENDS"
-eq "but with no head to key on, nothing is recorded" "" \
-   "$(jq -r '.review_notified["joshtronic/igor#99"] // ""' "$STATE")"
+review_notify_human joshtronic/igor 99
+review_notify_human joshtronic/igor 99
+eq "a stuck fetch is capped, not an email per call site per tick" \
+   "$((SENDS_BEFORE + 1))" "$SENDS"
+has "and it keys on an hour bucket, not an empty sha" \
+    "$(jq -r '.review_notified["joshtronic/igor#99"] // ""' "$STATE")" "nohead-"
+forgejo_get_pr() {
+  jq -n --arg s "$PR_SHA" \
+    '{head:{sha:$s}, title:"feat: a thing", html_url:"https://git.example/pr/42"}'
+}
+PR_SHA=ffff666
+review_notify_human joshtronic/igor 99
+eq "a fetch that recovers is a head nobody has seen -> sends" \
+   "$((SENDS_BEFORE + 2))" "$SENDS"
+
+echo "== the PR title is not Igor's prose: it cannot inject HTML =="
+forgejo_get_pr() {
+  jq -n --arg s "$PR_SHA" \
+    '{head:{sha:$s}, title:"<script>x</script> & co", html_url:"u"}'
+}
+PR_SHA=1111aaa
+review_notify_human joshtronic/igor 42
+has "the HTML part escapes the angle brackets" "$LAST_HTML" "&lt;script&gt;"
+case "$LAST_HTML" in
+  *"<script>"*) bad "no raw tag survives into the HTML part" ;;
+  *)            ok  "no raw tag survives into the HTML part" ;;
+esac
+has "and the ampersand"                  "$LAST_HTML" "&amp; co"
+has "the plain-text part is left alone"  "$LAST_BODY" "<script>x</script>"
+forgejo_get_pr() {
+  jq -n --arg s "$PR_SHA" \
+    '{head:{sha:$s}, title:"feat: a thing", html_url:"https://git.example/pr/42"}'
+}
+
+echo "== only a request FOR the operator is worth mailing him =="
+export FORGEJO_REVIEWER=josh
+SENDS_BEFORE=$SENDS; PR_SHA=2222bbb
+review_notify_human joshtronic/igor 42 someone-else
+eq "a request for somebody else does not email the operator" "$SENDS_BEFORE" "$SENDS"
+review_notify_human joshtronic/igor 42 josh
+eq "his own request does" "$((SENDS_BEFORE + 1))" "$SENDS"
+PR_SHA=3333ccc
+review_notify_human joshtronic/igor 42
+eq "an unnamed reviewer fails open, like the rest of this module" \
+   "$((SENDS_BEFORE + 2))" "$SENDS"
+
+echo "== a state dir that does not exist yet is created, not lost =="
+SAVED_DIR="$AGENT_STATE_DIR"
+export AGENT_STATE_DIR="$TMPDIR_T/never/made/before"
+PR_SHA=4444ddd
+review_notify_human joshtronic/igor 7
+eq "dedup records in a freshly created state dir" "4444ddd" \
+   "$(jq -r '.review_notified["joshtronic/igor#7"] // ""' \
+      "$AGENT_STATE_DIR/discretionary-state.json" 2>/dev/null)"
+export AGENT_STATE_DIR="$SAVED_DIR"
 
 echo "== email off / no recipients: quiet, not crashing =="
 # Deliberately NOT `( unset ...; review_notify_human ... )`: a subshell throws
@@ -168,11 +223,12 @@ export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
 . "$HERE/lib/forgejo.sh"
 
 HOOKED=""
-review_notify_human() { HOOKED="$1#$2"; }
+review_notify_human() { HOOKED="$1#$2 -> $3"; }
 
 _forgejo_post_reviewers() { printf '\n201'; }
 forgejo_request_review joshtronic/igor 42 josh
-eq "a request that LANDS fires the notifier" "joshtronic/igor#42" "$HOOKED"
+eq "a request that LANDS fires the notifier, reviewer and all" \
+   "joshtronic/igor#42 -> josh" "$HOOKED"
 
 HOOKED=""
 _forgejo_post_reviewers() { printf 'nope\n422'; }

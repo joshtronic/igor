@@ -102,6 +102,13 @@ WEBSITE_PATH="${WEBSITE_PATH:-$AGENT_STATE_DIR/repos/${WEBSITE_REPO}}"
 . "$AGENT_HOME/lib/claude.sh"
 # shellcheck source=../lib/brain.sh
 . "$AGENT_HOME/lib/brain.sh"
+# Same reason as site-work-block.sh: this pipeline opens a PR and requests the
+# operator's review, and the notifier hook is a per-process property (igor#439).
+# email.sh first: reviewnotify sends through email_send.
+# shellcheck source=../lib/email.sh
+. "$AGENT_HOME/lib/email.sh"
+# shellcheck source=../lib/reviewnotify.sh
+. "$AGENT_HOME/lib/reviewnotify.sh"
 
 # -- constants --------------------------------------------------
 

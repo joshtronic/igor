@@ -98,6 +98,57 @@ else
   fi
 fi
 
+# -- Review-notification wiring ---------------------------------
+#
+# The "a PR needs you" email (igor#439) hangs off forgejo_request_review, which
+# fires review_notify_human only if something DEFINED it -- lib/forgejo.sh stays
+# a pure API wrapper and bin/agent-*.sh keep working without the notifier. That
+# makes the hook a per-PROCESS property: an entry point that reaches a review
+# request without sourcing lib/reviewnotify.sh requests it and tells the
+# operator nothing, which is the "forgot to hook the caller" failure the design
+# set out to avoid, just moved to a process boundary. So assert it.
+
+# Every lib/*.sh an entry point sources, transitively (libs don't source libs
+# today, but a one-level check would quietly stop being true if one started).
+sourced_libs() {
+  local pending="$1" seen="" f next
+  while [ -n "$pending" ]; do
+    f="${pending%%$'\n'*}"
+    pending="${pending#"$f"}"; pending="${pending#$'\n'}"
+    case $'\n'"$seen"$'\n' in *$'\n'"$f"$'\n'*) continue ;; esac
+    seen="${seen}${seen:+$'\n'}$f"
+    [ -f "$f" ] || continue
+    next=$(grep -oE '^[[:space:]]*(\.|source)[[:space:]]+"?\$AGENT_HOME/lib/[a-z-]+\.sh' "$f" 2>/dev/null \
+           | grep -oE 'lib/[a-z-]+\.sh' | sort -u)
+    [ -n "$next" ] && pending="${pending}${pending:+$'\n'}$next"
+  done
+  printf '%s\n' "$seen"
+}
+
+for entry in bin/*.sh; do
+  case "$entry" in bin/test-*.sh | bin/check-sync.sh) continue ;; esac
+  reach=$(sourced_libs "$entry")
+  # lib/forgejo.sh is excluded from the CALLER scan on purpose: it holds the
+  # definitions, and its one internal call is inside forgejo_open_pr -- which is
+  # exactly what we're tracking. Counting it would drag in every read-only
+  # helper that merely talks to Forgejo.
+  callers=$(printf '%s\n' "$reach" | grep -v '^lib/forgejo\.sh$' | tr '\n' ' ')
+  # shellcheck disable=SC2086
+  [ -n "${callers// /}" ] || continue
+  # shellcheck disable=SC2086
+  if ! grep -hE '(forgejo_request_review|forgejo_open_pr)' $callers 2>/dev/null \
+       | grep -qvE '^[[:space:]]*#'; then
+    continue
+  fi
+  if printf '%s\n' "$reach" | grep -q '^lib/reviewnotify\.sh$'; then
+    echo "+ $entry can request a review and sources lib/reviewnotify.sh"
+  else
+    echo "x $entry reaches forgejo_request_review but never sources lib/reviewnotify.sh"
+    echo "    -- the review request lands and the operator is never emailed (igor#439)"
+    FAIL=1
+  fi
+done
+
 # -- Unit tests -------------------------------------------------
 
 for t in bin/test-*.sh; do
