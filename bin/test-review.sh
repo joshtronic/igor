@@ -44,8 +44,12 @@ eq   "closing keyword but the fetch fails -> no section (skip gracefully)" "" "$
 forgejo_get_issue() { printf '%s' "{\"number\":5,\"title\":\"t\",\"body\":\"$(head -c 5000 < /dev/zero | tr '\0' 'x')\"}"; }
 LONG=$(review_linked_issue_section acme/repo "Closes #5")
 has "an oversized issue body is truncated"          "$LONG" "TRUNCATED"
+has "linked-issue section is fenced as untrusted data" "$LONG" "BEGIN UNTRUSTED ISSUE TEXT"
+has "linked-issue section's untrusted fence is closed" "$LONG" "END UNTRUSTED ISSUE TEXT"
+# Body is the only source of 'x' chars in this fixture (title is "t"), so a
+# raw count is a format-independent way to confirm the truncation length.
 eq  "truncated body caps at REVIEW_ISSUE_BODY_MAX"  "$REVIEW_ISSUE_BODY_MAX" \
-    "$(printf '%s' "$LONG" | tail -1 | tr -d '\n' | wc -c | tr -d ' ')"
+    "$(printf '%s' "$LONG" | tr -cd 'x' | wc -c | tr -d ' ')"
 
 echo "== review_diff_changed_files / review_diff_test_files =="
 DIFF="diff --git a/bin/test-foo.sh b/bin/test-foo.sh
