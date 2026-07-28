@@ -286,7 +286,19 @@ forgejo_request_review() {
     code="${resp##*$'\n'}"   # last line: the http_code
     body="${resp%$'\n'*}"    # everything before it: the response body
     case "$code" in
-      2*) return 0 ;;
+      2*)
+        # igor#439: the operator runs with Forgejo's own notifications off, so
+        # a landed review request is the one event worth emailing him about --
+        # it is where the loop stops and he becomes the blocker. Fired by name
+        # rather than passed in, so this file stays a pure API wrapper and the
+        # notifier (lib/reviewnotify.sh, which owns the dedup) is optional.
+        # Best-effort: the request already landed, and a notification failure
+        # must not turn a success into a failure.
+        if declare -F review_notify_human >/dev/null; then
+          review_notify_human "$repo" "$number" || true
+        fi
+        return 0
+        ;;
       5*|000) [ "$attempt" -eq 1 ] && { sleep 1; continue; } ;;
     esac
     break
