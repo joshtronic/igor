@@ -118,6 +118,8 @@ unset env_file_hint
 # shellcheck source=lib/automerge.sh
 . "$AGENT_HOME/lib/automerge.sh"
 . "$AGENT_HOME/lib/ship-report.sh"
+# shellcheck source=lib/needsyou.sh
+. "$AGENT_HOME/lib/needsyou.sh"
 # shellcheck source=lib/feedback.sh
 . "$AGENT_HOME/lib/feedback.sh"
 # shellcheck source=lib/deferred.sh
@@ -240,6 +242,12 @@ export HEALTH_RECIPIENTS="${HEALTH_RECIPIENTS:-}"
 # deploy/smoke failed" email goes (see do_deploy_barrier). Additive like the
 # rest: PRIMARY_RECIPIENTS always gets it; ALERT_RECIPIENTS adds others.
 export ALERT_RECIPIENTS="${ALERT_RECIPIENTS:-}"
+
+# Event-driven "needs you" notification (see do_needsyou_tick) -- additive
+# like every other report: PRIMARY_RECIPIENTS always gets it (and gates the
+# feature -- no PRIMARY_RECIPIENTS means no notification at all);
+# NEEDSYOU_RECIPIENTS adds extra subscribers.
+export NEEDSYOU_RECIPIENTS="${NEEDSYOU_RECIPIENTS:-}"
 
 # Sports digest -- opt-in daily (7 days; sports don't take weekends off)
 # ELI5 sports-tutor email: scripted ESPN fetch, ONE distill call on
@@ -1858,6 +1866,157 @@ do_shipreport_tick() {
   return 0
 }
 
+# -- Event-driven "needs you" notification ------------------------
+#
+# Fires the moment something ENTERS the set only the operator can unblock: a
+# PR open and awaiting the human (shadow verdict isn't APPROVE, or the repo
+# carries automerge.require_human), an issue that gained Status/Blocked or
+# Status/Need More Info, a CEO proposal/question awaiting a greenlight, or a
+# systemd unit gone failed. Silent when the set is unchanged; silent when
+# something LEAVES it -- see lib/needsyou.sh for the diff engine (this
+# function is pure gathering + wiring, mirroring shipreport_build vs
+# do_shipreport_tick). Fully scripted (no model call), so it runs every tick,
+# including during a Claude health cooldown. Reuses the ship-report's own
+# delivery path (email_send + recipients_with_primary), not a second mailer.
+#
+# Unlike the once-a-day digests, this runs EVERY tick: it returns 1 (fall
+# through, the common case) when nothing new entered the set, so it never
+# starves the rest of the cascade. Only an actual addition sends mail and
+# returns 0 (one notification, then end the tick, matching every other
+# single-action pass).
+do_needsyou_tick() {
+  [ -n "${PRIMARY_RECIPIENTS:-}" ] && [ -n "${SMTP2GO_API_KEY:-}" ] && [ -n "${SMTP2GO_SENDER:-}" ] || return 1
+  [ -n "${ANALYSIS_REPOS_JSON:-}" ] || return 1
+
+  local items='[]' now; now=$(date +%s)
+  local repo
+
+  # 1. PRs open and awaiting the human. A require_human repo always needs
+  # you. Otherwise this mirrors review_tick's OWN decision of when it
+  # actually requests the human -- not just "verdict isn't APPROVE" -- so a
+  # fresh REQUEST_CHANGES (round 1, the bot reworks it automatically) does
+  # NOT falsely flag; only COMMENT, an unvalidated-repo REQUEST_CHANGES, or
+  # one escalated after 3 rework rounds actually needs you. An un-reviewed
+  # or mid-rework head (reviewed_sha behind head) means the loop, not the
+  # operator, is the current blocker, so it's excluded until review_tick
+  # settles it.
+  local prs pr_num pr_json head key reqh reviewed_sha verdict since why needs_human
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    reqh=false; automerge_require_human "$repo" && reqh=true
+    prs=$(forgejo_list_open_bot_prs "$repo" "$BOT_USER" 2>/dev/null) || continue
+    while IFS= read -r pr_num; do
+      [ -n "$pr_num" ] || continue
+      pr_json=$(forgejo_get_pr "$repo" "$pr_num" 2>/dev/null) || continue
+      checkpoint_is_wip "$(jq -r '.title // ""' <<<"$pr_json")" && continue
+      head=$(jq -r '.head.sha // ""' <<<"$pr_json"); [ -n "$head" ] || continue
+      key="${repo}#${pr_num}"
+      reviewed_sha=$(review_reviewed_sha "$key")
+      verdict=""
+      [ "$reviewed_sha" = "$head" ] && verdict=$(jq -r --arg k "$key" '.review[$k].verdict // ""' "$(discretionary_state_file)" 2>/dev/null)
+      needs_human=false
+      if [ "$reqh" = true ]; then
+        needs_human=true
+      else
+        case "$verdict" in
+          COMMENT) needs_human=true ;;
+          REQUEST_CHANGES)
+            if ! maintenance_repo_validated "$repo"; then
+              needs_human=true
+            elif [ "$(review_rework_rounds "$key")" -ge 3 ]; then
+              needs_human=true
+            fi
+            ;;
+        esac
+      fi
+      if [ "$needs_human" = true ]; then
+        since=$(jq -r 'try (.created_at | fromdateiso8601) catch empty' <<<"$pr_json" 2>/dev/null)
+        [ -n "$since" ] || since="$now"
+        why="PR awaiting your review (shadow verdict: ${verdict:-pending})"
+        items=$(needsyou_add_item "$items" "pr:${key}" "$repo" "$why" "$(jq -r '.html_url // ""' <<<"$pr_json")" "$since")
+      fi
+    done < <(jq -r '.[].number' <<<"${prs:-[]}" 2>/dev/null)
+  done < <(printf '%s' "$ANALYSIS_REPOS_JSON" | jq -r '.full_name')
+
+  # 2. Issues gaining Status/Blocked or Status/Need More Info, plus CEO
+  # proposals/questions awaiting a greenlight -- one issues fetch per repo,
+  # filtered client-side (the API's `labels=` filter fails open on an unknown
+  # label name -- see forgejo_find_claimable's comment -- and "Status/Need
+  # More Info" isn't URL-safe unescaped anyway). A CEO question also carries
+  # Status/Need More Info, so the CEO branches are checked first and win.
+  local iss delta
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    iss=$(_fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" 2>/dev/null) || continue
+    delta=$(jq -c --arg repo "$repo" --arg pm "${CEO_PROPOSAL_MARKER:-}" --arg qm "${CEO_QUESTION_MARKER:-}" --arg r "${FORGEJO_REVIEWER:-}" '
+      [ .[]? | select(.pull_request == null)
+        | ((.body // "")) as $body
+        | ([.labels[]?.name]) as $labels
+        | ([.assignees[]?.login]) as $assignees
+        | (
+            if   (($pm|length) > 0) and ($body | contains($pm)) and (($labels | index("Agent")) == null)
+                 then "CEO proposal awaiting your greenlight"
+            elif (($qm|length) > 0) and ($body | contains($qm)) and (($assignees | index($r)) != null)
+                 then "CEO question awaiting your answer"
+            elif ($labels | index("Status/Blocked")) != null
+                 then "labeled Status/Blocked: " + .title
+            elif ($labels | index("Status/Need More Info")) != null
+                 then "labeled Status/Need More Info: " + .title
+            else null
+            end
+          ) as $why
+        | select($why != null)
+        | {id: ("issue:" + $repo + "#" + (.number|tostring)), repo: $repo, why: $why, url: .html_url,
+           since: (try (.created_at | fromdateiso8601) catch null)}
+      ]' <<<"${iss:-[]}" 2>/dev/null) || delta='[]'
+    delta=$(jq -c --argjson now "$now" 'map(.since //= $now)' <<<"${delta:-[]}" 2>/dev/null || echo '[]')
+    items=$(jq -c --argjson d "${delta:-[]}" '. + $d' <<<"$items")
+  done < <(printf '%s' "$ANALYSIS_REPOS_JSON" | jq -r '.full_name')
+
+  # 3. Systemd units gone failed -- same declared-unit discovery logwatch
+  # uses (a repo's root systemd/ dir), but a live is-failed check rather than
+  # a journal read.
+  if command -v systemctl >/dev/null 2>&1; then
+    local dir_listing units unit base state ts fail_since
+    while IFS= read -r repo; do
+      [ -n "$repo" ] || continue
+      dir_listing=$(forgejo_repo_list_dir "$repo" "systemd" 2>/dev/null) || continue
+      units=$(grep -E '\.service$' <<<"$dir_listing" || true)
+      [ -n "$units" ] || continue
+      while IFS= read -r unit; do
+        [ -n "$unit" ] || continue
+        base="${unit%.service}"
+        state=$(systemctl --user is-failed "$unit" 2>/dev/null || true)
+        [ "$state" = "failed" ] || continue
+        ts=$(systemctl --user show "$unit" --property=ActiveEnterTimestamp --value 2>/dev/null)
+        fail_since=$(date -d "$ts" +%s 2>/dev/null) || fail_since="$now"
+        items=$(needsyou_add_item "$items" "systemd:${repo}/${unit}" "$repo" "systemd unit ${base} is in failed state" "${FORGEJO_URL}/${repo}" "$fail_since")
+      done <<<"$units"
+    done < <(printf '%s' "$ANALYSIS_REPOS_JSON" | jq -r '.full_name')
+  fi
+
+  # -- Diff against the last-notified set; notify only on additions --------
+  local sf prev new
+  sf=$(discretionary_state_file)
+  prev=$(needsyou_load_ids "$sf")
+  new=$(needsyou_new_items "$prev" "$items")
+  needsyou_save_ids "$sf" "$(needsyou_current_ids "$items")"
+  [ "$(jq 'length' <<<"$new" 2>/dev/null || echo 0)" -gt 0 ] || return 1
+
+  local html text subject recipients n
+  n=$(jq -r 'length' <<<"$new")
+  html=$(needsyou_render_html "$now" <<<"$new")
+  text=$(needsyou_render_text "$now" <<<"$new")
+  subject="[Needs You] ${n} item(s) newly waiting on you"
+  recipients=$(recipients_with_primary "${NEEDSYOU_RECIPIENTS:-}")
+  if email_send "$subject" "$html" "$text" "$recipients"; then
+    log "needsyou: notified ${n} new item(s) to $recipients"
+  else
+    log "warning: needsyou email failed (continuing)"
+  fi
+  return 0
+}
+
 # -- Sports digest (daily, opt-in) --------------------------------
 #
 # The ELI5 sports-tutor email: harness-side ESPN fetch (lib/espn.sh),
@@ -3297,6 +3456,14 @@ log "validation: ${VAL_PASS} pass, ${VAL_CACHED} cached, ${VAL_NOTREADY} not-rea
 # One-thing-then-exit, like the rest of the cascade. Deliberately above the
 # claude_health_blocked gate below -- see the validation-sweep comment above.
 do_automerge_tick && exit 0
+
+# -- "Needs you" notification (event-driven; non-model API+systemctl only).
+# Deliberately above the health gate: a live Claude cooldown is exactly when
+# the operator most needs to know the agent itself may be stuck. Runs every
+# tick but only ends it (exit 0) on an actual new addition -- the common
+# "nothing new" case returns 1 and falls through untouched. See
+# do_needsyou_tick's own header for the full event list.
+do_needsyou_tick && exit 0
 
 if claude_health_blocked; then
   log "claude health: backoff active (kind=$(claude_health_kind)) -- skipping all model work this tick"
