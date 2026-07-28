@@ -2,10 +2,11 @@
 # agent-block.sh -- Called by the agent from within a tick when it
 # cannot complete the work.
 #
-# Posts the supplied reason as a comment on the current issue,
-# applies the Status/Blocked label, and unassigns the bot. The
-# `Agent` label is left in place so the issue stays in the agent's
-# domain.
+# Appends the reason to the issue BODY (see igor#434: the issue-work
+# prompt is built from ISSUE_BODY alone, so a reason posted only as a
+# comment never reaches a re-queued run), posts it as a comment too,
+# applies the Status/Blocked label, and unassigns the bot. The `Agent`
+# label is left in place so the issue stays in the agent's domain.
 #
 # Usage: agent-block.sh "<reason>"
 #
@@ -23,7 +24,21 @@ REASON="${1:?usage: agent-block.sh \"<reason>\"}"
 # shellcheck source=../lib/forgejo.sh
 . "$AGENT_HOME/lib/forgejo.sh"
 
-forgejo_comment    "$FORGEJO_REPO" "$ISSUE_NUMBER" "$REASON"
+# Best-effort: a fetch/PATCH failure here must not stop the comment + label
+# + unassign below -- those are what actually mark the issue blocked. Only
+# claim the mechanism worked (via NOTE) when it actually did.
+#
+# Heading carries the time, not just the date: a ticket can block twice in a
+# day (re-queued, blocked again), and two identical `## Blocked (2026-07-27)`
+# headings read as a formatting bug rather than as two separate attempts.
+NOTE=""
+if forgejo_append_issue_body "$FORGEJO_REPO" "$ISSUE_NUMBER" "Blocked ($(date -u '+%Y-%m-%d %H:%MZ'))" "$REASON"; then
+  NOTE=$'\n\n_(Appended to the issue description above -- removing `Status/Blocked` re-queues the ticket with this context already in hand.)_'
+else
+  echo "agent-block: warning: could not append findings to the issue body" >&2
+fi
+
+forgejo_comment    "$FORGEJO_REPO" "$ISSUE_NUMBER" "${REASON}${NOTE}"
 forgejo_add_label  "$FORGEJO_REPO" "$ISSUE_NUMBER" "Status/Blocked"
 forgejo_unassign_all "$FORGEJO_REPO" "$ISSUE_NUMBER"
 

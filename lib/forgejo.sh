@@ -149,6 +149,47 @@ forgejo_get_issue() {
   _fj GET "/repos/${repo}/issues/${number}"
 }
 
+# forgejo_append_issue_body <repo> <number> <heading> <text> -- appends
+# <text> under a "## <heading>" section at the end of the issue's current
+# body and PATCHes it back. Used by agent-block.sh (igor#434): the
+# issue-work prompt (bin/tick.sh) feeds ONLY the issue body to the next
+# tick's Claude invocation -- comments are never read -- so a block reason
+# posted solely as a comment can never reach a re-queued run. Appending it
+# to the body is what makes "remove Status/Blocked to re-queue" actually
+# work. Best-effort: a fetch/PATCH failure returns 1 without touching
+# anything, so the caller can still fall back to commenting alone.
+#
+# The fetch is validated in two steps, deliberately, because the naive
+# `current=$(forgejo_get_issue ... | jq -r '.body // empty') || return 1` is
+# wrong in both halves and its failure mode is DESTRUCTIVE -- it PATCHes the
+# block note in as the entire issue description, erasing the very text this
+# helper exists to preserve:
+#   1. A pipeline's status is jq's, not the fetch's, unless the CALLER has
+#      `pipefail` set -- and `jq -r '.body // empty'` on empty stdin exits 0.
+#      So the fetch is captured on its own line; no shell option of the
+#      caller's can change what that guard sees.
+#   2. Exit status alone isn't enough anyway. `_fj`'s `curl -sf` covers the
+#      HTTP >= 400 case today, but any 2xx payload that isn't an issue (an
+#      error object, a proxy's interstitial) is still well-formed JSON whose
+#      `.body // empty` is "" with exit 0. So require the payload to look like
+#      an issue -- `has("number")` and `has("body")` -- before writing.
+# Growth is accepted: each block appends another section rather than replacing
+# the last, because the history of what was tried and rejected is context a
+# re-queued run wants. The heading carries a timestamp (see agent-block.sh) so
+# repeated blocks on one day stay distinguishable.
+forgejo_append_issue_body() {
+  local repo="$1" number="$2" heading="$3" text="$4"
+  local raw current new
+  raw=$(forgejo_get_issue "$repo" "$number") || return 1
+  current=$(jq -er '
+      if (type == "object") and has("number") and has("body")
+      then (.body // "") else empty end
+    ' <<<"$raw") || return 1
+  new=$(printf '%s\n\n---\n## %s\n\n%s\n' "$current" "$heading" "$text")
+  _fj PATCH "/repos/${repo}/issues/${number}" \
+    "$(jq -n --arg b "$new" '{body: $b}')" >/dev/null
+}
+
 # All non-bot reviews on a PR, sorted oldest-to-newest. Used to
 # detect "request changes" pickup signal -- if the latest non-bot
 # review on the CURRENT head is REQUEST_CHANGES, the reviewer has
