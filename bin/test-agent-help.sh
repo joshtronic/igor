@@ -15,6 +15,15 @@
 # touching Forgejo cannot need ISSUE_NUMBER/FORGEJO_*/AGENT_HOME. If one of these
 # starts failing because a var is missing, that IS the bug -- it means the script
 # got far enough to try to act.
+#
+# The second block asserts the mirror property: with NO arguments a helper must
+# REFUSE (non-zero) at the argument check and stop there. Same class of bug from
+# the other side -- a helper that prints usage and then keeps going acts on empty
+# arguments. (A shadowed `usage()` that lost its `exit 1` did exactly this.)
+#
+# Scope note: the --help guard inspects "$1" only, so `agent-ask.sh some/repo
+# --help` still reads --help as the title. That is the reported failure mode and
+# all these helpers need; none of them do real flag parsing.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
@@ -36,10 +45,29 @@ for f in "$HERE"/bin/agent-*.sh; do
       continue
     fi
     case "$out" in
-      Usage:*|*"Usage:"*) ok "$base $flag -> usage, exit 0, no environment needed" ;;
+      *"Usage:"*|*"usage:"*) ok "$base $flag -> usage, exit 0, no environment needed" ;;
       *) bad "$base $flag: exit 0 but printed no usage: ${out:0:60}" ;;
     esac
   done
+done
+
+echo "== every agent-*.sh refuses zero arguments instead of falling through =="
+for f in "$HERE"/bin/agent-*.sh; do
+  [ -f "$f" ] || continue
+  base=$(basename "$f")
+  out=$(env -i PATH="$PATH" bash "$f" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ]; then
+    bad "$base (no args): exited 0 -- it did not refuse"
+    continue
+  fi
+  # Every helper checks its arguments before it checks its environment, so
+  # reaching an env check proves the argument check let it through.
+  case "$out" in
+    *"are you being run from a tick"*)
+      bad "$base (no args): fell past the argument check into the env checks" ;;
+    *"Usage:"*|*"usage:"*) ok "$base (no args) -> usage, non-zero exit, stopped at the argument check" ;;
+    *) bad "$base (no args): exited $rc but printed no usage: ${out:0:60}" ;;
+  esac
 done
 
 if [ "$COUNT" -eq 0 ]; then

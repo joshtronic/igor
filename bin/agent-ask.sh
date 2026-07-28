@@ -39,6 +39,8 @@ USAGE
 # --help/-h must short-circuit BEFORE any Forgejo contact -- otherwise the
 # flag is taken as a positional argument and performs the real action
 # (igor#398 fixed this on agent-report.sh; the same hole was left here).
+# Only "$1" is inspected -- `agent-ask.sh some/repo --help` still reads --help
+# as the title. That was the reported failure mode; no general flag parsing here.
 case "${1:-}" in
   -h | --help)
     usage
