@@ -92,6 +92,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/browser-reap.sh"
 # shellcheck source=lib/cascade.sh
 . "$AGENT_HOME/lib/cascade.sh"
+# shellcheck source=lib/needsyou.sh
+. "$AGENT_HOME/lib/needsyou.sh"
 # shellcheck source=lib/http-reap.sh
 . "$AGENT_HOME/lib/http-reap.sh"
 # shellcheck source=lib/cost.sh
@@ -4072,6 +4074,82 @@ fi
 # daily post still comes first. Posts ONE non-binding verdict per tick
 # on an un-reviewed bot-PR head, then exits like any other pass. Never
 # merges or pushes -- comment only.
+# -- What is waiting on the operator (igor#439, detection half) --
+#
+# The operator's stated biggest problem is not knowing when he is the blocker.
+# This builds the set of items waiting on him and logs the ones that are NEW.
+# Delivery is a separate change; this half only has to be right about WHAT is
+# waiting and WHEN it started.
+#
+# Scanned rather than hooked at the emit points, because items must also LEAVE
+# the set when he deals with them. A hook can only ever add; without removal an
+# item stays "already known" forever and a genuine recurrence is never
+# announced again. A scan is idempotent and self-correcting, and it also picks
+# up anything that entered the queue before this shipped.
+#
+# Throttled to every NEEDSYOU_SCAN_EVERY ticks: it costs one PR-list call per
+# eligible repo, which is the fleet-sweep cost igor#441 is about, so it must not
+# run on every tick. At the post-#447 cadence this is a few minutes' latency on
+# learning you are blocked -- against the status quo of finding out by asking.
+NEEDSYOU_SCAN_EVERY=20
+
+# A PR needs the human exactly when auto-merge will NOT take it. Deliberately
+# expressed as the negation of the existing predicate rather than a second copy
+# of the rule: automerge_will_take is "APPROVE and the repo is not pinned to a
+# human", it is already unit-tested, and a duplicate would drift from it.
+needsyou_scan_set() {
+  local sf repo_line repo prs pr key verdict out='{}' item why kind
+  sf=$(discretionary_state_file)
+  while IFS= read -r repo_line; do
+    [ -n "$repo_line" ] || continue
+    repo=$(jq -r '.full_name' <<<"$repo_line" 2>/dev/null); [ -n "$repo" ] || continue
+
+    prs=$(forgejo_list_open_bot_prs "$repo" "$BOT_USER" 2>/dev/null) || prs=""
+    while IFS= read -r pr; do
+      if [ -z "$pr" ] || [ "$pr" = "null" ]; then continue; fi
+      verdict=$(jq -r --arg k "${repo}#${pr}" '.review[$k].verdict // ""' "$sf" 2>/dev/null)
+      automerge_will_take "$repo" "$verdict" && continue
+      if automerge_require_human "$repo"; then
+        why="open PR on a repo pinned to your review"
+      else
+        why="shadow verdict ${verdict:-none} -- auto-merge will not take it"
+      fi
+      item=$(needsyou_item "$repo" pr "$pr" "$why" 0)
+      out=$(jq -c --arg k "$(needsyou_key "$repo" pr "$pr")" --argjson v "$item" '. + {($k): $v}' <<<"$out")
+    done <<<"$prs"
+
+    while IFS= read -r kind; do
+      [ -n "$kind" ] || continue
+      pr=${kind%%|*}; why=${kind#*|}
+      item=$(needsyou_item "$repo" issue "$pr" "$why" 0)
+      out=$(jq -c --arg k "$(needsyou_key "$repo" issue "$pr")" --argjson v "$item" '. + {($k): $v}' <<<"$out")
+    done < <(_fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" 2>/dev/null       | jq -r '.[]? | select([.labels[]?.name] | any(. == "Status/Blocked" or . == "Status/Need More Info"))
+               | "\(.number)|\([.labels[].name] | map(select(startswith("Status/"))) | join(", "))"' 2>/dev/null || true)
+  done <<<"$ANALYSIS_REPOS_JSON"
+  printf '%s' "$out"
+}
+
+needsyou_pass() {
+  local sf prev cur merged now added key
+  sf=$(discretionary_state_file)
+  [ -f "$sf" ] || echo '{}' > "$sf"
+  now=$(date +%s)
+  prev=$(jq -c '.needsyou // {}' "$sf" 2>/dev/null || echo '{}')
+  cur=$(needsyou_scan_set)
+  merged=$(needsyou_merge "$prev" "$cur" "$now")
+  added=$(needsyou_added "$prev" "$cur")
+
+  local tmp; tmp=$(mktemp)
+  if jq --argjson n "$merged" '.needsyou = $n' "$sf" > "$tmp" 2>/dev/null; then mv "$tmp" "$sf"; else rm -f "$tmp"; fi
+
+  if [ -n "$added" ]; then
+    while IFS= read -r key; do
+      [ -n "$key" ] || continue
+      log "needs-you: $(needsyou_describe "$merged" "$key" "$now")"
+    done <<<"$added"
+  fi
+}
+
 # -- Cascade fairness (igor#441) --------------------------------
 #
 # Each gate below is wrapped so the stage records that it was REACHED. A stage
@@ -4144,6 +4222,13 @@ cascade_bump_tick_file
 CASCADE_TICK=$(cascade_tick_number "$(cascade_state_file_read)")
 
 CASCADE_RESCUED=""
+# Throttled here rather than beside its definitions above: CASCADE_TICK is not
+# assigned until the cascade prelude, and the modulo would read an unset
+# variable under `set -u`.
+if [ $(( CASCADE_TICK % NEEDSYOU_SCAN_EVERY )) -eq 0 ]; then
+  needsyou_pass
+fi
+
 CASCADE_STARVED=$(cascade_starved_stage "$(cascade_state_file_read)" "$CASCADE_STAGES" "$CASCADE_TICK")
 if [ -n "$CASCADE_STARVED" ]; then
   log "cascade: ${CASCADE_STARVED} starved -- unreached for $(cascade_stage_age "$(cascade_state_file_read)" "$CASCADE_STARVED" "$CASCADE_TICK") ticks; running it before the usual order"
