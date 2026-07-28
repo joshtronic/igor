@@ -2220,6 +2220,46 @@ do_ceo_tick() {
         esac
         return 0   # one model-backed action per tick
       fi
+
+      # --- Path 1c (igor#433): act on board STEERING left as a COMMENT on the
+      # OPEN weekly digest -- EVERY tick, not week-gated (requirement 2:
+      # composing next week's digest and responding to steering on THIS one are
+      # different actions). Watermark = the CEO's own last reply on the thread,
+      # so a comment already answered doesn't re-fire and needs no new state.
+      # Gated on comment AUTHOR == reviewer (never "not the bot" -- see the
+      # ceo_digest_pending_steering_number comment for why that distinction is
+      # the whole point). The digest stays open + assigned either way
+      # (requirement 3); only a reply is posted, never a close/unassign.
+      local dnum dthread dparsed
+      dnum=$(ceo_digest_pending_steering_number "$repo" "$FORGEJO_REVIEWER")
+      if [ -n "$dnum" ]; then
+        dthread=$(ceo_digest_thread "$repo" "$dnum" "$FORGEJO_REVIEWER")
+        prompt=$(ceo_build_digest_steering_prompt "$repo" "$mandate" "$dthread")
+        dparsed=""
+        for attempt in 1 2; do
+          raw=$(claude_call "$AGENT_MODEL" "ceo-digest-steer" 8000 \
+            "You are the CEO acting on board steering left as a comment on your OPEN weekly digest. This is a focused action, not a digest -- the board already gave you the direction, so act on your own judgment: file real work directly (Agent-labeled, ready for the grind) rather than re-proposing it for a second approval. Reply to the board naming what you did. Follow the output format in the prompt exactly." \
+            "$prompt" 0) \
+            || { log "ceo: digest-steering call failed for ${repo}#${dnum} (attempt ${attempt})"; continue; }
+          if dparsed=$(ceo_parse_digest_steering "$raw"); then break; fi
+          dparsed=""
+        done
+        if [ -z "$dparsed" ]; then
+          # No reply posted -- the watermark doesn't move, so this same board
+          # comment is retried next tick instead of silently dropped.
+          log "ceo: unparseable digest-steering response for ${repo}#${dnum} -- will retry next tick"
+          continue
+        fi
+        # Reply FIRST, work second -- the reply is the watermark, so a failed POST
+        # must leave nothing filed or the retry re-files the same Agent-labeled
+        # tickets into the autonomous queue (see ceo_commit_digest_steering).
+        if ceo_commit_digest_steering "$repo" "$dnum" "$dparsed"; then
+          log "ceo: replied to board steering on ${repo}#${dnum}"
+        else
+          log "warning: ceo: failed to post steering reply on ${repo}#${dnum} -- filed nothing; retrying next tick"
+        fi
+        return 0   # one model-backed action per tick
+      fi
     fi
 
     # --- Path 2: the weekly board digest (once per ISO week). ---
