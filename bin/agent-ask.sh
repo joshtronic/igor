@@ -26,6 +26,26 @@
 
 set -euo pipefail
 
+usage() {
+  cat <<'USAGE'
+Usage: agent-ask.sh <owner/repo> "<title>" "<body>"
+
+Files an asynchronous question issue on <owner/repo> for the board.
+Throttled to one open bot question per repo.
+Run from within a tick; requires BOT_USER, FORGEJO_URL, FORGEJO_TOKEN, AGENT_HOME.
+USAGE
+}
+
+# --help/-h must short-circuit BEFORE any Forgejo contact -- otherwise the
+# flag is taken as a positional argument and performs the real action
+# (igor#398 fixed this on agent-report.sh; the same hole was left here).
+case "${1:-}" in
+  -h | --help)
+    usage
+    exit 0
+    ;;
+esac
+
 REPO="${1:?usage: agent-ask.sh <owner/repo> \"<title>\" \"<body>\"}"
 TITLE="${2:?usage: agent-ask.sh <owner/repo> \"<title>\" \"<body>\"}"
 BODY="${3:?usage: agent-ask.sh <owner/repo> \"<title>\" \"<body>\"}"

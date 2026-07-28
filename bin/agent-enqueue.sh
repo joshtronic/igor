@@ -51,6 +51,25 @@ USAGE
   exit 1
 }
 
+usage() {
+  cat <<'USAGE'
+Usage: agent-enqueue.sh <owner/repo> "<title>" "<body>"
+
+Files a work ticket on <owner/repo>.
+Run from within a tick; requires BOT_USER, FORGEJO_URL, FORGEJO_TOKEN, AGENT_HOME.
+USAGE
+}
+
+# --help/-h must short-circuit BEFORE any Forgejo contact -- otherwise the
+# flag is taken as a positional argument and performs the real action
+# (igor#398 fixed this on agent-report.sh; the same hole was left here).
+case "${1:-}" in
+  -h | --help)
+    usage
+    exit 0
+    ;;
+esac
+
 REPO="${1:-}"
 TITLE="${2:-}"
 [ -z "$REPO" ] || [ -z "$TITLE" ] && usage
