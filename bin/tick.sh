@@ -84,6 +84,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/checkpoint.sh"
 # shellcheck source=lib/repo-checks.sh
 . "$AGENT_HOME/lib/repo-checks.sh"
+# shellcheck source=lib/review.sh
+. "$AGENT_HOME/lib/review.sh"
 # shellcheck source=lib/maintenance-checks.sh
 . "$AGENT_HOME/lib/maintenance-checks.sh"
 # shellcheck source=lib/browser-reap.sh
@@ -2995,23 +2997,11 @@ do_review_tick() {
   body=$(jq -r '.body // ""' <<<"$target_json")
 
   directive=$(cat "$AGENT_HOME/bin/lib/review-directive.md")
-  user="PR under review: ${target_repo}#${target_num}
-Head commit: ${target_sha}
-CI status for head: ${ci}
-
-## PR title
-
-${title}
-
-## PR description
-
-${body:-(none)}
-
-## Unified diff${truncated_note}
-
-\`\`\`diff
-${diff}
-\`\`\`"
+  # review_build_prompt (lib/review.sh) also folds in the linked issue's
+  # own text and the repo's test-runner facts (igor#438) -- both
+  # best-effort and additive, so a missing issue or unreadable Makefile
+  # just means a shorter prompt, never a blocked review.
+  user=$(review_build_prompt "$target_repo" "$target_num" "$target_sha" "$ci" "$title" "$body" "$diff" "$truncated_note")
 
   log "review: examining ${key} head ${target_sha:0:8} (ci=${ci}, ${#diff} chars of diff${truncated_note:+, truncated})"
 
