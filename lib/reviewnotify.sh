@@ -166,7 +166,9 @@ review_notify_human() {
     log "warning: reviewnotify: email failed for ${repo}#${number} -- not recording, will retry on the next request"
     return 0
   fi
-  log "reviewnotify: emailed ${recipients} about ${repo}#${number} (head ${head:0:8})"
+  # The KEY, not the head: on a failed fetch the head is empty and the line
+  # read "(head )", which says nothing about why the mail went out anyway.
+  log "reviewnotify: emailed ${recipients} about ${repo}#${number} (key ${key:0:13})"
 
   # Recorded only after a send actually lands, so a failed send retries rather
   # than marking the operator notified about mail he never got. The temp file is

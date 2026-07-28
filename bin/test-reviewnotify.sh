@@ -223,7 +223,10 @@ export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
 . "$HERE/lib/forgejo.sh"
 
 HOOKED=""
-review_notify_human() { HOOKED="$1#$2 -> $3"; }
+# ${3:-} deliberately: a hook called with the reviewer dropped must produce a
+# readable assertion failure, not an unbound-variable abort that takes the
+# whole suite down before it can report which check broke.
+review_notify_human() { HOOKED="$1#$2 -> ${3:-}"; }
 
 _forgejo_post_reviewers() { printf '\n201'; }
 forgejo_request_review joshtronic/igor 42 josh

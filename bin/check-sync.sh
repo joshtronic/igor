@@ -120,7 +120,12 @@ sourced_libs() {
     [ -f "$f" ] || continue
     next=$(grep -oE '^[[:space:]]*(\.|source)[[:space:]]+"?\$AGENT_HOME/lib/[a-z-]+\.sh' "$f" 2>/dev/null \
            | grep -oE 'lib/[a-z-]+\.sh' | sort -u)
-    [ -n "$next" ] && pending="${pending}${pending:+$'\n'}$next"
+    # `if`, not `[ -n "$next" ] && ...`: the && form returns 1 as the loop
+    # body's last status whenever a file sources nothing, which is the common
+    # case here and exactly the shape errexit trips on.
+    if [ -n "$next" ]; then
+      pending="${pending}${pending:+$'\n'}$next"
+    fi
   done
   printf '%s\n' "$seen"
 }
@@ -133,9 +138,8 @@ for entry in bin/*.sh; do
   # exactly what we're tracking. Counting it would drag in every read-only
   # helper that merely talks to Forgejo.
   callers=$(printf '%s\n' "$reach" | grep -v '^lib/forgejo\.sh$' | tr '\n' ' ')
-  # shellcheck disable=SC2086
   [ -n "${callers// /}" ] || continue
-  # shellcheck disable=SC2086
+  # shellcheck disable=SC2086  # deliberate word-split: $callers is a file list
   if ! grep -hE '(forgejo_request_review|forgejo_open_pr)' $callers 2>/dev/null \
        | grep -qvE '^[[:space:]]*#'; then
     continue
