@@ -4102,7 +4102,10 @@ cascade_bump_tick_file() {
   if jq '.cascade //= {} | .cascade.tick = ((.cascade.tick // 0) + 1)' "$f" > "$tmp" 2>/dev/null; then
     mv "$tmp" "$f"
   else
+    # An unparseable state file would otherwise stop the counter advancing and
+    # kill the whole fairness gate silently and permanently. Say so.
     rm -f "$tmp"
+    log "cascade: could not bump the tick counter -- $f unparseable?"
   fi
 }
 
@@ -4115,14 +4118,24 @@ cascade_mark_reached_file() {
     mv "$tmp" "$f"
   else
     rm -f "$tmp"
+    log "cascade: could not stamp '$stage' as reached -- $f unparseable?"
   fi
 }
 
 # cascade_run <stage> -- stamp the stage as reached, then run do_<stage>_tick.
 # Returns the stage's own status, so `if cascade_run x; then exit 0; fi` keeps
 # the existing gate semantics exactly.
+#
+# A stage rescued at the top of the cascade already ran this tick. Returning
+# non-zero for it here means the cascade falls straight through its normal gate
+# instead of invoking do_<stage>_tick a second time -- which for the model-call
+# stages (sports, ceo, feedback, deferred) would be a duplicated model call, and
+# for any stage with a side effect on its false path a duplicated side effect.
 cascade_run() {
   local stage="$1"
+  if [ "$stage" = "${CASCADE_RESCUED:-}" ]; then
+    return 1
+  fi
   cascade_mark_reached_file "$stage" "$CASCADE_TICK"
   "do_${stage}_tick"
 }
@@ -4130,12 +4143,16 @@ cascade_run() {
 cascade_bump_tick_file
 CASCADE_TICK=$(cascade_tick_number "$(cascade_state_file_read)")
 
+CASCADE_RESCUED=""
 CASCADE_STARVED=$(cascade_starved_stage "$(cascade_state_file_read)" "$CASCADE_STAGES" "$CASCADE_TICK")
 if [ -n "$CASCADE_STARVED" ]; then
   log "cascade: ${CASCADE_STARVED} starved -- unreached for $(cascade_stage_age "$(cascade_state_file_read)" "$CASCADE_STARVED" "$CASCADE_TICK") ticks; running it before the usual order"
   if cascade_run "$CASCADE_STARVED"; then
     exit 0
   fi
+  # It did no work, so the cascade continues -- but it has had its turn. Its
+  # own gate below is skipped for the rest of this tick.
+  CASCADE_RESCUED="$CASCADE_STARVED"
 fi
 
 if cascade_run review; then

@@ -6,7 +6,9 @@
 # above consumed every one. Reordering would only move the starvation, so a
 # stage that goes unreached for CASCADE_STARVE_TICKS jumps the queue once.
 #
-# Pure-function tests against JSON text -- no state file, no tick.
+# Mostly pure-function tests against JSON text -- no state file, no tick. The
+# last section lifts cascade_run out of bin/tick.sh and drives it with stubs,
+# since the dispatch and the rescued-stage skip live there.
 set -uo pipefail
 
 command -v jq >/dev/null 2>&1 || { echo "test-cascade: jq absent -- skipping"; exit 0; }
@@ -29,6 +31,20 @@ S=$(cascade_bump_tick "$S"); S=$(cascade_bump_tick "$S")
 eq "bump is monotonic -> 3" "3" "$(cascade_tick_number "$S")"
 eq "bump preserves unrelated keys" "keepme" \
   "$(cascade_bump_tick '{"weekly":{"x":"keepme"}}' | jq -r '.weekly.x')"
+
+echo "== a missing or empty state argument means an empty document =="
+# cascade_state_file_read returns "" -- not "{}" -- when the state file exists
+# but is zero-length or whitespace, so every function has to survive it. The
+# original ${1:-\{\}} default fed jq a literal backslash-brace and only looked
+# safe because each caller had a fallback behind it.
+eq "no argument -> tick 0" "0" "$(cascade_tick_number)"
+eq "empty argument -> tick 0" "0" "$(cascade_tick_number '')"
+eq "no argument bumps to a real document" "1" "$(cascade_bump_tick | jq -r '.cascade.tick')"
+eq "empty argument bumps to a real document" "1" "$(cascade_bump_tick '' | jq -r '.cascade.tick')"
+eq "empty argument marks a real document" "7" \
+  "$(cascade_mark_reached '' ceo 7 | jq -r '.cascade.reached.ceo')"
+eq "empty argument starves nothing at tick 1" "" "$(cascade_starved_stage '' "$STAGES" 1)"
+eq "empty argument, stage age is the tick number" "9" "$(cascade_stage_age '' ceo 9)"
 
 echo "== nothing starves on a fresh state =="
 # Every stage reads as reached-at-0, so with the counter still low nothing is
@@ -78,6 +94,44 @@ echo "== malformed state degrades to 'nothing starved', never to a crash =="
 eq "garbage state -> empty, no crash" "" "$(cascade_starved_stage 'not json' "$STAGES" 100 2>/dev/null)"
 eq "non-numeric reached value is treated as never-reached" "ceo" \
   "$(cascade_starved_stage '{"cascade":{"reached":{"ceo":"banana"}}}' "ceo" 100)"
+
+echo "== cascade_run dispatches, and a rescued stage does not run twice =="
+# cascade_run lives in bin/tick.sh (it needs the state file and log), so lift
+# the function out and drive it with stubs -- the dispatch and the skip are the
+# risky part, and neither is reachable from the pure functions above.
+CASCADE_RUN_SRC=$(sed -n '/^cascade_run() {$/,/^}$/p' "$HERE/bin/tick.sh")
+if [ -z "$CASCADE_RUN_SRC" ]; then
+  bad "could not extract cascade_run() from bin/tick.sh"
+else
+  eval "$CASCADE_RUN_SRC"
+  # Both globals are read by the eval'd cascade_run, which shellcheck can't see.
+  # shellcheck disable=SC2034
+  CASCADE_TICK=1
+  MARKED=""; RAN=""
+  cascade_mark_reached_file() { MARKED="$MARKED $1"; }
+  do_alpha_tick() { RAN="$RAN alpha"; return 1; }   # reached, did no work
+  do_beta_tick()  { RAN="$RAN beta";  return 0; }   # reached, did work
+
+  CASCADE_RESCUED=""
+  cascade_run alpha
+  eq "a stage that does no work returns non-zero" "1" "$?"
+  cascade_run beta
+  eq "a stage that works returns zero" "0" "$?"
+  eq "both stages ran" " alpha beta" "$RAN"
+  eq "both were stamped as reached" " alpha beta" "$MARKED"
+
+  # The blocking case: the rescue at the top of the cascade ran alpha, alpha
+  # returned non-zero, so the cascade falls through to alpha's normal gate.
+  MARKED=""; RAN=""
+  # shellcheck disable=SC2034
+  CASCADE_RESCUED="alpha"
+  cascade_run alpha
+  eq "the rescued stage's normal gate returns non-zero" "1" "$?"
+  eq "and it is NOT invoked a second time" "" "$RAN"
+  eq "and it is not re-stamped" "" "$MARKED"
+  cascade_run beta
+  eq "other stages are unaffected by the rescue" " beta" "$RAN"
+fi
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-cascade: all checks passed"

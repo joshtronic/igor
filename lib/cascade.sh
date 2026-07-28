@@ -32,25 +32,38 @@
 # "strong opinions, not configuration" convention.
 CASCADE_STARVE_TICKS=20
 
+# _cascade_state <state_json>
+# The state argument, or an empty object when missing or empty. Not written
+# inline as ${1:-{}}: the braces need escaping inside double quotes, and bash
+# strips a backslash there only before $ ` " \ -- so `\{\}` reaches jq verbatim
+# as an invalid document. The empty case is reachable in production, where the
+# state file exists but is zero-length.
+_cascade_state() {
+  if [ -n "${1:-}" ]; then printf '%s' "$1"; else printf '{}'; fi
+}
+
 # cascade_tick_number <state_json>
 # The current monotonic tick counter, 0 when unset.
 cascade_tick_number() {
-  jq -r '.cascade.tick // 0' <<<"${1:-\{\}}" 2>/dev/null || echo 0
+  local state; state=$(_cascade_state "${1:-}")
+  jq -r '.cascade.tick // 0' <<<"$state" 2>/dev/null || echo 0
 }
 
 # cascade_bump_tick <state_json>
 # Echo the state with the tick counter incremented. Called once per tick.
 cascade_bump_tick() {
-  jq -c '.cascade //= {} | .cascade.tick = ((.cascade.tick // 0) + 1)' <<<"${1:-\{\}}" 2>/dev/null \
-    || printf '%s' "${1:-\{\}}"
+  local state; state=$(_cascade_state "${1:-}")
+  jq -c '.cascade //= {} | .cascade.tick = ((.cascade.tick // 0) + 1)' <<<"$state" 2>/dev/null \
+    || printf '%s' "$state"
 }
 
 # cascade_mark_reached <state_json> <stage> <tick_no>
 # Echo the state with <stage> stamped as reached at <tick_no>.
 cascade_mark_reached() {
+  local state; state=$(_cascade_state "${1:-}")
   jq -c --arg s "$2" --argjson t "${3:-0}" \
     '.cascade //= {} | .cascade.reached //= {} | .cascade.reached[$s] = $t' \
-    <<<"${1:-\{\}}" 2>/dev/null || printf '%s' "${1:-\{\}}"
+    <<<"$state" 2>/dev/null || printf '%s' "$state"
 }
 
 # cascade_starved_stage <state_json> <stages> <tick_no> [threshold]
@@ -64,8 +77,9 @@ cascade_mark_reached() {
 # Ties break toward the EARLIER stage in the supplied order, so the cascade's
 # own priority still decides between two equally-starved stages.
 cascade_starved_stage() {
-  local state="${1:-\{\}}" stages="$2" now="${3:-0}" thresh="${4:-$CASCADE_STARVE_TICKS}"
-  local stage last age worst_stage="" worst_age=0
+  local stages="$2" now="${3:-0}" thresh="${4:-$CASCADE_STARVE_TICKS}"
+  local state stage last age worst_stage="" worst_age=0
+  state=$(_cascade_state "${1:-}")
   # Fail CLOSED on unparseable state. Every lookup would fall back to
   # "never reached", making the whole cascade look starved at once and
   # reordering it on the strength of a corrupt file. Reordering is the
@@ -87,8 +101,9 @@ cascade_starved_stage() {
 # Ticks since <stage> was last reached -- for the log line, so a starvation
 # rescue says how bad it had got rather than just that it happened.
 cascade_stage_age() {
-  local last
-  last=$(jq -r --arg s "$2" '.cascade.reached[$s] // 0' <<<"${1:-\{\}}" 2>/dev/null || echo 0)
+  local state last
+  state=$(_cascade_state "${1:-}")
+  last=$(jq -r --arg s "$2" '.cascade.reached[$s] // 0' <<<"$state" 2>/dev/null || echo 0)
   case "$last" in ''|*[!0-9]*) last=0 ;; esac
   printf '%s' $(( ${3:-0} - last ))
 }

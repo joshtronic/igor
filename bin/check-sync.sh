@@ -67,6 +67,37 @@ for h in $helpers; do
   fi
 done
 
+# -- Cascade stages ---------------------------------------------
+#
+# cascade_run dispatches each name in CASCADE_STAGES as `do_<stage>_tick`. A
+# typo exits 127, which the gate reads as "this stage did no work" -- so the
+# stage is silently never run AND, because cascade_run stamped it as reached,
+# silently never starved either. Two things can drift: a name with no matching
+# function, and the literal `cascade_run <stage>` gates falling out of step
+# with the list they are supposed to enumerate.
+
+cascade_stages=$(sed -n 's/^CASCADE_STAGES="\([^"]*\)".*/\1/p' bin/tick.sh | head -1)
+if [ -z "$cascade_stages" ]; then
+  echo "x CASCADE_STAGES not found in bin/tick.sh"
+  FAIL=1
+else
+  for stage in $cascade_stages; do
+    if grep -qE "^do_${stage}_tick\(\)" bin/tick.sh lib/*.sh; then
+      echo "+ cascade stage '$stage' -> do_${stage}_tick"
+    else
+      echo "x cascade stage '$stage' has no do_${stage}_tick function"
+      FAIL=1
+    fi
+  done
+
+  cascade_calls=$(grep -oE '^if cascade_run [a-z]+' bin/tick.sh | awk '{print $3}' | sort -u)
+  if [ "$cascade_calls" != "$(echo "$cascade_stages" | tr ' ' '\n' | sort -u)" ]; then
+    echo "x CASCADE_STAGES and the cascade_run gates diverge"
+    diff <(echo "$cascade_stages" | tr ' ' '\n' | sort -u) <(echo "$cascade_calls") | sed 's/^/    /'
+    FAIL=1
+  fi
+fi
+
 # -- Unit tests -------------------------------------------------
 
 for t in bin/test-*.sh; do
