@@ -849,6 +849,12 @@ ceo_file_digest_work() {
 # Same code-check gate as proposals (the CEO drafts blind to the code) so it can't
 # re-file already-done work. Not counted against CEO_MAX_OPEN -- that cap tracks
 # items awaiting a human call, not work the board already approved.
+#
+# igor#440: once the reply lands, the steering that kept this digest open
+# (ceo_prior_digest_steering's only remaining consumer) is spent -- close it
+# here rather than leaving it for next week's digest to close. Best-effort:
+# a failed PATCH just leaves it open for that existing next-week close, no
+# retry needed since the reply itself (the watermark) already landed.
 ceo_commit_digest_steering() {
   local repo="$1" num="$2" parsed="$3" reply work w wtitle wbody filed
   reply=$(jq -r '.reply // ""' <<<"$parsed")
@@ -873,6 +879,7 @@ ceo_commit_digest_steering() {
     fi
   done < <(jq -c '.[]?' <<<"$work")
   [ "$filed" -gt 0 ] && log "ceo: filed ${filed} work ticket(s) from board steering on ${repo}"
+  _fj PATCH "/repos/${repo}/issues/${num}" '{"state":"closed"}' >/dev/null 2>&1
   return 0
 }
 

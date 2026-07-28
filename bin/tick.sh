@@ -2230,8 +2230,10 @@ do_ceo_tick() {
       # so a comment already answered doesn't re-fire and needs no new state.
       # Gated on comment AUTHOR == reviewer (never "not the bot" -- see the
       # ceo_digest_pending_steering_number comment for why that distinction is
-      # the whole point). The digest stays open + assigned either way
-      # (requirement 3); only a reply is posted, never a close/unassign.
+      # the whole point). igor#440: once acted on, the steering is spent, so
+      # ceo_commit_digest_steering closes the digest itself rather than
+      # leaving it open for next week's digest to close (assignment is left
+      # as-is either way -- only state changes).
       local dnum dthread dparsed
       dnum=$(ceo_digest_pending_steering_number "$repo" "$FORGEJO_REVIEWER")
       if [ -n "$dnum" ]; then
@@ -2256,7 +2258,7 @@ do_ceo_tick() {
         # must leave nothing filed or the retry re-files the same Agent-labeled
         # tickets into the autonomous queue (see ceo_commit_digest_steering).
         if ceo_commit_digest_steering "$repo" "$dnum" "$dparsed"; then
-          log "ceo: replied to board steering on ${repo}#${dnum}"
+          log "ceo: replied to board steering on ${repo}#${dnum} and closed it"
         else
           log "warning: ceo: failed to post steering reply on ${repo}#${dnum} -- filed nothing; retrying next tick"
         fi

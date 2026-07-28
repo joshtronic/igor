@@ -76,6 +76,21 @@ form of this digest's recommendations, against the TOP priorities. This is the
 - Each proposal must be **immediately workable**: a specific, bounded task with a
   clear title, the scope, acceptance criteria, and which mandate priority it
   serves — never a vague "improve SEO."
+- **Respect the execution budget.** One issue is built by one agent, in one
+  pass, under a hard per-issue cap: **10 commits / 400 changed lines**. That
+  cap is enforced at review time — a proposal that overshoots it doesn't get
+  built smaller, it gets **blocked** and the work is lost. If what you're
+  picturing plainly won't fit in that budget (e.g. multiple articles plus
+  their pages, nav, sitemap, and meta wiring, all at once), **split it into
+  separate, independently-buildable proposals** — sequenced, not bundled —
+  rather than filing one ticket for all of it.
+- **A ticket needs a decided default, not an open question.** If the work
+  requires a human design call — copy, layout, which of several options — do
+  **not** write it as "propose options" or "the agent should choose." Pick the
+  default yourself and write the ticket to build *that*; the human can reject
+  it in review if they disagree. If you genuinely can't pick a default,
+  it isn't buildable work — raise it as a `===QUESTION===` instead of a
+  proposal.
 - **Write it like a CEO, not a ticket.** Open the body with your *read* — what in
   the numbers or the week put this on your desk, the strategic why, the call you're
   making — in your own voice, the way you'd brief a sharp engineer you trust. THEN
