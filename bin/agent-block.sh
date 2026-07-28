@@ -15,6 +15,26 @@
 
 set -euo pipefail
 
+usage() {
+  cat <<'USAGE'
+Usage: agent-block.sh "<reason>"
+
+Blocks the CURRENT issue (ISSUE_NUMBER): appends <reason> to the issue body,
+comments it, applies Status/Blocked and unassigns the bot.
+Run from within a tick; requires ISSUE_NUMBER, FORGEJO_REPO, AGENT_HOME.
+USAGE
+}
+
+# --help/-h must short-circuit BEFORE any Forgejo contact -- otherwise the
+# flag is taken as a positional argument and performs the real action
+# (igor#398 fixed this on agent-report.sh; the same hole was left here).
+case "${1:-}" in
+  -h | --help)
+    usage
+    exit 0
+    ;;
+esac
+
 REASON="${1:?usage: agent-block.sh \"<reason>\"}"
 
 : "${ISSUE_NUMBER:?ISSUE_NUMBER not set -- are you being run from a tick?}"

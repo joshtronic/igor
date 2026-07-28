@@ -43,13 +43,34 @@
 
 set -euo pipefail
 
-usage() {
-  cat <<'USAGE' >&2
-usage: agent-enqueue.sh <owner/repo> "<title>" "<body>"
+print_help() {
+  cat <<'USAGE'
+Usage: agent-enqueue.sh <owner/repo> "<title>" "<body>"
        agent-enqueue.sh <owner/repo> "<title>" --body-file <path>
+
+Files an Agent-labeled work ticket on <owner/repo>.
+Run from within a tick; requires BOT_USER, FORGEJO_URL, FORGEJO_TOKEN, AGENT_HOME.
 USAGE
+}
+
+# Bad invocation: same text, but on stderr and fatal. Kept a distinct name from
+# print_help so the --help path can't shadow away this exit 1 -- a usage() that
+# returns instead of exiting lets the script run on with empty arguments.
+usage() {
+  print_help >&2
   exit 1
 }
+
+# --help/-h must short-circuit BEFORE any Forgejo contact -- otherwise the
+# flag is taken as a positional argument and performs the real action
+# (igor#398 fixed this on agent-report.sh; the same hole was left here).
+# Only "$1" is inspected; these helpers do no general flag parsing.
+case "${1:-}" in
+  -h | --help)
+    print_help
+    exit 0
+    ;;
+esac
 
 REPO="${1:-}"
 TITLE="${2:-}"
