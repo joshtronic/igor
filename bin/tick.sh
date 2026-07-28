@@ -4074,111 +4074,6 @@ fi
 # daily post still comes first. Posts ONE non-binding verdict per tick
 # on an un-reviewed bot-PR head, then exits like any other pass. Never
 # merges or pushes -- comment only.
-# -- What is waiting on the operator (igor#439, detection half) --
-#
-# The operator's stated biggest problem is not knowing when he is the blocker.
-# This builds the set of items waiting on him and logs the ones that are NEW.
-# Delivery is a separate change; this half only has to be right about WHAT is
-# waiting and WHEN it started.
-#
-# Scanned rather than hooked at the emit points, because items must also LEAVE
-# the set when he deals with them. A hook can only ever add; without removal an
-# item stays "already known" forever and a genuine recurrence is never
-# announced again. A scan is idempotent and self-correcting, and it also picks
-# up anything that entered the queue before this shipped.
-#
-# Throttled to every NEEDSYOU_SCAN_EVERY ticks: it costs a PR-list AND an
-# issue-list call for every repo in the analysis set -- 2N, the fleet-sweep cost
-# igor#441 is about -- plus one agent.json fetch for each repo that actually has
-# an open bot PR, which in practice is a handful. So it must not run on every
-# tick. At the post-#447 cadence this is a few minutes' latency on learning you
-# are blocked, against the status quo of finding out by asking.
-NEEDSYOU_SCAN_EVERY=20
-
-# Which items are the OPERATOR's turn is decided by needsyou_pr_why /
-# needsyou_issue_lines in lib/needsyou.sh, where it is unit-tested. This
-# function only gathers the facts those predicates need: the recorded shadow
-# verdict, the repo's human-pin, its rework round count, and whether it is
-# validated (rework on an unvalidated repo is handed straight to the human).
-needsyou_scan_set() {
-  local sf repo_line repo prs pr verdict out='{}' item why line num
-  local require_human validated issues
-  sf=$(discretionary_state_file)
-  while IFS= read -r repo_line; do
-    [ -n "$repo_line" ] || continue
-    repo=$(jq -r '.full_name // empty' <<<"$repo_line" 2>/dev/null)
-    if [ -z "$repo" ] || [ "$repo" = "null" ]; then continue; fi
-
-    # needsyou_pr_numbers, not the raw array: forgejo_list_open_bot_prs answers
-    # with a JSON array, and reading that text line by line hands the predicate
-    # "[" and '"number": 449,' instead of a number. It also makes the emptiness
-    # test below mean something -- "[]" is a non-empty STRING, so gating on the
-    # raw payload paid for the agent.json fetch on every repo in the fleet.
-    prs=$(needsyou_pr_numbers \
-            "$(forgejo_list_open_bot_prs "$repo" "$BOT_USER" 2>/dev/null || true)")
-    # Both only matter to the PR predicate, and automerge_require_human reads
-    # the repo's agent.json over the API -- so pay for them only where there is
-    # actually a PR to classify.
-    require_human=false; validated=false
-    if [ -n "$prs" ]; then
-      automerge_require_human "$repo" && require_human=true
-      maintenance_repo_validated "$repo" && validated=true
-    fi
-    while IFS= read -r pr; do
-      if [ -z "$pr" ] || [ "$pr" = "null" ]; then continue; fi
-      verdict=$(jq -r --arg k "${repo}#${pr}" '.review[$k].verdict // ""' "$sf" 2>/dev/null)
-      why=$(needsyou_pr_why "$verdict" "$require_human" \
-              "$(review_rework_rounds "${repo}#${pr}")" "$validated")
-      [ -n "$why" ] || continue
-      item=$(needsyou_item "$repo" pr "$pr" "$why" 0)
-      out=$(jq -c --arg k "$(needsyou_key "$repo" pr "$pr")" --argjson v "$item" '. + {($k): $v}' <<<"$out")
-    done <<<"$prs"
-
-    issues=$(_fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" 2>/dev/null || true)
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      num=${line%%|*}; why=${line#*|}
-      item=$(needsyou_item "$repo" issue "$num" "$why" 0)
-      out=$(jq -c --arg k "$(needsyou_key "$repo" issue "$num")" --argjson v "$item" '. + {($k): $v}' <<<"$out")
-    done <<<"$(needsyou_issue_lines "$issues")"
-    # Defensive `:-`: this is the only fleet loop that runs from the cascade
-    # prelude rather than from a stage, so it is the one most likely to be moved
-    # above the validation sweep that assigns the set. Under `set -u` that would
-    # abort the whole tick, and only every NEEDSYOU_SCAN_EVERY ticks -- a rare,
-    # confusing failure. Degrading to an empty scan is the cheaper wrong answer.
-  done <<<"${ANALYSIS_REPOS_JSON:-}"
-  printf '%s' "$out"
-}
-
-needsyou_pass() {
-  local sf prev cur merged now added key
-  sf=$(discretionary_state_file)
-  [ -f "$sf" ] || echo '{}' > "$sf"
-  now=$(date +%s)
-  prev=$(jq -c '.needsyou // {}' "$sf" 2>/dev/null || echo '{}')
-  cur=$(needsyou_scan_set)
-  merged=$(needsyou_merge "$prev" "$cur" "$now")
-  added=$(needsyou_added "$prev" "$cur")
-
-  # A write that never lands is not harmless: `prev` then reads as {} forever
-  # and every scan re-announces the whole set, which is the failure mode this
-  # feature is supposed to avoid. So say so rather than swallowing it.
-  local tmp; tmp=$(mktemp)
-  if jq --argjson n "$merged" '.needsyou = $n' "$sf" > "$tmp" 2>/dev/null; then
-    mv "$tmp" "$sf"
-  else
-    rm -f "$tmp"
-    log "warning: needs-you: could not write state to ${sf} -- the set will re-announce next scan"
-  fi
-
-  if [ -n "$added" ]; then
-    while IFS= read -r key; do
-      [ -n "$key" ] || continue
-      log "needs-you: $(needsyou_describe "$merged" "$key" "$now")"
-    done <<<"$added"
-  fi
-}
-
 # -- Cascade fairness (igor#441) --------------------------------
 #
 # Each gate below is wrapped so the stage records that it was REACHED. A stage
@@ -4251,9 +4146,11 @@ cascade_bump_tick_file
 CASCADE_TICK=$(cascade_tick_number "$(cascade_state_file_read)")
 
 CASCADE_RESCUED=""
-# Throttled here rather than beside its definitions above: CASCADE_TICK is not
-# assigned until the cascade prelude, and the modulo would read an unset
-# variable under `set -u`.
+# What is waiting on the OPERATOR (igor#439, detection half): build that set
+# and log what is NEW. The scan and its predicates live in lib/needsyou.sh,
+# where they are unit-tested; only the throttle is here, because CASCADE_TICK
+# is not assigned until this prelude. Reads ANALYSIS_REPOS_JSON, assigned well
+# above by the validation sweep.
 if [ $(( CASCADE_TICK % NEEDSYOU_SCAN_EVERY )) -eq 0 ]; then
   needsyou_pass
 fi

@@ -21,7 +21,8 @@
 # without needing a second store.
 #
 # Pure functions operate on JSON TEXT so they are testable without a state file
-# or a single API call; the scan that builds the live set lives in bin/tick.sh.
+# or a single API call. The scan that builds the live set is at the bottom,
+# talking to the fleet only through named seams a test can stub.
 
 # needsyou_key <repo> <kind> <number>
 # Stable identity for one waiting item. Kind is in the key because an issue and
@@ -153,18 +154,18 @@ needsyou_issue_lines() {
 needsyou_describe() {
   local set_json key="$2" now="${3:-0}"
   set_json=$(_needsyou_obj "${1:-}")
+  # `// empty` already emits nothing for a missing key, so there is no null
+  # branch to guard -- an unknown key simply produces no line.
   jq -rn --argjson s "$set_json" --arg k "$key" --argjson now "$now" '
     ($s[$k] // empty) as $i
-    | if $i == null then empty
-      else
-        # Clamped at 0: a hand-edited state file or clock skew can put `since`
-        # in the future, and "waiting -1m" reads as a bug in the notifier.
-        (([$now - ($i.since // $now), 0] | max) / 60 | floor) as $mins
-        | ( if $mins < 60 then "\($mins)m"
-            elif $mins < 1440 then "\(($mins/60)|floor)h"
-            else "\(($mins/1440)|floor)d" end ) as $age
-        | "\($i.repo)#\($i.number) (\($i.kind)) -- \($i.why) [waiting \($age)]"
-      end' 2>/dev/null || true
+    # Clamped at 0: a hand-edited state file or clock skew can put `since`
+    # in the future, and "waiting -1m" reads as a bug in the notifier.
+    | (([$now - ($i.since // $now), 0] | max) / 60 | floor) as $mins
+    | ( if $mins < 60 then "\($mins)m"
+        elif $mins < 1440 then "\(($mins/60)|floor)h"
+        else "\(($mins/1440)|floor)d" end ) as $age
+    | "\($i.repo)#\($i.number) (\($i.kind)) -- \($i.why) [waiting \($age)]"
+  ' 2>/dev/null || true
 }
 
 # _needsyou_obj <json>
@@ -172,10 +173,14 @@ needsyou_describe() {
 # helper rather than inline `${1:-{}}` because braces need escaping inside
 # double quotes and bash strips a backslash there only before $ ` " \ -- so
 # `\{\}` would reach jq verbatim as an invalid document (the igor#441 lesson).
+#
+# Checks the TYPE, not just that it parses: `keys` on an array yields its
+# INDICES, so a stray array reaching needsyou_added would announce "0", "1",
+# "2" as if they were waiting items.
 _needsyou_obj() {
   local v="${1:-}"
   [ -n "$v" ] || { printf '{}'; return 0; }
-  jq -ce . >/dev/null 2>&1 <<<"$v" || { printf '{}'; return 0; }
+  jq -ce 'type == "object"' >/dev/null 2>&1 <<<"$v" || { printf '{}'; return 0; }
   printf '%s' "$v"
 }
 
@@ -186,4 +191,155 @@ _needsyou_arr() {
   [ -n "$v" ] || { printf '[]'; return 0; }
   jq -ce 'type == "array"' >/dev/null 2>&1 <<<"$v" || { printf '[]'; return 0; }
   printf '%s' "$v"
+}
+
+# -- the scan ------------------------------------------------------------
+#
+# Everything above is pure. What follows talks to the fleet: it gathers the
+# facts those predicates need -- the recorded shadow verdict, the repo's
+# human-pin, its rework round count, whether it is validated -- and folds the
+# answers into a set. It lives here rather than in bin/tick.sh so it can be
+# unit-tested at its seams; an untested scan is how the first cut of this
+# feature shipped blind to every PR in the fleet while still reporting a
+# perfectly plausible "nothing needs you".
+#
+# Scanned rather than hooked at the emit points, because items must also LEAVE
+# the set when the operator deals with them. A hook can only ever add; without
+# removal an item stays "already known" forever and a genuine recurrence is
+# never announced again. A scan is idempotent and self-correcting, and it also
+# picks up anything that entered the queue before this shipped.
+#
+# Throttled by the caller to every NEEDSYOU_SCAN_EVERY ticks: it costs a
+# PR-list AND an issue-list call for every repo in the analysis set -- 2N, the
+# fleet-sweep cost igor#441 is about -- plus one agent.json fetch for each repo
+# that actually has an open bot PR, which in practice is a handful. At the
+# post-#447 cadence that is a few minutes' latency on learning you are blocked,
+# against the status quo of finding out by asking.
+NEEDSYOU_SCAN_EVERY=${NEEDSYOU_SCAN_EVERY:-20}
+
+# _needsyou_repo_lines <analysis_repos_json> -- the repo objects, one per line.
+#
+# bin/tick.sh assigns ANALYSIS_REPOS_JSON as `jq -c '.[]' <<<"$ALL_REPOS"` (see
+# its "Analysis set:" comment), i.e. newline-delimited compact objects, which
+# is what every other fleet loop reads. Flattening an ARRAY here anyway is a
+# cheap hedge against that shape ever changing: read line by line, an array
+# yields "[", "  {" and never a repo, so the scan would go blind fleet-wide --
+# and "nothing needs you" would still look like a legitimate answer. That is
+# exactly the bug this feature already shipped one layer up, in the PR list.
+_needsyou_repo_lines() {
+  local v="${1:-}"
+  [ -n "$v" ] || return 0
+  jq -c 'if type == "array" then .[] else . end' <<<"$v" 2>/dev/null || true
+}
+
+# _needsyou_listed <payload> -- true when a list call actually ANSWERED.
+#
+# forgejo_list_open_bot_prs is `_fj | jq`, so its exit status is jq's, not the
+# request's: a failed fetch yields empty output and rc 0, indistinguishable
+# from "this repo has no open bot PRs". A payload that parses as an array is
+# the only evidence the call landed.
+_needsyou_listed() {
+  jq -ce 'type == "array"' >/dev/null 2>&1 <<<"${1:-}"
+}
+
+# needsyou_scan_set
+# The live set on stdout. Returns NONZERO when the scan was INCOMPLETE -- no
+# repos, or a list call that did not answer -- because a partial scan looks
+# exactly like an empty one and must not be mistaken for "nothing is waiting".
+needsyou_scan_set() {
+  local sf repo_line repo pulls prs pr verdict out='{}' item why line num
+  local require_human validated issues repos=0 failed=0
+  sf=$(discretionary_state_file)
+  while IFS= read -r repo_line; do
+    [ -n "$repo_line" ] || continue
+    repo=$(jq -r '.full_name // empty' <<<"$repo_line" 2>/dev/null || true)
+    if [ -z "$repo" ] || [ "$repo" = "null" ]; then continue; fi
+    repos=$((repos + 1))
+
+    pulls=$(forgejo_list_open_bot_prs "$repo" "${BOT_USER:-}" 2>/dev/null || true)
+    _needsyou_listed "$pulls" || { failed=1; continue; }
+    # needsyou_pr_numbers, not the raw array: reading that text line by line
+    # hands the predicate "[" and '"number": 449,' instead of a number. It also
+    # makes the emptiness test below mean something -- "[]" is a non-empty
+    # STRING, so gating on the raw payload paid for the agent.json fetch on
+    # every repo in the fleet.
+    prs=$(needsyou_pr_numbers "$pulls")
+    # Both only matter to the PR predicate, and automerge_require_human reads
+    # the repo's agent.json over the API -- so pay for them only where there is
+    # actually a PR to classify.
+    require_human=false; validated=false
+    if [ -n "$prs" ]; then
+      automerge_require_human "$repo" && require_human=true
+      maintenance_repo_validated "$repo" && validated=true
+    fi
+    while IFS= read -r pr; do
+      if [ -z "$pr" ] || [ "$pr" = "null" ]; then continue; fi
+      verdict=$(jq -r --arg k "${repo}#${pr}" '.review[$k].verdict // ""' "$sf" 2>/dev/null || printf '')
+      why=$(needsyou_pr_why "$verdict" "$require_human" \
+              "$(review_rework_rounds "${repo}#${pr}")" "$validated")
+      [ -n "$why" ] || continue
+      item=$(needsyou_item "$repo" pr "$pr" "$why" 0)
+      out=$(jq -c --arg k "$(needsyou_key "$repo" pr "$pr")" --argjson v "$item" \
+              '. + {($k): $v}' <<<"$out" 2>/dev/null || printf '%s' "$out")
+    done <<<"$prs"
+
+    issues=$(_fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" 2>/dev/null || true)
+    _needsyou_listed "$issues" || { failed=1; continue; }
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      num=${line%%|*}; why=${line#*|}
+      item=$(needsyou_item "$repo" issue "$num" "$why" 0)
+      out=$(jq -c --arg k "$(needsyou_key "$repo" issue "$num")" --argjson v "$item" \
+              '. + {($k): $v}' <<<"$out" 2>/dev/null || printf '%s' "$out")
+    done <<<"$(needsyou_issue_lines "$issues")"
+    # Defensive `:-`: this is the only fleet loop that runs from the cascade
+    # prelude rather than from a stage, so it is the one most likely to be
+    # moved above the validation sweep that assigns the set. Under `set -u`
+    # that would abort the whole tick, and only every NEEDSYOU_SCAN_EVERY ticks
+    # -- a rare, confusing failure. Reporting an incomplete scan is cheaper.
+  done <<<"$(_needsyou_repo_lines "${ANALYSIS_REPOS_JSON:-}")"
+  printf '%s' "$out"
+  if [ "$repos" -gt 0 ] && [ "$failed" -eq 0 ]; then return 0; fi
+  return 1
+}
+
+# needsyou_pass
+# One scan: persist the live set (each item keeping the `since` it already had)
+# and log what is NEW. Removals are silent; an unchanged set logs nothing.
+# Needs `log` and `discretionary_state_file` from bin/tick.sh.
+needsyou_pass() {
+  local sf prev cur merged now added key tmp
+  sf=$(discretionary_state_file)
+  [ -f "$sf" ] || echo '{}' > "$sf"
+  now=$(date +%s)
+  prev=$(jq -c '.needsyou // {}' "$sf" 2>/dev/null || echo '{}')
+
+  # A partial scan is thrown away rather than believed. Persisting one would
+  # DROP items the operator has not touched, losing their `since` and
+  # re-announcing the lot as new on the next good scan -- one transient blip
+  # turning this into exactly the notification a reader learns to ignore.
+  if ! cur=$(needsyou_scan_set); then
+    log "needs-you: scan incomplete (no repos, or a list call did not answer) -- keeping the previous set"
+    return 0
+  fi
+  merged=$(needsyou_merge "$prev" "$cur" "$now")
+  added=$(needsyou_added "$prev" "$cur")
+
+  # A write that never lands is not harmless: `prev` then reads as {} forever
+  # and every scan re-announces the whole set, which is the failure mode this
+  # feature is supposed to avoid. So say so rather than swallowing it.
+  tmp=$(mktemp)
+  if jq --argjson n "$merged" '.needsyou = $n' "$sf" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$sf"
+  else
+    rm -f "$tmp"
+    log "warning: needs-you: could not write state to ${sf} -- the set will re-announce next scan"
+  fi
+
+  if [ -n "$added" ]; then
+    while IFS= read -r key; do
+      [ -n "$key" ] || continue
+      log "needs-you: $(needsyou_describe "$merged" "$key" "$now")"
+    done <<<"$added"
+  fi
 }

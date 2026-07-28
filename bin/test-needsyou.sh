@@ -17,6 +17,8 @@ ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
 eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
 has() { case "$2" in *"$3"*) ok "$1";; *) bad "$1: [$2] lacks [$3]";; esac; }
+rc0() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d (expected rc 0)"; fi; }
+rcn() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$d (expected nonzero)"; else ok "$d"; fi; }
 
 K1=$(needsyou_key acme/site pr 12)
 K2=$(needsyou_key acme/site issue 12)
@@ -69,6 +71,13 @@ has "reports the wait in days once it is old" "$D" "waiting 1d"
 D2=$(needsyou_describe "$MERGED" "acme/site/issue/5" "$((LATER + 1800))")
 has "a fresh item reports minutes" "$D2" "waiting 30m"
 eq "an unknown key describes to nothing" "" "$(needsyou_describe "$MERGED" "nope/x/1" "$LATER")"
+
+# The unit switches at 60 and 1440 minutes, so those are the two lines worth
+# pinning: an off-by-one there reads as "waiting 0h" on something an hour old.
+has "59 minutes still reads in minutes" "$(needsyou_describe "$MERGED" "$K1" "$((NOW + 3540))")" "waiting 59m"
+has "60 minutes flips to hours"         "$(needsyou_describe "$MERGED" "$K1" "$((NOW + 3600))")" "waiting 1h"
+has "23h59 is still hours"              "$(needsyou_describe "$MERGED" "$K1" "$((NOW + 86340))")" "waiting 23h"
+has "24 hours flips to days"            "$(needsyou_describe "$MERGED" "$K1" "$((NOW + 86400))")" "waiting 1d"
 
 echo "== a negative age (clock skew) clamps to zero =="
 eq "since in the future does not render -1m" "" "$(needsyou_describe "$MERGED" "acme/site/pr/12" "$((NOW - 600))" | grep -o -- '-[0-9]*m' || true)"
@@ -146,6 +155,100 @@ eq "a non-numeric since falls back to 0 rather than voiding the item" "0" \
   "$(needsyou_item acme/site pr 12 why 'not-a-number' | jq -r '.since')"
 eq "and the item is still well formed" "acme/site" \
   "$(needsyou_item acme/site pr 12 why 'not-a-number' | jq -r '.repo')"
+# A set that parses but isn't an object has no keys worth naming. Untightened,
+# `keys` on an array yields its INDICES, so a stray array announced "0", "1".
+eq "an array where a set belongs announces nothing" "" "$(needsyou_added '{}' '[1,2,3]')"
+eq "and does not read array indices as keys" "" "$(needsyou_added '[1,2,3]' '[1,2,3]')"
+
+# -- the glue ------------------------------------------------------------
+# Everything above tests pure functions. What shipped broken last round was the
+# layer BELOW them -- the scan that turns fleet API payloads into a set -- so it
+# is stubbed at its seams here rather than left to a manual run.
+echo "== the scan: fleet payloads in, a set out =="
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+STATE="$TMP/discretionary-state.json"
+discretionary_state_file() { printf '%s' "$STATE"; }
+LOGGED=""
+log() { LOGGED="${LOGGED}$*"$'\n'; }
+# BOT_USER and every ANALYSIS_REPOS_JSON below are read by needsyou_scan_set in
+# the sourced lib, which shellcheck does not follow into.
+# shellcheck disable=SC2034
+BOT_USER=igor
+# acme/site: one ready bot PR carrying a COMMENT verdict, one Status/Blocked
+# issue -- both the operator's. acme/blog: no bot PRs, and an issue that is
+# merely Agent-labelled -- neither is.
+PULLS_SITE='[{"number":7,"title":"feat: a thing","head":"agent/7"},
+             {"number":8,"title":"WIP: issue #8 checkpoint","head":"agent/8"}]'
+forgejo_list_open_bot_prs() {
+  case "$1" in
+    acme/site) printf '%s' "$PULLS_SITE" ;;
+    acme/blog) printf '%s' '[]' ;;
+    *) return 1 ;;   # a repo whose list call does not answer
+  esac
+}
+_fj() {
+  case "$2" in
+    */acme/site/issues*) printf '%s' '[{"number":3,"labels":[{"name":"Status/Blocked"}]}]' ;;
+    */acme/blog/issues*) printf '%s' '[{"number":9,"labels":[{"name":"Agent"}]}]' ;;
+    *) return 1 ;;
+  esac
+}
+automerge_require_human()   { return 1; }
+maintenance_repo_validated() { return 0; }
+review_rework_rounds()      { printf '0'; }
+echo '{"review":{"acme/site#7":{"verdict":"COMMENT"}}}' > "$STATE"
+
+WANT="acme/site/issue/3 acme/site/pr/7"
+ANALYSIS_REPOS_JSON='{"full_name":"acme/site"}
+{"full_name":"acme/blog"}'
+SET=$(needsyou_scan_set)
+eq "the scan keeps only what is the operator's turn" "$WANT" "$(jq -r 'keys|join(" ")' <<<"$SET")"
+has "the PR item carries the why the verdict table gave it" "$SET" "COMMENT"
+has "and the issue item carries its status label" "$SET" "Status/Blocked"
+rc0 "a scan that reached every repo reports itself complete" needsyou_scan_set
+
+# The regression finding #1 is about: bin/tick.sh assigns this as newline-
+# delimited compact objects (`jq -c '.[]'`), but reading a plain ARRAY line by
+# line yields "[", "  {" and never a repo -- so the scan would go blind
+# fleet-wide while "nothing needs you" still looked like a legitimate answer.
+ANALYSIS_REPOS_JSON='[{"full_name":"acme/site"},{"full_name":"acme/blog"}]'
+eq "a compact ARRAY repo set scans the same" "$WANT" "$(needsyou_scan_set | jq -r 'keys|join(" ")')"
+ANALYSIS_REPOS_JSON='[
+  { "full_name": "acme/site" },
+  { "full_name": "acme/blog" }
+]'
+eq "a PRETTY-PRINTED array too" "$WANT" "$(needsyou_scan_set | jq -r 'keys|join(" ")')"
+
+ANALYSIS_REPOS_JSON=''
+eq "no repos -> an empty set, not a crash" "{}" "$(needsyou_scan_set || true)"
+rcn "and no repos is reported as INCOMPLETE, not as 'nothing waiting'" needsyou_scan_set
+ANALYSIS_REPOS_JSON='{"full_name":"acme/nope"}'
+rcn "a list call that did not answer is incomplete too" needsyou_scan_set
+
+echo "== the pass: announce once, and never believe a partial scan =="
+# shellcheck disable=SC2034  # read by needsyou_scan_set, via needsyou_pass
+ANALYSIS_REPOS_JSON='{"full_name":"acme/site"}
+{"full_name":"acme/blog"}'
+LOGGED=""; needsyou_pass
+has "a first pass announces the PR"    "$LOGGED" "acme/site#7"
+has "and the blocked issue"            "$LOGGED" "acme/site#3"
+eq  "the set is persisted under .needsyou" "$WANT" "$(jq -r '.needsyou|keys|join(" ")' "$STATE")"
+eq  "the review state it read is left intact" "COMMENT" "$(jq -r '.review["acme/site#7"].verdict' "$STATE")"
+SINCE=$(jq -r '.needsyou["acme/site/pr/7"].since' "$STATE")
+LOGGED=""; needsyou_pass
+eq "an unchanged set announces NOTHING on rescan" "" "$LOGGED"
+eq "and the clock is not reset"                   "$SINCE" "$(jq -r '.needsyou["acme/site/pr/7"].since' "$STATE")"
+
+# The failure this guards: a transient blip empties the scan, the empty set is
+# persisted, every item loses its `since`, and the next good scan re-announces
+# the lot as new -- the "notification you learn to ignore" this feature exists
+# to avoid.
+forgejo_list_open_bot_prs() { return 1; }
+LOGGED=""; needsyou_pass
+has "an incomplete scan says so"  "$LOGGED" "scan incomplete"
+eq  "it announces nothing"        "0" "$(grep -c 'needs-you: acme' <<<"$LOGGED" || true)"
+eq  "and does NOT drop the set it could not re-confirm" "$WANT" \
+  "$(jq -r '.needsyou|keys|join(" ")' "$STATE")"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-needsyou: all checks passed"
