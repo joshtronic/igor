@@ -90,6 +90,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/maintenance-checks.sh"
 # shellcheck source=lib/browser-reap.sh
 . "$AGENT_HOME/lib/browser-reap.sh"
+# shellcheck source=lib/cascade.sh
+. "$AGENT_HOME/lib/cascade.sh"
 # shellcheck source=lib/http-reap.sh
 . "$AGENT_HOME/lib/http-reap.sh"
 # shellcheck source=lib/cost.sh
@@ -4070,7 +4072,90 @@ fi
 # daily post still comes first. Posts ONE non-binding verdict per tick
 # on an un-reviewed bot-PR head, then exits like any other pass. Never
 # merges or pushes -- comment only.
-if do_review_tick; then
+# -- Cascade fairness (igor#441) --------------------------------
+#
+# Each gate below is wrapped so the stage records that it was REACHED. A stage
+# that goes CASCADE_STARVE_TICKS without being reached runs FIRST on the next
+# tick that gets here. See lib/cascade.sh for why reordering is not the fix.
+#
+# The counter advances once per tick that reaches the cascade, not per tick
+# overall: a tick that exits earlier (deploy barrier, health gate) never gave
+# any stage an opportunity, and a rescue placed here could not have helped it
+# either. Age is therefore measured in opportunities missed.
+#
+# State writes use the same per-operation jq read-modify-write as
+# weekly_mark_done rather than holding the whole document in memory -- other
+# passes in this same tick write their own keys, and a whole-file write from a
+# stale in-memory copy would silently drop them.
+
+CASCADE_STAGES="review maintenance seo shipreport sports ceo feedback logwatch deferred"
+
+cascade_state_file_read() {
+  local f; f=$(discretionary_state_file)
+  [ -f "$f" ] && cat "$f" || echo '{}'
+}
+
+cascade_bump_tick_file() {
+  local f tmp; f=$(discretionary_state_file)
+  [ -f "$f" ] || echo '{}' > "$f"
+  tmp=$(mktemp)
+  if jq '.cascade //= {} | .cascade.tick = ((.cascade.tick // 0) + 1)' "$f" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$f"
+  else
+    # An unparseable state file would otherwise stop the counter advancing and
+    # kill the whole fairness gate silently and permanently. Say so.
+    rm -f "$tmp"
+    log "cascade: could not bump the tick counter -- $f unparseable?"
+  fi
+}
+
+cascade_mark_reached_file() {
+  local stage="$1" tick="$2" f tmp; f=$(discretionary_state_file)
+  [ -f "$f" ] || echo '{}' > "$f"
+  tmp=$(mktemp)
+  if jq --arg s "$stage" --argjson t "$tick" \
+      '.cascade //= {} | .cascade.reached //= {} | .cascade.reached[$s] = $t' "$f" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$f"
+  else
+    rm -f "$tmp"
+    log "cascade: could not stamp '$stage' as reached -- $f unparseable?"
+  fi
+}
+
+# cascade_run <stage> -- stamp the stage as reached, then run do_<stage>_tick.
+# Returns the stage's own status, so `if cascade_run x; then exit 0; fi` keeps
+# the existing gate semantics exactly.
+#
+# A stage rescued at the top of the cascade already ran this tick. Returning
+# non-zero for it here means the cascade falls straight through its normal gate
+# instead of invoking do_<stage>_tick a second time -- which for the model-call
+# stages (sports, ceo, feedback, deferred) would be a duplicated model call, and
+# for any stage with a side effect on its false path a duplicated side effect.
+cascade_run() {
+  local stage="$1"
+  if [ "$stage" = "${CASCADE_RESCUED:-}" ]; then
+    return 1
+  fi
+  cascade_mark_reached_file "$stage" "$CASCADE_TICK"
+  "do_${stage}_tick"
+}
+
+cascade_bump_tick_file
+CASCADE_TICK=$(cascade_tick_number "$(cascade_state_file_read)")
+
+CASCADE_RESCUED=""
+CASCADE_STARVED=$(cascade_starved_stage "$(cascade_state_file_read)" "$CASCADE_STAGES" "$CASCADE_TICK")
+if [ -n "$CASCADE_STARVED" ]; then
+  log "cascade: ${CASCADE_STARVED} starved -- unreached for $(cascade_stage_age "$(cascade_state_file_read)" "$CASCADE_STARVED" "$CASCADE_TICK") ticks; running it before the usual order"
+  if cascade_run "$CASCADE_STARVED"; then
+    exit 0
+  fi
+  # It did no work, so the cascade continues -- but it has had its turn. Its
+  # own gate below is skipped for the rest of this tick.
+  CASCADE_RESCUED="$CASCADE_STARVED"
+fi
+
+if cascade_run review; then
   exit 0
 fi
 
@@ -4081,7 +4166,7 @@ fi
 # configured. Runs after Igor's own work, before the claimable-issue
 # grind. Loops every repo eligible this ISO week in one pass and exits;
 # nothing eligible -> fall through to discovery.
-if do_maintenance_tick; then
+if cascade_run maintenance; then
   exit 0
 fi
 
@@ -4091,7 +4176,7 @@ fi
 # report per domain, and for agentic sites files a deduped Agent-labeled
 # ticket the discovery step below picks up once that repo is validated.
 # One domain per tick spreads the GSC/email load across the 1-min beat.
-if do_seo_tick; then
+if cascade_run seo; then
   exit 0
 fi
 
@@ -4099,7 +4184,7 @@ fi
 # health-blocked branch above -- it sends even during a Claude cooldown. Opt-in
 # via PRIMARY_RECIPIENTS + SMTP2GO; no-ops before 07:00 local or once today's
 # already sent. Once-daily; the safety valve for shadow-review auto-merge.
-if do_shipreport_tick; then
+if cascade_run shipreport; then
   exit 0
 fi
 
@@ -4110,7 +4195,7 @@ fi
 # but the distill is a model call -- so unlike the scripted SEO pass this
 # one sits below the health gate and goes dark with the rest of the model
 # work during a cooldown.
-if do_sports_tick; then
+if cascade_run sports; then
   exit 0
 fi
 
@@ -4120,7 +4205,7 @@ fi
 # per repo, it reads the mandate + gathers the week and emails a board
 # digest to CEO_RECIPIENTS. A model call, so it's below the health gate;
 # Phase 1 is read-only (no issue-filing/steering yet).
-if do_ceo_tick; then
+if cascade_run ceo; then
   exit 0
 fi
 
@@ -4128,7 +4213,7 @@ fi
 # .feedback.csv. Model work, so it sits below the health gate with the other
 # model passes; files an UNLABELED issue for the human to greenlight (or drops a
 # spam/dupe/already-worked row). See lib/feedback.sh.
-if do_feedback_tick; then
+if cascade_run feedback; then
   exit 0
 fi
 
@@ -4141,7 +4226,7 @@ fi
 # assigned to FORGEJO_REVIEWER -- the human triages by adding the
 # Agent label (that's the gate; an Agent-labeled ticket still assigned
 # to the reviewer is claimable, so unassigning is optional).
-if do_logwatch_tick; then
+if cascade_run logwatch; then
   exit 0
 fi
 
@@ -4153,7 +4238,7 @@ fi
 # Status/Blocked + the Agent greenlight and assigns the ticket to the reviewer for
 # confirmation (the check can false-positive, so it isn't auto-worked). A model
 # call, so below the health gate; fails CLOSED. See lib/deferred.sh.
-if do_deferred_tick; then
+if cascade_run deferred; then
   exit 0
 fi
 

@@ -11,7 +11,10 @@ then the daily sports digest (opt-in), then the weekly CEO board digest
 (opt-in), then the daily logwatch self-report
 (opt-in), then the claimable-issue grind. Igor's own
 work comes first and is throttled (daily/weekly slots), so tickets
-soak up whatever time is left and roll over to the next day. The
+soak up whatever time is left and roll over to the next day. That
+order has ONE documented exception: a stage that has gone
+`CASCADE_STARVE_TICKS` (20) ticks without being REACHED runs first on
+the next tick that gets here, once (`lib/cascade.sh`, igor#441). The
 reading pipeline's durable state lives in
 `~/.local/state/agent/brain.sqlite`; the per-day/per-week slot
 slate in `~/.local/state/agent/discretionary-state.json`. This
