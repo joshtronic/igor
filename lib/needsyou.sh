@@ -32,10 +32,35 @@ needsyou_key() {
 
 # needsyou_item <repo> <kind> <number> <why> <since_epoch>
 # One item as a compact JSON object, ready to be folded into a set.
+#
+# A non-numeric `since` is coerced to 0 rather than passed to --argjson, where
+# it would fail the whole invocation and yield a bare {} -- which the scan would
+# still fold into the set under a valid key, so needsyou_describe would render
+# "null#null". A wrong wait time is a bad line; a {} is a broken one.
 needsyou_item() {
+  local since="${5:-0}"
+  case "$since" in ''|*[!0-9]*) since=0 ;; esac
   jq -cn --arg r "${1:-}" --arg k "${2:-}" --arg n "${3:-}" --arg w "${4:-}" \
-    --argjson s "${5:-0}" \
+    --argjson s "$since" \
     '{repo:$r, kind:$k, number:$n, why:$w, since:$s}' 2>/dev/null || printf '{}'
+}
+
+# needsyou_pr_numbers <pulls_json>
+# The PR numbers worth classifying, one per line.
+#
+# forgejo_list_open_bot_prs returns a JSON ARRAY of objects, so feeding it
+# straight into `while read` yields "[", "  {", '  "number": 449,' and never a
+# number -- which is how the first cut of the scan classified nothing at all
+# across the whole fleet. do_automerge_tick pulls .number out the same way.
+#
+# Drafts are dropped for the same reason the rework loop is: a WIP: checkpoint
+# PR is Igor mid-task, not the operator's turn. It can also still carry the
+# verdict from before it checkpointed, which would otherwise read as "escalated
+# to you" while Igor is in fact still working on it.
+needsyou_pr_numbers() {
+  jq -r --arg wip "${CHECKPOINT_WIP_PREFIX:-WIP: }" '
+      .[]? | select((.title // "") | startswith($wip) | not) | .number // empty
+    ' <<<"$(_needsyou_arr "${1:-}")" 2>/dev/null || true
 }
 
 # needsyou_merge <previous_set_json> <current_set_json> <now_epoch>

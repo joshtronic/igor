@@ -4088,10 +4088,11 @@ fi
 # up anything that entered the queue before this shipped.
 #
 # Throttled to every NEEDSYOU_SCAN_EVERY ticks: it costs a PR-list AND an
-# issue-list call per eligible repo -- 2N, the fleet-sweep cost igor#441 is
-# about -- so it must not run on every tick. At the post-#447 cadence this is a
-# few minutes' latency on learning you are blocked, against the status quo of
-# finding out by asking.
+# issue-list call for every repo in the analysis set -- 2N, the fleet-sweep cost
+# igor#441 is about -- plus one agent.json fetch for each repo that actually has
+# an open bot PR, which in practice is a handful. So it must not run on every
+# tick. At the post-#447 cadence this is a few minutes' latency on learning you
+# are blocked, against the status quo of finding out by asking.
 NEEDSYOU_SCAN_EVERY=20
 
 # Which items are the OPERATOR's turn is decided by needsyou_pr_why /
@@ -4108,7 +4109,13 @@ needsyou_scan_set() {
     repo=$(jq -r '.full_name // empty' <<<"$repo_line" 2>/dev/null)
     if [ -z "$repo" ] || [ "$repo" = "null" ]; then continue; fi
 
-    prs=$(forgejo_list_open_bot_prs "$repo" "$BOT_USER" 2>/dev/null) || prs=""
+    # needsyou_pr_numbers, not the raw array: forgejo_list_open_bot_prs answers
+    # with a JSON array, and reading that text line by line hands the predicate
+    # "[" and '"number": 449,' instead of a number. It also makes the emptiness
+    # test below mean something -- "[]" is a non-empty STRING, so gating on the
+    # raw payload paid for the agent.json fetch on every repo in the fleet.
+    prs=$(needsyou_pr_numbers \
+            "$(forgejo_list_open_bot_prs "$repo" "$BOT_USER" 2>/dev/null || true)")
     # Both only matter to the PR predicate, and automerge_require_human reads
     # the repo's agent.json over the API -- so pay for them only where there is
     # actually a PR to classify.
@@ -4134,7 +4141,12 @@ needsyou_scan_set() {
       item=$(needsyou_item "$repo" issue "$num" "$why" 0)
       out=$(jq -c --arg k "$(needsyou_key "$repo" issue "$num")" --argjson v "$item" '. + {($k): $v}' <<<"$out")
     done <<<"$(needsyou_issue_lines "$issues")"
-  done <<<"$ANALYSIS_REPOS_JSON"
+    # Defensive `:-`: this is the only fleet loop that runs from the cascade
+    # prelude rather than from a stage, so it is the one most likely to be moved
+    # above the validation sweep that assigns the set. Under `set -u` that would
+    # abort the whole tick, and only every NEEDSYOU_SCAN_EVERY ticks -- a rare,
+    # confusing failure. Degrading to an empty scan is the cheaper wrong answer.
+  done <<<"${ANALYSIS_REPOS_JSON:-}"
   printf '%s' "$out"
 }
 

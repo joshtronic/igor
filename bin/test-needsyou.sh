@@ -91,6 +91,36 @@ has "and REQUEST_CHANGES on an unverifiable repo is yours" \
   "$(needsyou_pr_why REQUEST_CHANGES false 0 false)" "CI-verified"
 eq "a garbage round count is treated as zero, not an error" "" "$(needsyou_pr_why REQUEST_CHANGES false '' true)"
 
+echo "== the PR list is an ARRAY, not one number per line =="
+# The regression this exists for: the first cut fed forgejo_list_open_bot_prs'
+# output straight into `while read`, so every "PR number" was a fragment of
+# pretty-printed JSON ("[", "  {", "\"number\": 449,") and needsyou_pr_why was
+# never once called with a real number. A dry-run against the live fleet found
+# zero waiting PRs -- correctly, because the scan could not see any.
+PULLS='[
+  {
+    "number": 449,
+    "title": "feat: detect what is waiting on the operator",
+    "head": "feat/439-needsyou-detection"
+  },
+  {
+    "number": 12,
+    "title": "WIP: issue #7 checkpoint -- half a thing",
+    "head": "agent/7"
+  }
+]'
+eq "pulls JSON yields bare numbers, not JSON fragments" "449" "$(needsyou_pr_numbers "$PULLS")"
+eq "an empty list yields nothing" "" "$(needsyou_pr_numbers '[]')"
+eq "garbage yields nothing rather than fragments" "" "$(needsyou_pr_numbers 'not json')"
+eq "an empty argument yields nothing" "" "$(needsyou_pr_numbers '')"
+# A WIP: checkpoint PR is Igor mid-task, exactly like the rework loop -- and it
+# can carry a stale verdict from before it checkpointed, which would otherwise
+# read as "escalated to you" while Igor is still working.
+eq "a WIP: checkpoint PR is Igor's turn, not yours" "" \
+  "$(needsyou_pr_numbers '[{"number":12,"title":"WIP: issue #7 checkpoint"}]')"
+eq "two ready PRs both come through" "1
+2" "$(needsyou_pr_numbers '[{"number":1,"title":"a"},{"number":2,"title":"b"}]')"
+
 echo "== which issues are parked on the operator =="
 ISSUES='[{"number":1,"labels":[{"name":"Agent"}]},
          {"number":2,"labels":[{"name":"Status/Blocked"},{"name":"Priority/High"}]},
@@ -110,6 +140,12 @@ eq "garbage previous -> everything reads as new" "acme/site/pr/12" "$(needsyou_a
 eq "garbage current -> nothing announced" "" "$(needsyou_added "$PREV" 'not json')"
 eq "garbage both -> nothing" "" "$(needsyou_added 'not json' 'also not json')"
 eq "merge over garbage does not explode" "{}" "$(needsyou_merge 'not json' 'not json' "$NOW")"
+# A non-numeric `since` used to make jq fail and print {}, which the scan then
+# folded into the set under a valid key -- so describe rendered "null#null".
+eq "a non-numeric since falls back to 0 rather than voiding the item" "0" \
+  "$(needsyou_item acme/site pr 12 why 'not-a-number' | jq -r '.since')"
+eq "and the item is still well formed" "acme/site" \
+  "$(needsyou_item acme/site pr 12 why 'not-a-number' | jq -r '.repo')"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-needsyou: all checks passed"
