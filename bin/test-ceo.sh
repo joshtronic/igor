@@ -324,10 +324,12 @@ rm -f "$Q_POST_FILE"
 echo "== ceo_digest_pending_steering_number =="
 DS_ISSUES_GET='[]'; DS_COMMENTS_GET='[]'; DS_ISSUE_GET='{}'
 DS_POST_FILE="$(mktemp)"; DS_REPLY_FILE="$(mktemp)"; DS_REPLY_FAIL=""
+DS_CLOSE_FILE="$(mktemp)"; rm -f "$DS_CLOSE_FILE"   # absent = never closed
 _fj() {
   case "$1 $2" in
     "GET "*/issues\?*)          printf '%s' "$DS_ISSUES_GET" ;;
     "GET "*/issues/*/comments)  printf '%s' "$DS_COMMENTS_GET" ;;
+    "PATCH "*/issues/*)         printf '%s' "$3" > "$DS_CLOSE_FILE" ;;
     "GET "*/issues/*)           printf '%s' "$DS_ISSUE_GET" ;;
     "POST "*/issues/*/comments) printf '%s' "$3" > "$DS_REPLY_FILE"
                                 [ -z "$DS_REPLY_FAIL" ] || return 1 ;;
@@ -501,25 +503,32 @@ DS_PARSED=$(jq -c -n '{reply:"On it.", work:[{title:"Do the thing", body:"scope"
 
 # The reply POST fails -> NOTHING is filed, rc 1. The reply is the watermark, so
 # filing first would re-file the same Agent-labeled tickets straight into the
-# autonomous queue on every tick until the reply finally lands.
-rm -f "$DS_POST_FILE" "$DS_REPLY_FILE"
+# autonomous queue on every tick until the reply finally lands. An untouched
+# digest (steering never consumed) must also stay open -- no close PATCH fires.
+rm -f "$DS_POST_FILE" "$DS_REPLY_FILE" "$DS_CLOSE_FILE"
 DS_REPLY_FAIL=1
 if ceo_commit_digest_steering acme/x 55 "$DS_PARSED"; then CRC=0; else CRC=1; fi
 eq "failed reply: rc 1"          1  "$CRC"
 eq "failed reply: files no work" "" "$(cat "$DS_POST_FILE" 2>/dev/null || true)"
+eq "failed reply: digest stays open (no close)" "" "$(cat "$DS_CLOSE_FILE" 2>/dev/null || true)"
 
 DS_REPLY_FAIL=""
 if ceo_commit_digest_steering acme/x 55 "$DS_PARSED"; then CRC=0; else CRC=1; fi
 eq "reply posted: rc 0"                 0         "$CRC"
 eq "reply posted: reply body"           "On it."  "$(jq -r '.body' <"$DS_REPLY_FILE")"
 eq "reply posted: work filed after it"  "Do the thing" "$(jq -r '.title' <"$DS_POST_FILE")"
+eq "reply posted: digest closed once steering consumed (igor#440)" \
+   "closed" "$(jq -r '.state' <"$DS_CLOSE_FILE")"
 
-# a DROP verdict from the code-check gate still leaves the reply posted
+# a DROP verdict from the code-check gate still leaves the reply posted, and the
+# digest still closes -- the steering was consumed (replied to) even though the
+# board's ask didn't clear the code-check gate.
 ceo_codecheck_proposal() { printf 'DROP'; }
-rm -f "$DS_POST_FILE"
+rm -f "$DS_POST_FILE" "$DS_CLOSE_FILE"
 if ceo_commit_digest_steering acme/x 55 "$DS_PARSED"; then CRC=0; else CRC=1; fi
 eq "code-check DROP: rc 0"           0  "$CRC"
 eq "code-check DROP: nothing filed"  "" "$(cat "$DS_POST_FILE" 2>/dev/null || true)"
+eq "code-check DROP: digest still closes" "closed" "$(jq -r '.state' <"$DS_CLOSE_FILE")"
 
 # the gate is model-backed: if it (or anything under it) reads stdin, it drains
 # the loop's process substitution and the SECOND work item vanishes with no log
@@ -533,7 +542,7 @@ eq "stdin-eating gate: both work items still filed" \
 
 eval "$_CC_ORIG"; eval "$_AL_ORIG"
 if [ -n "$_LOG_ORIG" ]; then eval "$_LOG_ORIG"; else unset -f log; fi
-rm -f "$DS_POST_FILE" "$DS_REPLY_FILE"
+rm -f "$DS_POST_FILE" "$DS_REPLY_FILE" "$DS_CLOSE_FILE"
 
 # ---- ceo_read_metrics (Phase 4: data-driven) ----------------------------
 echo "== ceo_read_metrics =="
