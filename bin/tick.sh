@@ -114,6 +114,10 @@ unset env_file_hint
 . "$AGENT_HOME/lib/ga.sh"
 # shellcheck source=lib/email.sh
 . "$AGENT_HOME/lib/email.sh"
+# After email.sh: reviewnotify defines the hook forgejo_request_review fires,
+# and it sends through email_send.
+# shellcheck source=lib/reviewnotify.sh
+. "$AGENT_HOME/lib/reviewnotify.sh"
 # shellcheck source=lib/seo-analysis.sh
 . "$AGENT_HOME/lib/seo-analysis.sh"
 # shellcheck source=lib/espn.sh
