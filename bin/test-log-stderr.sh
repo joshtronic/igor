@@ -26,38 +26,25 @@ ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
 eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
 
-echo "== every log() in the repo writes to stderr =="
-# A property test, not a list: a lib added later with a stdout fallback fails
-# here rather than silently reintroducing the swallow. Deliberately covers the
-# `if ! declare -F log ...; fi` one-liners too.
-STDOUT_LOGGERS=$(grep -rn "log() { printf '\[agent\] %s\\\\n' \"\$\*\"; }" \
-  "$HERE"/bin/*.sh "$HERE"/lib/*.sh 2>/dev/null || true)
-eq "no [agent] log() still printing to stdout" "" "$STDOUT_LOGGERS"
+echo "== every log() definition outside tests redirects to stderr =="
+# Matches on the DEFINITION, not on one exact byte sequence: a future lib that
+# uses `echo`, a different format string, or a new prefix is still caught. The
+# first version of this test byte-matched `printf '[agent] %s\n' "$*"` and would
+# have waved all three through.
+#
+# Limitation, stated rather than oversold: it reads the definition LINE, so a
+# multi-line log() body would need this extended. Every definition in the repo
+# is a one-liner today, and the count floor below is the alarm for that changing.
+#
+# bin/test-*.sh are excluded on purpose -- suites legitimately stub log() as a
+# no-op or a capture-into-variable.
+NON_STDERR=$(grep -rnE '(^|[^a-zA-Z0-9_])log\(\) \{' "$HERE"/bin/*.sh "$HERE"/lib/*.sh 2>/dev/null \
+  | grep -v '/test-' | grep -v '>&2' || true)
+eq "no log() definition still writes to stdout" "" "$NON_STDERR"
 
-DEFS=$(grep -rlE "log\(\) \{ printf '\[agent\]" "$HERE"/bin/*.sh "$HERE"/lib/*.sh 2>/dev/null | wc -l)
-if [ "$DEFS" -ge 15 ]; then ok "found $DEFS files defining an [agent] log() (all checked)"
-else bad "expected >=15 files with an [agent] log(), found $DEFS -- did the grep drift?"; fi
-
-echo "== the swallow itself: a logging function inside \$( ) =="
-# The exact shape from the review path.
-OUT=$(
-  log() { printf '[agent] %s\n' "$*" >&2; }
-  failing() { log "claude review: failed (rc=124) -- timeout"; return 1; }
-  captured=$(failing 2>/dev/null) || true
-  printf '%s' "$captured"
-)
-eq "the captured value stays clean" "" "$OUT"
-
-ERR=$( {
-  log() { printf '[agent] %s\n' "$*" >&2; }
-  failing() { log "claude review: failed (rc=124) -- timeout"; return 1; }
-  captured=$(failing) || true
-  : "$captured"
-} 2>&1 )
-case "$ERR" in
-  *"rc=124"*) ok "and the reason still reaches stderr" ;;
-  *)          bad "and the reason still reaches stderr: got [$ERR]" ;;
-esac
+DEFS=$(grep -rlE '(^|[^a-zA-Z0-9_])log\(\) \{' "$HERE"/bin/*.sh "$HERE"/lib/*.sh 2>/dev/null | grep -vc '/test-')
+if [ "$DEFS" -ge 20 ]; then ok "checked $DEFS non-test files defining log()"
+else bad "expected >=20 non-test files defining log(), found $DEFS -- did the grep drift?"; fi
 
 echo "== the real claude_call path (igor#453's actual code) =="
 if ! command -v jq >/dev/null 2>&1; then
