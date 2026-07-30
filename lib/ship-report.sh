@@ -13,7 +13,7 @@
 # like do_seo_tick's gathering -- so these functions unit-test off fixtures.
 
 # Fallback logger so this module is sourceable standalone (tests).
-if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*"; }; fi
+if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*" >&2; }; fi
 
 _shipreport_state_file() { echo "${AGENT_STATE_DIR:-$HOME/.local/state/agent}/discretionary-state.json"; }
 

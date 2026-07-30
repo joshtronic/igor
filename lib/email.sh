@@ -9,7 +9,7 @@
 
 # Fallback logger so this module is sourceable standalone (tests).
 if ! declare -F log >/dev/null; then
-  log() { printf '[agent] %s\n' "$*"; }
+  log() { printf '[agent] %s\n' "$*" >&2; }
 fi
 
 # recipients_with_primary <extra_csv> -- the To line for any harness email:

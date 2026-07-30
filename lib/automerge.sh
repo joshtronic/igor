@@ -28,7 +28,7 @@ AUTOMERGE_SELF_REPO="${AUTOMERGE_SELF_REPO:-joshtronic/igor}" # never auto-merge
 AUTOMERGE_BLOCK_COOLDOWN_SECS=3600                            # after a rejected merge, back off ~1h before re-trying the same head
 
 # Fallback logger so this module is sourceable standalone (tests).
-if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*"; }; fi
+if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*" >&2; }; fi
 
 _deploy_state_file() { echo "${AGENT_STATE_DIR:-$HOME/.local/state/agent}/discretionary-state.json"; }
 

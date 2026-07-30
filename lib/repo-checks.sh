@@ -23,7 +23,7 @@
 # into tick.sh, bash's dynamic function lookup picks up tick's richer
 # definition at call time.
 if ! declare -F log >/dev/null; then
-  log() { printf '[agent] %s\n' "$*"; }
+  log() { printf '[agent] %s\n' "$*" >&2; }
 fi
 
 # -- Local clone reader -----------------------------------------

@@ -13,7 +13,7 @@
 # bin/tick.sh defines log() before sourcing this; bin/agent-*.sh and the unit
 # tests may not. Same fallback shape as lib/http-reap.sh.
 if ! declare -F log >/dev/null; then
-  log() { printf '[agent] %s\n' "$*"; }
+  log() { printf '[agent] %s\n' "$*" >&2; }
 fi
 
 # Fail-fast timeouts so a brief git.sherver.org blip can't wedge a tick.

@@ -22,7 +22,7 @@ FEEDBACK_MAX_ATTEMPTS=3                      # give up on a row after N failed t
 FEEDBACK_MARKER="<!-- agent:feedback-triage -->"
 
 # Fallback logger so this module is sourceable standalone (tests).
-if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*"; }; fi
+if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*" >&2; }; fi
 
 _feedback_state_file() { echo "${AGENT_STATE_DIR:-$HOME/.local/state/agent}/discretionary-state.json"; }
 

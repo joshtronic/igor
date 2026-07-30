@@ -33,7 +33,7 @@ REVIEW_TEST_SCRIPT_MAX=3000    # each Makefile-referenced script, chars
 
 # Fallback logger so this module is sourceable standalone (tests).
 if ! declare -F log >/dev/null; then
-  log() { printf '[agent] %s\n' "$*"; }
+  log() { printf '[agent] %s\n' "$*" >&2; }
 fi
 
 # -- Linked issue -------------------------------------------------
