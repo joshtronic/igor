@@ -325,16 +325,17 @@ respective tools on the host; install or skip.
   doesn't audit itself, honoring the supply-chain trust boundary)
   produces a verdict (APPROVE/REQUEST_CHANGES/COMMENT). APPROVE or
   COMMENT requests the human reviewer; REQUEST_CHANGES assigns the bot
-  and drives Igor's rework loop, capped at `REWORK_ROUND_CAP` (10,
-  `lib/review.sh`) rounds then escalates to the human. Inside that loop
-  the rework agent may DISMISS a finding instead of complying: it writes
-  the reasoning to `.agent/dismissed.md` (gitignored scratch, so it can
-  never reach the diff) and the harness posts that to the PR
-  (`lib/adjudication.sh`). No commits AND dismissals present is the
-  CONVERGED terminal state -- handed to the human with the argument
+  and drives Igor's rework loop, capped at 3 rounds then escalates to
+  the human. Inside that loop the rework agent may DISMISS a finding
+  instead of complying: it writes the reasoning to `.agent/dismissed.md`
+  (gitignored scratch, truncated before each run, so it can never reach
+  the diff nor survive into a later round) and the harness posts that to
+  the PR (`lib/adjudication.sh`). No commits AND dismissals present is
+  the CONVERGED terminal state -- handed to the human with the argument
   attached; no commits and no dismissals is still STUCK, escalated as
   before. The comment is for the human thread only: the review prompt
-  carries no PR comments, so a dismissed finding can be re-raised. The requested-changes text rides in
+  carries no PR comments, so a dismissed finding can be re-raised.
+  The requested-changes text rides in
   `.review.pending_rc_body`; the PR-pickup filter reads it because
   assignment is the turn marker (issue-type recovery and pull-type
   pickup don't collide). Patch-id dedup: a head that is only a

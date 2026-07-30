@@ -31,25 +31,6 @@
 REVIEW_ISSUE_BODY_MAX=4000     # linked-issue body, chars
 REVIEW_TEST_SCRIPT_MAX=3000    # each Makefile-referenced script, chars
 
-# -- The rework round cap -----------------------------------------
-#
-# How many REQUEST_CHANGES rounds one PR gets before do_review_tick hands it to
-# the human. Was 3, hardcoded at the comparison. The operator's measurement of
-# this same loop elsewhere is 5-7 rounds converging on 1-2 dismissed nits, so 3
-# cut healthy convergence off and handed over PRs that were two rounds from
-# done.
-#
-# It is a cap and not nothing, because the no-commit escalation only bounds the
-# UNPRODUCTIVE case: an agent that commits every round against a reviewer that
-# requests changes every round would otherwise loop forever, spending model
-# budget with nobody told. 10 is a ceiling for that runaway, not a target -- a
-# PR that reaches it has failed to converge and is the human's either way.
-#
-# One number, four readers: the escalation itself, reviewer_effort (the "final
-# boss" look), needsyou_pr_why (is the human the blocker yet), and prose in
-# bin/lib/review-directive.md + CLAUDE.md. Move it here and grep the name.
-REWORK_ROUND_CAP="${REWORK_ROUND_CAP:-10}"
-
 # Fallback logger so this module is sourceable standalone (tests).
 if ! declare -F log >/dev/null; then
   log() { printf '[agent] %s\n' "$*" >&2; }

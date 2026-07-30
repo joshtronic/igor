@@ -53,6 +53,17 @@ has "partial says the loop continues"  "$PART" "will re-review"
 case "$PART" in *"it is yours"*) bad "partial must NOT claim the loop ended" ;; *) ok "partial must NOT claim the loop ended" ;; esac
 case "$CONV" in *"will re-review"*) bad "converged must NOT promise another review" ;; *) ok "converged must NOT promise another review" ;; esac
 
+# The no-commits branch also fires on a plain reassignment, where the points
+# came from the operator's own comments and there was no automated review loop
+# to end. Wording that assumes the shadow reviewer would be asserting something
+# false on that path. Body chosen to contain neither phrase itself.
+NEUTRAL=$(adjudication_comment "- dismissed: the guard already covers that input." true)
+case "$NEUTRAL" in
+  *"automated loop"*|*"the reviewer"*)
+    bad "converged must not assume the points came from the shadow reviewer" ;;
+  *) ok "converged must not assume the points came from the shadow reviewer" ;;
+esac
+
 echo "== the log line distinguishes the two outcomes =="
 has "converged log names convergence" "$(adjudication_log_line r 1 true)"  "converged"
 has "converged log names the handoff" "$(adjudication_log_line r 1 true)"  "handing to the human"
@@ -62,23 +73,34 @@ case "$(adjudication_log_line r 1 false)" in
   *)           ok  "partial log must not say converged" ;;
 esac
 
+echo "== a stale file from a previous round is not this round's argument =="
+# adjudication_reset is what makes "the file is non-empty" mean "the agent
+# dismissed something THIS run". Without it a worktree that survives a crash at
+# the same path -- or is ever reused across rounds -- lets a round where the
+# agent did nothing report as CONVERGED and post someone else's reasoning,
+# which is the exact false positive the empty-file cases above exist to stop.
+printf -- '- stale reasoning from a previous round\n' > "$WT/.agent/dismissed.md"
+adjudication_reset "$WT"
+if adjudication_has "$WT"; then bad "reset clears a stale dismissals file"; else ok "reset clears a stale dismissals file"; fi
+
+# Must not care whether the file, the dir, or the worktree is there: it runs
+# unconditionally before the run, and under `set -e` a nonzero exit would take
+# the tick down.
+eq "reset is a no-op on an already-clean worktree" "0" \
+   "$(adjudication_reset "$WT" >/dev/null 2>&1; echo $?)"
+eq "reset is a no-op on a worktree that has no .agent dir" "0" \
+   "$(adjudication_reset "$WT/nope" >/dev/null 2>&1; echo $?)"
+
 echo "== bin/tick.sh: the wiring (source assertions) =="
 # These read the source rather than driving it: the branches live inline in the
 # PR-review flow, which needs a worktree, a repo, and a model call to reach.
 # Labelled as source checks, not dressed up as behavioural coverage -- but they
 # do catch a revert, which the pure tests above cannot.
 TICK="$HERE/bin/tick.sh"
-# The cap moved from a hardcoded 3 to REWORK_ROUND_CAP. Both halves matter: the
-# literal must be gone (a stray `-ge 3` would silently re-impose the old cap
-# alongside the constant) and the constant must actually be what the escalation
-# compares against.
-if grep -q 'rc_rounds" -ge 3' "$TICK"; then
-  bad "the hardcoded 3-round cap is gone"
-else ok "the hardcoded 3-round cap is gone"; fi
 
-if grep -q 'rc_rounds" -ge "\$REWORK_ROUND_CAP"' "$TICK"; then
-  ok "escalation compares against REWORK_ROUND_CAP"
-else bad "escalation compares against REWORK_ROUND_CAP"; fi
+if grep -q 'adjudication_reset "\$PR_WORKTREE"' "$TICK"; then
+  ok "the PR-rework flow resets the dismissals file"
+else bad "the PR-rework flow resets the dismissals file"; fi
 
 if grep -q 'adjudication_read "\$PR_WORKTREE"' "$TICK"; then
   ok "the post-run flow consults the dismissals file"
@@ -101,6 +123,17 @@ if [ -n "$LAST_READ" ] && [ -n "$FINAL_RM" ] && [ "$LAST_READ" -lt "$FINAL_RM" ]
   ok "dismissals are read BEFORE the worktree is removed (read ${LAST_READ} < rm ${FINAL_RM})"
 else
   bad "dismissals are read BEFORE the worktree is removed (read ${LAST_READ:-?}, rm ${FINAL_RM:-?})"
+fi
+
+# Ordering, the other end: the reset has to precede EVERY read, or it clears the
+# argument it was supposed to be guarding. FIRST read, not last -- one read
+# landing above the reset is the whole bug.
+FIRST_READ=$(grep -n 'adjudication_read "\$PR_WORKTREE"' "$TICK" | head -1 | cut -d: -f1)
+RESET_AT=$(grep -n 'adjudication_reset "\$PR_WORKTREE"' "$TICK" | tail -1 | cut -d: -f1)
+if [ -n "$FIRST_READ" ] && [ -n "$RESET_AT" ] && [ "$RESET_AT" -lt "$FIRST_READ" ]; then
+  ok "the reset runs BEFORE any read (reset ${RESET_AT} < read ${FIRST_READ})"
+else
+  bad "the reset runs BEFORE any read (reset ${RESET_AT:-?}, read ${FIRST_READ:-?})"
 fi
 
 # The file is written INSIDE the repo the agent is committing to, so the claim

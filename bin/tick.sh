@@ -1081,20 +1081,17 @@ review_reset_rework() {
 # would move the goalposts and the PR would never land) -- then "max" for the
 # LAST look before the human takes over (the "final boss": rare, and the
 # alternative is Josh's time, so max effort is the cheap bet). Escalation to
-# the human fires at rounds >= REWORK_ROUND_CAP (see the REQUEST_CHANGES
-# handler), so the review at that round is the one that maxes -- the ladder
-# tracks the cap rather than restating a number.
+# the human fires at rounds >= 3 (see the REQUEST_CHANGES handler), so the
+# review at rounds>=3 is the one that maxes. Hardcoded, not a knob.
 reviewer_effort() {
   local rounds="${1:-0}"
-  if [ "${rounds:-0}" -ge "${REWORK_ROUND_CAP:-10}" ]; then printf 'max'; else printf 'high'; fi
+  if [ "${rounds:-0}" -ge 3 ]; then printf 'max'; else printf 'high'; fi
 }
 
 # worker_effort <rework_rounds> -- reasoning effort for the bot's PR rework
 # at this round (igor#308). Climbs each pass -- try harder as the problem
-# proves hard: high -> xhigh -> max, and STAYS at max for every round after
-# the third. Deliberately not tied to REWORK_ROUND_CAP: the ladder is about
-# how hard the problem has proved, and a rework still going at round 4 has
-# proved hard whether the cap is 3 or 10. Hardcoded, not a knob.
+# proves hard: high -> xhigh -> max (round 3 is the last rework before the
+# reviewer escalates to the human). Hardcoded, not a knob.
 worker_effort() {
   case "${1:-0}" in
     0|1) printf 'high' ;;
@@ -3099,8 +3096,8 @@ ${review_body}
               || log "warning: review: unvalidated-repo comment failed on ${key}"
             review_request_human "$target_repo" "$target_num" "unvalidated repo"
           fi
-        elif [ "$rc_rounds" -ge "$REWORK_ROUND_CAP" ]; then
-          log "review: ${key} REQUEST_CHANGES rework_rounds=${rc_rounds} >= ${REWORK_ROUND_CAP} -- escalating to human"
+        elif [ "$rc_rounds" -ge 3 ]; then
+          log "review: ${key} REQUEST_CHANGES rework_rounds=${rc_rounds} >= 3 -- escalating to human"
           if [ -n "${FORGEJO_REVIEWER:-}" ]; then
             forgejo_comment "$target_repo" "$target_num" \
               "Igor requested changes ${rc_rounds} times without converging -- handing this to you." 2>/dev/null \
@@ -3108,26 +3105,13 @@ ${review_body}
             review_request_human "$target_repo" "$target_num" "escalation after ${rc_rounds} rework rounds"
           fi
         else
-          # The cap that used to sit here was 3 and it is now REWORK_ROUND_CAP
-          # (10, lib/review.sh). 3 severed healthy convergence: the operator's
-          # measurement of this loop elsewhere is 5-7 rounds settling on 1-2
-          # dismissed nits, so the old cap handed over PRs that were two rounds
-          # from done and called it failure.
-          #
-          # The cap is the bound on the PRODUCTIVE runaway -- an agent that
-          # commits every round against a reviewer that requests changes every
-          # round. The UNPRODUCTIVE case is bounded far tighter and always was:
-          # a rework that cannot act exits with no commits, and the no-commit
-          # branch in the PR-review flow escalates on the spot, on the FIRST
-          # such round. rework_crashes (REWORK_CRASH_CAP) bounds a rework that
-          # dies mid-run.
           local new_rounds
           new_rounds=$(( rc_rounds + 1 ))
           review_set_rework_rounds "$key" "$new_rounds"
           review_set_pending_rc_body "$key" "$review_body"
           forgejo_assign "$target_repo" "$target_num" "$BOT_USER" 2>/dev/null \
             || log "warning: review: bot assignment failed on ${key} (rework round ${new_rounds})"
-          log "review: ${key} REQUEST_CHANGES -> rework round ${new_rounds}/${REWORK_ROUND_CAP}, bot assigned"
+          log "review: ${key} REQUEST_CHANGES -> rework round ${new_rounds}/3, bot assigned"
         fi
         ;;
     esac
@@ -3589,6 +3573,10 @@ if [ -n "$REVIEW_PR" ]; then
       exit 0
     fi
     init_igor_scratch "$PR_WORKTREE"
+    # Truncate any dismissals file before the agent runs, so a non-empty one
+    # after it means THIS round dismissed something rather than a previous
+    # round's reasoning surviving at the same worktree path.
+    adjudication_reset "$PR_WORKTREE"
 
     # Stage the base branch INTO the PR branch before handing it over.
     #
@@ -3701,8 +3689,8 @@ You opened PR ${PR_REPO}#${PR_NUMBER}: ${PR_TITLE}
 The reviewer (Igor's automated review pass) requested changes to this PR.
 Work through the findings below with new commits on this branch (${PR_HEAD}), then
 exit. The harness pushes your commits and the reviewer re-reviews the new head
-automatically. The loop runs until it settles, or until ${REWORK_ROUND_CAP}
-rounds have passed without converging, at which point the human takes over.
+automatically. The loop runs until it settles, or until 3 rounds have passed
+without converging, at which point the human takes over.
 
 ## You may DISAGREE with a finding
 

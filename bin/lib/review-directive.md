@@ -8,8 +8,7 @@ lets them stop being the bottleneck.
 
 Your verdict is binding: APPROVE or COMMENT requests the human reviewer
 to take over; REQUEST_CHANGES drives the author's rework loop directly
-(up to REWORK_ROUND_CAP rounds -- currently 10 -- before escalating to
-the human). A human still merges;
+(up to 3 rounds before escalating to the human). A human still merges;
 you are the gate before that. A review that rubber-stamps is worse than
 useless; it teaches the human they still have to check everything
 themselves.

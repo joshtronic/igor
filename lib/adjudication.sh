@@ -40,6 +40,22 @@ ADJUDICATION_FILE=".agent/dismissed.md"
 # adjudication_path <worktree> -- absolute path to the dismissals file.
 adjudication_path() { printf '%s/%s' "${1:-.}" "$ADJUDICATION_FILE"; }
 
+# adjudication_reset <worktree>
+# Clear any dismissals file before handing the worktree to the agent, so a
+# non-empty file afterwards means THIS run dismissed something.
+#
+# The invariant is kept local on purpose. The PR-rework flow does carve a fresh
+# worktree each round, but that is code elsewhere and it can change; without
+# this, a worktree reused across rounds -- or one left at the same path by a
+# crashed run -- would let a round where the agent did nothing read as CONVERGED
+# and post the previous round's reasoning as if it were this round's answer.
+# That is precisely the false positive the empty-file handling above exists to
+# prevent, arriving through a different door.
+#
+# Always succeeds: it runs unconditionally under `set -e`, and there is nothing
+# to report about a file that was already absent.
+adjudication_reset() { rm -f "$(adjudication_path "${1:-}")" 2>/dev/null || true; }
+
 # adjudication_read <worktree>
 # Echo the dismissal text, or nothing. Whitespace-only counts as nothing: an
 # agent that touches the file without writing to it has not dismissed
@@ -66,11 +82,17 @@ adjudication_has() { adjudication_read "${1:-}" >/dev/null 2>&1; }
 # The header says the agent DISAGREED, in those words. An operator skimming a
 # notification needs to tell "I fixed everything" from "I refused some of it"
 # without opening the thread.
+#
+# Neither branch names where the points came from. The rework flow reaches this
+# from two directions -- a binding REQUEST_CHANGES from the shadow reviewer, and
+# a plain reassignment where the points are the operator's own comments -- and
+# the text has to be true of both. An earlier draft said "the end of the
+# automated loop", which is a claim about the first path asserted on both.
 adjudication_comment() {
   local body="${1:-}" converged="${2:-false}" head tail_
   head="### 🧑‍⚖️ Rework — findings dismissed _(automated)_"
   if [ "$converged" = "true" ]; then
-    tail_="No code changes: the agent judged every remaining finding not to require one. That makes this the end of the automated loop, so it is yours -- either the reasoning holds and you merge, or it does not and you say so."
+    tail_="No code changes: the agent judged every point raised not to need one. Nothing further happens on its own, so it is yours -- either the reasoning holds and you merge, or it does not and you say so."
   else
     tail_="The rest of the findings were addressed in the commits on this branch. The reviewer will re-review the new head."
   fi
