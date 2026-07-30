@@ -186,6 +186,40 @@ ${NO_TEST_DIFF}
 \`\`\`"
 eq "plain PR (no issue, no test files) prompt is byte-identical to the pre-438 shape" "$EXPECTED_PLAIN" "$PLAIN"
 
+echo "== prior dismissals are fed back to the reviewer (igor#456) =="
+# lib/adjudication.sh WRITES the marker; lib/review.sh READS it. They are
+# separate files with no sourcing between them, so a reworded marker in one
+# would leave the other matching nothing -- silently, and looking correct.
+ADJ_LIT=$(grep -o "ADJUDICATION_MARKER='[^']*'" "$HERE/../lib/adjudication.sh" | head -1 | sed "s/.*='//;s/'$//")
+REV_LIT=$(grep -o ':\s*"${ADJUDICATION_MARKER:=[^}]*}"' "$HERE/../lib/review.sh" | head -1 | sed 's/.*:=//;s/}"$//')
+eq "adjudication.sh and review.sh agree on the marker" "$ADJ_LIT" "$REV_LIT"
+has "the marker literal was found at all" "$ADJ_LIT" "adjudication:dismissed"
+
+# No bot user -> no section. Guards the standalone/test path from emitting a
+# heading with nothing under it.
+eq "no bot user -> no dismissals section" "" "$(review_dismissals_section acme/x 1 '')"
+
+# The section must NOT read as authoritative. If the reviewer treats a dismissal
+# as settled it becomes a rubber stamp, which is the opposite of the point.
+forgejo_pr_comments() {
+  jq -n --arg m "$ADJ_LIT" '[{user:{login:"igor"}, body:("dismissed: the guard covers it\n" + $m)},
+                             {user:{login:"joshtronic"}, body:("a human comment that must NOT be fed in\n" + $m)}]'
+}
+SEC=$(review_dismissals_section acme/x 1 igor)
+has "a bot dismissal is included"                "$SEC" "the guard covers it"
+has "it is fenced as untrusted"                  "$SEC" "UNTRUSTED"
+has "the reviewer is told it may still disagree" "$SEC" "NOT bound by them"
+case "$SEC" in
+  *"human comment"*) printf '  x a NON-bot comment must not reach the prompt\n'; FAIL=$((FAIL + 1)) ;;
+  *)                 printf '  + a NON-bot comment must not reach the prompt\n' ;;
+esac
+
+# A bot comment WITHOUT the marker is an ordinary review/rework comment and must
+# not be mistaken for an argument the author made.
+forgejo_pr_comments() { jq -n '[{user:{login:"igor"}, body:"### Review — APPROVE"}]'; }
+eq "an unmarked bot comment is not a dismissal" "" "$(review_dismissals_section acme/x 1 igor)"
+unset -f forgejo_pr_comments
+
 if [ "$FAIL" -eq 0 ]; then
   echo "test-review: all checks passed"
 else
