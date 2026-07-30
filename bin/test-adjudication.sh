@@ -116,6 +116,22 @@ else
   bad "it is consulted on BOTH the commits and no-commits paths (found ${CONSULTS})"
 fi
 
+# The count above is satisfied by two sites ANYWHERE, so it cannot see the shape
+# that actually loses a dismissal: the commits-path read nested inside the
+# `if [ -n "$BINDING_RC_BODY" ]` arm. On a plain reassignment the agent can both
+# commit and dismiss, and that arm never runs -- the worktree is then removed and
+# the reasoning is gone, silently, while the prompt has promised the agent the
+# file gets posted. So pin the STRUCTURE: after the push succeeds, the read has
+# to come BEFORE the binding/non-binding split, where it covers both.
+PUSH_AT=$(grep -n 'if git push origin "[$]PR_HEAD"; then' "$TICK" | head -1 | cut -d: -f1)
+SPLIT_AT=$(awk -v s="${PUSH_AT:-0}" 'NR>s && /-n "[$]BINDING_RC_BODY"/ {print NR; exit}' "$TICK")
+POSTED_AT=$(awk -v s="${PUSH_AT:-0}" 'NR>s && /adjudication_read "[$]PR_WORKTREE"/ {print NR; exit}' "$TICK")
+if [ -n "$PUSH_AT" ] && [ -n "$SPLIT_AT" ] && [ -n "$POSTED_AT" ] && [ "$POSTED_AT" -lt "$SPLIT_AT" ]; then
+  ok "the commits path reads dismissals ABOVE the binding split (read ${POSTED_AT} < split ${SPLIT_AT})"
+else
+  bad "the commits path reads dismissals ABOVE the binding split (push ${PUSH_AT:-?}, read ${POSTED_AT:-?}, split ${SPLIT_AT:-?})"
+fi
+
 # Ordering: reading after the worktree is torn down would silently never fire.
 LAST_READ=$(grep -n 'adjudication_read "\$PR_WORKTREE"' "$TICK" | tail -1 | cut -d: -f1)
 FINAL_RM=$(grep -n 'git worktree remove --force "\$PR_WORKTREE"' "$TICK" | tail -1 | cut -d: -f1)
@@ -143,16 +159,23 @@ fi
 if grep -q 'init_igor_scratch "\$PR_WORKTREE"' "$TICK"; then
   ok "the PR-rework worktree gets the ignored .agent scratch dir"
 else bad "the PR-rework worktree gets the ignored .agent scratch dir"; fi
-if grep -q "printf '\*\\\\n' > \"\$worktree/.agent/.gitignore\"" "$TICK"; then
-  ok "and that scratch dir ignores everything in it"
-else bad "and that scratch dir ignores everything in it"; fi
+# Matched on semantics, not on how init_igor_scratch happens to spell the write:
+# SOME line in its body writes `.agent/.gitignore` and that line carries a `*`.
+# Pinning the exact `printf '*\n' > ...` would fail this suite on a cosmetic edit
+# there, with a message about dismissals leaking that has nothing to do with it.
+SCRATCH_FN=$(awk '/^init_igor_scratch\(\)/ {f=1} f {print} f && /^}/ {exit}' "$TICK")
+IGNORE_LINE=$(printf '%s\n' "$SCRATCH_FN" | grep '\.agent/\.gitignore' | grep -v 'git rm' | head -1)
+case "$IGNORE_LINE" in
+  *'*'*) ok "and that scratch dir ignores everything in it" ;;
+  *)     bad "and that scratch dir ignores everything in it: [${IGNORE_LINE:-no .gitignore write found}]" ;;
+esac
 
 # The prompt has to name the exact path the harness reads, or the agent writes
 # somewhere nothing looks.
 if grep -q '\.agent/dismissed\.md' "$TICK"; then
   ok "the rework prompt names the same path the lib reads"
 else bad "the rework prompt names the same path the lib reads"; fi
-eq "and that path matches ADJUDICATION_FILE" "$ADJUDICATION_FILE" ".agent/dismissed.md"
+eq "and that path matches ADJUDICATION_FILE" ".agent/dismissed.md" "$ADJUDICATION_FILE"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-adjudication: all checks passed"

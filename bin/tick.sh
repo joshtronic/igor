@@ -3985,25 +3985,33 @@ Review requested so a human can review/discard." 2>/dev/null \
       if git push origin "$PR_HEAD"; then
         forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
           || log "warning: unassign failed on ${PR_REPO}#${PR_NUMBER}"
+        # Partial adjudication: some findings fixed, others dismissed. This sits
+        # ABOVE the binding/non-binding split on purpose -- the promise the
+        # prompt makes the agent ("that file is posted to the PR as a comment")
+        # is unconditional, and the agent can just as easily commit and dismiss
+        # on a plain reassignment, where the points came from the operator's own
+        # comments. Nested in the binding arm it would drop that round's
+        # reasoning on the floor when the worktree is removed a few lines below,
+        # with nothing in the log to say so.
+        #
+        # Posted before the re-review fires so the THREAD reads in order -- the
+        # reasoning sits above the verdict it answers rather than below it.
+        # It does not reach the reviewer itself: do_review_tick's prompt is
+        # title + body + linked issue + CI + diff, and deliberately carries no
+        # PR comments (see review_build_prompt). So a dismissed finding CAN be
+        # re-raised next round; what changes is that the human reading the
+        # thread can see it was answered.
+        if PR_DISMISSED=$(adjudication_read "$PR_WORKTREE"); then
+          forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+            "$(adjudication_comment "$PR_DISMISSED" false)" 2>/dev/null \
+            || log "warning: dismissal comment failed on ${PR_REPO}#${PR_NUMBER}"
+          log "$(adjudication_log_line "$PR_REPO" "$PR_NUMBER" false)"
+        fi
         if [ -n "$BINDING_RC_BODY" ]; then
           # Binding-flow rework: clear pending_rc_body and let do_review_tick
           # re-review the new head. The changed head means a new patch-id,
           # so the review fires next tick. Do NOT request the human.
           review_set_pending_rc_body "$REVIEW_KEY" ""
-          # Partial adjudication: some findings fixed, others dismissed. Posted
-          # before the re-review fires so the THREAD reads in order -- the
-          # reasoning sits above the verdict it answers rather than below it.
-          # It does not reach the reviewer itself: do_review_tick's prompt is
-          # title + body + linked issue + CI + diff, and deliberately carries no
-          # PR comments (see review_build_prompt). So a dismissed finding CAN be
-          # re-raised next round; what changes is that the human reading the
-          # thread can see it was answered.
-          if PR_DISMISSED=$(adjudication_read "$PR_WORKTREE"); then
-            forgejo_comment "$PR_REPO" "$PR_NUMBER" \
-              "$(adjudication_comment "$PR_DISMISSED" false)" 2>/dev/null \
-              || log "warning: dismissal comment failed on ${PR_REPO}#${PR_NUMBER}"
-            log "$(adjudication_log_line "$PR_REPO" "$PR_NUMBER" false)"
-          fi
           log "PR-review: binding rework pushed -- cleared pending_rc_body, do_review_tick will re-review"
         else
           log "PR-review: pushing $PR_NEW new commits and requesting review from $FORGEJO_REVIEWER"
