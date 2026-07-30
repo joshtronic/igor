@@ -276,10 +276,48 @@ forgejo_pr_comments() {
 BIG=$(review_dismissals_section acme/x 1 igor)
 has "an oversized set is marked truncated" "$BIG" "TRUNCATED"
 has "truncation keeps the newest round"    "$BIG" "NEWEST-ROUND"
+has "and says how many rounds it dropped"  "$BIG" "older round(s) dropped"
 case "$BIG" in
   *OLDEST-ROUND*) printf '  x truncation drops the oldest round\n'; FAIL=$((FAIL + 1)) ;;
   *)              printf '  + truncation drops the oldest round\n' ;;
 esac
+# Whole comments, not a byte slice: no fragment of the dropped comment may
+# survive glued to the front of the kept one.
+case "$BIG" in
+  *xxxx*) printf '  x a dropped comment leaves no headless fragment behind\n'; FAIL=$((FAIL + 1)) ;;
+  *)      printf '  + a dropped comment leaves no headless fragment behind\n' ;;
+esac
+
+# Multiple rounds that all fit must arrive in chronological order. Reversed,
+# the reviewer reads the newest argument as though it came first, and a later
+# round that supersedes an earlier one reads backwards.
+forgejo_pr_comments() {
+  jq -n --arg m "$ADJ_LIT" '[{user:{login:"igor"}, body:("ROUND-ONE\n" + $m)},
+                             {user:{login:"igor"}, body:("ROUND-TWO\n" + $m)},
+                             {user:{login:"igor"}, body:("ROUND-THREE\n" + $m)}]'
+}
+ORD=$(review_dismissals_section acme/x 1 igor)
+P1=$(printf '%s' "$ORD" | grep -n 'ROUND-ONE'   | cut -d: -f1)
+P3=$(printf '%s' "$ORD" | grep -n 'ROUND-THREE' | cut -d: -f1)
+if [ -n "$P1" ] && [ -n "$P3" ] && [ "$P1" -lt "$P3" ]; then
+  printf '  + rounds that all fit arrive oldest-first\n'
+else
+  printf '  x rounds that all fit arrive oldest-first (one at %s, three at %s)\n' "${P1:-?}" "${P3:-?}"; FAIL=$((FAIL + 1))
+fi
+case "$ORD" in *TRUNCATED*) printf '  x nothing is marked truncated when everything fits\n'; FAIL=$((FAIL + 1)) ;;
+                *)          printf '  + nothing is marked truncated when everything fits\n' ;; esac
+
+# A single comment bigger than the whole budget must still produce a section --
+# selecting whole comments would otherwise pick none and drop the argument
+# silently, which is the one outcome this function must never produce.
+forgejo_pr_comments() {
+  jq -n --arg m "$ADJ_LIT" --arg pad "$(printf 'z%.0s' $(seq 1 4000))" \
+    '[{user:{login:"igor"}, body:("HUGE-ROUND " + $pad + "\n" + $m)}]'
+}
+HUGE=$(review_dismissals_section acme/x 1 igor 2>/dev/null)
+if [ -n "$HUGE" ]; then printf '  + one oversized comment still yields a section\n'
+else printf '  x one oversized comment still yields a section\n'; FAIL=$((FAIL + 1)); fi
+has "and is marked as the oversized case" "$HUGE" "one oversized comment"
 
 # A forged closing delimiter must not let untrusted prose escape the fence.
 forgejo_pr_comments() {
@@ -290,6 +328,32 @@ ESC=$(review_dismissals_section acme/x 1 igor)
 eq "a forged END delimiter is neutralised" "1" "$(printf '%s' "$ESC" | grep -c -- '--- END UNTRUSTED AGENT TEXT ---')"
 has "and the attempt is visible, not dropped" "$ESC" "delimiter removed"
 unset -f forgejo_pr_comments
+
+# The writer and the reader must agree on WHICH endpoint carries a dismissal.
+# adjudication_comment's output is posted with forgejo_comment; the section
+# reads with forgejo_pr_comments. If those ever point at different endpoints
+# (a PR-review body vs an issue comment) the feature is a permanent no-op and,
+# because "no dismissals" is the normal case, it would log nothing either.
+W_PATH=$(sed -n '/^forgejo_comment() {/,/^}/p' "$HERE/../lib/forgejo.sh" | grep -o '/repos/[^"]*comments')
+R_PATH=$(sed -n '/^forgejo_pr_comments() {/,/^}/p' "$HERE/../lib/forgejo.sh" | grep -o '/repos/[^"]*comments')
+eq "the writer posts where the reader fetches" "$W_PATH" "$R_PATH"
+has "and that path is the issue-comments endpoint" "$R_PATH" "/issues/"
+# NOT `has ... ""` -- that matches anything and passes vacuously.
+POSTS=$(grep -c 'adjudication_comment "$PR_DISMISSED"' "$HERE/../bin/tick.sh" 2>/dev/null || echo 0)
+if [ "$POSTS" -ge 2 ]; then
+  printf '  + dismissals are posted on both paths via adjudication_comment (%s sites)\n' "$POSTS"
+else
+  printf '  x dismissals are posted on both paths via adjudication_comment (found %s)\n' "$POSTS"; FAIL=$((FAIL + 1))
+fi
+
+# BOT_USER: asked about in three consecutive review rounds. Pin it instead of
+# re-answering it in a commit message the reviewer cannot read.
+BOT_ASSIGN=$(grep -n '^BOT_USER=' "$HERE/../bin/tick.sh")
+has "BOT_USER is assigned unconditionally at top level" "$BOT_ASSIGN" 'BOT_USER='
+case "$BOT_ASSIGN" in
+  *'|| BOT_USER='*) printf '  + and has a fallback, so it is always defined under set -u\n' ;;
+  *) printf '  x and has a fallback, so it is always defined under set -u\n'; FAIL=$((FAIL + 1)) ;;
+esac
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-review: all checks passed"
