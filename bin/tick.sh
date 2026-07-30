@@ -1088,6 +1088,24 @@ reviewer_effort() {
   if [ "${rounds:-0}" -ge 3 ]; then printf 'max'; else printf 'high'; fi
 }
 
+# Wall-clock budget for one shadow-review call. claude_call's default is 300s,
+# which the escalated ladder above outgrows (igor#453). Measured on igor#455,
+# same PR, consecutive rounds:
+#
+#   round 2, effort=high, 24683 chars of diff -> verdict in  77s
+#   round 3, effort=max,  26898 chars of diff -> timeout (rc=124), twice
+#                                             -> then verdict in 197s
+#
+# So `max` on a diff near the 400-line scope cap runs 2.5x `high` and varies
+# enough to straddle 300s. The failure is worse than a slow review: a timeout
+# leaves the head un-recorded, so do_review_tick re-picks the same PR next tick
+# and every other PR in the fleet waits behind it until one attempt gets lucky.
+#
+# 600s is ~3x the observed successful max-effort run, and matches the budget the
+# sports digest already uses for its long call. Hardcoded rather than an env
+# knob: one operator, one right answer.
+REVIEW_CALL_TIMEOUT_SECS=600
+
 # worker_effort <rework_rounds> -- reasoning effort for the bot's PR rework
 # at this round (igor#308). Climbs each pass -- try harder as the problem
 # proves hard: high -> xhigh -> max (round 3 is the last rework before the
@@ -3029,7 +3047,7 @@ do_review_tick() {
   rev_effort=$(reviewer_effort "$rev_rounds")
   parsed=""
   for attempt in 1 2; do
-    raw=$(claude_call "${AGENT_MODEL_REVIEW}:${rev_effort}" "review" 8000 "$directive" "$user" 0) || {
+    raw=$(claude_call "${AGENT_MODEL_REVIEW}:${rev_effort}" "review" 8000 "$directive" "$user" 0 "$REVIEW_CALL_TIMEOUT_SECS") || {
       log "review: ${key} review call failed (attempt $attempt)"
       continue
     }
