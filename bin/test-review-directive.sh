@@ -41,6 +41,20 @@ else
   eval "$PARSER_SRC"
 fi
 
+# Lifting one function out of tick.sh assumes it calls no other tick.sh helper.
+# If that ever stops being true the parser fails on an undefined command and
+# every round-trip below reads as "the directive advertises a verdict the parser
+# rejects" -- a true statement about the wrong thing. Name the dependency so the
+# failure text points at the lift instead of at the directive.
+LIFT_NOTE=""
+_tick_fns=$(grep -oE '^[a-z_][a-z0-9_]*\(\) \{' "$TICK" | sed 's/() {$//' | grep -vx 'review_parse_response')
+for _fn in $_tick_fns; do
+  printf '%s' "$PARSER_SRC" | grep -qE "(^|[^a-z0-9_])${_fn}([^a-z0-9_]|$)" || continue
+  declare -F "$_fn" >/dev/null 2>&1 && continue
+  LIFT_NOTE="${LIFT_NOTE}${LIFT_NOTE:+, }$_fn"
+done
+[ -z "$LIFT_NOTE" ] || LIFT_NOTE=" (NOTE: the lifted parser calls undefined tick.sh helper(s): ${LIFT_NOTE} -- fix the lift, not the directive)"
+
 echo "== the directive still specifies the handshake the parser looks for =="
 if grep -q '^VERDICT: ' "$DIRECTIVE"; then
   ok "directive shows a VERDICT: line"
@@ -53,6 +67,15 @@ echo "== every verdict the directive advertises actually parses =="
 # The tokens come out of the directive itself, so adding a fourth verdict to the
 # rubric without teaching the parser fails here instead of in production.
 read -r -a ADVERTISED <<<"$(sed -n 's/^VERDICT: //p' "$DIRECTIVE" | head -1 | tr '|' ' ')"
+# An empty array is not a soft failure: the round-trip loop would run zero times
+# and the undocumented-token loop would `continue` on every candidate, so the
+# whole section would pass vacuously. (It also trips `${ADVERTISED[*]}` under
+# `set -u` on bash < 4.4.) Stop here instead.
+if [ "${#ADVERTISED[@]}" -eq 0 ]; then
+  bad "the directive's VERDICT: format line did not parse -- every check below would pass vacuously"
+  echo "test-review-directive: $FAIL FAILED"
+  exit 1
+fi
 eq "the format line lists three tokens" "3" "${#ADVERTISED[@]}"
 for v in "${ADVERTISED[@]}"; do
   if parsed=$(review_parse_response "VERDICT: ${v}
@@ -60,7 +83,7 @@ for v in "${ADVERTISED[@]}"; do
 some review prose"); then
     eq "  $v round-trips" "$v" "$(printf '%s' "$parsed" | jq -r '.verdict')"
   else
-    bad "  $v round-trips: parser REJECTED a verdict the directive advertises"
+    bad "  $v round-trips: parser REJECTED a verdict the directive advertises${LIFT_NOTE}"
   fi
 done
 
@@ -99,8 +122,11 @@ RUBRIC=$(awk '/^## Verdict rubric$/{f=1;next} /^## /{f=0} f' "$DIRECTIVE")
 if [ -z "$RUBRIC" ]; then
   bad "could not locate the '## Verdict rubric' section"
 else
+  # Bullet char and whatever follows the bolded token are left loose on purpose:
+  # this asserts the entry EXISTS, and a cosmetic reformat of the rubric (a
+  # different dash, a `*` bullet) shouldn't fail as "verdict never explained".
   for v in APPROVE REQUEST_CHANGES COMMENT; do
-    if printf '%s' "$RUBRIC" | grep -q -- "- \*\*${v}\*\* --"; then ok "  $v has a rubric entry"
+    if printf '%s' "$RUBRIC" | grep -qE "^[[:space:]]*[-*][[:space:]]+\*\*${v}\*\*"; then ok "  $v has a rubric entry"
     else bad "  $v has no rubric entry -- parser accepts a verdict the directive never explains"; fi
   done
 fi
