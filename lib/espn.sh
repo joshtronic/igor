@@ -16,7 +16,7 @@
 
 # Fallback logger so this module is sourceable standalone (tests).
 if ! declare -F log >/dev/null; then
-  log() { printf '[agent] %s\n' "$*"; }
+  log() { printf '[agent] %s\n' "$*" >&2; }
 fi
 
 # Override for tests or if ESPN moves the surface. No trailing slash.

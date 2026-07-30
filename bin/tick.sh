@@ -292,7 +292,7 @@ if ! flock -n 200; then
   exit 0
 fi
 
-log() { printf '[agent] %s\n' "$*"; }
+log() { printf '[agent] %s\n' "$*" >&2; }
 
 # Dead-man's-switch heartbeat (check A) -- unconditional, every tick that
 # gets this far (i.e. actually holds the lock). No-op when

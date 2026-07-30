@@ -11,7 +11,7 @@
 
 # Fallback logger so this module is sourceable standalone (tests).
 if ! declare -F log >/dev/null; then
-  log() { printf '[agent] %s\n' "$*"; }
+  log() { printf '[agent] %s\n' "$*" >&2; }
 fi
 
 GA_ADMIN_API="https://analyticsadmin.googleapis.com/v1beta"

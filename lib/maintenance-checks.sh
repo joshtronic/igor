@@ -8,7 +8,7 @@
 
 # Fallback logger so this module is sourceable outside tick.sh.
 if ! declare -F log >/dev/null; then
-  log() { printf '[agent] %s\n' "$*"; }
+  log() { printf '[agent] %s\n' "$*" >&2; }
 fi
 
 # -- Re-file-on-close fingerprint (maintenance redesign) ---------

@@ -10,7 +10,7 @@
 # Requires bash; sourced by bin/tick.sh.
 
 if ! declare -F log >/dev/null; then
-  log() { printf '[agent] %s\n' "$*"; }
+  log() { printf '[agent] %s\n' "$*" >&2; }
 fi
 
 # Hardcoded per the "strong opinions" convention -- not an env knob. 60 min

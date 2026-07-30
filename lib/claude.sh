@@ -32,6 +32,17 @@
 # cost_record_api) and a `log` function defined by the caller.
 # anthropic_call additionally needs ANTHROPIC_API_KEY in the env.
 
+# Fallback logger, same shape as every other lib. The header above says a
+# caller must define log(), and under bin/tick.sh one does -- but this is the
+# module whose diagnostics matter most (it is the only place that knows WHY a
+# model call died), and without the guard those lines die as
+# `log: command not found` instead. Stderr, so a diagnostic emitted from inside
+# a caller's command substitution reaches the journal instead of the caller's
+# captured value (igor#453).
+if ! declare -F log >/dev/null; then
+  log() { printf '[agent] %s\n' "$*" >&2; }
+fi
+
 # -- Auth/usage health state -------------------------------------
 #
 # Durable record of whether `claude` can currently get a completion

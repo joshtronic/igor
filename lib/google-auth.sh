@@ -18,7 +18,7 @@
 
 # Fallback logger so this module is sourceable standalone (tests).
 if ! declare -F log >/dev/null; then
-  log() { printf '[agent] %s\n' "$*"; }
+  log() { printf '[agent] %s\n' "$*" >&2; }
 fi
 
 GOOGLE_TOKEN_EP_DEFAULT="https://oauth2.googleapis.com/token"
