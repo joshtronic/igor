@@ -233,13 +233,39 @@ REVIEW_DISMISSALS_MAX=3000     # all rounds' dismissal text, chars
 # hostile text through the agent should not upgrade its trust level.
 review_dismissals_section() {
   local repo="$1" number="$2" bot="${3:-}" raw text note
-  [ -n "$bot" ] || return 0
-  raw=$(forgejo_pr_comments "$repo" "$number" 2>/dev/null) || return 0
-  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw" || return 0
-  text=$(jq -r --arg b "$bot" --arg m "$ADJUDICATION_MARKER" '
+  # Every failure below returns 0 with no section, because a reviewer that
+  # cannot fetch comments must still review. But each one is LOGGED: a silent
+  # no-op here is indistinguishable from "there were no dismissals", so a
+  # contract change in forgejo_pr_comments would disable the feature
+  # permanently while every test stayed green. The log line is the only thing
+  # that makes that visible.
+  if [ -z "$bot" ]; then
+    log "warning: review: no bot user -- skipping the dismissals section"
+    return 0
+  fi
+  if ! raw=$(forgejo_pr_comments "$repo" "$number" 2>/dev/null); then
+    log "warning: review: could not fetch comments for ${repo}#${number} -- dismissals section omitted"
+    return 0
+  fi
+  if ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw"; then
+    log "warning: review: comments for ${repo}#${number} were not a JSON array -- dismissals section omitted (API contract changed?)"
+    return 0
+  fi
+  if ! text=$(jq -r --arg b "$bot" --arg m "$ADJUDICATION_MARKER" '
       [ .[]? | select(.user.login == $b) | select((.body // "") | contains($m)) | .body ]
-      | join("\n\n")' <<<"$raw" 2>/dev/null) || return 0
+      | join("\n\n")' <<<"$raw" 2>/dev/null); then
+    log "warning: review: could not extract dismissals for ${repo}#${number} -- section omitted"
+    return 0
+  fi
   printf '%s' "$text" | grep -q '[^[:space:]]' || return 0
+  # Strip the closing delimiter out of the untrusted text before fencing it.
+  # The text is model prose derived from a diff that may be adversarial, and
+  # unlike the diff it is specifically an argument for NOT raising a finding --
+  # so a forged "--- END UNTRUSTED AGENT TEXT ---" followed by instructions is
+  # worth the two lines to prevent, even though the reviewer already reads the
+  # diff this came from.
+  text=${text//--- END UNTRUSTED AGENT TEXT ---/[delimiter removed]}
+  text=${text//--- BEGIN UNTRUSTED AGENT TEXT/[delimiter removed]}
   note=""
   if [ "${#text}" -gt "$REVIEW_DISMISSALS_MAX" ]; then
     # Keep the TAIL: the most recent round's argument is the one most likely to
