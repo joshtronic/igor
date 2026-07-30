@@ -131,6 +131,28 @@ else
   done
 fi
 
+echo "== the directive tells the reviewer what a dismissal does (igor#456) =="
+# lib/review.sh feeds a "## Findings the author already dismissed" section into
+# the user turn. If the directive never mentions it, the block arrives
+# unannounced and there is no rule for how it interacts with fail-closed --
+# which is how a well-argued dismissal starts converting blocks into approvals.
+if grep -q 'Findings the author already dismissed' "$DIRECTIVE"; then
+  ok "the input list names the dismissals section"
+else bad "the input list names the dismissals section"; fi
+if grep -qi 'never, on its own, turns' "$DIRECTIVE"; then
+  ok "and states a dismissal alone cannot upgrade a verdict"
+else bad "and states a dismissal alone cannot upgrade a verdict"; fi
+# The heading the directive advertises must be the one review.sh actually emits.
+# Both sides are pinned NON-EMPTY first: comparing two greps that each found
+# nothing passes vacuously, which is how this assertion started out useless.
+DIR_H=$(grep -o 'Findings the author already dismissed' "$DIRECTIVE" | head -1)
+REV_H=$(grep -o 'Findings the author already dismissed' "$HERE/lib/review.sh" | head -1)
+if [ -n "$DIR_H" ]; then ok "the directive names the section heading"
+else bad "the directive names the section heading"; fi
+if [ -n "$REV_H" ]; then ok "lib/review.sh emits that heading"
+else bad "lib/review.sh emits that heading"; fi
+eq "directive and review.sh agree on the section heading" "$DIR_H" "$REV_H"
+
 if [ "$FAIL" -eq 0 ]; then
   echo "test-review-directive: all checks passed"
 else

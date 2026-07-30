@@ -37,6 +37,12 @@ fi
 # The file the agent writes. Named in the prompt; keep the two in sync.
 ADJUDICATION_FILE=".agent/dismissed.md"
 
+# Machine marker on every dismissal comment, so the next review can find its own
+# prior arguments without pattern-matching a human-facing heading (which carries
+# an emoji and an em dash, and would silently stop matching the first time
+# someone reworded it). Same trick as the `<!-- review sha=... -->` footer.
+ADJUDICATION_MARKER='<!-- adjudication:dismissed -->'
+
 # adjudication_path <worktree> -- absolute path to the dismissals file.
 adjudication_path() { printf '%s/%s' "${1:-.}" "$ADJUDICATION_FILE"; }
 
@@ -96,7 +102,7 @@ adjudication_comment() {
   else
     tail_="The rest of the findings were addressed in the commits on this branch. The reviewer will re-review the new head."
   fi
-  printf '%s\n\n%s\n\n---\n\n%s\n' "$head" "$body" "$tail_"
+  printf '%s\n\n%s\n\n---\n\n%s\n%s\n' "$head" "$body" "$tail_" "$ADJUDICATION_MARKER"
 }
 
 # adjudication_log_line <repo> <number> <converged>
