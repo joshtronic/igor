@@ -118,6 +118,8 @@ unset env_file_hint
 # and it sends through email_send.
 # shellcheck source=lib/reviewnotify.sh
 . "$AGENT_HOME/lib/reviewnotify.sh"
+# shellcheck source=lib/adjudication.sh
+. "$AGENT_HOME/lib/adjudication.sh"
 # shellcheck source=lib/seo-analysis.sh
 . "$AGENT_HOME/lib/seo-analysis.sh"
 # shellcheck source=lib/espn.sh
@@ -3571,6 +3573,10 @@ if [ -n "$REVIEW_PR" ]; then
       exit 0
     fi
     init_igor_scratch "$PR_WORKTREE"
+    # Truncate any dismissals file before the agent runs, so a non-empty one
+    # after it means THIS round dismissed something rather than a previous
+    # round's reasoning surviving at the same worktree path.
+    adjudication_reset "$PR_WORKTREE"
 
     # Stage the base branch INTO the PR branch before handing it over.
     #
@@ -3681,14 +3687,38 @@ CONFLICT_EOF
 You opened PR ${PR_REPO}#${PR_NUMBER}: ${PR_TITLE}
 
 The reviewer (Igor's automated review pass) requested changes to this PR.
-Address the requested changes listed below with new commits on this branch (${PR_HEAD}),
-then exit. The harness will push your commits and the reviewer will re-review
-the new head automatically. The human is only brought in on APPROVE or after 3 rework
-rounds without convergence.
+Work through the findings below with new commits on this branch (${PR_HEAD}), then
+exit. The harness pushes your commits and the reviewer re-reviews the new head
+automatically. The loop runs until it settles, or until 3 rounds have passed
+without converging, at which point the human takes over.
 
-If the requested changes are not actionable -- a fundamental design disagreement,
-unclear requirements, or something you need the human to weigh in on -- exit without
-commits. The harness will escalate to the human reviewer.
+## You may DISAGREE with a finding
+
+You are not required to comply with every finding. The reviewer sees ONLY the
+diff -- no working tree, no ability to run anything -- so it raises whatever it
+cannot rule out from there. You have the checkout. When it is wrong, say so
+rather than changing correct code to satisfy it.
+
+For each finding, do exactly one of:
+
+1. **Fix it** -- it is right, or cheap enough not to argue about. Commit the fix.
+2. **Dismiss it** -- you checked and it does not hold, or it is a nit not worth
+   a change. Append to \`.agent/dismissed.md\` in this worktree: the finding, and
+   WHY, with the evidence you used (the grep you ran, the call site you read,
+   the test that already covers it). That file is posted to the PR as a comment.
+3. **Escalate it** -- a genuine design disagreement, or it needs a decision only
+   the human can make. Exit with no commits and nothing in \`.agent/dismissed.md\`.
+
+Dismissing is a real option, not a loophole. But the burden is on you: "I could
+not confirm the reviewer's concern" is not a dismissal, it is a shrug. Go check,
+then either fix it or state what you found. A dismissal a human reads and
+disagrees with costs more than the fix would have.
+
+Mixing is normal and expected -- fix three, dismiss one, in the same round.
+
+If you dismiss everything and commit nothing, that is a legitimate outcome: the
+harness treats it as converged and hands the PR to the human with your reasoning
+attached, rather than as a failure.
 ${PR_MERGE_CONFLICT_MSG}
 ${PR_CI_FAILURE_MSG}
 
@@ -3955,6 +3985,28 @@ Review requested so a human can review/discard." 2>/dev/null \
       if git push origin "$PR_HEAD"; then
         forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
           || log "warning: unassign failed on ${PR_REPO}#${PR_NUMBER}"
+        # Partial adjudication: some findings fixed, others dismissed. This sits
+        # ABOVE the binding/non-binding split on purpose -- the promise the
+        # prompt makes the agent ("that file is posted to the PR as a comment")
+        # is unconditional, and the agent can just as easily commit and dismiss
+        # on a plain reassignment, where the points came from the operator's own
+        # comments. Nested in the binding arm it would drop that round's
+        # reasoning on the floor when the worktree is removed a few lines below,
+        # with nothing in the log to say so.
+        #
+        # Posted before the re-review fires so the THREAD reads in order -- the
+        # reasoning sits above the verdict it answers rather than below it.
+        # It does not reach the reviewer itself: do_review_tick's prompt is
+        # title + body + linked issue + CI + diff, and deliberately carries no
+        # PR comments (see review_build_prompt). So a dismissed finding CAN be
+        # re-raised next round; what changes is that the human reading the
+        # thread can see it was answered.
+        if PR_DISMISSED=$(adjudication_read "$PR_WORKTREE"); then
+          forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+            "$(adjudication_comment "$PR_DISMISSED" false)" 2>/dev/null \
+            || log "warning: dismissal comment failed on ${PR_REPO}#${PR_NUMBER}"
+          log "$(adjudication_log_line "$PR_REPO" "$PR_NUMBER" false)"
+        fi
         if [ -n "$BINDING_RC_BODY" ]; then
           # Binding-flow rework: clear pending_rc_body and let do_review_tick
           # re-review the new head. The changed head means a new patch-id,
@@ -3970,19 +4022,37 @@ Review requested so a human can review/discard." 2>/dev/null \
         log "PR-review: rework push REJECTED on ${PR_REPO}#${PR_NUMBER} (remote advanced -- non-fast-forward); leaving the bot assigned + pending_rc_body intact so the next tick retries against the current head"
       fi
     else
-      log "PR-review: no commits made -- requesting review from $FORGEJO_REVIEWER with a note"
-      forgejo_comment "$PR_REPO" "$PR_NUMBER" \
-        "The agent reopened this PR after reassignment but didn't make any new commits. Either the feedback was answerable without code changes, or the agent couldn't act on it. Review requested so a human can close the loop." 2>/dev/null \
-        || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
+      # No commits. Two very different situations, and before adjudication
+      # existed they were indistinguishable -- an agent that correctly dismissed
+      # every finding looked exactly like one that could not act at all.
+      #
+      #   dismissals present -> CONVERGED. The loop finished with an argument
+      #                         rather than a diff. Hand over the reasoning.
+      #   dismissals absent  -> STUCK. Unchanged behaviour: escalate.
+      PR_DISMISSED=$(adjudication_read "$PR_WORKTREE") || PR_DISMISSED=""
+      if [ -n "$PR_DISMISSED" ]; then
+        forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+          "$(adjudication_comment "$PR_DISMISSED" true)" 2>/dev/null \
+          || log "warning: dismissal comment failed on ${PR_REPO}#${PR_NUMBER}"
+        log "$(adjudication_log_line "$PR_REPO" "$PR_NUMBER" true)"
+      else
+        log "PR-review: no commits made -- requesting review from $FORGEJO_REVIEWER with a note"
+        forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+          "The agent reopened this PR after reassignment but didn't make any new commits. Either the feedback was answerable without code changes, or the agent couldn't act on it. Review requested so a human can close the loop." 2>/dev/null \
+          || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
+      fi
       forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
         || log "warning: unassign failed on ${PR_REPO}#${PR_NUMBER}"
       if [ -n "$BINDING_RC_BODY" ]; then
-        # Binding-flow rework produced no commits: clear the pending body and
-        # escalate to the human as a safety valve (the agent couldn't act).
+        # Either way the pending body is cleared and the human is next: a
+        # converged PR needs their verdict on the argument, a stuck one needs
+        # them to break the tie. The distinction is carried by the comment
+        # posted above, not by different routing.
         review_set_pending_rc_body "$REVIEW_KEY" ""
         forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null \
           || log "warning: review-request-to-${FORGEJO_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER} (no-commit binding rework)"
-        log "PR-review: binding rework produced no commits -- escalating to ${FORGEJO_REVIEWER}"
+        [ -n "$PR_DISMISSED" ] \
+          || log "PR-review: binding rework produced no commits -- escalating to ${FORGEJO_REVIEWER}"
       else
         forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null \
           || log "warning: review-request-to-${FORGEJO_REVIEWER} failed on ${PR_REPO}#${PR_NUMBER}"
