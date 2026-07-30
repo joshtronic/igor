@@ -277,20 +277,13 @@ review_dismissals_section() {
   # the same full set as page=1. So there is no first-page-only failure mode
   # where the newest dismissal never arrives.
   #
-  # That is a fact about today's Forgejo, not a guarantee, and a dated comment
-  # is a poor defence against a future version that starts paginating: comments
-  # arrive oldest-first, so a truncated first page would silently drop the
-  # NEWEST dismissal -- the one that matters -- and log nothing, because "no
-  # dismissals" is the normal case. The cheap guard below is a smell test: a
-  # response whose length is exactly a common page size is far more likely to
-  # be a page boundary than a coincidence, and saying so costs one comparison.
-  local n_comments
-  n_comments=$(jq 'length' <<<"$raw" 2>/dev/null || echo 0)
-  case "$n_comments" in
-    10|15|20|25|30|50|100)
-      log "warning: review: ${repo}#${number} returned exactly ${n_comments} comments -- suspiciously like a page boundary; if Forgejo has started paginating, the NEWEST dismissal may be missing"
-      ;;
-  esac
+  # That is a fact about today's Forgejo, not a guarantee. I tried a heuristic
+  # here (warn when the comment count is exactly a common page size) and removed
+  # it: it counts ALL comments, not dismissals, and this repo's own PRs routinely
+  # reach 10-15 through ordinary review/rework traffic -- so it fired on normal
+  # operation, which is the same reason a "no dismissals matched" log was
+  # rejected in an earlier round. If Forgejo ever does paginate, the fix is to
+  # paginate the fetch, not to guess from a count.
   local sel dropped
   if ! sel=$(jq -c --arg b "$bot" --arg m "$ADJUDICATION_MARKER" \
                  --argjson max "$REVIEW_DISMISSALS_MAX" '
@@ -336,6 +329,7 @@ review_dismissals_section() {
   # author's prose, and these are the strings that blur it. Defence in depth,
   # not a claimed exploit.
   text=${text//===BODY===/[sentinel removed]}
+  text=${text//VERDICT:/[sentinel removed]}
   text=${text//## Findings the author already dismissed/[heading removed]}
   text=${text//## Unified diff/[heading removed]}
   text=${text//PR under review:/[heading removed]}
