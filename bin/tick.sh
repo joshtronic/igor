@@ -3031,7 +3031,7 @@ do_review_tick() {
   # own text and the repo's test-runner facts (igor#438) -- both
   # best-effort and additive, so a missing issue or unreadable Makefile
   # just means a shorter prompt, never a blocked review.
-  user=$(review_build_prompt "$target_repo" "$target_num" "$target_sha" "$ci" "$title" "$body" "$diff" "$truncated_note" "$BOT_USER")
+  user=$(review_build_prompt "$target_repo" "$target_num" "$target_sha" "$ci" "$title" "$body" "$diff" "$truncated_note" "${BOT_USER:-}")
 
   log "review: examining ${key} head ${target_sha:0:8} (ci=${ci}, ${#diff} chars of diff${truncated_note:+, truncated})"
 

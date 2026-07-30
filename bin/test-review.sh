@@ -223,7 +223,6 @@ unset -f forgejo_pr_comments
 # The production path. Every assertion above stubs forgejo_pr_comments, so the
 # whole feature could be a permanent no-op against the real API and this suite
 # would stay green. These pin the contract the section is coded against.
-unset -f forgejo_pr_comments 2>/dev/null || true
 # Read lib/forgejo.sh rather than sourcing it: this suite deliberately does not
 # pull in the API layer, and sourcing it needs FORGEJO_URL/TOKEN. An empty
 # REAL_SRC means the function was renamed or removed, so this one check covers
@@ -247,7 +246,25 @@ has "and says so in the journal" "$LOGGED" "not a JSON array"
 LOGGED=""
 review_dismissals_section acme/x 1 "" >/dev/null 2>&1
 has "an empty bot user is logged, not silent" "$LOGGED" "no bot user"
-unset -f log
+unset -f log   # drop the capture stub; lib/review.sh's real log() is restored below
+# shellcheck source=../lib/review.sh
+. "$HERE/../lib/review.sh"
+
+# THE load-bearing one. review_dismissals_section is called inside $(...) by
+# review_build_prompt, and it logs on four failure paths. If the real log()
+# wrote to STDOUT, a fetch failure would splice "warning: review: could not
+# fetch comments ..." into the prompt AS the dismissals section -- and every
+# assertion above would still pass, because they stub log() or discard stdout.
+# So run the real one and prove stdout is empty.
+LOG_STDOUT=$(log "a warning that must not reach the prompt" 2>/dev/null)
+eq "the real log() writes nothing to stdout" "" "$LOG_STDOUT"
+LOG_STDERR=$(log "a warning that must not reach the prompt" 2>&1 >/dev/null)
+has "and does write to stderr" "$LOG_STDERR" "must not reach the prompt"
+
+# End to end: a failing fetch must yield an EMPTY section, not a warning string.
+forgejo_pr_comments() { return 1; }
+eq "a failed fetch yields an empty section, not a logged warning" "" \
+   "$(review_dismissals_section acme/x 1 igor 2>/dev/null)"
 
 # Truncation keeps the NEWEST rounds. A slice that kept the head instead would
 # feed the reviewer the oldest arguments and drop the one it needs.

@@ -143,8 +143,14 @@ if grep -qi 'never, on its own, turns' "$DIRECTIVE"; then
   ok "and states a dismissal alone cannot upgrade a verdict"
 else bad "and states a dismissal alone cannot upgrade a verdict"; fi
 # The heading the directive advertises must be the one review.sh actually emits.
+# Both sides are pinned NON-EMPTY first: comparing two greps that each found
+# nothing passes vacuously, which is how this assertion started out useless.
 DIR_H=$(grep -o 'Findings the author already dismissed' "$DIRECTIVE" | head -1)
 REV_H=$(grep -o 'Findings the author already dismissed' "$HERE/lib/review.sh" | head -1)
+if [ -n "$DIR_H" ]; then ok "the directive names the section heading"
+else bad "the directive names the section heading"; fi
+if [ -n "$REV_H" ]; then ok "lib/review.sh emits that heading"
+else bad "lib/review.sh emits that heading"; fi
 eq "directive and review.sh agree on the section heading" "$DIR_H" "$REV_H"
 
 if [ "$FAIL" -eq 0 ]; then
