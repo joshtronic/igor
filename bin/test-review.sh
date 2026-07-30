@@ -233,7 +233,8 @@ if [ -n "$REAL_SRC" ]; then
 else
   printf '  x the real forgejo_pr_comments still exists (renamed or removed?)\n'; FAIL=$((FAIL + 1))
 fi
-has "the real one takes repo + number" "$REAL_SRC" 'local repo="$1" number="$2"'
+has "the real one takes a repo arg"   "$REAL_SRC" 'repo="$1"'
+has "the real one takes a number arg" "$REAL_SRC" 'number="$2"'
 
 # A malformed payload must be LOUD, not silently sectionless -- that is the
 # difference between "no dismissals yet" and "this feature died in production".
@@ -354,6 +355,43 @@ case "$BOT_ASSIGN" in
   *'|| BOT_USER='*) printf '  + and has a fallback, so it is always defined under set -u\n' ;;
   *) printf '  x and has a fallback, so it is always defined under set -u\n'; FAIL=$((FAIL + 1)) ;;
 esac
+
+# THE invariant: whatever else is dropped, the NEWEST dismissal survives. It is
+# the argument about the finding the reviewer is weighing right now.
+#
+# The first version of the whole-comment selection got this exactly backwards.
+# Its reduce skipped a non-fitting comment and kept iterating, so an oversized
+# NEWEST round was dropped while an older one was kept -- and the note still
+# read "older round(s) dropped", which was a lie about which round was lost.
+PAD4K=$(printf 'z%.0s' $(seq 1 4000))
+forgejo_pr_comments() {
+  jq -n --arg m "$ADJ_LIT" --arg p "$PAD4K" \
+    '[{user:{login:"igor"}, body:("OLD-SMALL-ROUND\n" + $m)},
+      {user:{login:"igor"}, body:("NEWEST-BUT-HUGE " + $p + "\n" + $m)}]'
+}
+NB=$(review_dismissals_section acme/x 1 igor 2>/dev/null)
+has "an oversized NEWEST round is kept, not skipped" "$NB" "NEWEST-BUT-HUGE"
+case "$NB" in
+  *OLD-SMALL-ROUND*) printf '  x and an older round is not kept in its place\n'; FAIL=$((FAIL + 1)) ;;
+  *)                 printf '  + and an older round is not kept in its place\n' ;;
+esac
+has "the note names the oversized case, not a false 'older dropped'" "$NB" "one oversized comment"
+
+# The oversized fallback keeps the OPENING: a dismissal names the finding it is
+# about in its first line, so a tail-slice yields a conclusion with no subject.
+has "the oversized fallback keeps the opening" "$NB" "NEWEST-BUT-HUGE"
+
+# Mirror case: the OLDER round is the oversized one. The newest still fits, so
+# it is kept whole and the "older dropped" note is accurate here.
+forgejo_pr_comments() {
+  jq -n --arg m "$ADJ_LIT" --arg p "$PAD4K" \
+    '[{user:{login:"igor"}, body:("OLD-BUT-HUGE " + $p + "\n" + $m)},
+      {user:{login:"igor"}, body:("NEWEST-SMALL-ROUND\n" + $m)}]'
+}
+MB=$(review_dismissals_section acme/x 1 igor 2>/dev/null)
+has "a fitting newest round is kept whole"      "$MB" "NEWEST-SMALL-ROUND"
+has "and the older-dropped note is accurate"    "$MB" "older round(s) dropped"
+unset -f forgejo_pr_comments
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-review: all checks passed"

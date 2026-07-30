@@ -264,15 +264,29 @@ review_dismissals_section() {
   # attribution glued in front of the round it actually needs. Dropping whole
   # comments also means truncation can no longer cut a fence delimiter in half,
   # which is what made the strip-before-truncate ordering load-bearing.
+  #
+  # The `done` flag STOPS at the first comment that doesn't fit; it does not
+  # skip it and carry on. Without it the kept set is non-contiguous: an
+  # oversized NEWEST round gets skipped while an older one still fits, so the
+  # argument the reviewer most needs is the one silently dropped -- and the
+  # note then says "older round(s) dropped", which is precisely backwards.
+  #
+  # forgejo_pr_comments returns the WHOLE thread, verified 2026-07-30: the
+  # instance swagger for /repos/{owner}/{repo}/issues/{index}/comments declares
+  # only owner/repo/index/since/before -- no page or limit -- and page=2 returns
+  # the same full set as page=1. So there is no first-page-only failure mode
+  # where the newest dismissal never arrives.
   local sel dropped
   if ! sel=$(jq -c --arg b "$bot" --arg m "$ADJUDICATION_MARKER" \
                  --argjson max "$REVIEW_DISMISSALS_MAX" '
       [ .[]? | select(.user.login == $b) | select((.body // "") | contains($m)) | .body ] as $all
       | ( $all | reverse
-          | reduce .[] as $c ({keep: [], len: 0};
-              if (.len + ($c | length) + 2) <= $max
-              then {keep: (.keep + [$c]), len: (.len + ($c | length) + 2)}
-              else . end)
+          | reduce .[] as $c ({keep: [], len: 0, done: false};
+              if .done then .
+              elif (.len + ($c | length) + 2) <= $max
+              then {keep: (.keep + [$c]), len: (.len + ($c | length) + 2), done: false}
+              else {keep: .keep, len: .len, done: true}
+              end)
           | .keep | reverse ) as $kept
       | {text: ($kept | join("\n\n")), dropped: (($all | length) - ($kept | length)),
          total: ($all | length)}' <<<"$raw" 2>/dev/null); then
@@ -307,10 +321,13 @@ review_dismissals_section() {
   # the single-oversized-comment fallback can, so the ordering still matters.
   note=""
   if [ "${#text}" -gt "$REVIEW_DISMISSALS_MAX" ]; then
-    # Only reachable via the oversized-single-comment fallback. Keep the TAIL:
-    # a dismissal's reasoning tends to end with its conclusion.
-    text="${text: -$REVIEW_DISMISSALS_MAX}"
-    note=" (TRUNCATED -- one oversized comment, tail kept)"
+    # Only reachable via the oversized-single-comment fallback. Keep the HEAD,
+    # not the tail: a dismissal opens by naming the finding it is about, so the
+    # tail is a conclusion with no subject -- the reviewer cannot tell which of
+    # its own points was answered. Losing the closing marker does not matter;
+    # it was only ever used for selection, which already happened.
+    text="${text:0:$REVIEW_DISMISSALS_MAX}"
+    note=" (TRUNCATED -- one oversized comment, opening kept)"
   elif [ "${dropped:-0}" -gt 0 ]; then
     note=" (TRUNCATED -- ${dropped} older round(s) dropped)"
   fi
