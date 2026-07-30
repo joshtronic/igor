@@ -307,10 +307,12 @@ review_dismissals_section() {
   # through with an empty text would drop the argument silently, which is the
   # one outcome this function must never produce -- so keep that comment and
   # hard-slice it below.
+  local oversized=false
   if [ -z "$text" ] && [ "$(jq -r '.total' <<<"$sel")" -gt 0 ]; then
     text=$(jq -r --arg b "$bot" --arg m "$ADJUDICATION_MARKER" '
         [ .[]? | select(.user.login == $b) | select((.body // "") | contains($m)) | .body ][-1]' <<<"$raw")
     dropped=$(( $(jq -r '.total' <<<"$sel") - 1 ))
+    oversized=true
     log "review: ${repo}#${number} a single dismissal comment exceeds the ${REVIEW_DISMISSALS_MAX}-char budget -- keeping a truncated copy"
   fi
   printf '%s' "$text" | grep -q '[^[:space:]]' || return 0
@@ -338,18 +340,30 @@ review_dismissals_section() {
   # slicing first could cut one in half and leave a fragment the strip no
   # longer matches. Whole-comment selection above cannot cut a delimiter, but
   # the single-oversized-comment fallback can, so the ordering still matters.
+  # The note is derived from the SELECTION, never from the post-substitution
+  # length. The scrubbing above GROWS text (VERDICT: 8 -> 18 chars,
+  # ===BODY=== 10 -> 18), so a set that fitted the budget can cross it after
+  # escaping -- and keying the note on ${#text} then labelled a perfectly
+  # ordinary two-round set "one oversized comment, opening kept", which was
+  # false about both halves. Three distinct outcomes, each stated plainly.
   note=""
-  if [ "${#text}" -gt "$REVIEW_DISMISSALS_MAX" ]; then
-    # Only reachable via the oversized-single-comment fallback. Keep the HEAD,
-    # not the tail: a dismissal opens by naming the finding it is about, so the
-    # tail is a conclusion with no subject -- the reviewer cannot tell which of
-    # its own points was answered. Losing the closing marker does not matter;
-    # it was only ever used for selection, which already happened.
+  if [ "$oversized" = "true" ]; then
+    # Keep the HEAD, not the tail: a dismissal opens by naming the finding it
+    # answers, so a tail-slice is a conclusion with no subject. Losing the
+    # trailing marker is fine; it was only ever used for selection.
     text="${text:0:$REVIEW_DISMISSALS_MAX}"
     note=" (TRUNCATED -- one oversized comment, opening kept)"
-    # The surrounding code makes a point of the note being honest about WHICH
-    # round was lost, so say it when older rounds went too.
-    [ "${dropped:-0}" -gt 0 ] && note=" (TRUNCATED -- one oversized comment, opening kept; ${dropped} older round(s) also dropped)"
+    if [ "${dropped:-0}" -gt 0 ]; then
+      note=" (TRUNCATED -- one oversized comment, opening kept; ${dropped} older round(s) also dropped)"
+    fi
+  elif [ "${#text}" -gt "$REVIEW_DISMISSALS_MAX" ]; then
+    # Every kept comment fitted, and escaping pushed the total over. Say that,
+    # rather than blaming a round for being oversized when none was.
+    text="${text:0:$REVIEW_DISMISSALS_MAX}"
+    note=" (TRUNCATED -- escaping expanded the text past the budget)"
+    if [ "${dropped:-0}" -gt 0 ]; then
+      note=" (TRUNCATED -- escaping expanded the text past the budget; ${dropped} older round(s) dropped)"
+    fi
   elif [ "${dropped:-0}" -gt 0 ]; then
     note=" (TRUNCATED -- ${dropped} older round(s) dropped)"
   fi

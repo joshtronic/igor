@@ -425,6 +425,29 @@ if [ "$CALLS" -ge 1 ]; then printf '  + and there is at least one such call site
 else printf '  x and there is at least one such call site\n'; FAIL=$((FAIL + 1)); fi
 
 
+# Escaping GROWS text (VERDICT: 8 -> 18 chars, ===BODY=== 10 -> 18), so a kept
+# set that fitted the budget can cross it after substitution. Keying the note on
+# post-substitution length labelled that case "one oversized comment, opening
+# kept" -- false about both halves: nothing was oversized and nothing was
+# dropped. The note must come from the SELECTION, not from ${#text}.
+SENTINELS=$(for _i in $(seq 1 40); do printf 'VERDICT: x ===BODY=== y\n'; done)
+forgejo_pr_comments() {
+  jq -n --arg m "$ADJ_LIT" --arg s "$SENTINELS" \
+    '[{user:{login:"igor"}, body:("ROUND-ONE\n" + $s + "\n" + $m)},
+      {user:{login:"igor"}, body:("ROUND-TWO\n" + $s + "\n" + $m)}]'
+}
+GROW=$(review_dismissals_section acme/x 1 igor 2>/dev/null)
+has "escaping-induced overflow is named as such" "$GROW" "escaping expanded the text"
+case "$GROW" in
+  *"one oversized comment"*) printf '  x and is NOT blamed on an oversized round\n'; FAIL=$((FAIL + 1)) ;;
+  *)                         printf '  + and is NOT blamed on an oversized round\n' ;;
+esac
+case "$GROW" in
+  *"older round(s) dropped"*) printf '  x and does not claim rounds were dropped when none were\n'; FAIL=$((FAIL + 1)) ;;
+  *)                          printf '  + and does not claim rounds were dropped when none were\n' ;;
+esac
+unset -f forgejo_pr_comments
+
 if [ "$FAIL" -eq 0 ]; then
   echo "test-review: all checks passed"
 else
