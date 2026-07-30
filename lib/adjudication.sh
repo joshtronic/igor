@@ -14,8 +14,9 @@
 # missing adjudicator that makes it expensive.
 #
 # The agent now writes dismissals to .agent/dismissed.md in its worktree. That
-# directory already carries a `*` .gitignore (see agent_scratch_dir in
-# bin/tick.sh), so a dismissal can never leak into the diff under `git add -A`.
+# directory already carries a `*` .gitignore, written by init_igor_scratch in
+# bin/tick.sh -- which the PR-rework flow calls on PR_WORKTREE before the run --
+# so a dismissal can never leak into the diff under `git add -A`.
 #
 # Three post-run outcomes, and the middle one is new:
 #

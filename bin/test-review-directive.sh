@@ -15,6 +15,12 @@
 # Nothing covered this file before. Scope is deliberately the contract only.
 set -uo pipefail
 
+# Skip-safe per bin/check-sync.sh's contract. Not a courtesy skip: the parser
+# lifted below ENDS in `jq -n`, so without jq every round-trip fails on the
+# missing tool and the suite reports a directive/parser mismatch that isn't
+# there. That is exactly the false red this guard exists to prevent.
+command -v jq >/dev/null 2>&1 || { echo "test-review-directive: jq absent -- skipping"; exit 0; }
+
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 DIRECTIVE="$HERE/bin/lib/review-directive.md"
 TICK="$HERE/bin/tick.sh"
@@ -36,17 +42,19 @@ else
 fi
 
 echo "== the directive still specifies the handshake the parser looks for =="
-grep -q '^VERDICT: ' "$DIRECTIVE" \
-  && ok "directive shows a VERDICT: line" || bad "directive shows a VERDICT: line"
-grep -q '^===BODY===$' "$DIRECTIVE" \
-  && ok "directive shows the ===BODY=== sentinel" || bad "directive shows the ===BODY=== sentinel"
+if grep -q '^VERDICT: ' "$DIRECTIVE"; then
+  ok "directive shows a VERDICT: line"
+else bad "directive shows a VERDICT: line"; fi
+if grep -q '^===BODY===$' "$DIRECTIVE"; then
+  ok "directive shows the ===BODY=== sentinel"
+else bad "directive shows the ===BODY=== sentinel"; fi
 
 echo "== every verdict the directive advertises actually parses =="
 # The tokens come out of the directive itself, so adding a fourth verdict to the
 # rubric without teaching the parser fails here instead of in production.
-ADVERTISED=$(sed -n 's/^VERDICT: //p' "$DIRECTIVE" | head -1 | tr '|' ' ')
-eq "the format line lists three tokens" "3" "$(printf '%s\n' $ADVERTISED | grep -c .)"
-for v in $ADVERTISED; do
+read -r -a ADVERTISED <<<"$(sed -n 's/^VERDICT: //p' "$DIRECTIVE" | head -1 | tr '|' ' ')"
+eq "the format line lists three tokens" "3" "${#ADVERTISED[@]}"
+for v in "${ADVERTISED[@]}"; do
   if parsed=$(review_parse_response "VERDICT: ${v}
 ===BODY===
 some review prose"); then
@@ -58,7 +66,7 @@ done
 
 echo "== and the parser accepts nothing the directive doesn't advertise =="
 for v in LGTM APPROVED REJECT BLOCK ""; do
-  case " $ADVERTISED " in *" $v "*) continue ;; esac
+  case " ${ADVERTISED[*]} " in *" $v "*) continue ;; esac
   if review_parse_response "VERDICT: ${v}
 ===BODY===
 prose" >/dev/null 2>&1; then
@@ -69,13 +77,15 @@ prose" >/dev/null 2>&1; then
 done
 
 echo "== a missing sentinel or empty body is rejected, not silently accepted =="
-review_parse_response "VERDICT: APPROVE
-no sentinel here" >/dev/null 2>&1 \
-  && bad "missing ===BODY=== is rejected" || ok "missing ===BODY=== is rejected"
-review_parse_response "VERDICT: APPROVE
+if review_parse_response "VERDICT: APPROVE
+no sentinel here" >/dev/null 2>&1; then
+  bad "missing ===BODY=== is rejected"
+else ok "missing ===BODY=== is rejected"; fi
+if review_parse_response "VERDICT: APPROVE
 ===BODY===
-   " >/dev/null 2>&1 \
-  && bad "empty body is rejected" || ok "empty body is rejected"
+   " >/dev/null 2>&1; then
+  bad "empty body is rejected"
+else ok "empty body is rejected"; fi
 
 echo "== the three verdicts are each documented in the rubric =="
 # Guards the inverse of the round-trip: a token the parser accepts but the

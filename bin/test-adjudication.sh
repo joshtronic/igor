@@ -68,16 +68,31 @@ echo "== bin/tick.sh: the wiring (source assertions) =="
 # Labelled as source checks, not dressed up as behavioural coverage -- but they
 # do catch a revert, which the pure tests above cannot.
 TICK="$HERE/bin/tick.sh"
+# The cap moved from a hardcoded 3 to REWORK_ROUND_CAP. Both halves matter: the
+# literal must be gone (a stray `-ge 3` would silently re-impose the old cap
+# alongside the constant) and the constant must actually be what the escalation
+# compares against.
 if grep -q 'rc_rounds" -ge 3' "$TICK"; then
-  bad "the 3-round cap is gone"
-else ok "the 3-round cap is gone"; fi
+  bad "the hardcoded 3-round cap is gone"
+else ok "the hardcoded 3-round cap is gone"; fi
+
+if grep -q 'rc_rounds" -ge "\$REWORK_ROUND_CAP"' "$TICK"; then
+  ok "escalation compares against REWORK_ROUND_CAP"
+else bad "escalation compares against REWORK_ROUND_CAP"; fi
 
 if grep -q 'adjudication_read "\$PR_WORKTREE"' "$TICK"; then
   ok "the post-run flow consults the dismissals file"
 else bad "the post-run flow consults the dismissals file"; fi
 
-eq "it is consulted on BOTH the commits and no-commits paths" "2" \
-   "$(grep -c 'adjudication_read "\$PR_WORKTREE"' "$TICK")"
+# -ge, not -eq: both paths must consult it, but a future third call site is a
+# legitimate addition and shouldn't fail a suite that has no behavioural
+# complaint about it.
+CONSULTS=$(grep -c 'adjudication_read "\$PR_WORKTREE"' "$TICK")
+if [ "$CONSULTS" -ge 2 ]; then
+  ok "it is consulted on BOTH the commits and no-commits paths (${CONSULTS} sites)"
+else
+  bad "it is consulted on BOTH the commits and no-commits paths (found ${CONSULTS})"
+fi
 
 # Ordering: reading after the worktree is torn down would silently never fire.
 LAST_READ=$(grep -n 'adjudication_read "\$PR_WORKTREE"' "$TICK" | tail -1 | cut -d: -f1)
@@ -87,6 +102,17 @@ if [ -n "$LAST_READ" ] && [ -n "$FINAL_RM" ] && [ "$LAST_READ" -lt "$FINAL_RM" ]
 else
   bad "dismissals are read BEFORE the worktree is removed (read ${LAST_READ:-?}, rm ${FINAL_RM:-?})"
 fi
+
+# The file is written INSIDE the repo the agent is committing to, so the claim
+# "a dismissal cannot leak into the diff" rests entirely on the PR-rework
+# worktree getting the ignore-everything scratch dir before the run. Drop that
+# call and dismissals start showing up in the PR.
+if grep -q 'init_igor_scratch "\$PR_WORKTREE"' "$TICK"; then
+  ok "the PR-rework worktree gets the ignored .agent scratch dir"
+else bad "the PR-rework worktree gets the ignored .agent scratch dir"; fi
+if grep -q "printf '\*\\\\n' > \"\$worktree/.agent/.gitignore\"" "$TICK"; then
+  ok "and that scratch dir ignores everything in it"
+else bad "and that scratch dir ignores everything in it"; fi
 
 # The prompt has to name the exact path the harness reads, or the agent writes
 # somewhere nothing looks.

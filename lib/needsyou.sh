@@ -102,7 +102,7 @@ needsyou_removed() {
 # The first cut of this asked `! automerge_will_take`, which is much broader
 # than "the human is the blocker": it is also true of a PR nobody has reviewed
 # yet (the shadow reviewer's turn) and of one inside the rework loop (Igor's
-# turn, for up to 3 rounds). Both of those flip in and out of the set on their
+# turn, up to the round cap). Both of those flip in and out of the set on their
 # own, so announcing them is exactly the "usually says nothing needs you" noise
 # this feature exists to avoid. So the verdicts that mean HUMAN are enumerated
 # instead, mirroring do_review_tick's own routing:
@@ -111,8 +111,9 @@ needsyou_removed() {
 #   APPROVE        auto-merge takes it               -> nobody, unless the repo
 #                                                       pins itself to a human
 #   COMMENT        auto-merge will not take it       -> human
-#   REQUEST_CHANGES  rework rounds 1..3              -> Igor
-#                    escalated (>=3) or unverifiable -> human
+#   REQUEST_CHANGES  rework rounds under the cap     -> Igor
+#                    escalated (>= REWORK_ROUND_CAP,
+#                    lib/review.sh) or unverifiable  -> human
 needsyou_pr_why() {
   local verdict="${1:-}" require_human="${2:-false}" rounds="${3:-0}" validated="${4:-true}"
   case "$rounds" in ''|*[!0-9]*) rounds=0 ;; esac
@@ -127,7 +128,7 @@ needsyou_pr_why() {
     REQUEST_CHANGES)
       if [ "$validated" != "true" ]; then
         printf 'Igor requested changes on a repo whose rework cannot be CI-verified -- handed to you'
-      elif [ "$rounds" -ge 3 ]; then
+      elif [ "$rounds" -ge "${REWORK_ROUND_CAP:-10}" ]; then
         printf 'Igor requested changes %s times without converging -- escalated to you' "$rounds"
       fi
       ;;

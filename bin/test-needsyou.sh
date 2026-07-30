@@ -94,8 +94,15 @@ eq "an APPROVE on a shadow-gated repo merges itself" "" "$(needsyou_pr_why APPRO
 has "an APPROVE on a human-pinned repo IS yours" "$(needsyou_pr_why APPROVE true 0 true)" "pinned to your review"
 has "a COMMENT is yours -- auto-merge won't take it" "$(needsyou_pr_why COMMENT false 0 true)" "COMMENT"
 eq "REQUEST_CHANGES inside the rework loop is IGOR's turn" "" "$(needsyou_pr_why REQUEST_CHANGES false 0 true)"
-eq "still Igor's on the last round before escalation" "" "$(needsyou_pr_why REQUEST_CHANGES false 2 true)"
-has "but an escalation after 3 rounds is yours" "$(needsyou_pr_why REQUEST_CHANGES false 3 true)" "without converging"
+# The threshold is REWORK_ROUND_CAP (lib/review.sh), read here via the same
+# default this file's fallback uses -- so raising the cap moves the boundary in
+# one place instead of silently leaving this scan announcing PRs that are still
+# Igor's turn.
+CAP="${REWORK_ROUND_CAP:-10}"
+eq "still Igor's on the last round before escalation" "" \
+  "$(needsyou_pr_why REQUEST_CHANGES false "$((CAP - 1))" true)"
+has "but an escalation at the round cap is yours" \
+  "$(needsyou_pr_why REQUEST_CHANGES false "$CAP" true)" "without converging"
 has "and REQUEST_CHANGES on an unverifiable repo is yours" \
   "$(needsyou_pr_why REQUEST_CHANGES false 0 false)" "CI-verified"
 eq "a garbage round count is treated as zero, not an error" "" "$(needsyou_pr_why REQUEST_CHANGES false '' true)"
