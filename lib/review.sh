@@ -266,6 +266,10 @@ review_dismissals_section() {
   # diff this came from.
   text=${text//--- END UNTRUSTED AGENT TEXT ---/[delimiter removed]}
   text=${text//--- BEGIN UNTRUSTED AGENT TEXT/[delimiter removed]}
+  # Strip BEFORE truncating, deliberately. Truncation only removes characters,
+  # so stripping first can never miss a delimiter -- whereas truncating first
+  # could slice one in half and leave a fragment that the strip no longer
+  # matches. Do not swap these two.
   note=""
   if [ "${#text}" -gt "$REVIEW_DISMISSALS_MAX" ]; then
     # Keep the TAIL: the most recent round's argument is the one most likely to
