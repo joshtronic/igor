@@ -276,6 +276,21 @@ review_dismissals_section() {
   # only owner/repo/index/since/before -- no page or limit -- and page=2 returns
   # the same full set as page=1. So there is no first-page-only failure mode
   # where the newest dismissal never arrives.
+  #
+  # That is a fact about today's Forgejo, not a guarantee, and a dated comment
+  # is a poor defence against a future version that starts paginating: comments
+  # arrive oldest-first, so a truncated first page would silently drop the
+  # NEWEST dismissal -- the one that matters -- and log nothing, because "no
+  # dismissals" is the normal case. The cheap guard below is a smell test: a
+  # response whose length is exactly a common page size is far more likely to
+  # be a page boundary than a coincidence, and saying so costs one comparison.
+  local n_comments
+  n_comments=$(jq 'length' <<<"$raw" 2>/dev/null || echo 0)
+  case "$n_comments" in
+    10|15|20|25|30|50|100)
+      log "warning: review: ${repo}#${number} returned exactly ${n_comments} comments -- suspiciously like a page boundary; if Forgejo has started paginating, the NEWEST dismissal may be missing"
+      ;;
+  esac
   local sel dropped
   if ! sel=$(jq -c --arg b "$bot" --arg m "$ADJUDICATION_MARKER" \
                  --argjson max "$REVIEW_DISMISSALS_MAX" '
@@ -314,6 +329,16 @@ review_dismissals_section() {
   # diff this came from.
   text=${text//--- END UNTRUSTED AGENT TEXT ---/[delimiter removed]}
   text=${text//--- BEGIN UNTRUSTED AGENT TEXT/[delimiter removed]}
+  # Also neutralise the prompt's OTHER structural markers, not just the fence.
+  # Stripping the fence alone leaves text free to impersonate a section heading
+  # or the response sentinels, which is confusion rather than escape -- but the
+  # whole point of fencing is that the reviewer can tell our structure from the
+  # author's prose, and these are the strings that blur it. Defence in depth,
+  # not a claimed exploit.
+  text=${text//===BODY===/[sentinel removed]}
+  text=${text//## Findings the author already dismissed/[heading removed]}
+  text=${text//## Unified diff/[heading removed]}
+  text=${text//PR under review:/[heading removed]}
   # Strip BEFORE the hard slice below, deliberately. A slice only removes
   # characters, so stripping first can never miss a delimiter -- whereas
   # slicing first could cut one in half and leave a fragment the strip no
@@ -328,6 +353,9 @@ review_dismissals_section() {
     # it was only ever used for selection, which already happened.
     text="${text:0:$REVIEW_DISMISSALS_MAX}"
     note=" (TRUNCATED -- one oversized comment, opening kept)"
+    # The surrounding code makes a point of the note being honest about WHICH
+    # round was lost, so say it when older rounds went too.
+    [ "${dropped:-0}" -gt 0 ] && note=" (TRUNCATED -- one oversized comment, opening kept; ${dropped} older round(s) also dropped)"
   elif [ "${dropped:-0}" -gt 0 ]; then
     note=" (TRUNCATED -- ${dropped} older round(s) dropped)"
   fi
