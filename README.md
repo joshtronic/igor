@@ -54,3 +54,4 @@ readiness bar.
 - [Architecture](docs/architecture.md) -- how the runtime works, labels, layout, trade-offs
 - [Setup](docs/setup.md) -- auth, bot user, install, local dev, operating
 - [Onboarding a repo](docs/onboarding-a-repo.md) -- readiness bar, labels, validation
+- [AGENTS.md dossier spec](docs/agents-md-spec.md) -- the per-repo context file's required shape
