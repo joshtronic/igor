@@ -110,9 +110,9 @@ see below):
   root dossier is the only machine-readable one).
 
 **Absent vs nonconforming -- the migration gate:** a repo with NO
-`AGENTS.md` at the root validates under the legacy rules (`CLAUDE.md`
-+ `agent.json`) for the duration of the migration window -- absence
-is not failure while the fleet converts. A dossier that is PRESENT
+`AGENTS.md` at the root validates under the legacy rules
+(`CLAUDE.md` + `agent.json`) for the duration of the migration
+window -- absence is not failure while the fleet converts. A dossier that is PRESENT
 but nonconforming is a hard validation failure immediately: a broken
 dossier is worse than none, because agents trust it. Once the fleet
 is converted the legacy path is removed and absence itself becomes
