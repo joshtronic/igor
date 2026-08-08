@@ -39,10 +39,10 @@ validation matches them literally.
    otherwise (`# igor`). The paragraph(s) under it must answer two
    questions: what this project is, and who it is for.
 2. **`## KPIs`** (required). An ordered list -- priority order, top
-   entry matters most. Each entry names its measurement source after
-   an em/en dash or comma (a GA4 event, a GSC metric, a spreadsheet).
-   A KPI with no measurement source is a vibe and does not go in the
-   list. `(none yet)` as the section's entire content is honest and
+   entry matters most. Each entry names its measurement source (a GA4
+   event, a GSC metric, a spreadsheet) after a separator: `--`, an
+   em/en dash, or a comma. A KPI with no measurement source is a vibe
+   and does not go in the list. `(none yet)` as the section's entire content is honest and
    valid; an empty section is not.
 3. **`## DOs and DON'Ts`** (optional). Decided policy, both
    directions, as two bulleted groups or one mixed list. Entries are
@@ -83,23 +83,40 @@ unchanged -- a repo needs a test signal (a `test:` command or a live
 `url` acting as a smoke check) to validate for work.
 
 `type` closed list: `arcade`, `game`, `content`, `tool`, `api`,
-`personal`, `infra`. The type drives harness behavior (which digest
-treatment a site gets, what a measurement-gap check expects), so a
-new value is a harness change, shipped together with it.
+`personal`, `infra`. Of these, the **site types** -- the ones that
+serve a live domain and therefore require `url` -- are `arcade`,
+`game`, `content`, `api`, and `personal`; `tool` and `infra` are not
+site types and take no `url`. The type drives harness behavior
+(which digest treatment a site gets, what a measurement-gap check
+expects), so a new value is a harness change, shipped together with
+it.
 
 ## Validation contract
 
-`validate-repo` asserts, loudly and fail-fast:
+`validate-repo` asserts, loudly and fail-fast, against the ROOT
+dossier only (nested dossiers are exempt from structural checks --
+see below):
 
-- `AGENTS.md` exists at the repo root.
 - Required sections present, in spec order, exact heading strings.
 - `## Metadata` is the last section and contains exactly one fenced
   block; the block parses as flat `key: value` lines.
 - All keys are in the vocabulary; required keys present (`type`
   always; `url` for site types).
-- For site types, the H1 equals the `url` host.
+- For site types, the H1 equals the `url` host, with a leading
+  `www.` stripped from the host before comparison.
 - Each `## KPIs` entry carries a measurement source, or the section
   is exactly `(none yet)`.
+- Nested `AGENTS.md` files contain no `## Metadata` section (the
+  root dossier is the only machine-readable one).
+
+**Absent vs nonconforming -- the migration gate:** a repo with NO
+`AGENTS.md` at the root validates under the legacy rules (`CLAUDE.md`
++ `agent.json`) for the duration of the migration window -- absence
+is not failure while the fleet converts. A dossier that is PRESENT
+but nonconforming is a hard validation failure immediately: a broken
+dossier is worse than none, because agents trust it. Once the fleet
+is converted the legacy path is removed and absence itself becomes
+the failure.
 
 ## Nested dossiers
 
@@ -122,8 +139,9 @@ keeping from `CLAUDE.md` moves into Caveats/Metadata; a retired
 `CEO.md`'s guardrails move into DOs and DON'Ts ("fire the CEO, keep
 his notes"); `CLAUDE.md`, `agent.json`, and `CEO.md` are deleted in
 the same PR. During the migration window the harness helpers fall
-back to `agent.json` when a repo has no conforming dossier; the
-fallback is removed once the fleet is converted.
+back to `agent.json` when a repo has no root `AGENTS.md` at all (see
+the absent-vs-nonconforming rule above); the fallback is removed
+once the fleet is converted.
 
 Acceptance test for a conversion: the amnesia test. A cold agent with
 only the thin dossier takes a trivial ticket end-to-end. If it
@@ -132,7 +150,7 @@ which section was too thin before converting the next repo.
 
 ## Example
 
-```markdown
+````markdown
 # porksicle.com
 
 Penny arcade -- a collection of small browser games, played casually
@@ -158,12 +176,10 @@ people playing, not people reading.
 
 ## Metadata
 
-    type: arcade
-    url: https://porksicle.com
-    test: npm test
-    feedback-csv: https://docs.google.com/spreadsheets/d/e/.../pub?output=csv
+```yaml
+type: arcade
+url: https://porksicle.com
+test: npm test
+feedback-csv: https://docs.google.com/spreadsheets/d/e/.../pub?output=csv
 ```
-
-(The example indents its Metadata block only to nest inside this
-document's own fence; real dossiers use a normal triple-backtick
-fenced block.)
+````
