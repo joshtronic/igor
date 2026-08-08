@@ -35,15 +35,18 @@ Sections appear in exactly this order. Headings are exact strings;
 validation matches them literally.
 
 1. **H1 + description** (required). The H1 is the project's canonical
-   name: the apex domain for sites (`# porksicle.com`), the repo name
-   otherwise (`# igor`). The paragraph(s) under it must answer two
-   questions: what this project is, and who it is for.
-2. **`## KPIs`** (required). An ordered list -- priority order, top
-   entry matters most. Each entry names its measurement source (a GA4
-   event, a GSC metric, a spreadsheet) after a separator: `--`, an
-   em/en dash, or a comma. A KPI with no measurement source is a vibe
-   and does not go in the list. `(none yet)` as the section's entire content is honest and
-   valid; an empty section is not.
+   name: the `url` host for sites (`# porksicle.com`), the repo name
+   otherwise (`# igor`). A site served from a subdomain uses that
+   subdomain; the validation rule below is the definition. The
+   paragraph(s) under it must answer two questions: what this project
+   is, and who it is for.
+2. **`## KPIs`** (required). Either an ordered list -- priority
+   order, top entry matters most -- or the literal `(none yet)` as
+   the section's entire content, which is honest and valid. An empty
+   section is not. Each list entry names its measurement source (a
+   GA4 event, a GSC metric, a spreadsheet) after a separator: `--`,
+   an em/en dash, or a comma. A KPI with no measurement source is a
+   vibe and does not go in the list.
 3. **`## DOs and DON'Ts`** (optional). Decided policy, both
    directions, as two bulleted groups or one mixed list. Entries are
    rulings, ideally with a one-clause why: "DON'T build a real-money
@@ -59,8 +62,9 @@ validation matches them literally.
 
 ## The Metadata block
 
-The harness reads the first fenced code block after the literal
-heading `## Metadata`. Rules:
+Validation enforces exactly one fenced code block in this section, so
+the harness can simply take the first one after the literal heading
+`## Metadata` and never encounter a second. Rules:
 
 - Flat `key: value` scalars only. No nesting, no lists, no multiline
   values. The parser is grep/awk, not a YAML library; flatness is
@@ -118,6 +122,14 @@ dossier is worse than none, because agents trust it. Once the fleet
 is converted the legacy path is removed and absence itself becomes
 the failure.
 
+**When "once the fleet is converted" is true:** when no repo in
+`VALIDATED_REPOS_JSON` still takes the legacy path -- every validated
+repo has a root `AGENTS.md`. That is mechanically checkable, so it
+does not depend on anyone remembering. The PR that converts the LAST
+repo is the one that deletes the fallback and flips absence to a
+failure; a fallback still standing after that PR is live debt and
+gets a ticket, not another migration window.
+
 ## Nested dossiers
 
 Per the AGENTS.md standard, nested files are allowed and the nearest
@@ -140,8 +152,8 @@ keeping from `CLAUDE.md` moves into Caveats/Metadata; a retired
 his notes"); `CLAUDE.md`, `agent.json`, and `CEO.md` are deleted in
 the same PR. During the migration window the harness helpers fall
 back to `agent.json` when a repo has no root `AGENTS.md` at all (see
-the absent-vs-nonconforming rule above); the fallback is removed
-once the fleet is converted.
+the absent-vs-nonconforming rule above); the fallback is removed on
+the condition stated there -- with the last repo's conversion PR.
 
 Acceptance test for a conversion: the amnesia test. A cold agent with
 only the thin dossier takes a trivial ticket end-to-end. If it
