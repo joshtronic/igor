@@ -17,6 +17,8 @@ command -v jq  >/dev/null 2>&1 || { echo "test-repo-checks: jq absent -- skippin
 command -v git >/dev/null 2>&1 || { echo "test-repo-checks: git absent -- skipping"; exit 0; }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=../lib/dossier.sh
+. "$HERE/../lib/dossier.sh"
 # shellcheck source=../lib/repo-checks.sh
 . "$HERE/../lib/repo-checks.sh"
 

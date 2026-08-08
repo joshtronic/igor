@@ -18,6 +18,8 @@
 #
 # Requires lib/forgejo.sh sourced first (for repo enumeration in the --all
 # path of validate-repo.sh; the checks themselves are pure git reads).
+# Requires lib/dossier.sh sourced first (check_dossier calls dossier_validate
+# and dossier_check_no_nested_metadata).
 
 # Fallback logger so this module is sourceable outside tick.sh. When sourced
 # into tick.sh, bash's dynamic function lookup picks up tick's richer
@@ -118,6 +120,34 @@ check_deploy_smoke_signal() {
   url=$(jq -r '.smoke.url // empty' <<<"$cfg" 2>/dev/null)
   [ -n "$url" ] || return 1
   git -C "$_RC_REPO_PATH" grep -qiF 'deploy-sha' "$_RC_REF" >/dev/null 2>&1
+}
+
+# check_dossier -- the AGENTS.md dossier spec gate (docs/agents-md-spec.md).
+# Returns:
+#   0 -- root AGENTS.md present and conforms.
+#   1 -- root AGENTS.md present but nonconforming (hard fail -- reason in
+#        DOSSIER_REASON), OR a nested AGENTS.md carries a ## Metadata section.
+#   2 -- no root AGENTS.md at all -- the migration-window legacy path, NOT a
+#        failure. Caller must not gate on this.
+DOSSIER_REASON=""
+check_dossier() {
+  local content reason files f
+  content=$(rc_file_read AGENTS.md)
+  [ -n "$content" ] || return 2
+  if ! reason=$(dossier_validate "$content"); then
+    DOSSIER_REASON="$reason"
+    return 1
+  fi
+  files=$(git -C "$_RC_REPO_PATH" ls-tree -r --name-only "$_RC_REF" 2>/dev/null \
+    | grep -E '(^|/)AGENTS\.md$' | grep -vxF AGENTS.md || true)
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    if ! dossier_check_no_nested_metadata "$(rc_file_read "$f")"; then
+      DOSSIER_REASON="dossier: nested $f must not contain a ## Metadata section (root dossier only)"
+      return 1
+    fi
+  done <<<"$files"
+  return 0
 }
 
 check_lint_signal() {
@@ -255,6 +285,18 @@ validate_repo_local() {
   check_test_signal
   _gate $? "Test signal present (a real way to verify a change)" \
     "add a \`\"test\"\` script in package.json, \`pytest\`, a \`test:\` Make target, a Cargo/Go project, or a deploy-smoke marker (\`agent.json\` \`.smoke.url\` + a \`deploy-sha\` marker)"
+
+  # AGENTS.md dossier spec (docs/agents-md-spec.md): absent is the legacy
+  # migration path and prints nothing (fleet validation behavior is
+  # unchanged until a repo actually adopts it); present-but-nonconforming is
+  # a hard gate failure -- a broken dossier is worse than none.
+  check_dossier
+  case $? in
+    0) printf -- '- [x] %s\n' 'AGENTS.md dossier conforms to spec' ;;
+    1) printf -- '- [ ] %s -- %s\n' 'AGENTS.md dossier conforms to spec' "$DOSSIER_REASON"
+       fail=$((fail + 1)) ;;
+    *) : ;;  # 2: no root AGENTS.md -- legacy path, not a failure
+  esac
 
   # ADVISORY -- guidance, not gates. CLAUDE.md/README aren't safety-relevant, and
   # check_lint_signal is a pure existence check (a lint config no CI runs) that
