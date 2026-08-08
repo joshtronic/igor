@@ -124,16 +124,27 @@ check_deploy_smoke_signal() {
 
 # check_dossier -- the AGENTS.md dossier spec gate (docs/agents-md-spec.md).
 # Returns:
-#   0 -- root AGENTS.md present and conforms.
-#   1 -- root AGENTS.md present but nonconforming (hard fail -- reason in
+#   0 -- root dossier present and conforms.
+#   1 -- root dossier present but nonconforming (hard fail -- reason in
 #        DOSSIER_REASON), OR a nested AGENTS.md carries a ## Metadata section.
-#   2 -- no root AGENTS.md at all -- the migration-window legacy path, NOT a
-#        failure. Caller must not gate on this.
+#   2 -- the repo hasn't adopted the dossier -- no root AGENTS.md, or one
+#        carrying no `## Metadata` heading (an ordinary prose AGENTS.md, which
+#        is what most of the fleet including this repo has today). The
+#        migration-window legacy path, NOT a failure; callers must not gate on
+#        it.
+#
+# The rc1/rc2 split keys on ADOPTION, not on the file existing: a prose
+# AGENTS.md is the pre-spec convention and predates this gate, so conscripting
+# every one of them would flip currently-validating repos to not-ready. A file
+# that declares itself a dossier (`## Metadata`) is validated in full -- that
+# is the "a broken dossier is worse than none" case the spec means.
 DOSSIER_REASON=""
 check_dossier() {
   local content reason files f
+  DOSSIER_REASON=""
   content=$(rc_file_read AGENTS.md)
   [ -n "$content" ] || return 2
+  dossier_is_declared "$content" || return 2
   if ! reason=$(dossier_validate "$content"); then
     DOSSIER_REASON="$reason"
     return 1
@@ -286,16 +297,21 @@ validate_repo_local() {
   _gate $? "Test signal present (a real way to verify a change)" \
     "add a \`\"test\"\` script in package.json, \`pytest\`, a \`test:\` Make target, a Cargo/Go project, or a deploy-smoke marker (\`agent.json\` \`.smoke.url\` + a \`deploy-sha\` marker)"
 
-  # AGENTS.md dossier spec (docs/agents-md-spec.md): absent is the legacy
-  # migration path and prints nothing (fleet validation behavior is
-  # unchanged until a repo actually adopts it); present-but-nonconforming is
-  # a hard gate failure -- a broken dossier is worse than none.
+  # AGENTS.md dossier spec (docs/agents-md-spec.md): un-adopted (no root
+  # AGENTS.md, or a prose one with no `## Metadata`) is the legacy migration
+  # path and prints nothing -- fleet validation behavior is unchanged until a
+  # repo actually adopts the spec. An adopted-but-nonconforming dossier is a
+  # hard gate failure: a broken dossier is worse than none.
   check_dossier
   case $? in
     0) printf -- '- [x] %s\n' 'AGENTS.md dossier conforms to spec' ;;
     1) printf -- '- [ ] %s -- %s\n' 'AGENTS.md dossier conforms to spec' "$DOSSIER_REASON"
        fail=$((fail + 1)) ;;
-    *) : ;;  # 2: no root AGENTS.md -- legacy path, not a failure
+    2) : ;;  # not adopted -- legacy path, not a failure
+    # Anything else means check_dossier never ran (e.g. lib/dossier.sh not
+    # sourced -> 127). Say so on stderr: tick.sh sends this checklist to
+    # /dev/null, so a silent no-op here would hide a dead gate fleet-wide.
+    *) printf 'validation: check_dossier returned an unexpected status -- is lib/dossier.sh sourced?\n' >&2 ;;
   esac
 
   # ADVISORY -- guidance, not gates. CLAUDE.md/README aren't safety-relevant, and

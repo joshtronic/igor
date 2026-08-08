@@ -45,6 +45,20 @@ D3="$TMPROOT/d3"; mkdir -p "$D3"
 no "neither AGENTS.md nor agent.json -> rc1" dossier_get "$D3" type
 no "dossier_keys with nothing present -> rc1" dossier_keys "$D3"
 
+# A prose AGENTS.md (no ## Metadata) is NOT an adopted dossier: the reader
+# must still take the agent.json fallback, or a repo that adds an ordinary
+# AGENTS.md silently loses its smoke url.
+PROSE=$'# Unattended Mode\n\nHow this repo works for agents.\n\n## Override notice\n\nRules for unattended runs.\n\n## Universal rules\n\n- one issue, one outcome\n'
+D4="$TMPROOT/d4"; mkdir -p "$D4"; printf '%s' "$PROSE" >"$D4/AGENTS.md"
+printf '%s' '{"smoke":{"url":"https://snail.io"}}' >"$D4/agent.json"
+eq "prose AGENTS.md + agent.json -> still reads .smoke.url" "https://snail.io" "$(dossier_get "$D4" url)"
+eq "dossier_keys likewise falls back" "url" "$(dossier_keys "$D4")"
+
+# Unvalidated read path: a junk block must not emit junk "keys".
+D5="$TMPROOT/d5"; mkdir -p "$D5"
+printf '%s' $'# x\n\n## Metadata\n\n```yaml\nnot a key line at all\n```\n' >"$D5/AGENTS.md"
+no "malformed Metadata block -> dossier_keys rc1, no junk keys" dossier_keys "$D5"
+
 echo "== dossier_validate: happy path + (none yet) KPIs =="
 ok "conforming dossier validates" dossier_validate "$GOOD"
 NONE_KPI=${GOOD/1. Games played per week -- GA4 game_start/(none yet)}
@@ -55,14 +69,15 @@ echo "== dossier_validate: failure modes =="
 # reason line mentions <substring> (greppability check per the ticket).
 reason_has() {
   local d="$1" content="$2" substr="$3" v
-  v=$(dossier_validate "$content")
-  if [ $? -eq 0 ]; then printf '  x %s (expected rc1, got rc0)\n' "$d"; FAIL=$((FAIL + 1)); return; fi
+  if v=$(dossier_validate "$content"); then
+    printf '  x %s (expected rc1, got rc0)\n' "$d"; FAIL=$((FAIL + 1)); return
+  fi
   if [[ "$v" == *"$substr"* ]]; then printf '  + %s\n' "$d"; else printf '  x %s (reason: %s)\n' "$d" "$v"; FAIL=$((FAIL + 1)); fi
 }
 
 BAD=${GOOD/\# porksicle.com/porksicle.com}
 reason_has "missing H1 fails" "$BAD" "H1"
-NOORDER=$(sed 's/^## KPIs$/## Caveats/' <<<"$GOOD")
+NOORDER=${GOOD/'## KPIs'/'## Caveats'}
 no "KPIs section renamed/out of order fails" dossier_validate "$NOORDER"
 NOKPISRC=${GOOD/1. Games played per week -- GA4 game_start/1. Games played per week}
 reason_has "KPI entry missing measurement source fails" "$NOKPISRC" "measurement source"
@@ -87,7 +102,7 @@ echo "== dossier_check_no_nested_metadata =="
 ok "prose-only nested AGENTS.md passes"  dossier_check_no_nested_metadata $'# lore\n\njust prose, no metadata\n'
 no  "nested AGENTS.md with ## Metadata fails" dossier_check_no_nested_metadata $'# lore\n\n## Metadata\n\n```yaml\ntype: tool\n```\n'
 
-echo "== check_dossier: absent-vs-nonconforming migration gate, nested exemption =="
+echo "== check_dossier: un-adopted-vs-nonconforming migration gate, nested exemption =="
 new_fixture() { local p; p=$(mktemp -d "$TMPROOT/fix.XXXXXX"); git init -q -b master "$p"; git -C "$p" config user.email t@t; git -C "$p" config user.name t; printf '%s' "$p"; }
 commit_fixture() { local p="$1"; git -C "$p" add -A; git -C "$p" commit -q -m fixture; _RC_REPO_PATH="$p"; _RC_REF="master"; }
 
@@ -95,10 +110,25 @@ f="$(new_fixture)"; : >"$f/README.md"; commit_fixture "$f"
 V=0; check_dossier || V=$?
 eq "no root AGENTS.md -> rc2 (legacy, not a failure)" 2 "$V"
 
+# The case the whole fleet is actually in today (this repo included): a root
+# AGENTS.md that is ordinary prose. It predates the spec, so it's un-adopted
+# -> rc2, NOT a nonconforming dossier.
+f="$(new_fixture)"; printf '%s' "$PROSE" >"$f/AGENTS.md"; commit_fixture "$f"
+V=0; check_dossier || V=$?
+eq "prose root AGENTS.md (no ## Metadata) -> rc2 (un-adopted)" 2 "$V"
+
+f="$(new_fixture)"; : >"$f/AGENTS.md"; : >"$f/README.md"; commit_fixture "$f"
+V=0; check_dossier || V=$?
+eq "empty root AGENTS.md -> rc2 (un-adopted)" 2 "$V"
+
 f="$(new_fixture)"; printf '%s' "$BADTYPE" >"$f/AGENTS.md"; commit_fixture "$f"
 V=0; check_dossier || V=$?
 eq "present + nonconforming -> rc1 (hard fail)" 1 "$V"
-[[ "$DOSSIER_REASON" == *"closed list"* ]] && printf '  + DOSSIER_REASON set\n' || { printf '  x DOSSIER_REASON: %s\n' "$DOSSIER_REASON"; FAIL=$((FAIL + 1)); }
+if [[ "$DOSSIER_REASON" == *"closed list"* ]]; then
+  printf '  + DOSSIER_REASON set\n'
+else
+  printf '  x DOSSIER_REASON: %s\n' "$DOSSIER_REASON"; FAIL=$((FAIL + 1))
+fi
 
 f="$(new_fixture)"; printf '%s' "$GOOD" >"$f/AGENTS.md"; mkdir -p "$f/games/snail"
 printf '%s' $'# Snail lore\n\njust prose about this one game, no metadata block.\n' >"$f/games/snail/AGENTS.md"
@@ -122,6 +152,14 @@ git -C "$GWORK" add -A; git -C "$GWORK" commit -q -m good
 git -C "$GWORK" remote add origin "$GBARE"; git -C "$GWORK" push -q origin master
 GCLONE="$TMPROOT/good-clone"; git clone -q "$GBARE" "$GCLONE"
 ok "no AGENTS.md at all -> validate_repo_local still passes (rc0)" validate_repo_local demo/good "$GCLONE"
+
+# The regression this gate must not cause: a repo whose root AGENTS.md is
+# prose (the pre-spec convention, e.g. this harness's own) validated before
+# the dossier check existed and must keep validating after it.
+printf '%s' "$PROSE" >"$GWORK/AGENTS.md"
+git -C "$GWORK" add -A; git -C "$GWORK" commit -q -m "add prose AGENTS.md"
+git -C "$GWORK" push -q origin master; git -C "$GCLONE" pull -q
+ok "prose root AGENTS.md -> validate_repo_local still passes (rc0)" validate_repo_local demo/good "$GCLONE"
 
 printf '%s' "$BADTYPE" >"$GWORK/AGENTS.md"
 git -C "$GWORK" add -A; git -C "$GWORK" commit -q -m "add broken dossier"

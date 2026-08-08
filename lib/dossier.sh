@@ -8,6 +8,10 @@
 # function's. No YAML dependency -- the block is flat so grep/awk/bash
 # parse it without one.
 
+# All three lists are lifted verbatim from docs/agents-md-spec.md: the keys
+# are the table in "The Metadata block"; DOSSIER_TYPES and DOSSIER_SITE_TYPES
+# are the `type` closed list in the paragraph directly under that table
+# (site types serve a live domain and therefore require `url`).
 DOSSIER_KEYS="type url test lint verify feedback-csv"
 DOSSIER_TYPES="arcade game content tool api personal infra"
 DOSSIER_SITE_TYPES="arcade game content api personal"
@@ -38,13 +42,14 @@ _dossier_metadata_block() {
 # dossier_get <checkout_dir> <key>
 # Echoes the value for <key> from the root AGENTS.md Metadata block. Falls
 # back to legacy agent.json (url <- .smoke.url, feedback-csv <- .feedback.csv)
-# when the repo has no root AGENTS.md at all. Empty + rc 1 when the key (or
-# the whole dossier) is absent.
+# when the repo hasn't adopted the dossier -- no root AGENTS.md, or a prose
+# one with no `## Metadata` (same keying as check_dossier's rc2). Empty + rc 1
+# when the key is absent, or when an adopted dossier's block is unreadable.
 dossier_get() {
   local dir="$1" key="$2" agents cfg
   agents="$dir/AGENTS.md"; cfg="$dir/agent.json"
   local content block line value
-  if [ -f "$agents" ]; then
+  if [ -f "$agents" ] && dossier_is_declared "$(cat "$agents")"; then
     content=$(cat "$agents")
     block=$(_dossier_metadata_block "$content") || return 1
     line=$(grep -E "^${key}:" <<<"$block" | head -1) || true
@@ -66,14 +71,20 @@ dossier_get() {
 }
 
 # dossier_keys <checkout_dir> -- lists the keys present, one per line. Same
-# two sources as dossier_get. Empty + rc 1 if neither source has any key.
+# two sources, and the same adoption keying, as dossier_get. Empty + rc 1 if
+# neither source has any key.
 dossier_keys() {
-  local dir="$1" agents cfg content block found=1
+  local dir="$1" agents cfg content block keys found=1
   agents="$dir/AGENTS.md"; cfg="$dir/agent.json"
-  if [ -f "$agents" ]; then
+  if [ -f "$agents" ] && dossier_is_declared "$(cat "$agents")"; then
     content=$(cat "$agents")
     block=$(_dossier_metadata_block "$content") || return 1
-    awk -F: 'NF{print $1}' <<<"$block"
+    # Key syntax per the spec's flat `key: value` rule -- this is the
+    # UNVALIDATED read path (dossier_validate may never have run), so a
+    # malformed block yields no keys rather than junk ones.
+    keys=$(sed -nE 's/^[[:space:]]*([a-z][a-z-]*):.*$/\1/p' <<<"$block")
+    [ -n "$keys" ] || return 1
+    printf '%s\n' "$keys"
     return 0
   fi
   [ -f "$cfg" ] || return 1
@@ -90,6 +101,9 @@ dossier_keys() {
 # ONE greppable reason line to stdout and returns 1.
 dossier_validate() {
   local content="$1" h1 heading_texts ok=1 v
+  # The four legal H2 sequences enumerated by the spec's "Required
+  # structure": KPIs and Metadata required, DOs and DON'Ts and Caveats
+  # optional, Metadata always last.
   local -a valid_seqs=(
     "KPIs
 Metadata"
@@ -195,10 +209,20 @@ _dossier_validate_metadata() {
   return 0
 }
 
+# dossier_is_declared <agents-md-content>
+# 0 when the file declares itself a dossier -- i.e. carries the literal
+# "## Metadata" heading. The migration gate keys on THIS, not on the file
+# existing: a root AGENTS.md is the near-universal prose convention (this
+# repo's own is one), and a repo carrying one without a Metadata block simply
+# hasn't adopted the spec yet. See the spec's "Un-adopted vs nonconforming".
+dossier_is_declared() {
+  grep -qxF '## Metadata' <<<"$1"
+}
+
 # dossier_check_no_nested_metadata <nested-agents-md-content>
 # 0 (pass) when the content has no "## Metadata" heading -- required for
 # every non-root AGENTS.md file, since only the root dossier is
 # machine-readable.
 dossier_check_no_nested_metadata() {
-  ! grep -qxF '## Metadata' <<<"$1"
+  ! dossier_is_declared "$1"
 }

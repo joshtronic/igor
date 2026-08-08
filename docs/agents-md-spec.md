@@ -113,22 +113,28 @@ see below):
 - Nested `AGENTS.md` files contain no `## Metadata` section (the
   root dossier is the only machine-readable one).
 
-**Absent vs nonconforming -- the migration gate:** a repo with NO
-`AGENTS.md` at the root validates under the legacy rules
+**Un-adopted vs nonconforming -- the migration gate:** a repo that
+has not adopted this spec validates under the legacy rules
 (`CLAUDE.md` + `agent.json`) for the duration of the migration
-window -- absence is not failure while the fleet converts. A dossier that is PRESENT
-but nonconforming is a hard validation failure immediately: a broken
-dossier is worse than none, because agents trust it. Once the fleet
-is converted the legacy path is removed and absence itself becomes
-the failure.
+window -- non-adoption is not failure while the fleet converts. The
+gate keys on the `## Metadata` heading, not on the file existing: a
+root `AGENTS.md` is the near-universal prose convention and predates
+this spec, so a root file carrying no `## Metadata` is an ordinary
+prose AGENTS.md and takes the legacy path, exactly as an absent one
+does. A file that DECLARES itself a dossier by carrying `##
+Metadata` is validated in full, and nonconformance is a hard
+validation failure immediately: a broken dossier is worse than none,
+because agents trust it. Once the fleet is converted the legacy path
+is removed and non-adoption itself becomes the failure.
 
 **When "once the fleet is converted" is true:** when no repo in
 `VALIDATED_REPOS_JSON` still takes the legacy path -- every validated
-repo has a root `AGENTS.md`. That is mechanically checkable, so it
-does not depend on anyone remembering. The PR that converts the LAST
-repo is the one that deletes the fallback and flips absence to a
-failure; a fallback still standing after that PR is live debt and
-gets a ticket, not another migration window.
+repo has a root `AGENTS.md` carrying a `## Metadata` block. That is
+mechanically checkable, so it does not depend on anyone remembering.
+The PR that converts the LAST repo is the one that deletes the
+fallback and flips non-adoption to a failure; a fallback still
+standing after that PR is live debt and gets a ticket, not another
+migration window.
 
 ## Nested dossiers
 
@@ -151,8 +157,8 @@ keeping from `CLAUDE.md` moves into Caveats/Metadata; a retired
 `CEO.md`'s guardrails move into DOs and DON'Ts ("fire the CEO, keep
 his notes"); `CLAUDE.md`, `agent.json`, and `CEO.md` are deleted in
 the same PR. During the migration window the harness helpers fall
-back to `agent.json` when a repo has no root `AGENTS.md` at all (see
-the absent-vs-nonconforming rule above); the fallback is removed on
+back to `agent.json` for any repo that has not adopted the spec (see
+the un-adopted-vs-nonconforming rule above); the fallback is removed on
 the condition stated there -- with the last repo's conversion PR.
 
 Acceptance test for a conversion: the amnesia test. A cold agent with
