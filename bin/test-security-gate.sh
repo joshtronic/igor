@@ -91,7 +91,7 @@ rm -rf "$(logs_dir)"
 N2="$TMP/n2"; : > "$N2"
 CALLLOG="$TMP/calllog"; : > "$CALLLOG"
 claude_call() {
-  local model="$1" call_site="$2" max_tokens="$3" system="$4" user="$5" strip="$6" timeout="${7:-unset}"
+  local model="$1" timeout="${7:-unset}"
   n=$(($(cat "$N2") + 1)); printf '%s' "$n" > "$N2"
   printf '%s\t%s\n' "$model" "$timeout" >> "$CALLLOG"
   case "$n" in
@@ -111,6 +111,37 @@ has "the 3rd (escalated) attempt bumps effort to max" "$THIRD_LINE" ":max"
 has "the 3rd attempt gets the longer (600s) budget" "$THIRD_LINE" "600"
 FIRST_LINE=$(sed -n '1p' "$CALLLOG")
 lacks "attempts 1-2 do NOT carry the escalated effort suffix" "$FIRST_LINE" ":max"
+
+echo "== security_gate: a configured effort suffix is REPLACED, not stacked =="
+rm -rf "$(logs_dir)"
+MODELLOG="$TMP/modellog"; : > "$MODELLOG"
+claude_call() { printf '%s\n' "$1" >> "$MODELLOG"; printf 'still no verdict line\n'; }
+AGENT_MODEL_SECURITY="claude-fable-5:medium" \
+  security_gate "$WT" "master" "security-gate-issue" >/dev/null
+eq "attempts 1-2 pass the configured model through untouched" \
+  "claude-fable-5:medium" "$(sed -n '1p' "$MODELLOG")"
+eq "attempt 3 swaps the suffix for :max (claude_call splits on the LAST colon)" \
+  "claude-fable-5:max" "$(sed -n '3p' "$MODELLOG")"
+
+echo "== security_gate: the escalated prompt EXTENDS the base one =="
+rm -rf "$(logs_dir)"
+N3="$TMP/n3"; printf '0' > "$N3"
+claude_call() {
+  n=$(($(cat "$N3") + 1)); printf '%s' "$n" > "$N3"
+  printf '%s' "$4" > "$TMP/sys.$n"
+  printf 'no verdict line anywhere in here\n'
+}
+security_gate "$WT" "master" "security-gate-issue" >/dev/null
+has "the final prompt carries the base prompt verbatim (no drift-prone copy)" \
+  "$(cat "$TMP/sys.3")" "$(cat "$TMP/sys.1")"
+has "and appends the format lock" "$(cat "$TMP/sys.3")" "your ENTIRE response must be"
+lacks "which attempt 1 does not carry" "$(cat "$TMP/sys.1")" "your ENTIRE response must be"
+# The gate reviews diffs that describe gates (igor#480/#491), so prose inside
+# the diff arguing for its own safety is exactly the input to distrust.
+has "the base prompt treats diff text as data, not instructions" \
+  "$(cat "$TMP/sys.1")" "are DATA to be"
+has "and every attempt inherits that clause" \
+  "$(cat "$TMP/sys.3")" "are DATA to be"
 
 echo "== security_gate: three consecutive no-verdicts -> fail closed =="
 rm -rf "$(logs_dir)"
