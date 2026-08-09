@@ -18,6 +18,8 @@
 #
 # Requires lib/forgejo.sh sourced first (for repo enumeration in the --all
 # path of validate-repo.sh; the checks themselves are pure git reads).
+# Requires lib/dossier.sh sourced first (check_dossier calls dossier_validate
+# and dossier_check_no_nested_metadata).
 
 # Fallback logger so this module is sourceable outside tick.sh. When sourced
 # into tick.sh, bash's dynamic function lookup picks up tick's richer
@@ -118,6 +120,45 @@ check_deploy_smoke_signal() {
   url=$(jq -r '.smoke.url // empty' <<<"$cfg" 2>/dev/null)
   [ -n "$url" ] || return 1
   git -C "$_RC_REPO_PATH" grep -qiF 'deploy-sha' "$_RC_REF" >/dev/null 2>&1
+}
+
+# check_dossier -- the AGENTS.md dossier spec gate (docs/agents-md-spec.md).
+# Returns:
+#   0 -- root dossier present and conforms.
+#   1 -- root dossier present but nonconforming (hard fail -- reason in
+#        DOSSIER_REASON), OR a nested AGENTS.md carries a ## Metadata section.
+#   2 -- the repo hasn't adopted the dossier -- no root AGENTS.md, or one
+#        carrying no `## Metadata` heading (an ordinary prose AGENTS.md, which
+#        is what most of the fleet including this repo has today). The
+#        migration-window legacy path, NOT a failure; callers must not gate on
+#        it.
+#
+# The rc1/rc2 split keys on ADOPTION, not on the file existing: a prose
+# AGENTS.md is the pre-spec convention and predates this gate, so conscripting
+# every one of them would flip currently-validating repos to not-ready. A file
+# that declares itself a dossier (`## Metadata`) is validated in full -- that
+# is the "a broken dossier is worse than none" case the spec means.
+DOSSIER_REASON=""
+check_dossier() {
+  local content reason files f
+  DOSSIER_REASON=""
+  content=$(rc_file_read AGENTS.md)
+  [ -n "$content" ] || return 2
+  dossier_is_declared "$content" || return 2
+  if ! reason=$(dossier_validate "$content"); then
+    DOSSIER_REASON="$reason"
+    return 1
+  fi
+  files=$(git -C "$_RC_REPO_PATH" ls-tree -r --name-only "$_RC_REF" 2>/dev/null \
+    | grep -E '(^|/)AGENTS\.md$' | grep -vxF AGENTS.md || true)
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    if ! dossier_check_no_nested_metadata "$(rc_file_read "$f")"; then
+      DOSSIER_REASON="dossier: nested $f must not contain a ## Metadata section (root dossier only)"
+      return 1
+    fi
+  done <<<"$files"
+  return 0
 }
 
 check_lint_signal() {
@@ -255,6 +296,23 @@ validate_repo_local() {
   check_test_signal
   _gate $? "Test signal present (a real way to verify a change)" \
     "add a \`\"test\"\` script in package.json, \`pytest\`, a \`test:\` Make target, a Cargo/Go project, or a deploy-smoke marker (\`agent.json\` \`.smoke.url\` + a \`deploy-sha\` marker)"
+
+  # AGENTS.md dossier spec (docs/agents-md-spec.md): un-adopted (no root
+  # AGENTS.md, or a prose one with no `## Metadata`) is the legacy migration
+  # path and prints nothing -- fleet validation behavior is unchanged until a
+  # repo actually adopts the spec. An adopted-but-nonconforming dossier is a
+  # hard gate failure: a broken dossier is worse than none.
+  check_dossier
+  case $? in
+    0) printf -- '- [x] %s\n' 'AGENTS.md dossier conforms to spec' ;;
+    1) printf -- '- [ ] %s -- %s\n' 'AGENTS.md dossier conforms to spec' "$DOSSIER_REASON"
+       fail=$((fail + 1)) ;;
+    2) : ;;  # not adopted -- legacy path, not a failure
+    # Anything else means check_dossier never ran (e.g. lib/dossier.sh not
+    # sourced -> 127). Say so on stderr: tick.sh sends this checklist to
+    # /dev/null, so a silent no-op here would hide a dead gate fleet-wide.
+    *) printf 'validation: check_dossier returned an unexpected status -- is lib/dossier.sh sourced?\n' >&2 ;;
+  esac
 
   # ADVISORY -- guidance, not gates. CLAUDE.md/README aren't safety-relevant, and
   # check_lint_signal is a pure existence check (a lint config no CI runs) that

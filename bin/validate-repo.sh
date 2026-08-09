@@ -22,6 +22,8 @@ fi
 
 # shellcheck source=../lib/forgejo.sh
 . "$AGENT_HOME/lib/forgejo.sh"
+# shellcheck source=../lib/dossier.sh
+. "$AGENT_HOME/lib/dossier.sh"
 # shellcheck source=../lib/repo-checks.sh
 . "$AGENT_HOME/lib/repo-checks.sh"
 
