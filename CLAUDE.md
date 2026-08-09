@@ -28,19 +28,14 @@ repo is everything that makes the cron beat real.
   website-side ticks (opt-in via `WEBSITE_REPO`).
 - `bin/*.sh` -- helpers Claude or the operator can invoke
   (`agent-block.sh`, `agent-ask.sh`, `validate-repo.sh`, etc.).
-- `bin/lib/` -- the one prompt surface not sourced from the
-  Distillery (`ceo-digest-directive.md`). The voice anchor and the
-  other task directives are sourced live from the Distillery
-  (`joshtronic/distillery`) via `lib/context-source.sh`'s last-good
-  cache -- see the Gotchas entry below.
+- `bin/lib/` -- shared voice anchor + task directives loaded into
+  Claude's system prompt per surface.
 - `lib/*.sh` -- sourced shell libraries (Forgejo API, repo checks,
   maintenance checks, cost tracking; the shared SMTP2GO sender
   `email.sh`; the opt-in SEO pair `gsc.sh` + `seo-analysis.sh`; and
   the opt-in sports-digest pair `espn.sh` + `sports-digest.sh`).
-- `AGENTS.md` -- a stub. The real worker-contract system prompt for
-  issue work and PR review is sourced live from the Distillery; this
-  file exists only to give `bin/check-sync.sh` a local document to
-  validate when the Distillery cache is unseeded (see Gotchas).
+- `AGENTS.md` -- the universal agent rules appended to Claude's
+  system prompt for issue work and PR review.
 - `agent-settings.json` -- Claude's tool permission profile.
 - `systemd/agent.{service,timer}` -- the production deploy units.
 - `docs/` -- operator-facing notes (architecture, onboarding,
@@ -53,15 +48,10 @@ make test
 ```
 
 Runs `bin/check-sync.sh`, which is what CI runs on every PR. The
-sync check enforces the worker-contract <-> `tick.sh` contract: every
+sync check enforces the `AGENTS.md` <-> `tick.sh` contract: every
 `# OUTCOME: <label>` in tick.sh must have a matching
-`<!-- OUTCOME: <label> -->` in whichever document the worker actually
-reads, and every `agent-*.sh` referenced there must exist and be
-executable in `bin/`. It validates the sourced `worker-contract`
-(`lib/context-source.sh`'s last-good Distillery cache) when seeded,
-falling back to the in-repo `AGENTS.md` stub -- with a loud warning --
-only when the cache is unseeded and unreachable (the normal CI-container
-case; see Gotchas).
+`<!-- OUTCOME: <label> -->` in AGENTS.md, and every `agent-*.sh`
+referenced in AGENTS.md must exist and be executable in `bin/`.
 It then runs every `bin/test-*.sh` (shell-function unit tests, e.g.
 `bin/test-ceo.sh`); each is skip-safe, exiting 0 with a notice if a
 tool like `jq` is absent, so the single CI step covers the contract
@@ -212,19 +202,11 @@ respective tools on the host; install or skip.
   (15 min) so the per-tick cost doesn't compound at the 1-minute
   cadence as repos are added. Only PASSes are cached; failures
   re-check every tick.
-- igor's prompt surfaces (the worker-contract for issue work + PR
-  review, the shared voice anchor, and the task-specific directives for
-  maintenance triage, reading pipeline, site-work, review, sports
-  digest, and feedback triage) are sourced LIVE from the Distillery
-  (`joshtronic/distillery`, at `origin/master`) via `context_surface`'s
-  last-good cache (`lib/context-source.sh`) -- no in-repo fallback
-  (igor#485/#486). A change merged to distillery master is live on
-  igor's next tick, same as igor's own self-pull. `AGENTS.md` in this
-  repo is now only a stub carrying the OUTCOME sentinels for
-  `bin/check-sync.sh`'s CI fallback (igor#487) -- it is not read by any
-  prompt-consuming surface. `bin/lib/` keeps exactly one file that's
-  still local, `ceo-digest-directive.md`. Treat a change to any sourced
-  skill on the Distillery side the way you would a deploy to this repo.
+- `AGENTS.md` is appended to Claude's system prompt for issue
+  work and PR review. Other surfaces (maintenance triage, reading
+  pipeline, site-work) use task-specific directives from
+  `bin/lib/`. Treat changes to any of these the way you would a
+  deploy.
 - Website work is opt-in via `WEBSITE_REPO`. With it unset the
   daily/weekly Igor slots no-op cleanly; the rest of the tick
   (issues, maintenance, PR review) still runs.
@@ -259,9 +241,8 @@ respective tools on the host; install or skip.
   7 days a week, first tick after 03:00 (window-completeness like
   logwatch: the digest covers YESTERDAY and west-coast games end past
   midnight CT). `SPORTS_LEAGUES` is one flat CSV of ESPN
-  `{sport}/{league}` paths -- no tier var; the directive (the
-  `sports-digest-directive` skill, sourced from the Distillery) curates
-  by significance.
+  `{sport}/{league}` paths -- no tier var; the directive
+  (`bin/lib/sports-digest-directive.md`) curates by significance.
   Day-state is `.sports = {date, sent, failures, last_attempt}`: a
   cooldown via `SPORTS_RETRY_COOLDOWN_SECS`, a hardcoded 5-failure cap,
   and `sent` flips only on a successful send. Deliberately no

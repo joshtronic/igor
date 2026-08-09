@@ -382,8 +382,8 @@ init_igor_scratch() {
 # loads it from the worktree root when invoked there. The legacy
 # pattern of catting identity.md + memories/MEMORY.md + blog-ideas
 # is retired in Phase 5 of the refactor: brain has been replaced
-# by ~/.local/state/agent/brain.sqlite, and persona/voice now lives
-# in the `voice` skill, sourced via context_surface above.
+# by ~/.local/state/agent/brain.sqlite, and persona/voice now
+# lives in voice.md.
 #
 # Used by issue work (tier-1) and PR-review pickup. Maintenance
 # triage uses a task-specific inline prompt (no voice anchor --
@@ -518,7 +518,7 @@ derive_commit_subject() {
 
 # Derive a full PR body (two-checklist Markdown) from the diff. Used
 # as a fallback when Claude exited without writing .agent/PR_BODY.md
-# this tick -- the worker-contract says it's mandatory but compliance is
+# this tick -- AGENTS.md says it's mandatory but compliance is
 # probabilistic, and a thin git-log-derived body wastes the
 # reviewer's time. Better to spend one cheap completion synthesizing
 # a real description than ship a one-liner.
@@ -1567,7 +1567,7 @@ EOF
 )
 
   # Maintenance triage is classification work, not agent work: no voice
-  # anchor, no worker-contract -- the user message is self-contained. Claude
+  # anchor, no AGENTS.md -- the user message is self-contained. Claude
   # Code's built-in system prompt is fine; we don't append our own.
   log "invoking claude for maintenance triage (timeout ${TICK_TIMEOUT})"
   local m_log="$m_worktree/.agent/claude-output.log"
@@ -3663,7 +3663,7 @@ if [ -n "$REVIEW_PR" ]; then
     # conflict the moment it was merged). The reviewer's ask is then
     # "resolve the conflict with <base>" -- but the worktree is checked
     # out on origin/$PR_HEAD ALONE, so there is nothing in the tree to
-    # resolve and the agent correctly no-ops (worker-contract 1b: nothing
+    # resolve and the agent correctly no-ops (AGENTS.md 1b: nothing
     # actionable -> exit without commits). That is the no-op that wasted a
     # review round-trip.
     #
@@ -3845,7 +3845,7 @@ the reviewer's specific information into the relevant spot. Don't
 restructure, simplify, or delete surrounding content beyond what
 the comment directly addresses.
 
-Same rules as PR mode (the worker-contract): TDD where the repo supports it,
+Same rules as PR mode (AGENTS.md): TDD where the repo supports it,
 project tests + lint must pass before exit, /security-review on your
 diff. Stay on this branch. Do not open a new PR -- this one already
 exists.
@@ -3926,7 +3926,7 @@ When in doubt: prefer adding/correcting facts over removing
 content. The reviewer can ask for further cuts in another round
 if needed; over-deletion is hard to recover from.
 
-Same rules as PR mode (the worker-contract): TDD where the repo supports it,
+Same rules as PR mode (AGENTS.md): TDD where the repo supports it,
 project tests + lint must pass before exit, /security-review on your
 diff. Stay on this branch. Do not open a new PR -- this one already
 exists.
@@ -4846,7 +4846,7 @@ elif [ "$HAS_BLOCKED" = "true" ]; then
   log "outcome: blocked (Status/Blocked applied by agent)"
 
 elif [ "$COMMITS" -gt 0 ]; then
-  # HEAD-equals-branch sanity check. The worker-contract tells Claude to stay on
+  # HEAD-equals-branch sanity check. AGENTS.md tells Claude to stay on
   # the agent branch, but trust-but-verify before we touch the remote.
   ACTUAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
   if [ "$ACTUAL_BRANCH" != "$BRANCH" ]; then
@@ -4858,9 +4858,8 @@ elif [ "$COMMITS" -gt 0 ]; then
 
   # Runaway guard (igor#467, was a 400-line "scope cap"). This is a
   # backstop against a genuinely runaway branch, not a sizing target --
-  # sizing judgment for everything else lives in the review (the
-  # review-directive skill, sourced from the Distillery -- see
-  # context_surface review-directive). Long commit chains still get blocked.
+  # sizing judgment for everything else lives in the review
+  # (bin/lib/review-directive.md). Long commit chains still get blocked.
   # Generated/lockfiles AND test files (lib/scope-gate.sh's is_test_path)
   # are excluded from the line count: lockfiles aren't human-reviewed code,
   # and excluding tests makes "delete tests to shrink the diff" structurally
@@ -4996,7 +4995,7 @@ Address it, then remove \`Status/Blocked\` to re-queue. (If the note above says 
     if [ -f .agent/PR_BODY.md ]; then
       PR_BODY=$(cat .agent/PR_BODY.md)
     else
-      log "WARNING: PR_BODY.md was NOT written by claude this tick. The worker-contract requires it on every ship; this is not optional. Attempting harness-side fallback via $AGENT_MODEL."
+      log "WARNING: PR_BODY.md was NOT written by claude this tick. AGENTS.md requires it on every ship; this is not optional. Attempting harness-side fallback via $AGENT_MODEL."
       PR_BODY=$(derive_pr_body "$WORKTREE" "$PR_BASE")
       if [ -n "$PR_BODY" ]; then
         log "harness-side PR body synthesized via $AGENT_MODEL from diff"

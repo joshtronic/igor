@@ -65,8 +65,7 @@ sports_concepts_append() {
 # Assembles the user prompt for the distill call: the digest date, the
 # already-taught concept list, and the per-league payloads from
 # lib/espn.sh. The system prompt (persona, curation rule, output
-# contract) is the sports-digest-directive skill, sourced from the
-# Distillery (see context_surface sports-digest-directive).
+# contract) lives in bin/lib/sports-digest-directive.md.
 sports_build_prompt() {
   local payload="$1" covered="$2" date="$3" covered_lines
   covered_lines=$(jq -r '.[]? | "- \(.name) (taught \(.date))"' <<<"$covered" 2>/dev/null)

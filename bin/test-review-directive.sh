@@ -2,8 +2,8 @@
 # test-review-directive.sh -- the review directive's machine contract must match
 # what review_parse_response actually accepts.
 #
-# The review directive is prose, and prose is not unit-testable: no assertion
-# here can tell you whether the rubric produces good verdicts. What IS
+# bin/lib/review-directive.md is prose, and prose is not unit-testable: no
+# assertion here can tell you whether the rubric produces good verdicts. What IS
 # testable is the handshake, and it is load-bearing -- the directive tells the
 # model to emit `VERDICT: <token>` above a `===BODY===` sentinel, and
 # review_parse_response in bin/tick.sh accepts exactly three tokens and that one
@@ -12,29 +12,17 @@
 # which retries twice per tick, forever, and looks like a model failure rather
 # than a text mismatch.
 #
-# Since igor#485/#486 the directive is sourced live from the Distillery
-# (lib/context-source.sh's last-good cache), not an in-repo
-# bin/lib/review-directive.md copy (igor#487) -- so this suite reads the
-# same cache the worker does. Skip-safe per bin/check-sync.sh's contract:
-# without jq the parser lifted below can't round-trip; without a seeded
-# cache there's no local copy of the real directive to check, and this
-# suite has no business reaching the network.
+# Nothing covered this file before. Scope is deliberately the contract only.
 set -uo pipefail
 
+# Skip-safe per bin/check-sync.sh's contract. Not a courtesy skip: the parser
+# lifted below ENDS in `jq -n`, so without jq every round-trip fails on the
+# missing tool and the suite reports a directive/parser mismatch that isn't
+# there. That is exactly the false red this guard exists to prevent.
 command -v jq >/dev/null 2>&1 || { echo "test-review-directive: jq absent -- skipping"; exit 0; }
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source=../lib/context-source.sh
-. "$HERE/lib/context-source.sh"
-
-if ! context_seeded; then
-  echo "test-review-directive: prompt cache unseeded -- skipping (no local copy of the real directive to check)"
-  exit 0
-fi
-
-DIRECTIVE="$(mktemp)"
-trap 'rm -f "$DIRECTIVE"' EXIT
-context_surface review-directive > "$DIRECTIVE"
+DIRECTIVE="$HERE/bin/lib/review-directive.md"
 TICK="$HERE/bin/tick.sh"
 
 FAIL=0

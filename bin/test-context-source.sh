@@ -255,29 +255,6 @@ else
   ok "do_feedback_tick sources feedback-directive via context_surface" false
 fi
 
-# -- negative wiring: the in-repo bin/lib/*.md prompt copies deleted by
-#    igor#487 must have no consuming reader left behind. A bare grep for
-#    the path would also match the comments explaining WHY the copies
-#    are gone (this file's own wiring tests above, docs/architecture.md
-#    references, etc.) -- so only a non-comment hit counts as a real
-#    regression. worker-contract has no bin/lib/*.md analogue (AGENTS.md
-#    is its in-repo stub, handled separately by check-sync); the other
-#    six CONTEXT_SKILLS entries each used to have one.
-echo "== wiring: no consuming reads of the deleted in-repo bin/lib/*.md prompt copies =="
-ROOT="$(cd "$HERE/.." && pwd)"
-STRAY=0
-for surface in review-directive voice feedback-directive site-work-directive sports-digest-directive now-directive; do
-  hits=$(grep -rn "bin/lib/${surface}\.md" "$ROOT/bin" "$ROOT/lib" 2>/dev/null \
-    | awk -F: '{ rest=$0; sub(/^[^:]*:[0-9]*:/, "", rest); gsub(/^[ \t]+/, "", rest); if (rest !~ /^#/) print }')
-  if [ -n "$hits" ]; then
-    printf '  x %s\n' "bin/lib/${surface}.md has a non-comment reference left in bin/ or lib/"
-    printf '%s\n' "$hits" | sed 's/^/      /'
-    FAIL=$((FAIL + 1))
-    STRAY=$((STRAY + 1))
-  fi
-done
-[ "$STRAY" -eq 0 ] && printf '  + %s\n' "no consuming reads of the deleted bin/lib/*.md prompt copies remain"
-
 if [ "$FAIL" -eq 0 ]; then
   echo "test-context-source: all passed"
 else

@@ -10,8 +10,7 @@
 # cap was punishing the wrong thing. Excluding tests makes "delete tests to
 # shrink the diff" structurally impossible and stops taxing coverage; sizing
 # judgment for everything else (padding, drive-by changes) moves to the
-# review (the review-directive skill, sourced from the Distillery -- see
-# context_surface review-directive), which can actually read intent.
+# review (bin/lib/review-directive.md), which can actually read intent.
 
 # shellcheck disable=SC2034  # read only by bin/tick.sh, which sources this
 SCOPE_GATE_MAX_LINES=1000
