@@ -284,7 +284,7 @@ do_feedback_tick() {
     key=$(feedback_row_key "$row")
     labels_json=$(feedback_repo_labels "$repo")
     context=$(feedback_gather_context "$repo"; feedback_search_prior "$repo" "$(jq -r '.Game // ""' <<<"$row")"; feedback_labels_section "$labels_json")
-    directive=$(context_surface feedback-directive "$AGENT_HOME/bin/lib/feedback-directive.md")
+    directive=$(context_surface feedback-directive)
     prompt=$(feedback_build_prompt "$repo" "$row" "$context")
     parsed=""
     for attempt in 1 2; do

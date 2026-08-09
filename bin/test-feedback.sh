@@ -186,8 +186,10 @@ eq "file: applies resolved label ids to the payload" "[2,3]" "$(jq -c '.labels' 
 echo "== do_feedback_tick decision =="
 export FORGEJO_REVIEWER=josh AGENT_MODEL_REVIEW=m
 export ANALYSIS_REPOS_JSON='{"full_name":"acme/x"}'
-# shellcheck disable=SC2034  # read by do_feedback_tick in lib/feedback.sh
-AGENT_HOME="$TMP"; mkdir -p "$TMP/bin/lib"; echo "directive" > "$TMP/bin/lib/feedback-directive.md"
+# context_surface feedback-directive fails cleanly with an unseeded cache
+# (AGENT_STATE_DIR is this test's tmp dir) -- claude_call below is fully
+# stubbed and ignores the directive, so an empty directive doesn't affect
+# these assertions.
 feedback_csv_url()      { echo "https://x"; }
 feedback_fetch_rows()   { echo '[{"Timestamp":"u1","Game":"g","Tell us more":"a real, specific bug"}]'; }
 feedback_gather_context() { echo "ctx"; }
