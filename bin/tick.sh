@@ -3714,6 +3714,14 @@ CONFLICT_EOF
     PR_REASSIGNMENT_FEEDBACK=""
     if [ -z "$BINDING_RC_BODY" ]; then
       PR_REASSIGNMENT_FEEDBACK=$(review_reassignment_feedback_section "$PR_REPO" "$PR_NUMBER" "${BOT_USER:-}")
+      # Command substitution strips the trailing newline, so a non-empty
+      # section would abut the next heading. Put one back here rather than in
+      # the heredoc: the bare ${...} line is what keeps the empty case from
+      # leaving a stray blank line.
+      if [ -n "$PR_REASSIGNMENT_FEEDBACK" ]; then
+        PR_REASSIGNMENT_FEEDBACK="${PR_REASSIGNMENT_FEEDBACK}
+"
+      fi
     fi
 
     if [ -n "$BINDING_RC_BODY" ]; then

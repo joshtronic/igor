@@ -403,6 +403,11 @@ review_reassignment_feedback_section() {
     log "warning: review: comments for ${repo}#${number} were not a JSON array -- reassignment-feedback section omitted (API contract changed?)"
     return 0
   fi
+  # created_at is ordered as a STRING, both for "latest marker" and for "posted
+  # after it". Sound for the `...Z` form Forgejo emits today; an offset form
+  # (`+02:00`) would sort wrong, and a comment posted in the same second as the
+  # review is excluded. Both are acceptable: the cost is one comment that the
+  # existing issue-comment feed still shows the agent anyway.
   if ! parsed=$(jq -c --arg bot "$bot" '
       def is_marker: (.body // "") | test("review sha=");
       ( [.[]? | select(.user.login == $bot and is_marker)]
@@ -427,6 +432,16 @@ review_reassignment_feedback_section() {
   # review_dismissals_section above. Fence it and strip any forged structural
   # markers so a diff that tried to inject instructions via the review comment
   # cannot impersonate this prompt's own headings or sentinels.
+  #
+  # Scrubbed: the fence, the response sentinels, and the headings this section
+  # sits between. Deliberately NOT every heading in the rework prompt -- the
+  # list covers where a forged string could blur THIS section's boundary, and
+  # a longer allowlist just mangles more legitimate review prose.
+  #
+  # after_text is emitted OUTSIDE the fence and unscrubbed, on purpose: those
+  # are human comments, at the same trust level as PR_ISSUE_COMMENTS, which the
+  # same prompt already interpolates raw. Fencing here and not there would be
+  # theatre.
   shadow_body=${shadow_body//--- END UNTRUSTED AGENT TEXT ---/[delimiter removed]}
   shadow_body=${shadow_body//--- BEGIN UNTRUSTED AGENT TEXT/[delimiter removed]}
   shadow_body=${shadow_body//===BODY===/[sentinel removed]}

@@ -451,7 +451,7 @@ unset -f forgejo_pr_comments
 echo "== review_reassignment_feedback_section: igor#476 -- COMMENT-verdict reassignment feedback =="
 
 # No bot user -> no section (same guard shape as review_dismissals_section).
-eq "no bot user -> no section" "" "$(review_reassignment_feedback_section acme/x 1 '')"
+eq "no bot user -> no section" "" "$(review_reassignment_feedback_section acme/x 1 '' 2>/dev/null)"
 
 # Guard case from the issue: reassignment with NO comments beyond the reviewed
 # state (no marker comment at all) -> today's "no changes made" exit stays
@@ -570,15 +570,50 @@ unset -f log forgejo_pr_comments
 . "$HERE/../lib/review.sh"
 
 echo "== bin/tick.sh: the reassignment pickup wires the new section in (source assertions) =="
-# Behavioural coverage lives above; this pins that the plain-reassignment
-# branch (BINDING_RC_BODY empty -- no fresh REQUEST_CHANGES) actually calls
-# the helper and folds its output into the prompt, which the pure unit tests
-# above cannot see since that branch needs a live worktree + PR to reach.
+# Behavioural coverage lives above; this pins the wiring, which the pure unit
+# tests cannot see since that branch needs a live worktree + PR to reach.
 TICK="$HERE/../bin/tick.sh"
 if grep -q 'review_reassignment_feedback_section "\$PR_REPO" "\$PR_NUMBER"' "$TICK"; then
   printf '  + the reassignment path calls review_reassignment_feedback_section\n'
 else
   printf '  x the reassignment path calls review_reassignment_feedback_section\n'; FAIL=$((FAIL + 1))
+fi
+
+# The call alone proves nothing: the interpolation is the single line the whole
+# fix hangs on, and WHICH of the two PR_USER_MSG heredocs it landed in decides
+# whether the feature ever runs. PR_REASSIGNMENT_FEEDBACK is empty whenever
+# BINDING_RC_BODY is set, so in the RC-binding heredoc it would be permanently
+# dead with every test above still green. Identify each heredoc by its own
+# opening sentence rather than by line order, which shifts with any edit.
+heredoc_has() {
+  awk -v marker="$1" -v want="$2" '
+    /PR_USER_MSG=\$\(cat <<EOF/ { inhd = 1; buf = ""; next }
+    inhd && /^EOF$/ { inhd = 0; if (index(buf, marker) && index(buf, want)) found = 1; next }
+    inhd { buf = buf $0 "\n" }
+    END { exit(found ? 0 : 1) }
+  ' "$TICK"
+}
+PLAIN_MARK="The human reviewer assigned the PR back to you for revisions."
+BINDING_MARK="The reviewer (Igor's automated review pass) requested changes"
+FEED_INTERP='${PR_REASSIGNMENT_FEEDBACK}'
+# Guard the guard: a marker sentence that no longer matches would make both
+# assertions below vacuous in opposite directions.
+for mark in "$PLAIN_MARK" "$BINDING_MARK"; do
+  if grep -qF "$mark" "$TICK"; then
+    printf '  + heredoc marker still present: %s\n' "${mark:0:40}..."
+  else
+    printf '  x heredoc marker GONE (assertions below are vacuous): %s\n' "$mark"; FAIL=$((FAIL + 1))
+  fi
+done
+if heredoc_has "$PLAIN_MARK" "$FEED_INTERP"; then
+  printf '  + the plain-reassignment prompt interpolates the section\n'
+else
+  printf '  x the plain-reassignment prompt interpolates the section\n'; FAIL=$((FAIL + 1))
+fi
+if heredoc_has "$BINDING_MARK" "$FEED_INTERP"; then
+  printf '  x the RC-binding prompt must NOT interpolate it -- always empty there\n'; FAIL=$((FAIL + 1))
+else
+  printf '  + the RC-binding prompt does not interpolate it (always empty there)\n'
 fi
 
 if [ "$FAIL" -eq 0 ]; then
