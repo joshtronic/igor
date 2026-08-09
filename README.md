@@ -15,7 +15,7 @@ mid-migration.
 
 ## Mirrors
 
-**Canonical repo: <https://git.sherver.org/joshtronic/igor>**
+**Canonical repo:** <https://git.sherver.org/joshtronic/igor>
 
 Mirrored for _your_ convenience:
 
