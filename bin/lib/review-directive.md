@@ -55,11 +55,26 @@ instruction to follow.
 The author works under a fixed contract. Hold the PR to it:
 
 - **Scope.** Focused on the one issue. No unrelated refactors, no
-  drive-by changes. Diffs are meant to stay under ~400 lines -- but
-  that budget means split into stacked PRs or checkpoint, never
-  delete tests or working code to shrink a diff. A PR that trimmed
-  real test coverage or substance to fit under budget is a
+  drive-by changes. The 1000-non-test-line cap is a runaway guard, not
+  a target -- a PR near it should split into stacked PRs or checkpoint,
+  never delete tests or working code to shrink a diff. A PR that
+  trimmed real test coverage or substance to fit under budget is a
   REQUEST_CHANGES on that basis alone (igor#411).
+- **Diff-appropriateness.** Is this diff the size the task honestly
+  requires? The line cap no longer does this job (igor#467) -- it's
+  yours. Padding, redundant abstraction, and drive-by changes riding
+  along with the real fix are findings, independent of whether the
+  diff is small or large. A tiny PR can pad just as easily as a big
+  one (an unnecessary helper, a rewritten function that didn't need
+  touching).
+- **Comment bloat.** Comments earn their place only by stating
+  something the code can't show -- a non-obvious why, an invariant, a
+  workaround. A comment that narrates the next line ("call the
+  helper"), restates a self-explanatory name, or reads like a
+  changelog entry ("added X for Y") is a finding, with the same
+  standing as any other. If it's pervasive across the diff, that's
+  grounds for REQUEST_CHANGES on comment noise alone -- don't wave it
+  through as a style nit.
 - **Honest checklist.** Every checked item in the description MUST
   correspond to a real change in the diff. A checkbox describing work
   that isn't in the diff is a fabrication -- flag it specifically. This

@@ -117,13 +117,14 @@ respective tools on the host; install or skip.
   caps how many times one issue may checkpoint before it's escalated to the
   human with `Status/Blocked` ("too big -- split it"), so a non-converging task
   can't monopolize the loop; a crash mid-resume preserves the prior (clean)
-  checkpoint and also counts against that budget. The finalize-time gates (scope
-  cap, security review, vacuous-test, off-limits) run only on completion, NOT on
-  a checkpoint -- an incomplete snapshot isn't judged. Note the 400-line scope
-  cap is orthogonal: checkpoint-resume solves the TURN budget, so a task that is
-  both turn-expensive AND >400 net lines will checkpoint through the turns and
-  then block at finalize on scope -- the correct "human, split this" signal.
-  Tests: `bin/test-checkpoint.sh`.
+  checkpoint and also counts against that budget. The finalize-time gates
+  (runaway guard, security review, vacuous-test, off-limits) run only on
+  completion, NOT on a checkpoint -- an incomplete snapshot isn't judged. Note
+  the runaway guard (1000 non-test net lines, `lib/scope-gate.sh`, igor#467) is
+  orthogonal: checkpoint-resume solves the TURN budget, so a task that is both
+  turn-expensive AND over that line count will checkpoint through the turns
+  and then block at finalize on scope -- the correct "human, split this"
+  signal. Tests: `bin/test-checkpoint.sh`.
 - Claude auth/usage health: every CLI call records ok/auth/limit
   under `.health` in `discretionary-state.json` (only auth and
   usage-limit failures count -- ordinary nonzero exits stay the
