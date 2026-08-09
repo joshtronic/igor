@@ -62,6 +62,20 @@ rc_file_exists() { git -C "$_RC_REPO_PATH" cat-file -e "${_RC_REF}:$1" 2>/dev/nu
 rc_file_read()   { git -C "$_RC_REPO_PATH" show     "${_RC_REF}:$1" 2>/dev/null || true; }
 rc_dir_list()    { git -C "$_RC_REPO_PATH" ls-tree --name-only "${_RC_REF}:$1" 2>/dev/null || true; }
 
+# rc_context_file_exists_at <repo-path> <ref> -- true if <ref> in <repo-path>
+# carries a root AGENTS.md (the dossier, docs/agents-md-spec.md) or legacy
+# CLAUDE.md. Either satisfies the "this repo has a conventions file" gate --
+# a dossier-era repo has no obligation to also carry a legacy CLAUDE.md
+# compatibility symlink (igor#493). Takes path/ref explicitly rather than
+# reading through rc_local_init/_RC_REF: tick.sh's preflight runs against a
+# separate work clone at origin/$PR_BASE, not the validation clone the other
+# check_* helpers above read from.
+rc_context_file_exists_at() {
+  local path="$1" ref="$2"
+  git -C "$path" cat-file -e "${ref}:AGENTS.md" 2>/dev/null \
+    || git -C "$path" cat-file -e "${ref}:CLAUDE.md" 2>/dev/null
+}
+
 # -- Individual checks ------------------------------------------
 #
 # Each returns 0 on pass, non-zero on fail. Pure reads of the initialised

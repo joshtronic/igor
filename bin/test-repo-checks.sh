@@ -209,6 +209,23 @@ TCLONE="$TMPROOT/notest-clone"; git clone -q "$TBARE" "$TCLONE"
 V=0; validate_repo_local demo/notest "$TCLONE" >/dev/null 2>&1 || V=$?
 if [ "$V" -eq 1 ]; then printf '  + Validate action but no test signal -> rc 1 (not ready)\n'; else printf '  x expected rc 1, got %s\n' "$V"; FAIL=$((FAIL + 1)); fi
 
+echo "== rc_context_file_exists_at: AGENTS.md/CLAUDE.md either/or (igor#493) =="
+# tick.sh's pre-claim preflight -- a dossier-era repo (docs/agents-md-spec.md)
+# has no obligation to also carry the legacy CLAUDE.md compatibility symlink,
+# so either filename must satisfy the check.
+f="$(new_fixture)"; printf '# demo\n' >"$f/AGENTS.md"; commit_fixture "$f"
+ok "AGENTS.md only -> present"          rc_context_file_exists_at "$f" master
+f="$(new_fixture)"; printf 'demo\n' >"$f/CLAUDE.md"; commit_fixture "$f"
+ok "CLAUDE.md only -> present"          rc_context_file_exists_at "$f" master
+f="$(new_fixture)"; printf '# demo\n' >"$f/AGENTS.md"; printf 'demo\n' >"$f/CLAUDE.md"; commit_fixture "$f"
+ok "both present -> present"            rc_context_file_exists_at "$f" master
+f="$(new_fixture)"; : >"$f/README.md"; commit_fixture "$f"
+no "neither -> absent (blocked)"        rc_context_file_exists_at "$f" master
+
+echo "== tick.sh preflight block message prefers AGENTS.md wording (igor#493) =="
+ok "block message names AGENTS.md first, CLAUDE.md as legacy fallback" \
+  grep -qF '\`AGENTS.md\` (or legacy \`CLAUDE.md\`) is missing at the repo root' "$HERE/tick.sh"
+
 if [ "$FAIL" -eq 0 ]; then
   echo "test-repo-checks: all passed"
 else

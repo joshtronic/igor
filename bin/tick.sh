@@ -12,8 +12,8 @@
 #      the next tick re-claims it.
 #   4. Discovery -- list every repo the bot has push access to, find
 #      the globally oldest claimable issue across them.
-#   5. Claim, clone-if-needed, preflight (CLAUDE.md present), worktree,
-#      invoke Claude, classify outcome.
+#   5. Claim, clone-if-needed, preflight (AGENTS.md or CLAUDE.md present),
+#      worktree, invoke Claude, classify outcome.
 #
 # Exits 0 on success or no-work-found. Non-zero on config/infra errors.
 
@@ -4580,22 +4580,25 @@ fi
 
 # -- Preflight -------------------------------------------------
 #
-# CLAUDE.md must exist on the ref we actually branch from
+# A root context file -- AGENTS.md (docs/agents-md-spec.md) or legacy
+# CLAUDE.md -- must exist on the ref we actually branch from
 # (origin/$PR_BASE) -- NOT the clone's working tree. The clone is a
 # fetch-only anchor: nothing ever checks it out again, so a repo cloned
-# before its CLAUDE.md landed keeps a stale tree forever and reading the
-# tree here falsely blocks it -- the repo DOES have CLAUDE.md on its
+# before its context file landed keeps a stale tree forever and reading
+# the tree here falsely blocks it -- the repo DOES have one on its
 # default branch (it passes API validation, and the worktree below is
 # carved from origin/$PR_BASE, which is current). Fetch first so the
 # check sees current remote state; on a fetch failure fall back to the
-# last-known origin ref (still better than the local checkout).
+# last-known origin ref (still better than the local checkout). Either
+# filename satisfies this -- a dossier-era repo has no obligation to
+# also carry the legacy CLAUDE.md symlink (igor#493).
 git -C "$REPO_PATH" fetch origin --prune --quiet \
   || log "preflight: warning -- fetch failed; checking last-known origin/${PR_BASE}"
-if ! git -C "$REPO_PATH" cat-file -e "origin/${PR_BASE}:CLAUDE.md" 2>/dev/null; then
-  log "preflight: missing CLAUDE.md on origin/${PR_BASE}, blocking"
-  agent-block.sh "The agent cannot work this repo: \`CLAUDE.md\` is missing at the repo root.
+if ! rc_context_file_exists_at "$REPO_PATH" "origin/${PR_BASE}"; then
+  log "preflight: missing AGENTS.md/CLAUDE.md on origin/${PR_BASE}, blocking"
+  agent-block.sh "The agent cannot work this repo: \`AGENTS.md\` (or legacy \`CLAUDE.md\`) is missing at the repo root.
 
-The agent relies on \`CLAUDE.md\` for project conventions (test commands, code style, gotchas). Add one, remove \`Status/Blocked\`, and the next tick will re-claim this issue."
+The agent relies on \`AGENTS.md\` (or legacy \`CLAUDE.md\`) for project conventions (test commands, code style, gotchas). Add one, remove \`Status/Blocked\`, and the next tick will re-claim this issue."
   exit 0
 fi
 
@@ -4911,7 +4914,7 @@ Revert those changes (or do them yourself outside the agent) and remove \`Status
   if grep -qiE 'tests:[[:space:]]+0[[:space:]]+(passed|failed|of|total)|no tests (ran|found|collected)|collected 0 items|(^|[^0-9])0 passing([^0-9]|$)|running 0 tests|ran 0 tests' "$CLAUDE_LOG"; then
     # OUTCOME: blocked
     log "outcome: blocked (vacuous tests: 0 tests reported)"
-    agent-block.sh "Tests ran but reported zero tests executed. Definition of done failed: the test suite must run at least one assertion. Either this repo's \`CLAUDE.md\` declares a meaningless test command, or the change skipped the relevant suite. Fix and remove \`Status/Blocked\` to re-queue."
+    agent-block.sh "Tests ran but reported zero tests executed. Definition of done failed: the test suite must run at least one assertion. Either this repo's \`AGENTS.md\` (or legacy \`CLAUDE.md\`) declares a meaningless test command, or the change skipped the relevant suite. Fix and remove \`Status/Blocked\` to re-queue."
     exit 0
   fi
 

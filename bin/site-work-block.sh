@@ -15,11 +15,12 @@
 #   2. Invoke Claude Code in that worktree with:
 #        - The voice anchor
 #        - The directive (site-work-directive or now-directive)
-#        - The repo's CLAUDE.md
+#        - The repo's root context file -- AGENTS.md dossier
+#          (docs/agents-md-spec.md) if present, else legacy CLAUDE.md
 #      Both the voice anchor and the directive are sourced from the
 #      Distillery's last-good cache (lib/context-source.sh, igor#485),
 #      not the in-repo bin/lib/*.md copies.
-#      No AGENTS.md -- non-issue-work surface.
+#      No harness worker-contract AGENTS.md -- non-issue-work surface.
 #
 #   3. After Claude exits: if commits landed AND .agent/PR_BODY.md
 #      exists, push the branch + open a PR.
@@ -181,10 +182,17 @@ mkdir -p "$WORKTREE/.agent"
 
 # -- build the prompts ----------------------------------------
 
+# Prefer the AGENTS.md dossier (docs/agents-md-spec.md); fall back to
+# legacy CLAUDE.md for a repo that hasn't converted (igor#493).
 REPO_CLAUDE_MD=""
-[ -f "$WORKTREE/CLAUDE.md" ] && REPO_CLAUDE_MD=$(cat "$WORKTREE/CLAUDE.md")
+if [ -f "$WORKTREE/AGENTS.md" ]; then
+  REPO_CLAUDE_MD=$(cat "$WORKTREE/AGENTS.md")
+elif [ -f "$WORKTREE/CLAUDE.md" ]; then
+  REPO_CLAUDE_MD=$(cat "$WORKTREE/CLAUDE.md")
+fi
 
-# System prompt: voice + repo conventions. No AGENTS.md.
+# System prompt: voice + repo conventions. No harness worker-contract
+# AGENTS.md.
 SYSTEM_PROMPT=$(cat <<EOF
 ${VOICE_BODY}
 
