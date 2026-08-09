@@ -3416,23 +3416,37 @@ fi
 # -- Recovery: clear orphaned bot assignments ------------------
 #
 # Invariant: we hold the global flock, so no other tick is
-# currently running. Any open issue assigned to the bot right
-# now is in one of two states:
+# currently running. Assignment is now the PRIMARY claim lock
+# (igor#496): a claimed issue STAYS assigned to the bot for the
+# whole lifecycle of its PR -- through build, review, rework
+# rounds, and re-review -- and is only unassigned when the issue
+# closes (moot) or the work genuinely returns to the claimable
+# pool. So any OPEN issue this sweep finds assigned to the bot is
+# in one of three states:
 #
-#   (a) Orphan from a crashed previous tick. Needs the
-#       re-queueing comment, unassign, and local worktree
-#       cleanup.
+#   (a) In flight via a real (non-WIP) open bot PR. This is now
+#       the NORMAL steady state for a claimed issue, not a
+#       leftover to clean up -- hands off entirely. No unassign,
+#       no comment, no worktree touch.
 #
-#   (b) Leftover from a successful tick where post-PR cleanup
-#       didn't unassign the bot -- e.g., issues whose PRs
-#       opened before fix/issue-lifecycle-design landed. The
-#       work is IN FLIGHT via the open bot PR. Unassign
-#       quietly; no comment ("re-queueing" would be a lie
-#       since discovery's PR-history check skips it), no
-#       worktree cleanup (the work is on the remote branch).
+#   (b) Mid checkpoint: an open WIP (turn-cap draft) bot PR and
+#       nothing else. Checkpoint's own end-of-tick unassign
+#       already handles the normal case; the sweep only sees this
+#       after a crash mid-checkpoint-tick, before that unassign
+#       ran. Unassign quietly (no comment) so discovery's resume
+#       path can re-claim and continue it next tick.
 #
-# Distinguish via forgejo_bot_prs_for_issue: any open bot PR
-# closing the issue -> case (b).
+#   (c) No open bot PR at all -> orphan from a tick that crashed
+#       before opening (or resuming) a PR. Every successful
+#       completion path (ship, checkpoint-requeue, noop, blocked)
+#       already unassigns before the tick ends, and the flock
+#       guarantees the assigning tick has fully exited by the time
+#       this sweep runs -- so "assigned, no PR" can only mean the
+#       process died mid-flight. Needs the re-queueing comment,
+#       unassign, and local worktree cleanup.
+#
+# Distinguish via forgejo_bot_prs_for_issue + checkpoint_count_non_wip
+# (the same WIP-aware split discovery's structural guard uses).
 
 log "recovery sweep ($BOT_USER)"
 ORPHANS=$(forgejo_my_assigned || echo '[]')
@@ -3444,16 +3458,27 @@ if [ "$ORPHAN_COUNT" -gt 0 ]; then
     O_REPO=$(jq -r '.repo' <<<"$line")
     O_NUM=$(jq -r '.num' <<<"$line")
 
-    # Case (b): open bot PR -> work in flight, quiet unassign only.
     O_PR_HISTORY=$(forgejo_bot_prs_for_issue "$O_REPO" "$O_NUM" "$BOT_USER" 2>/dev/null || echo '[]')
-    O_OPEN_PR=$(jq '[.[] | select(.state == "open")] | length' <<<"$O_PR_HISTORY")
-    if [ "$O_OPEN_PR" -gt 0 ]; then
-      log "recovery: ${O_REPO}#${O_NUM} in flight (open bot PR), unassigning quietly"
+    O_OPEN_PRS=$(jq -c '[.[] | select(.state == "open")]' <<<"$O_PR_HISTORY")
+    O_OPEN_TOTAL=$(jq 'length' <<<"$O_OPEN_PRS")
+    O_OPEN_NONWIP=$(checkpoint_count_non_wip "$O_OPEN_PRS")
+
+    # Case (a): real PR in flight -- this is the intended primary-lock
+    # steady state. Leave the assignment alone.
+    if [ "$O_OPEN_NONWIP" -gt 0 ]; then
+      log "recovery: ${O_REPO}#${O_NUM} in flight (open bot PR), leaving assigned"
+      continue
+    fi
+
+    # Case (b): only a WIP checkpoint draft open -> mid-resume crash.
+    # Unassign so discovery's resume path can re-claim it.
+    if [ "$O_OPEN_TOTAL" -gt 0 ]; then
+      log "recovery: ${O_REPO}#${O_NUM} mid checkpoint (WIP PR only), unassigning for resume"
       forgejo_unassign_all "$O_REPO" "$O_NUM"
       continue
     fi
 
-    # Case (a): true orphan -> re-queue.
+    # Case (c): true orphan -> re-queue.
     log "recovery: ${O_REPO}#${O_NUM} orphaned, re-queueing"
     forgejo_comment "$O_REPO" "$O_NUM" \
       "Previous tick was interrupted before completion. Re-queueing -- the next tick will pick this up."
@@ -5083,13 +5108,15 @@ Address it, then remove \`Status/Blocked\` to re-queue. (If the note above says 
     log "warning: could not log time on ${FORGEJO_REPO}#${ISSUE_NUMBER}"
   fi
 
-  # Unassign the bot from the issue so the next tick's recovery
-  # sweep stays quiet. Keep the Agent label intact -- the label is
-  # the human's signal ("this needs an agent"); the open PR linked
-  # via "Closes #N" is the harness's signal ("work in flight").
-  # Discovery's PR-history check excludes issues with open bot PRs.
-  forgejo_unassign_all "$FORGEJO_REPO" "$ISSUE_NUMBER" 2>/dev/null \
-    || log "warning: could not unassign ${FORGEJO_REPO}#${ISSUE_NUMBER}"
+  # Assignment is the primary claim lock (igor#496): stay assigned to
+  # the bot for the PR's whole lifecycle -- review, rework rounds,
+  # re-review -- so discovery (which excludes bot-assigned issues) can
+  # never re-claim and rebuild over it. Keep the Agent label intact --
+  # the label is the human's signal ("this needs an agent"); the
+  # assignment is the harness's own in-flight lock. Unassign happens
+  # only when the issue closes (PR merged) or the work returns to the
+  # pool (recovery sweep's orphan case, checkpoint requeue, noop,
+  # block).
 
 else
   # Noop-loop guard. If the bot already left a "no work produced"

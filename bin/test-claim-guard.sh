@@ -11,6 +11,14 @@
 # pre-worktree branch abort, which must fire on a branch an open PR still
 # lives on and stay out of the way of the rejected-attempt retry.
 #
+# The operator amendment (appended to the issue before claim) makes
+# ASSIGNMENT the primary claim lock: a claimed issue stays assigned to the
+# bot for its PR's whole lifecycle, and is unassigned only when the issue
+# closes or the work genuinely returns to the pool. The sections below cover
+# that: the recovery sweep must leave an in-flight (real, non-WIP PR)
+# assignment alone instead of clearing it every tick, and the ship path must
+# stop clearing the assignment the moment a PR opens.
+#
 # Skip-safe: needs jq; exits 0 with a notice if absent.
 set -uo pipefail
 
@@ -236,6 +244,64 @@ LN_SET=$(grep -n '^ISSUE_NUMBER=' "$TICK" | head -1 | cut -d: -f1)
 LN_USE=$(grep -n 'STALE_BRANCHES=' "$TICK" | head -1 | cut -d: -f1)
 eq "ISSUE_NUMBER is assigned before the branch-abort block reads it" "true" \
   "$([ -n "$LN_SET" ] && [ -n "$LN_USE" ] && [ "$LN_SET" -lt "$LN_USE" ] && echo true || echo false)"
+
+# ---------------------------------------------------------------------------
+# Assignment as the primary claim lock (operator amendment to igor#496): the
+# recovery sweep's own 3-way split, exercised with the exact shape
+# forgejo_bot_prs_for_issue returns ({number, state, title, merged}) and the
+# exact filter + checkpoint_count_non_wip call bin/tick.sh's recovery loop
+# runs. Pure logic, no network.
+# ---------------------------------------------------------------------------
+echo "== recovery sweep: real (non-WIP) open PR -> in flight, hands off =="
+recovery_split() {
+  # Mirrors bin/tick.sh's recovery loop exactly: filter to open, then split
+  # via checkpoint_count_non_wip. Echoes "total nonwip" for the caller to read.
+  local history="$1" open total nonwip
+  open=$(jq -c '[.[] | select(.state == "open")]' <<<"$history")
+  total=$(jq 'length' <<<"$open")
+  nonwip=$(checkpoint_count_non_wip "$open")
+  printf '%s %s' "$total" "$nonwip"
+}
+READY_ONLY='[{"number":492,"state":"open","title":"fix: real work","merged":false}]'
+eq "a real open PR -> nonwip=1 (hands off, no unassign)" "1 1" "$(recovery_split "$READY_ONLY")"
+
+echo "== recovery sweep: WIP checkpoint draft only -> mid-resume crash, unassign for resume =="
+WIP_ONLY=$(jq -n --arg wip "$CHECKPOINT_WIP_PREFIX" \
+  '[{number: 490, state: "open", title: ($wip + "issue #490 checkpoint"), merged: false}]')
+eq "a WIP-only open PR -> total=1, nonwip=0 (unassign so discovery can resume)" "1 0" "$(recovery_split "$WIP_ONLY")"
+
+echo "== recovery sweep: no open PR at all -> true orphan, re-queue =="
+NO_OPEN='[{"number":489,"state":"closed","title":"an earlier rejected attempt","merged":false}]'
+eq "only closed history -> total=0 (orphan: comment + unassign + worktree cleanup)" "0 0" "$(recovery_split "$NO_OPEN")"
+eq "no history at all -> total=0 (orphan)" "0 0" "$(recovery_split '[]')"
+
+echo "== recovery sweep: rejected history alongside a live real PR -> still hands off =="
+MIXED='[{"number":489,"state":"closed","title":"rejected attempt","merged":false},{"number":492,"state":"open","title":"fix: real work","merged":false}]'
+eq "closed history + one real open PR -> nonwip=1 (hands off, not orphaned)" "1 1" "$(recovery_split "$MIXED")"
+
+echo "== recovery sweep: tick.sh wires up the WIP-aware 3-way split (igor#496 amendment) =="
+eq "recovery filters bot PR history down to open ones" "true" \
+  "$(grep -q 'O_OPEN_PRS=\$(jq -c' "$TICK" && echo true || echo false)"
+eq "recovery splits via checkpoint_count_non_wip, same helper discovery uses" "true" \
+  "$(grep -q 'O_OPEN_NONWIP=\$(checkpoint_count_non_wip "\$O_OPEN_PRS")' "$TICK" && echo true || echo false)"
+RECOVERY_START=$(grep -n 'log "recovery sweep' "$TICK" | head -1 | cut -d: -f1)
+RECOVERY_END=$(awk -v start="$RECOVERY_START" 'NR>start && /^fi$/ {print NR; exit}' "$TICK")
+RECOVERY_BLOCK=$(sed -n "${RECOVERY_START},${RECOVERY_END}p" "$TICK")
+eq "a real open PR case does NOT call forgejo_unassign_all" "true" \
+  "$(printf '%s\n' "$RECOVERY_BLOCK" | awk '/O_OPEN_NONWIP" -gt 0/,/continue/' | grep -q 'forgejo_unassign_all' && echo false || echo true)"
+eq "the WIP-only case still calls forgejo_unassign_all (resume path preserved)" "true" \
+  "$(printf '%s\n' "$RECOVERY_BLOCK" | awk '/O_OPEN_TOTAL" -gt 0/,/continue/' | grep -q 'forgejo_unassign_all "\$O_REPO" "\$O_NUM"' && echo true || echo false)"
+eq "the orphan case still comments + unassigns + cleans up the worktree" "true" \
+  "$(printf '%s\n' "$RECOVERY_BLOCK" | grep -q 'orphaned, re-queueing' && printf '%s\n' "$RECOVERY_BLOCK" | grep -q 'git worktree remove' && echo true || echo false)"
+
+echo "== ship path: opening/finalizing a PR no longer clears the issue assignment (igor#496 amendment) =="
+PR_OUTCOME_LINE=$(grep -n 'log "outcome: PR (' "$TICK" | head -1 | cut -d: -f1)
+NOOP_ELSE_LINE=$(awk -v start="$PR_OUTCOME_LINE" 'NR>start && /^else$/ {print NR; exit}' "$TICK")
+SHIP_BLOCK=$(sed -n "${PR_OUTCOME_LINE},${NOOP_ELSE_LINE}p" "$TICK")
+eq "the ship path does not unassign FORGEJO_REPO/ISSUE_NUMBER after a successful PR" "true" \
+  "$(printf '%s\n' "$SHIP_BLOCK" | grep -q 'forgejo_unassign_all "\$FORGEJO_REPO" "\$ISSUE_NUMBER"' && echo false || echo true)"
+eq "...while the noop (0-commit) outcome still unassigns to return the issue to the pool" "true" \
+  "$(sed -n "${NOOP_ELSE_LINE},\$p" "$TICK" | grep -q 'forgejo_unassign_all "\$FORGEJO_REPO" "\$ISSUE_NUMBER"' && echo true || echo false)"
 
 if [ "$FAIL" -eq 0 ]; then echo "test-claim-guard: all checks passed"; exit 0; fi
 echo "test-claim-guard: $FAIL check(s) FAILED"
