@@ -20,9 +20,10 @@
 # subscription billing the marginal cost of the bigger model is zero.
 
 # Max diff bytes fed to the reviewer. Issue-work diffs are already
-# scope-capped (~400 lines); this bounds the pathological case and keeps
-# the token cost predictable. An over-cap diff is reviewed truncated,
-# with a note so the reviewer knows it didn't see everything.
+# runaway-capped (~1000 non-test lines, igor#467); this bounds the
+# pathological case and keeps the token cost predictable. An over-cap diff
+# is reviewed truncated, with a note so the reviewer knows it didn't see
+# everything.
 SECURITY_GATE_MAX_DIFF_BYTES=60000
 
 # security_gate <worktree> <base_ref> <call_site>

@@ -77,8 +77,9 @@ form of this digest's recommendations, against the TOP priorities. This is the
   clear title, the scope, acceptance criteria, and which mandate priority it
   serves — never a vague "improve SEO."
 - **Respect the execution budget.** One issue is built by one agent, in one
-  pass, under a hard per-issue cap: **10 commits / 400 changed lines**. That
-  cap is enforced at review time — a proposal that overshoots it doesn't get
+  pass, under a hard per-issue cap: **10 commits / 1000 non-test changed
+  lines**. That cap is a runaway guard, not a sizing target, but it is
+  enforced at review time — a proposal that overshoots it doesn't get
   built smaller, it gets **blocked** and the work is lost. If what you're
   picturing plainly won't fit in that budget (e.g. multiple articles plus
   their pages, nav, sitemap, and meta wiring, all at once), **split it into
