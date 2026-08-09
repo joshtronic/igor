@@ -114,11 +114,6 @@ if [ ! -f "$AGENT_HOME/.env" ]; then
   exit 1
 fi
 
-set -a
-# shellcheck source=/dev/null
-. "$AGENT_HOME/.env"
-set +a
-
 mkdir -p "$UNIT_DIR"
 ln -sf "$AGENT_HOME/systemd/agent.service" "$UNIT_DIR/agent.service"
 ln -sf "$AGENT_HOME/systemd/agent.timer"   "$UNIT_DIR/agent.timer"
@@ -135,6 +130,14 @@ systemctl --user list-timers agent.timer --no-pager || true
 # first minute after the timer fires.
 echo
 echo "-> seeding prompt-surface cache from the Distillery (joshtronic/distillery)"
+
+# FORGEJO_HOST (used by ssh_clone_url below) comes from .env -- only
+# this seeding block needs it, so keep the sourcing scoped here.
+set -a
+# shellcheck source=/dev/null
+. "$AGENT_HOME/.env"
+set +a
+
 AGENT_STATE_DIR="${AGENT_STATE_DIR:-$HOME/.local/state/agent}"
 AGENT_REPO_ROOT="$AGENT_STATE_DIR/repos"
 DISTILLERY_PATH="$AGENT_REPO_ROOT/distillery"

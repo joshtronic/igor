@@ -210,9 +210,12 @@ context_refresh() {
   printf '%s\n' "$head" > "$gen/HEAD"
 
   # Atomic swap: repoint `current` in one rename (ln + mv -T on the
-  # symlink itself, never traversing into the target). A reader mid-cat
-  # of an old generation is unaffected -- nothing deletes it until after
-  # the swap below.
+  # symlink itself, never traversing into the target). The old
+  # generation is deleted right below, but a reader mid-cat of it is
+  # still unaffected: it already holds an open file descriptor, and
+  # unlinking a file doesn't invalidate descriptors already open on it
+  # (standard POSIX unlink semantics) -- the bytes stay readable until
+  # that reader closes it.
   ln -sfn "$(basename "$gen")" "$cache_root/current.tmp"
   mv -T "$cache_root/current.tmp" "$current"
 

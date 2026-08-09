@@ -12,9 +12,10 @@
 # http_reap_select_victims for the parentage and cgroup guards that keep
 # a server somebody is actually running out of the victim set.
 #
-# This is a backstop, not the fix: the directive (AGENTS.md,
-# site-work-directive.md) tells the agent not to spawn one of these at
-# all. This sweep catches whatever slips through anyway.
+# This is a backstop, not the fix: the directive (the worker-contract,
+# site-work-directive skills, sourced from the Distillery) tells the
+# agent not to spawn one of these at all. This sweep catches whatever
+# slips through anyway.
 #
 # Requires bash; sourced by bin/tick.sh.
 

@@ -210,15 +210,17 @@ bin/
 |-- agent-ask.sh             # Claude calls to file an async question issue
 |-- agent-block.sh           # Claude calls when stuck
 |-- agent-report.sh          # Claude calls for no-diff outcomes
-|-- check-sync.sh            # CI lint: AGENTS.md <-> tick.sh contract
+|-- check-sync.sh            # CI lint: worker-contract <-> tick.sh contract
 |-- validate.sh              # validate env + Forgejo connectivity + bot perms
 |-- validate-repo.sh         # audit a single repo (or --all) for readiness
 |-- install.sh               # one-time: install systemd units + enable timer
 |-- uninstall.sh             # stop, disable, remove units
 `-- lib/
-    |-- voice.md             # shared voice anchor for every Claude invocation
-    |-- site-work-directive.md # weekly site-work pass directive
-    `-- now-directive.md     # weekly /now refresh directive
+    `-- ceo-digest-directive.md # weekly CEO board digest directive -- the
+                                 # only prompt surface still local; voice,
+                                 # worker-contract, and the other task
+                                 # directives are sourced live from the
+                                 # Distillery (see "System prompts" below)
 
 lib/
 |-- forgejo.sh               # Forgejo API helpers
@@ -233,7 +235,7 @@ systemd/                     # user units (no @ instance)
 |-- agent.service
 `-- agent.timer
 
-AGENTS.md                    # universal unattended rules -- appended to Claude's system prompt for issue/PR work
+AGENTS.md                    # stub: OUTCOME sentinels only, for check-sync.sh's CI fallback
 agent-settings.json          # bot's permission profile -- passed via --settings
 ```
 

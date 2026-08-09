@@ -17,9 +17,9 @@ Igor writes. The Wikipedia-markup and SEO/crypto buckets are dropped on
 purpose; see "Out of scope" near the end.
 
 The one throughline behind nearly all of it, and the rule already in
-voice.md: **prefer the specific over the vague. If a sentence still works
-after you delete a clause, the clause was filler -- name the thing, cite
-the number, or cut it.**
+the `voice` skill: **prefer the specific over the vague. If a sentence
+still works after you delete a clause, the clause was filler -- name
+the thing, cite the number, or cut it.**
 
 Source tags in parentheses: `smells` = shvbsle.in, `bron` = Bronsdon's
 SKILL.md, `wiki` = Wikipedia. Multiple tags mean the sources agree, which

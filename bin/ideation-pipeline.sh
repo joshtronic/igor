@@ -332,13 +332,14 @@ EOF
 
 # -- voice notes (Igor's evolving, self-maintained style layer) -
 #
-# A persistent style addendum, SUBORDINATE to voice.md, that survives
-# between ticks. Loaded into the draft prompt every run; refined at most
-# once per ISO week by reflecting on recent post bodies. Lives in agent
-# state ($VOICE_NOTES_FILE), regenerable. The guardrails against a
+# A persistent style addendum, SUBORDINATE to the `voice` skill, that
+# survives between ticks. Loaded into the draft prompt every run; refined
+# at most once per ISO week by reflecting on recent post bodies. Lives in
+# agent state ($VOICE_NOTES_FILE), regenerable. The guardrails against a
 # self-reinforcing drift loop: weekly cadence, hard size cap, rewrite-
 # not-append, logged diffs, the VOICE_NOTES_EVOLVE=0 kill-switch, and the
-# anchor always winning. Known/endorsed rules belong in voice.md, not here.
+# anchor always winning. Known/endorsed rules belong in the `voice`
+# skill (sourced from the Distillery), not here.
 
 voice_notes_evolved_this_week() {
   local last this

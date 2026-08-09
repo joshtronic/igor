@@ -16,8 +16,9 @@ fails validation and drops out of the work pool, loudly.
 
 - **Thin by intent.** The dossier holds only what is true about THIS
   project. Generic craft (how to be a good unattended worker, PR
-  discipline, TDD) lives in the harness's `AGENTS.md` system-prompt
-  contract, not per repo. Coding standards are the linters' job
+  discipline, TDD) lives in the harness's worker-contract system prompt
+  (sourced from the Distillery), not per repo. Coding standards are
+  the linters' job
   (`lint:` in Metadata), and idiom is the codebase's job -- agents
   match surrounding code. Per-repo prose earns its place only when it
   is about this repo.
