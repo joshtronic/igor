@@ -114,6 +114,11 @@ if [ ! -f "$AGENT_HOME/.env" ]; then
   exit 1
 fi
 
+set -a
+# shellcheck source=/dev/null
+. "$AGENT_HOME/.env"
+set +a
+
 mkdir -p "$UNIT_DIR"
 ln -sf "$AGENT_HOME/systemd/agent.service" "$UNIT_DIR/agent.service"
 ln -sf "$AGENT_HOME/systemd/agent.timer"   "$UNIT_DIR/agent.timer"
@@ -121,6 +126,50 @@ ln -sf "$AGENT_HOME/systemd/agent.timer"   "$UNIT_DIR/agent.timer"
 systemctl --user daemon-reload
 systemctl --user enable --now agent.timer
 systemctl --user list-timers agent.timer --no-pager || true
+
+# One initial successful pull of igor's prompt surfaces from the
+# Distillery (joshtronic/distillery) is mandatory -- there's no in-repo
+# fallback, only the last-good cache (lib/context-source.sh, igor#485).
+# Seed it here rather than waiting for the first tick, so a broken or
+# unreachable distillery is caught during install, not silently on the
+# first minute after the timer fires.
+echo
+echo "-> seeding prompt-surface cache from the Distillery (joshtronic/distillery)"
+AGENT_STATE_DIR="${AGENT_STATE_DIR:-$HOME/.local/state/agent}"
+AGENT_REPO_ROOT="$AGENT_STATE_DIR/repos"
+DISTILLERY_PATH="$AGENT_REPO_ROOT/distillery"
+
+# Same SSH clone URL the harness uses (bin/tick.sh:ssh_clone_url).
+ssh_clone_url() {
+  local repo="$1"
+  if [[ "${FORGEJO_HOST:-}" == *:* ]]; then
+    echo "ssh://git@${FORGEJO_HOST}/${repo}.git"
+  else
+    echo "git@${FORGEJO_HOST}:${repo}.git"
+  fi
+}
+
+if [ ! -d "$DISTILLERY_PATH/.git" ]; then
+  mkdir -p "$AGENT_REPO_ROOT"
+  git clone --quiet "$(ssh_clone_url joshtronic/distillery)" "$DISTILLERY_PATH" 2>/dev/null \
+    || echo "warning: could not clone joshtronic/distillery" >&2
+else
+  git -C "$DISTILLERY_PATH" fetch --prune --quiet origin 2>/dev/null \
+    || echo "warning: could not fetch joshtronic/distillery" >&2
+fi
+
+# shellcheck source=lib/context-source.sh
+. "$AGENT_HOME/lib/context-source.sh"
+if context_refresh && context_seeded; then
+  echo "   prompt cache seeded OK"
+else
+  cat >&2 <<EOF2
+warning: initial context pull did not succeed -- prompt-consuming work
+(issue work, PR review, feedback triage, site-work, sports digest) will
+stay BLOCKED until a tick manages one successful pull. Run
+\`bin/doctor.sh\` after the timer's first fire to confirm it landed.
+EOF2
+fi
 
 cat <<EOF
 

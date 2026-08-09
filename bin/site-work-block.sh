@@ -13,10 +13,12 @@
 #      a new `agent/site-work-<ts>` branch.
 #
 #   2. Invoke Claude Code in that worktree with:
-#        - The voice anchor (bin/lib/voice.md)
-#        - The directive (site-work-directive.md or
-#          now-directive.md)
+#        - The voice anchor
+#        - The directive (site-work-directive or now-directive)
 #        - The repo's CLAUDE.md
+#      Both the voice anchor and the directive are sourced from the
+#      Distillery's last-good cache (lib/context-source.sh, igor#485),
+#      not the in-repo bin/lib/*.md copies.
 #      No AGENTS.md -- non-issue-work surface.
 #
 #   3. After Claude exits: if commits landed AND .agent/PR_BODY.md
@@ -95,6 +97,8 @@ DIRECTIVE=""
 
 # shellcheck source=../lib/forgejo.sh
 . "$AGENT_HOME/lib/forgejo.sh"
+# shellcheck source=../lib/context-source.sh
+. "$AGENT_HOME/lib/context-source.sh"
 # shellcheck source=../lib/cost.sh
 . "$AGENT_HOME/lib/cost.sh"
 # shellcheck source=../lib/claude.sh
@@ -135,15 +139,20 @@ WEBSITE_PATH="${WEBSITE_PATH:-$AGENT_REPO_ROOT/${WEBSITE_REPO}}"
 log() { printf 'site-work-block: %s\n' "$*" >&2; }
 
 # -- load voice anchor + directive -----------------------------
+#
+# Sourced from the Distillery at origin/master, live, via
+# context_surface's last-good cache -- no in-repo fallback
+# (lib/context-source.sh, igor#485). tick.sh's bootstrap gate normally
+# guarantees a seeded cache before this ever runs; the check below is
+# defense-in-depth for a standalone invocation of this script.
 
-VOICE_FILE="$AGENT_HOME/bin/lib/voice.md"
-DIRECTIVE_FILE="$AGENT_HOME/bin/lib/${DIRECTIVE}-directive.md"
+if ! context_seeded; then
+  log "prompt cache never seeded (lib/context-source.sh) -- refusing to run"
+  exit 2
+fi
 
-if [ ! -f "$VOICE_FILE" ];     then log "voice anchor not found: $VOICE_FILE"; exit 2; fi
-if [ ! -f "$DIRECTIVE_FILE" ]; then log "directive not found: $DIRECTIVE_FILE"; exit 2; fi
-
-VOICE_BODY=$(cat "$VOICE_FILE")
-DIRECTIVE_BODY=$(cat "$DIRECTIVE_FILE")
+VOICE_BODY=$(context_surface voice)
+DIRECTIVE_BODY=$(context_surface "${DIRECTIVE}-directive")
 
 # -- website worktree setup ------------------------------------
 

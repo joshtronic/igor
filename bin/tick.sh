@@ -80,6 +80,8 @@ unset env_file_hint
 
 # shellcheck source=lib/forgejo.sh
 . "$AGENT_HOME/lib/forgejo.sh"
+# shellcheck source=lib/context-source.sh
+. "$AGENT_HOME/lib/context-source.sh"
 # shellcheck source=lib/checkpoint.sh
 . "$AGENT_HOME/lib/checkpoint.sh"
 # shellcheck source=lib/dossier.sh
@@ -368,8 +370,13 @@ init_igor_scratch() {
 # Build the full system prompt for issue-work Claude invocations.
 #
 # Two pieces, in order:
-#   bin/lib/voice.md  -- shared voice anchor (2 paragraphs)
-#   AGENTS.md         -- slim, issue-work-specific protocol/rules
+#   voice anchor      -- shared voice anchor (2 paragraphs)
+#   worker contract   -- slim, issue-work-specific protocol/rules
+#
+# Both are sourced from the Distillery at origin/master, live, via
+# context_surface's last-good cache -- no in-repo fallback
+# (lib/context-source.sh, igor#485). The bootstrap gate above the main
+# cascade guarantees the cache is seeded before this ever runs.
 #
 # Per-repo CLAUDE.md is NOT concatenated here; Claude Code auto-
 # loads it from the worktree root when invoked there. The legacy
@@ -383,12 +390,9 @@ init_igor_scratch() {
 # classification work); the reading pipeline and site-work block
 # each compose their own prompts inside their executor scripts.
 issue_system_prompt() {
-  local voice="$AGENT_HOME/bin/lib/voice.md"
-  if [ -f "$voice" ]; then
-    cat "$voice" "$AGENT_HOME/AGENTS.md"
-  else
-    cat "$AGENT_HOME/AGENTS.md"
-  fi
+  context_surface voice
+  printf '\n'
+  context_surface worker-contract
 }
 
 
@@ -2012,7 +2016,7 @@ do_sports_tick() {
   local covered prompt directive raw parsed attempt snippet tail_snip
   covered=$(sports_concepts_load)
   prompt=$(sports_build_prompt "$payload" "$covered" "$ydash")
-  directive=$(cat "$AGENT_HOME/bin/lib/sports-digest-directive.md")
+  directive=$(context_surface sports-digest-directive)
   parsed=""
   for attempt in 1 2; do
     raw=$(claude_call "$AGENT_MODEL" "sports-digest" 16000 "$directive" "$prompt" 0 "${SPORTS_CALL_TIMEOUT_SECS:-600}") || {
@@ -3030,7 +3034,7 @@ do_review_tick() {
   title=$(jq -r '.title // ""' <<<"$target_json")
   body=$(jq -r '.body // ""' <<<"$target_json")
 
-  directive=$(cat "$AGENT_HOME/bin/lib/review-directive.md")
+  directive=$(context_surface review-directive)
   # review_build_prompt (lib/review.sh) also folds in the linked issue's
   # own text and the repo's test-runner facts (igor#438) -- both
   # best-effort and additive, so a missing issue or unreadable Makefile
@@ -3212,6 +3216,37 @@ do_health_tick || true
 # verifies -- so no long work starts mid-deploy. Sits above the health gate.
 do_deploy_barrier && exit 0
 
+# -- Distillery context sourcing ----------------------------------
+#
+# igor's prompt surfaces (voice, worker contract, review/feedback/
+# site-work/now/sports-digest directives) are sourced live from the
+# Distillery (joshtronic/distillery) at origin/master -- no pins, no
+# submodules, no in-repo fallback (lib/context-source.sh, igor#485).
+# This is igor's OWN "keep it fetched" step for that clone, run near
+# the top of the cascade the same way the harness pulls its own code
+# at the very top of this script -- except the clone lives at a
+# dedicated FLAT path (not the owner-nested layout the validation
+# sweep below uses for bot-managed repos), since distillery isn't
+# necessarily one of those.
+#
+# Non-model (git only), so it runs even during a Claude health
+# cooldown -- keeping the cache fresh costs nothing and a cooldown
+# can run for hours. context_refresh itself is fail-open: on any
+# problem it leaves the existing cache untouched and warns once (see
+# lib/context-source.sh); only a cache that has NEVER been seeded is
+# fatal, and that's the bootstrap gate below, not here.
+DISTILLERY_PATH="$AGENT_REPO_ROOT/distillery"
+if [ ! -d "$DISTILLERY_PATH/.git" ]; then
+  log "context-source: cloning joshtronic/distillery to $DISTILLERY_PATH"
+  mkdir -p "$AGENT_REPO_ROOT"
+  git clone --quiet "$(ssh_clone_url joshtronic/distillery)" "$DISTILLERY_PATH" 2>/dev/null \
+    || log "warning: clone of joshtronic/distillery failed; context cache serves last-good"
+else
+  (cd "$DISTILLERY_PATH" && git fetch --prune --quiet origin 2>/dev/null) \
+    || log "warning: fetch of joshtronic/distillery failed; context cache serves last-good"
+fi
+context_refresh || true
+
 # -- Validation sweep ------------------------------------------
 #
 # Per-tick pre-flight. Every bot-accessible repo is CLONED (or its
@@ -3324,6 +3359,26 @@ do_automerge_tick && exit 0
 
 if claude_health_blocked; then
   log "claude health: backoff active (kind=$(claude_health_kind)) -- skipping all model work this tick"
+  do_seo_tick || true
+  do_shipreport_tick || true
+  exit 0
+fi
+
+# -- Context bootstrap gate ---------------------------------------
+#
+# One initial successful pull from the Distillery is mandatory --
+# every prompt-consuming surface (issue work, PR review, feedback
+# triage, site-work, sports digest) reads its system prompt through
+# context_surface, which refuses to serve a skill until the cache has
+# been seeded at least once (lib/context-source.sh, igor#485). After
+# that first success, ordinary refresh failures are fail-open and
+# never reach here -- this only trips on a fresh install (or a
+# distillery that's been unreachable/broken since day one). Mirrors
+# the claude_health_blocked shape immediately above: block all model
+# work, let the scripted no-LLM subsystems keep running.
+if ! context_seeded; then
+  log "context-source: prompt cache never seeded -- blocking all model work (see lib/context-source.sh)"
+  context_bootstrap_alert || true
   do_seo_tick || true
   do_shipreport_tick || true
   exit 0
@@ -4585,9 +4640,9 @@ init_igor_scratch "$WORKTREE"
 
 cd "$WORKTREE"
 
-# System prompt: voice anchor + slim AGENTS.md (issue-work-
-# specific). Per-repo CLAUDE.md is auto-loaded by Claude Code
-# from the worktree root.
+# System prompt: voice anchor + worker contract, sourced from the
+# Distillery (issue_system_prompt). Per-repo CLAUDE.md is auto-loaded
+# by Claude Code from the worktree root.
 SYSTEM_PROMPT=$(issue_system_prompt)
 
 USER_MSG=$(cat <<EOF
