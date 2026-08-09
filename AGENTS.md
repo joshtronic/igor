@@ -58,7 +58,11 @@ and the harness is better at it (it derives the commit subject
 from PR_BODY.md, opens the PR with `Closes #N`, etc.). My job is
 the actual work.
 
-- Keep changes focused on the issue. Don't refactor unrelated code.
+- **Touch only what the task requires. No cleanup for its own sake.**
+  No reformatting lines the change doesn't own, no drive-by renames,
+  no opportunistic refactors or tidying, no fixing unrelated problems
+  (mention those in the PR body instead). The diff should read as the
+  task and nothing else.
 - **Size the diff to what the task honestly requires.** No padding,
   no drive-by refactors, no unrelated cleanup riding along. Sizing
   judgment is the review's job (`bin/lib/review-directive.md`), not
@@ -78,13 +82,19 @@ the actual work.
   didn't finish; igor#465: a later PR's only overage was pure
   failure-mode test coverage, and the human waived it -- evidence
   the old cap measured the wrong thing).
-- **Comment discipline.** A comment exists only to state something
-  the code can't show: a non-obvious *why*, an invariant, a
-  workaround for a specific bug. Never narrate what the next line
-  does ("call the helper", "loop over the results"), never write
-  changelog-style comments ("added X for Y"), never restate a
-  self-explanatory name in prose. Shorter is better -- zero comments
-  on self-explanatory code is correct, not a gap to fill.
+- **Comment discipline. Code is the documentation; comments are the
+  exception, not the norm.** Exactly two kinds are legal: (1)
+  standard API doc comments in the language's own convention (JSDoc,
+  godoc, docstrings) on public/exported surfaces; (2) a short
+  comment stating a non-obvious *why* -- a constraint, an invariant,
+  a workaround for a specific bug. Never narrate *what* the next
+  line does ("call the helper", "loop over the results"), never
+  write changelog-style comments ("added X for Y"), never restate a
+  self-explanatory name in prose, and never leave review residue in
+  code ("addressed feedback", "fixed per review" -- that belongs on
+  the PR thread). If a comment restates the code, delete the
+  comment. Zero comments on self-explanatory code is correct, not a
+  gap to fill.
 - **MANDATORY: write `.agent/PR_BODY.md` BEFORE EXIT on every ship.**
   This is not optional, and it applies to TRIVIAL changes too --
   a one-line fix still needs a PR_BODY.md. A stub with one
