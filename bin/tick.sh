@@ -4449,6 +4449,12 @@ while IFS= read -r repo_line; do
   # rejected-PR strike count) becomes this repo's contender against
   # other repos' contenders.
   CANDIDATES=$(forgejo_find_claimable "$R_NAME" "${FORGEJO_REVIEWER:-}" || echo '[]')
+  # The open-PR listing is repo-scoped and issue-independent, so it is fetched
+  # once here rather than per candidate.
+  R_OPEN_PRS=$(forgejo_open_prs "$R_NAME" 2>/dev/null) || {
+    R_OPEN_PRS='[]'
+    log "warning: could not list open PRs on ${R_NAME} -- in-flight check degraded to \"nothing covering\" this tick"
+  }
   REPO_CONTENDER=""
   while read -r candidate; do
     [ -z "$candidate" ] && continue
@@ -4457,20 +4463,20 @@ while IFS= read -r repo_line; do
     # Structural in-flight check (igor#496): ANY open PR (any author,
     # unaffected by assignment/review history or discretionary-state.json)
     # whose branch is this issue's own agent/<n>(-*) namespace, or whose body
-    # carries a closing keyword, means the work already lives in a PR --
-    # rebuilding it from scratch would silently replace whatever's there
+    # carries a standalone closing line, means the work already lives in a PR
+    # -- rebuilding it from scratch would silently replace whatever's there
     # (including post-review rework fixes). EXCEPT a WIP checkpoint draft
     # (turn-cap snapshot): that IS this issue, paused mid-flight, and must be
     # RESUMED below, not skipped here -- so it stays claimable at this point.
     #
-    # A Forgejo blip here reads as "nothing covering" (fail open) so one bad
+    # A Forgejo blip above reads as "nothing covering" (fail open) so one bad
     # response can't stall the grind fleet-wide; the pre-worktree branch check
     # further down is the fail-CLOSED backstop, re-querying immediately before
     # the force-push and refusing when it can't confirm.
-    C_COVERING=$(forgejo_open_pr_covers_issue "$R_NAME" "$C_NUM" 2>/dev/null || echo '[]')
+    C_COVERING=$(forgejo_prs_covering_issue "$R_OPEN_PRS" "$C_NUM")
     C_OPEN=$(checkpoint_count_non_wip "$C_COVERING")
     if [ "$C_OPEN" -gt 0 ]; then
-      log "skipping ${R_NAME}#${C_NUM} -- open PR already covers this issue (branch/closing-keyword match)"
+      log "skipping ${R_NAME}#${C_NUM} -- open PR already covers this issue (branch/closing-line match)"
       continue
     fi
     # Rejected-attempt strike count still needs BOT authorship specifically

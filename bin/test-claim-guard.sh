@@ -3,12 +3,13 @@
 # issues that an open, ready PR already covered, rebuilding and force-pushing
 # over the same agent/<n>-slug branch and destroying rework fixes (#492/#494).
 #
-# The invariant under test: forgejo_open_pr_covers_issue's keyword regex must
-# stay as broad as pr_body_ensure_closes's "already satisfied" regex, or a PR
-# whose body reads "fixes #N" (so no literal `Closes #N` line was ever
-# appended) is invisible to the gate. Plus the pre-worktree branch abort,
-# which must fire on a branch an open PR still lives on and stay out of the
-# way of the rejected-attempt retry.
+# Two arms under test, pulling in opposite directions. The branch arm
+# (`agent/<n>(-*)`) must catch every bot PR, since that is the class the gate
+# exists to protect. The body arm must NOT catch a PR that merely mentions the
+# issue in prose -- igor's own PR bodies do that constantly, and a false
+# positive there stalls an unrelated issue silently and indefinitely. Plus the
+# pre-worktree branch abort, which must fire on a branch an open PR still
+# lives on and stay out of the way of the rejected-attempt retry.
 #
 # Skip-safe: needs jq; exits 0 with a notice if absent.
 set -uo pipefail
@@ -29,13 +30,20 @@ FAIL=0
 eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
 
 echo "== forgejo_open_pr_covers_issue: branch-name signal (author-independent) =="
-_fj() { cat <<'JSON'
+# forgejo_open_prs walks pages until one comes back empty, so every _fj stub
+# standing in for a whole listing has to answer page 2 with [].
+_fj() {
+  case "$2" in
+    *page=1*) cat <<'JSON'
 [
  {"number":492,"head":{"ref":"agent/490-fix-claim-gate"},"body":"unrelated body, no keyword","user":{"login":"igor"}},
  {"number":10,"head":{"ref":"agent/49-something-else"},"body":"","user":{"login":"igor"}},
  {"number":11,"head":{"ref":"feature/manual"},"body":"nothing relevant","user":{"login":"human"}}
 ]
 JSON
+      ;;
+    *) printf '%s' '[]' ;;
+  esac
 }
 OUT=$(forgejo_open_pr_covers_issue acme/x 490)
 eq "matches agent/490-<slug> branch even with no closing keyword" "1" "$(jq 'length' <<<"$OUT")"
@@ -45,50 +53,100 @@ eq "the head ref rides along (the branch abort filters on it)"     "agent/490-fi
 eq "agent/49-* (different issue, shared prefix) does NOT match"    "false" \
   "$(jq -r '[.[].number] | index(10) != null' <<<"$OUT")"
 
-echo "== forgejo_open_pr_covers_issue: the root-cause keyword gap, now closed =="
-# The exact shape that let #490/#491 slip through: a PR whose branch name
-# doesn't happen to carry the issue number (title-slug drift is not modeled
-# here) but whose body reads "fixes #490" -- a phrase forgejo_bot_prs_for_issue
-# never matched (its regex requires the literal word "closes").
-_fj() { printf '%s' '[{"number":492,"head":{"ref":"some-other-branch"},"body":"This PR fixes #490 by adding the missing guard.","user":{"login":"igor"}}]'; }
-OUT=$(forgejo_open_pr_covers_issue acme/x 490)
-eq "\"fixes #490\" prose is recognized (the bug forgejo_bot_prs_for_issue had)" "1" "$(jq 'length' <<<"$OUT")"
-OLD=$(forgejo_bot_prs_for_issue acme/x 490 igor)
-eq "...whereas forgejo_bot_prs_for_issue's narrower regex still misses it (documents the gap this fix closes)" \
-  "0" "$(jq 'length' <<<"$OLD")"
+echo "== forgejo_prs_covering_issue: body arm matches a STANDALONE closing line =="
+# covers <body> [issue] -- how many PRs the body arm alone matches. The head
+# ref is deliberately outside the agent/ namespace so only the body can match.
+covers() {
+  local prs
+  prs=$(jq -nc --arg b "$1" '[{number: 492, head: {ref: "some-other-branch"}, body: $b, user: {login: "igor"}}]')
+  jq 'length' <<<"$(forgejo_prs_covering_issue "$prs" "${2:-490}")"
+}
+eq "bare \"Closes #490\""                     "1" "$(covers 'Closes #490')"
+eq "the line pr_body_ensure_closes appends"   "1" "$(covers "$(pr_body_ensure_closes 'did the work' 490)")"
+eq "\"Fixes #490.\" with a trailing period"   "1" "$(covers 'Fixes #490.')"
+eq "\"- Resolves #490\" as a list item"       "1" "$(covers '- Resolves #490')"
+eq "\"Close #490\" (no s) on its own line"    "1" "$(covers "$(printf 'intro\nClose #490\n')")"
+eq "CRLF line endings (what the API returns)" "1" "$(covers "$(printf 'intro\r\nCloses #490\r\nmore\r\n')")"
+eq "\"Resolved #491\" on its own line"        "1" "$(covers 'Resolved #491' 491)"
 
-_fj() { printf '%s' '[{"number":493,"head":{"ref":"some-other-branch"},"body":"Resolved #491 in the process.","user":{"login":"igor"}}]'; }
-eq "\"resolved #491\" prose is also recognized" "1" "$(jq 'length' <<<"$(forgejo_open_pr_covers_issue acme/x 491)")"
+echo "== forgejo_prs_covering_issue: a prose mention must NOT match (igor#497) =="
+# The body arm matches ANY open PR by ANY author, so anything looser than a
+# standalone closing line makes the discovery loop skip an unrelated issue on
+# every tick for as long as the PR is open -- silent, and indefinite. igor's
+# own PR bodies are the first case: they quote other tickets constantly.
+eq "mid-sentence \"This PR fixes #490 by ...\"" "0" \
+  "$(covers 'This PR fixes #490 by adding the missing guard.')"
+eq "the same phrase wrapped onto a fresh line"  "0" \
+  "$(covers "$(printf 'a body of\nfixes #490 by adding the missing guard. satisfied the old regex')")"
+eq "a checklist item mentioning the issue"      "0" \
+  "$(covers "$(printf '## What this PR does\n\n- [x] fix: something that also fixes #490 somehow\n')")"
+eq "\"#4900\" does not falsely satisfy issue 490" "0" "$(covers 'Closes #4900')"
+eq "no keyword at all"                            "0" "$(covers 'see #490 for context')"
 
-_fj() { printf '%s' '[{"number":494,"head":{"ref":"some-other-branch"},"body":"Close #490 once merged.","user":{"login":"igor"}}]'; }
-eq "\"close #490\" (no s) is also recognized" "1" "$(jq 'length' <<<"$(forgejo_open_pr_covers_issue acme/x 490)")"
+echo "== forgejo_prs_covering_issue: the branch arm is what covers every bot PR =="
+# A bot PR whose body only mentions the issue in prose is still caught, because
+# bin/tick.sh builds BRANCH as agent/<n>[-slug] and every bot PR lives there.
+# That is the arm that closes igor#496; the body arm is for the rest.
+INCIDENT='[{"number":492,"head":{"ref":"agent/490-fix-claim-gate"},"body":"This PR fixes #490 by adding the missing guard.","user":{"login":"igor"}}]'
+eq "prose body + agent/490-<slug> branch -> covered" "1" \
+  "$(jq 'length' <<<"$(forgejo_prs_covering_issue "$INCIDENT" 490)")"
+_fj() { printf '%s' "$INCIDENT"; }
+eq "...and forgejo_bot_prs_for_issue would have missed it (the igor#496 gap)" "0" \
+  "$(jq 'length' <<<"$(forgejo_bot_prs_for_issue acme/x 490 igor)")"
 
-echo "== forgejo_open_pr_covers_issue: literal Closes still works, no false positives =="
-_fj() { printf '%s' '[{"number":495,"head":{"ref":"agent/500-other-issue"},"body":"Closes #490","user":{"login":"igor"}}]'; }
-eq "literal \"Closes #490\" still matches" "1" "$(jq 'length' <<<"$(forgejo_open_pr_covers_issue acme/x 490)")"
-
-_fj() { printf '%s' '[{"number":496,"head":{"ref":"agent/500-other-issue"},"body":"Closes #4900","user":{"login":"igor"}}]'; }
-eq "\"#4900\" does not falsely satisfy issue 490 (word-boundary respected)" "0" "$(jq 'length' <<<"$(forgejo_open_pr_covers_issue acme/x 490)")"
-
-_fj() { printf '%s' '[]'; }
-eq "no open PRs at all -> empty" "0" "$(jq 'length' <<<"$(forgejo_open_pr_covers_issue acme/x 490)")"
-
-echo "== forgejo_open_pr_covers_issue: paginates, and reports an incomplete listing =="
+echo "== forgejo_open_prs: paginates, and reports an incomplete listing =="
 # A miss here is silent and repeats every tick, so a repo with more than one
 # page of open PRs must not hide the covering PR on page 2.
 _fj() {
   case "$2" in
     *page=1*) jq -nc '[range(50) | {number: (1000 + .), head: {ref: "other/\(.)"}, body: "nothing"}]' ;;
-    *)        printf '%s' '[{"number":492,"head":{"ref":"agent/490-fix-claim-gate"},"body":"nothing"}]' ;;
+    *page=2*) printf '%s' '[{"number":492,"head":{"ref":"agent/490-fix-claim-gate"},"body":"nothing"}]' ;;
+    *)        printf '%s' '[]' ;;
   esac
 }
 OUT=$(forgejo_open_pr_covers_issue acme/x 490)
 eq "a covering PR on page 2 is still found" "492" "$(jq -r '.[0].number // "none"' <<<"$OUT")"
 
+# A short page is NOT treated as the end: a Forgejo whose MAX_RESPONSE_ITEMS is
+# below our limit=50 would otherwise report "complete" after page 1.
+_fj() {
+  case "$2" in
+    *page=1*) jq -nc '[range(10) | {number: (1000 + .), head: {ref: "other/\(.)"}, body: "nothing"}]' ;;
+    *page=2*) printf '%s' '[{"number":492,"head":{"ref":"agent/490-fix-claim-gate"},"body":"nothing"}]' ;;
+    *)        printf '%s' '[]' ;;
+  esac
+}
+eq "a server that honours a smaller page size still gets walked to the end" "492" \
+  "$(jq -r '.[0].number // "none"' <<<"$(forgejo_open_pr_covers_issue acme/x 490)")"
+
+_fj() { printf '%s' '[]'; }
+eq "no open PRs at all -> empty" "0" "$(jq 'length' <<<"$(forgejo_open_pr_covers_issue acme/x 490)")"
+
 _fj() { return 1; }
 OUT=$(forgejo_open_pr_covers_issue acme/x 490); RC=$?
 eq "an unfetchable listing returns nonzero..." "1" "$RC"
 eq "...with no output, so a caller can't mistake it for \"nothing covering\"" "" "$OUT"
+
+echo "== forgejo_open_prs: a degenerate response terminates instead of spinning =="
+# `jq length` on an empty body yields an empty string, and `[ "" -lt 50 ]` is
+# an error, not false -- which in the first cut meant page++ forever, hanging
+# the tick. Both the numeric guard and the page cap have to hold for these to
+# return at all, so a regression shows up as a hung suite, not a red one.
+_fj() { printf ''; }
+OUT=$(forgejo_open_prs acme/x); RC=$?
+eq "an empty body ends the walk nonzero" "1" "$RC"
+eq "...and emits nothing"                ""  "$OUT"
+
+_fj() { printf '%s' 'not json at all'; }
+OUT=$(forgejo_open_prs acme/x); RC=$?
+eq "an unparseable body ends the walk nonzero" "1" "$RC"
+
+# A server that keeps answering with a full page must hit the cap. The cap is
+# lowered inside the substitution's subshell so the override can't leak.
+_fj() { jq -nc '[range(50) | {number: ., head: {ref: "other/\(.)"}, body: "x"}]'; }
+# shellcheck disable=SC2034  # read by forgejo_open_prs (lib/forgejo.sh)
+OUT=$(FORGEJO_OPEN_PRS_MAX_PAGES=3; forgejo_open_prs acme/x); RC=$?
+eq "an endless full-page server hits the page cap and returns nonzero" "1" "$RC"
 
 echo "== forgejo_prs_on_branches: which leftover branches still carry live work =="
 COVERING='[{"number":492,"title":"t","head":"agent/490-fix-claim-gate"},{"number":493,"title":"t","head":"agent/490-old-slug"}]'
@@ -103,7 +161,7 @@ eq "no covering PRs at all reports nothing" "" \
 
 # ---------------------------------------------------------------------------
 # Discovery gate: the count that decides claimability is checkpoint_count_non_wip
-# (lib/checkpoint.sh) applied to forgejo_open_pr_covers_issue's output -- the
+# (lib/checkpoint.sh) applied to forgejo_prs_covering_issue's output -- the
 # same function bin/tick.sh calls, not a re-implementation of it.
 # ---------------------------------------------------------------------------
 echo "== discovery gate: ready PR open -> NOT claimable =="
@@ -159,10 +217,14 @@ eq "leftover branch from a CLOSED (rejected) PR -> no abort, the second attempt 
 # ---------------------------------------------------------------------------
 echo "== tick.sh: wires up the structural guard + branch abort (igor#496) =="
 TICK="$HERE/tick.sh"
-eq "discovery loop calls forgejo_open_pr_covers_issue" "true" \
-  "$(grep -q 'forgejo_open_pr_covers_issue ' "$TICK" && echo true || echo false)"
+eq "discovery loop filters via forgejo_prs_covering_issue" "true" \
+  "$(grep -q 'forgejo_prs_covering_issue ' "$TICK" && echo true || echo false)"
+eq "...against a listing hoisted OUT of the candidate loop (one fetch per repo)" "true" \
+  "$(awk '/^  CANDIDATES=/,/^  while read -r candidate/' "$TICK" | grep -q 'forgejo_open_prs ' && echo true || echo false)"
 eq "discovery gate counts non-WIP entries via checkpoint_count_non_wip" "true" \
   "$(grep -q 'checkpoint_count_non_wip ' "$TICK" && echo true || echo false)"
+eq "the branch abort re-queries with forgejo_open_pr_covers_issue" "true" \
+  "$(grep -A8 'STALE_BRANCHES=' "$TICK" | grep -q 'forgejo_open_pr_covers_issue ' && echo true || echo false)"
 eq "fresh -B path checks for a leftover agent/<n>(-*) branch on origin before overwriting" "true" \
   "$(grep -q 'STALE_BRANCHES=' "$TICK" && echo true || echo false)"
 eq "that check narrows to branches an open PR is built on" "true" \

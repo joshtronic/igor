@@ -673,39 +673,79 @@ forgejo_bot_prs_for_issue() {
          | {number, state, title: (.title // ""), merged: (.merged // false)}]'
 }
 
-# forgejo_open_pr_covers_issue <repo> <issue_num> -- OPEN pull requests (ANY
-# author, unlike forgejo_bot_prs_for_issue) already covering this issue: head
-# branch in the issue's own `agent/<n>`/`agent/<n>-*` namespace, or a body
-# closing keyword for <n>. Returns [{number, title, head}]; paginated, and
-# returns nonzero with NO output if the listing couldn't be fetched whole --
-# callers gating a destructive step must read that as "unknown", not "none".
+# Page cap for forgejo_open_prs. 20 pages x 50 = 1000 open PRs, far past any
+# real repo; it exists so a server that keeps answering with a full page can't
+# spin the tick forever.
+FORGEJO_OPEN_PRS_MAX_PAGES="${FORGEJO_OPEN_PRS_MAX_PAGES:-20}"
+
+# forgejo_open_prs <repo> -- every open pull request in <repo>, one JSON array.
+# Nonzero with NO output when the listing couldn't be walked to the end (a
+# failed request, an unparseable page, or the page cap) -- callers gating a
+# destructive step must read that as "unknown", not "none".
 #
-# INVARIANT: the keyword regex must stay at least as broad as
-# pr_body_ensure_closes's "already satisfied" regex (lib/checkpoint.sh). That
-# function skips appending `Closes #N` when the body already reads e.g.
-# "fixes #N"; anything narrower here makes such a PR permanently invisible to
-# the claim gate, which is how ready PRs got reclaimed and force-pushed over
-# (igor#496).
-forgejo_open_pr_covers_issue() {
-  local repo="$1" issue_num="$2" page=1 batch count all='[]' complete=0
-  while batch=$(_fj GET "/repos/${repo}/pulls?state=open&limit=50&page=${page}"); do
-    count=$(jq 'length' <<<"$batch")
-    [ "$count" -gt 0 ] && all=$(printf '%s\n%s' "$all" "$batch" | jq -s 'add')
-    if [ "$count" -lt 50 ]; then complete=1; break; fi
+# Pages until a page comes back EMPTY rather than short: `limit=50` is a
+# request, not a promise, and a Forgejo with a lower MAX_RESPONSE_ITEMS would
+# make a short first page look like the whole list. One extra request per repo
+# per tick buys that; the callers hoist this out of their loops.
+forgejo_open_prs() {
+  local repo="$1" page=1 batch count all='[]'
+  while [ "$page" -le "$FORGEJO_OPEN_PRS_MAX_PAGES" ]; do
+    batch=$(_fj GET "/repos/${repo}/pulls?state=open&limit=50&page=${page}") || return 1
+    count=$(jq 'length' <<<"$batch" 2>/dev/null) || return 1
+    case "$count" in '' | *[!0-9]*) return 1 ;; esac
+    [ "$count" -eq 0 ] && { printf '%s' "$all"; return 0; }
+    all=$(printf '%s\n%s' "$all" "$batch" | jq -s 'add') || return 1
     page=$((page + 1))
   done
-  [ "$complete" = "1" ] || return 1
-  jq -c --arg n "$issue_num" '
+  return 1
+}
+
+# forgejo_prs_covering_issue <open_prs_json> <issue_num> -- of the PRs in
+# <open_prs_json> (forgejo_open_prs's shape), those already covering this
+# issue, as [{number, title, head}]. Author-independent, unlike
+# forgejo_bot_prs_for_issue. Two arms:
+#
+#   1. Head branch in the issue's own `agent/<n>`/`agent/<n>-*` namespace.
+#      This is the load-bearing one: EVERY bot PR for an issue lives there
+#      (bin/tick.sh builds BRANCH as agent/<n>[-slug] and resumes on it), so
+#      it covers the whole class of PR this gate exists to protect (igor#496)
+#      with no false-positive surface -- that namespace is the harness's own.
+#   2. A STANDALONE closing line for <n> -- the `Closes #N` form
+#      pr_body_ensure_closes appends, or a human writing `Fixes #N` on its own
+#      line. Deliberately NARROWER than pr_body_ensure_closes's "already
+#      satisfied" test, which accepts the keyword anywhere in the body: igor's
+#      own PR bodies routinely discuss other tickets in prose ("this PR fixes
+#      issue NNN by..."), and a keyword-anywhere match there makes the
+#      discovery loop skip that unrelated issue on every tick, silently and
+#      indefinitely, for as long as the PR stays open (igor#497 review). A
+#      false negative here just costs a duplicate claim, which arm 1 and the
+#      pre-worktree branch abort in bin/tick.sh both still catch.
+#
+# jq's regex engine anchors `^`/`$` to the whole STRING, not to each line, so
+# the line boundaries are spelled out as `(\A|\n)` / `(\n|\z)`.
+forgejo_prs_covering_issue() {
+  jq -c --arg n "$2" '
       [.[]
        | select(
            ((.head.ref // "") | test("^agent/" + $n + "($|-)"))
-           or ((.body // "") | test("(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\s+#" + $n + "(\\D|$)"))
+           or ((.body // "") | test(
+                 "(?i)(\\A|\\n)[ \\t>*+-]*(close[sd]?|fix(e[sd])?|resolve[sd]?)"
+                 + "[ \\t]+#" + $n + "[ \\t]*[.;,)]?[ \\t\\r]*(\\n|\\z)"))
          )
-       | {number, title: (.title // ""), head: (.head.ref // "")}]' <<<"$all"
+       | {number, title: (.title // ""), head: (.head.ref // "")}]' <<<"$1"
+}
+
+# forgejo_open_pr_covers_issue <repo> <issue_num> -- forgejo_open_prs piped
+# into forgejo_prs_covering_issue, for one-shot callers. Propagates the
+# "listing incomplete" nonzero.
+forgejo_open_pr_covers_issue() {
+  local prs
+  prs=$(forgejo_open_prs "$1") || return 1
+  forgejo_prs_covering_issue "$prs" "$2"
 }
 
 # forgejo_prs_on_branches <covering_json> <branches> -- of the PR entries in
-# <covering_json> (forgejo_open_pr_covers_issue's shape), those whose head ref
+# <covering_json> (forgejo_prs_covering_issue's shape), those whose head ref
 # is one of the newline-separated <branches>, rendered as "#N (ref), ...".
 # Empty output means no open PR is built on any of those branches, i.e. they
 # are leftovers from closed or merged PRs and safe to reset.
