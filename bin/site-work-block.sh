@@ -15,12 +15,13 @@
 #   2. Invoke Claude Code in that worktree with:
 #        - The voice anchor
 #        - The directive (site-work-directive or now-directive)
-#        - The repo's root context file -- AGENTS.md dossier
+#        - The WEBSITE repo's root context file -- AGENTS.md dossier
 #          (docs/agents-md-spec.md) if present, else legacy CLAUDE.md
 #      Both the voice anchor and the directive are sourced from the
 #      Distillery's last-good cache (lib/context-source.sh, igor#485),
 #      not the in-repo bin/lib/*.md copies.
-#      No harness worker-contract AGENTS.md -- non-issue-work surface.
+#      Never THIS repo's worker-contract AGENTS.md: the worktree is
+#      always carved from WEBSITE_REPO, a non-issue-work surface.
 #
 #   3. After Claude exits: if commits landed AND .agent/PR_BODY.md
 #      exists, push the branch + open a PR.
@@ -184,11 +185,11 @@ mkdir -p "$WORKTREE/.agent"
 
 # Prefer the AGENTS.md dossier (docs/agents-md-spec.md); fall back to
 # legacy CLAUDE.md for a repo that hasn't converted (igor#493).
-REPO_CLAUDE_MD=""
+REPO_CONTEXT_MD=""
 if [ -f "$WORKTREE/AGENTS.md" ]; then
-  REPO_CLAUDE_MD=$(cat "$WORKTREE/AGENTS.md")
+  REPO_CONTEXT_MD=$(cat "$WORKTREE/AGENTS.md")
 elif [ -f "$WORKTREE/CLAUDE.md" ]; then
-  REPO_CLAUDE_MD=$(cat "$WORKTREE/CLAUDE.md")
+  REPO_CONTEXT_MD=$(cat "$WORKTREE/CLAUDE.md")
 fi
 
 # System prompt: voice + repo conventions. No harness worker-contract
@@ -198,7 +199,7 @@ ${VOICE_BODY}
 
 ---
 
-${REPO_CLAUDE_MD}
+${REPO_CONTEXT_MD}
 EOF
 )
 

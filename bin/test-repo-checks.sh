@@ -222,9 +222,17 @@ ok "both present -> present"            rc_context_file_exists_at "$f" master
 f="$(new_fixture)"; : >"$f/README.md"; commit_fixture "$f"
 no "neither -> absent (blocked)"        rc_context_file_exists_at "$f" master
 
-echo "== tick.sh preflight block message prefers AGENTS.md wording (igor#493) =="
+echo "== tick.sh preflight wiring + wording (igor#493) =="
+# The preflight calls rc_context_file_exists_at. Without the source line the
+# call is a 127 swallowed by `if !`, blocking EVERY repo at claim time -- so
+# assert both halves of the wiring: tick.sh sources the lib, and the lib
+# defines the function (this file has already sourced it above).
+ok "tick.sh sources lib/repo-checks.sh" \
+  grep -qE '^\. "\$AGENT_HOME/lib/repo-checks\.sh"$' "$HERE/tick.sh"
+ok "the sourced lib defines rc_context_file_exists_at" \
+  command -v rc_context_file_exists_at
 ok "block message names AGENTS.md first, CLAUDE.md as legacy fallback" \
-  grep -qF '\`AGENTS.md\` (or legacy \`CLAUDE.md\`) is missing at the repo root' "$HERE/tick.sh"
+  grep -qE 'AGENTS\.md.*legacy.*CLAUDE\.md.*missing at the repo root' "$HERE/tick.sh"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-repo-checks: all passed"
