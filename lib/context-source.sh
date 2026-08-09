@@ -181,7 +181,7 @@ context_refresh() {
     return 0   # already current -- no re-extract
   fi
 
-  local gen errfile skill body reason line_count ok=1 bad_reason=""
+  local gen errfile skill body line_count ok=1 bad_reason=""
   gen=$(mktemp -d "$cache_root/.gen-XXXXXX")
   errfile=$(mktemp)
   for skill in "${CONTEXT_SKILLS[@]}"; do

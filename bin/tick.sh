@@ -4640,9 +4640,9 @@ init_igor_scratch "$WORKTREE"
 
 cd "$WORKTREE"
 
-# System prompt: voice anchor + slim AGENTS.md (issue-work-
-# specific). Per-repo CLAUDE.md is auto-loaded by Claude Code
-# from the worktree root.
+# System prompt: voice anchor + worker contract, sourced from the
+# Distillery (issue_system_prompt). Per-repo CLAUDE.md is auto-loaded
+# by Claude Code from the worktree root.
 SYSTEM_PROMPT=$(issue_system_prompt)
 
 USER_MSG=$(cat <<EOF

@@ -116,6 +116,26 @@ else
   info "WEBSITE_REPO unset -- website work disabled"
 fi
 
+# ----- Prompt-surface cache (Distillery) -------------------------
+
+section "Prompt-surface cache (Distillery)"
+CONTEXT_CACHE="$AGENT_STATE_DIR/context/current"
+DISTILLERY_CLONE="$AGENT_REPO_ROOT/distillery"
+if [ -f "$CONTEXT_CACHE/HEAD" ]; then
+  CACHE_HEAD=$(cat "$CONTEXT_CACHE/HEAD" 2>/dev/null)
+  ok "initial context pull succeeded -- cache stamped at ${CACHE_HEAD:0:7}"
+  if [ -d "$DISTILLERY_CLONE/.git" ]; then
+    LIVE_HEAD=$(git -C "$DISTILLERY_CLONE" rev-parse origin/master 2>/dev/null || echo "")
+    if [ -n "$LIVE_HEAD" ] && [ "$LIVE_HEAD" != "$CACHE_HEAD" ]; then
+      warn "cache is behind distillery's origin/master (${LIVE_HEAD:0:7}) -- last refresh must have been refused; check the tick log"
+    fi
+  else
+    info "no local distillery clone at $DISTILLERY_CLONE (serving last-good cache regardless)"
+  fi
+else
+  bad "prompt cache never seeded -- all model work is BLOCKED (lib/context-source.sh, igor#485)"
+fi
+
 # ----- State files ----------------------------------------------
 
 section "State files"
