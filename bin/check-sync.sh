@@ -18,8 +18,8 @@
 # checking a copy the model never reads (igor#487). When a cache is
 # already seeded (every production host, mid-tick), that's the sourced
 # worker-contract body. A CI container has no cache and typically no
-# Distillery SSH access either -- see worker_contract_doc() below for the
-# best-effort seed attempt and the AGENTS.md fallback.
+# Distillery SSH access either -- see the seed attempt and AGENTS.md
+# fallback below.
 #
 # Exits 0 on success, 1 on any mismatch or test failure. Run by
 # .forgejo/workflows/lint.yml on every PR and push.
@@ -45,9 +45,8 @@ FAIL=0
 # `make test` validate the real document instead of the fallback. If
 # that doesn't produce a seeded cache (no .env, no network, no
 # Distillery access -- the normal CI case), fall back to validating the
-# in-repo AGENTS.md stub and say so loudly: it only carries the OUTCOME
-# sentinels, not the helper references, so the helper check below is
-# vacuous in that mode.
+# in-repo AGENTS.md and say so loudly, so a green run in that mode is
+# never mistaken for having checked the real, sourced document.
 WORKER_DOC_TMP=""
 cleanup_worker_doc() { if [ -n "$WORKER_DOC_TMP" ]; then rm -f "$WORKER_DOC_TMP"; fi; }
 trap cleanup_worker_doc EXIT
@@ -87,7 +86,7 @@ if context_seeded; then
   WORKER_DOC_LABEL="the sourced worker-contract (Distillery cache)"
 else
   WORKER_DOC="AGENTS.md"
-  WORKER_DOC_LABEL="AGENTS.md (fallback -- prompt cache unseeded; helper check will be vacuous)"
+  WORKER_DOC_LABEL="AGENTS.md (fallback -- prompt cache unseeded)"
   echo "! prompt cache unseeded and no Distillery access -- validating $WORKER_DOC_LABEL instead"
 fi
 echo "+ validating sentinels/helpers against: $WORKER_DOC_LABEL"
