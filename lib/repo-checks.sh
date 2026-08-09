@@ -106,18 +106,20 @@ check_test_signal() {
 # check_deploy_smoke_signal -- an alternate test-signal path for static sites
 # with no unit-test suite (e.g. snail.io). Per Josh: "games are still websites
 # -- the smoke test is the site deploying and passing that bundle-hash
-# validation." A repo qualifies when agent.json declares a live `.smoke.url`
-# (the same file lib/automerge.sh reads to gate auto-merge) AND the build
-# stamps a `deploy-sha` marker into the page (the live propagation check
-# lib/automerge.sh's automerge_live_sha performs post-deploy). The actual
-# pre-merge correctness bar -- CI building the site on the PR -- is
-# check_ci_workflow, run separately by validate_repo_local; this only
-# substitutes for the unit-test requirement, it doesn't relax CI.
+# validation." A repo qualifies when its dossier declares a live `url` (root
+# AGENTS.md, falling back to legacy agent.json `.smoke.url` -- the same
+# source lib/automerge.sh reads to gate auto-merge, via lib/dossier.sh's
+# dossier_get_content) AND the build stamps a `deploy-sha` marker into the
+# page (the live propagation check lib/automerge.sh's automerge_live_sha
+# performs post-deploy). The actual pre-merge correctness bar -- CI building
+# the site on the PR -- is check_ci_workflow, run separately by
+# validate_repo_local; this only substitutes for the unit-test requirement,
+# it doesn't relax CI.
 check_deploy_smoke_signal() {
-  local cfg url
+  local agents cfg url
+  agents=$(rc_file_read AGENTS.md)
   cfg=$(rc_file_read agent.json)
-  [ -n "$cfg" ] || return 1
-  url=$(jq -r '.smoke.url // empty' <<<"$cfg" 2>/dev/null)
+  url=$(dossier_get_content "$agents" "$cfg" url) || return 1
   [ -n "$url" ] || return 1
   git -C "$_RC_REPO_PATH" grep -qiF 'deploy-sha' "$_RC_REF" >/dev/null 2>&1
 }

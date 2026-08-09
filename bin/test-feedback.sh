@@ -10,6 +10,8 @@ for t in jq python3 sha1sum; do
 done
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=../lib/dossier.sh
+. "$HERE/../lib/dossier.sh"
 # shellcheck source=../lib/feedback.sh
 . "$HERE/../lib/feedback.sh"
 
@@ -72,11 +74,45 @@ eq "parse: FILE body"     "The pig freezes." "$(jq -r '.body' <<<"$OUT")"
 no "parse: no DECISION -> rc1"   feedback_parse_response "garbage"
 no "parse: FILE w/o body -> rc1" feedback_parse_response "$(printf 'DECISION: FILE\nTITLE: x')"
 
-echo "== csv_url (agent.json .feedback.csv) =="
+echo "== csv_url (agent.json .feedback.csv, legacy fallback -- no repo has adopted the dossier yet) =="
 forgejo_repo_get_file() { printf '%s' '{"feedback":{"csv":"https://x/pub?output=csv"}}'; }
 eq "csv_url: extracts .feedback.csv" "https://x/pub?output=csv" "$(feedback_csv_url acme/x)"
 forgejo_repo_get_file() { printf '%s' '{"smoke":{"url":"y"}}'; }
 eq "csv_url: no feedback key -> empty" "" "$(feedback_csv_url acme/x)"
+
+echo "== feedback_csv_url is dossier_get_repo (igor#473): adopted AGENTS.md vs legacy fallback =="
+# A repo that HAS adopted the spec: root AGENTS.md carries the fence, no
+# agent.json involved at all.
+DOSSIER=$'# dossier.example\n\n## Metadata\n\n```yaml\ntype: arcade\nurl: https://dossier.example\nfeedback-csv: https://dossier.example/feedback.csv\n```\n'
+forgejo_repo_get_file() {
+  case "$2" in
+    AGENTS.md) printf '%s' "$DOSSIER" ;;
+    *) return 1 ;;
+  esac
+}
+eq "csv_url: adopted dossier -> reads root AGENTS.md Metadata" \
+  "https://dossier.example/feedback.csv" "$(feedback_csv_url acme/x)"
+
+# A repo that has NOT adopted the spec (the whole fleet today): no root
+# AGENTS.md dossier, so it falls back to legacy agent.json -- same value as
+# the pre-#473 direct read, i.e. fleet behavior is unchanged.
+forgejo_repo_get_file() {
+  case "$2" in
+    agent.json) printf '%s' '{"feedback":{"csv":"https://x/pub?output=csv"}}' ;;
+    *) return 1 ;;
+  esac
+}
+eq "csv_url: un-adopted repo -> falls back to legacy agent.json (fleet-neutral)" \
+  "https://x/pub?output=csv" "$(feedback_csv_url acme/x)"
+
+echo "== dossier.sh wiring (igor#473): the dependency must be sourced, and loud when it isn't =="
+# This test file sources lib/dossier.sh itself, so it would pass even if
+# bin/tick.sh (the real caller graph) never did -- assert that directly.
+ok "tick.sh sources lib/dossier.sh" grep -q 'lib/dossier\.sh"$' "$HERE/tick.sh"
+# And if it ever stops: an undefined dossier_get_repo must LOG, not degrade to
+# a silent empty (which feedback reads as "no repo opted in").
+BARE=$(bash -c '. "$1/../lib/feedback.sh"; feedback_csv_url acme/x' _ "$HERE" 2>&1)
+has "csv_url: missing lib/dossier.sh logs instead of failing silently" "$BARE" "lib/dossier.sh not sourced"
 
 echo "== feedback_search_prior (generic targeted dedup search) =="
 _fj() {
