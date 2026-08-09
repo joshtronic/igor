@@ -287,9 +287,11 @@ Known trade-offs:
   urgent issue first.
 - **Recovery, not resume.** An interrupted tick re-queues its
   issue; the next tick starts fresh.
-- **Scope cap.** A branch over ~400 changed lines gets blocked
-  instead of shipped, with a comment listing the touched files.
-  Split the ticket and re-queue.
+- **Runaway guard.** A branch over 1000 non-test changed lines (test
+  files are excluded from the count) gets blocked instead of shipped,
+  with a comment listing the touched files. It's a backstop against a
+  genuinely runaway branch, not a sizing target -- split the ticket and
+  re-queue.
 - **One PR per repo.** While a bot PR is open in a repo, the rest
   of that repo's claimable issues wait. Intentional throttle; merge
   or close to resume.
