@@ -95,3 +95,8 @@ readiness bar.
 - [Setup](docs/setup.md) -- auth, bot user, install, local dev, operating
 - [Onboarding a repo](docs/onboarding-a-repo.md) -- readiness bar, labels, validation
 - [AGENTS.md dossier spec](docs/agents-md-spec.md) -- the per-repo context file's required shape
+
+## License
+
+This project is licensed under the GNU General Public License v3.0 --
+see [LICENSE](LICENSE) for the full text.
