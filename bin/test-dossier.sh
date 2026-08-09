@@ -106,6 +106,13 @@ reason_has "double-spaced invalid type still fails, honestly" "$BADTYPE2SPACE" "
 H1_2SPACE=${GOOD/'# porksicle.com'/'#  porksicle.com'}
 ok "double-spaced H1 passes once trimmed" dossier_validate "$H1_2SPACE"
 
+echo "== dossier_get: trims padded values, agreeing with dossier_validate/dossier_keys =="
+PADDED=${GOOD/type: arcade/type:  arcade  }
+ok "padded 'type:  arcade  ' passes dossier_validate" dossier_validate "$PADDED"
+D7="$TMPROOT/d7"; mkdir -p "$D7"; printf '%s' "$PADDED" >"$D7/AGENTS.md"
+eq "dossier_keys lists all 4, including padded type" "$(printf 'type\nurl\ntest\nfeedback-csv')" "$(dossier_keys "$D7")"
+eq "dossier_get trims padded type to exactly 'arcade'" "arcade" "$(dossier_get "$D7" type)"
+
 echo "== dossier_check_no_nested_metadata =="
 ok "prose-only nested AGENTS.md passes"  dossier_check_no_nested_metadata $'# lore\n\njust prose, no metadata\n'
 no  "nested AGENTS.md with ## Metadata fails" dossier_check_no_nested_metadata $'# lore\n\n## Metadata\n\n```yaml\ntype: tool\n```\n'

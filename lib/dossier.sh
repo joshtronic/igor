@@ -74,7 +74,7 @@ dossier_get_content() {
     line=$(grep -E "^${key}:" <<<"$block" | head -1) || true
     [ -n "$line" ] || return 1
     value="${line#*:}"
-    value="${value# }"
+    value="$(_dossier_trim "$value")"
     [ -n "$value" ] || return 1
     printf '%s\n' "$value"
     return 0
@@ -85,6 +85,7 @@ dossier_get_content() {
     feedback-csv) value=$(jq -r '.feedback.csv // empty' <<<"$cfg_content" 2>/dev/null) ;;
     *) return 1 ;;
   esac
+  value="$(_dossier_trim "$value")"
   [ -n "$value" ] || return 1
   printf '%s\n' "$value"
 }
