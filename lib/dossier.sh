@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # dossier.sh -- the machine half of docs/agents-md-spec.md.
-# dossier_get/dossier_keys are the RUNTIME reader (falls back to legacy
-# agent.json when a repo has no root AGENTS.md, so call sites can switch
-# without a behavior change). dossier_validate is the STRUCTURAL check
-# lib/repo-checks.sh's check_dossier runs against a root AGENTS.md's
-# content -- absent-vs-nonconforming is check_dossier's call, not this
-# function's. No YAML dependency -- the block is flat so grep/awk/bash
-# parse it without one.
+# dossier_get/dossier_get_repo/dossier_keys are the RUNTIME reader (falls
+# back to legacy agent.json when a repo has no root AGENTS.md, so call sites
+# can switch without a behavior change) -- both dossier_get (checkout dir)
+# and dossier_get_repo (Forgejo API, no clone) share the same core lookup,
+# dossier_get_content, which callers with content already in hand (e.g.
+# lib/repo-checks.sh's git-show-based reads) can call directly too.
+# dossier_validate is the STRUCTURAL check lib/repo-checks.sh's check_dossier
+# runs against a root AGENTS.md's content -- absent-vs-nonconforming is
+# check_dossier's call, not this function's. No YAML dependency -- the block
+# is flat so grep/awk/bash parse it without one.
 
 # All three lists are lifted verbatim from docs/agents-md-spec.md: the keys
 # are the table in "The Metadata block"; DOSSIER_TYPES and DOSSIER_SITE_TYPES
@@ -39,19 +42,21 @@ _dossier_metadata_block() {
   return 0
 }
 
-# dossier_get <checkout_dir> <key>
-# Echoes the value for <key> from the root AGENTS.md Metadata block. Falls
-# back to legacy agent.json (url <- .smoke.url, feedback-csv <- .feedback.csv)
-# when the repo hasn't adopted the dossier -- no root AGENTS.md, or a prose
-# one with no `## Metadata` (same keying as check_dossier's rc2). Empty + rc 1
-# when the key is absent, or when an adopted dossier's block is unreadable.
-dossier_get() {
-  local dir="$1" key="$2" agents cfg
-  agents="$dir/AGENTS.md"; cfg="$dir/agent.json"
-  local content block line value
-  if [ -f "$agents" ] && dossier_is_declared "$(cat "$agents")"; then
-    content=$(cat "$agents")
-    block=$(_dossier_metadata_block "$content") || return 1
+# dossier_get_content <agents_md_content> <agent_json_content> <key>
+# The core lookup shared by every runtime consumer: dossier_get (checkout
+# dir, below), dossier_get_repo (Forgejo API, no clone -- lib/automerge.sh,
+# lib/feedback.sh), and check_deploy_smoke_signal (the local anchor clone via
+# rc_file_read/git-show -- lib/repo-checks.sh). Same value contract
+# everywhere: echoes the value + rc0, or empty + rc1. Falls back to legacy
+# agent.json (url <- .smoke.url, feedback-csv <- .feedback.csv) when the repo
+# hasn't adopted the dossier -- no AGENTS.md content, or a prose one with no
+# `## Metadata` (same keying as check_dossier's rc2). Empty + rc 1 when the
+# key is absent, or when an adopted dossier's block is unreadable.
+dossier_get_content() {
+  local agents_content="$1" cfg_content="$2" key="$3"
+  local block line value
+  if [ -n "$agents_content" ] && dossier_is_declared "$agents_content"; then
+    block=$(_dossier_metadata_block "$agents_content") || return 1
     line=$(grep -E "^${key}:" <<<"$block" | head -1) || true
     [ -n "$line" ] || return 1
     value="${line#*:}"
@@ -60,14 +65,36 @@ dossier_get() {
     printf '%s\n' "$value"
     return 0
   fi
-  [ -f "$cfg" ] || return 1
+  [ -n "$cfg_content" ] || return 1
   case "$key" in
-    url)          value=$(jq -r '.smoke.url // empty' "$cfg" 2>/dev/null) ;;
-    feedback-csv) value=$(jq -r '.feedback.csv // empty' "$cfg" 2>/dev/null) ;;
+    url)          value=$(jq -r '.smoke.url // empty' <<<"$cfg_content" 2>/dev/null) ;;
+    feedback-csv) value=$(jq -r '.feedback.csv // empty' <<<"$cfg_content" 2>/dev/null) ;;
     *) return 1 ;;
   esac
   [ -n "$value" ] || return 1
   printf '%s\n' "$value"
+}
+
+# dossier_get <checkout_dir> <key> -- dossier_get_content sourced from real
+# files on disk. See dossier_get_content for the value contract.
+dossier_get() {
+  local dir="$1" key="$2" agents cfg agents_content cfg_content
+  agents="$dir/AGENTS.md"; cfg="$dir/agent.json"
+  agents_content=""; [ -f "$agents" ] && agents_content=$(cat "$agents")
+  cfg_content=""; [ -f "$cfg" ] && cfg_content=$(cat "$cfg")
+  dossier_get_content "$agents_content" "$cfg_content" "$key"
+}
+
+# dossier_get_repo <repo> <key> -- dossier_get_content sourced from a repo's
+# Forgejo contents API (no clone needed) -- for callers with no local
+# checkout, like lib/automerge.sh and lib/feedback.sh. Needs
+# forgejo_repo_get_file (lib/forgejo.sh) already sourced. See
+# dossier_get_content for the value contract.
+dossier_get_repo() {
+  local repo="$1" key="$2" agents_content cfg_content
+  agents_content=$(forgejo_repo_get_file "$repo" AGENTS.md 2>/dev/null) || agents_content=""
+  cfg_content=$(forgejo_repo_get_file "$repo" agent.json 2>/dev/null) || cfg_content=""
+  dossier_get_content "$agents_content" "$cfg_content" "$key"
 }
 
 # dossier_keys <checkout_dir> -- lists the keys present, one per line. Same

@@ -9,6 +9,8 @@ set -uo pipefail
 command -v jq >/dev/null 2>&1 || { echo "test-automerge: jq absent -- skipping"; exit 0; }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=../lib/dossier.sh
+. "$HERE/../lib/dossier.sh"
 # shellcheck source=../lib/automerge.sh
 . "$HERE/../lib/automerge.sh"
 
@@ -22,7 +24,7 @@ no() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (expect
 eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
 has() { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
 
-echo "== agent.json (.smoke.url) opt-in =="
+echo "== agent.json (.smoke.url) opt-in (legacy fallback -- no repo has adopted the dossier yet) =="
 forgejo_repo_get_file() { printf '%s' '{"smoke":{"url":"https://porksicle.com"}}'; }
 eq "smoke_url: extracts .smoke.url"        "https://porksicle.com" "$(automerge_smoke_url acme/site)"
 eq "smoke_url: self repo never eligible"   ""                      "$(automerge_smoke_url "$AUTOMERGE_SELF_REPO")"
@@ -30,6 +32,31 @@ forgejo_repo_get_file() { printf '%s' '{"feedback":{"csv":"x"}}'; }
 eq "smoke_url: agent.json without .smoke -> empty" ""              "$(automerge_smoke_url acme/site)"
 forgejo_repo_get_file() { return 1; }
 eq "smoke_url: no agent.json -> empty"     ""                      "$(automerge_smoke_url acme/site)"
+
+echo "== automerge_smoke_url is dossier_get_repo (igor#473): adopted AGENTS.md vs legacy fallback =="
+# A repo that HAS adopted the spec: root AGENTS.md carries the fence, no
+# agent.json involved at all.
+DOSSIER=$'# dossier.example\n\n## Metadata\n\n```yaml\ntype: tool\nurl: https://dossier.example\n```\n'
+forgejo_repo_get_file() {
+  case "$2" in
+    AGENTS.md) printf '%s' "$DOSSIER" ;;
+    *) return 1 ;;
+  esac
+}
+eq "smoke_url: adopted dossier -> reads root AGENTS.md Metadata" \
+  "https://dossier.example" "$(automerge_smoke_url acme/site)"
+
+# A repo that has NOT adopted the spec (the whole fleet today): no root
+# AGENTS.md dossier, so it falls back to legacy agent.json -- same value as
+# the pre-#473 direct read, i.e. fleet behavior is unchanged.
+forgejo_repo_get_file() {
+  case "$2" in
+    agent.json) printf '%s' '{"smoke":{"url":"https://porksicle.com"}}' ;;
+    *) return 1 ;;
+  esac
+}
+eq "smoke_url: un-adopted repo -> falls back to legacy agent.json (fleet-neutral)" \
+  "https://porksicle.com" "$(automerge_smoke_url acme/site)"
 
 echo "== approval / mergeable gates =="
 _fj() { printf '%s' "$FJ"; }

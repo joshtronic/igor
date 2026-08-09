@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # automerge.sh -- auto-merge-on-approve + the deploy barrier. Sourced by bin/tick.sh.
 #
-# "After you approve, your job ends." A repo opts in by CONVENTION: a root
-# agent.json (AGENT_CONFIG_FILE) carrying a `.smoke.url` marks it
-# auto-merge-eligible -- agent.json is the shared per-repo machine-config dossier
-# (each feature reads its own key). The
+# "After you approve, your job ends." A repo opts in by CONVENTION: its
+# dossier declaring a live `url` marks it auto-merge-eligible -- root
+# AGENTS.md `url` (docs/agents-md-spec.md), falling back to legacy agent.json
+# (AGENT_CONFIG_FILE) `.smoke.url` via lib/dossier.sh's dossier_get_repo for
+# any repo that hasn't adopted the spec yet. The
 # harness merges a bot PR ONLY when the human (FORGEJO_REVIEWER) has submitted an
 # APPROVED review, CI is green on the head, it is cleanly mergeable, and the
 # shadow verdict is not REQUEST_CHANGES. On merge it stamps a pending deploy
@@ -32,14 +33,14 @@ if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*" >&2; }; 
 
 _deploy_state_file() { echo "${AGENT_STATE_DIR:-$HOME/.local/state/agent}/discretionary-state.json"; }
 
-# automerge_smoke_url <repo> -- the live URL from the repo's agent.json
-# `.smoke.url`, or empty: not eligible (no agent.json / no .smoke.url), or the
-# harness's own repo.
+# automerge_smoke_url <repo> -- the live URL from the repo's dossier (root
+# AGENTS.md `url`, falling back to legacy agent.json `.smoke.url` -- see
+# lib/dossier.sh), or empty: not eligible (neither source declares one), or
+# the harness's own repo.
 automerge_smoke_url() {
   local repo="$1"
   [ "$repo" = "$AUTOMERGE_SELF_REPO" ] && return 0
-  forgejo_repo_get_file "$repo" "$AGENT_CONFIG_FILE" 2>/dev/null \
-    | jq -r '.smoke.url // empty' 2>/dev/null || true
+  dossier_get_repo "$repo" url 2>/dev/null || true
 }
 
 # automerge_require_human <repo> -- exit 0 if the repo pins itself to a HUMAN

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # feedback.sh -- player-feedback triage. Sourced by bin/tick.sh.
 #
-# Opt-in by CONVENTION: a repo's agent.json carries `.feedback.csv` -- the
-# published Google-Form CSV of player feedback. do_feedback_tick processes the
+# Opt-in by CONVENTION: a repo's dossier carries a feedback CSV url (root
+# AGENTS.md `feedback-csv`, or legacy agent.json `.feedback.csv` -- see
+# lib/dossier.sh) -- the published Google-Form CSV of player feedback.
+# do_feedback_tick processes the
 # OLDEST unprocessed row each tick (one row per tick): ONE claude_call on
 # AGENT_MODEL_REVIEW reads the feedback (as untrusted DATA) plus repo context
 # (recent CLOSED issues, recent commits, the game list) and decides:
@@ -26,10 +28,11 @@ if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*" >&2; }; 
 
 _feedback_state_file() { echo "${AGENT_STATE_DIR:-$HOME/.local/state/agent}/discretionary-state.json"; }
 
-# feedback_csv_url <repo> -- the .feedback.csv from the repo's agent.json, or empty.
+# feedback_csv_url <repo> -- the feedback CSV from the repo's dossier (root
+# AGENTS.md `feedback-csv`, falling back to legacy agent.json `.feedback.csv`
+# -- see lib/dossier.sh), or empty.
 feedback_csv_url() {
-  forgejo_repo_get_file "$1" "${AGENT_CONFIG_FILE:-agent.json}" 2>/dev/null \
-    | jq -r '.feedback.csv // empty' 2>/dev/null
+  dossier_get_repo "$1" feedback-csv 2>/dev/null || true
 }
 
 # feedback_fetch_rows <url> -- curl the published CSV, emit a JSON array of row
@@ -251,7 +254,7 @@ feedback_file_issue() {
 }
 
 # do_feedback_tick -- triage ONE unprocessed feedback row per tick across the
-# analysis set (repos whose agent.json declares .feedback.csv). FILE -> open an
+# analysis set (repos whose dossier declares a feedback CSV). FILE -> open an
 # UNLABELED issue assigned to FORGEJO_REVIEWER; DROP -> log + skip. The row is
 # stamped seen either way. Returns 0 if a row was processed. Model work (one
 # claude_call), so the caller sits it BELOW the Claude health gate.
