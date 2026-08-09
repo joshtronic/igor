@@ -1,17 +1,27 @@
 # Igor
 
 Igor is an unattended Claude Code harness: a systemd timer fires a tick
-every minute, the tick claims one `Agent`-labeled Forgejo issue across
-every repo the bot can push to, and ships a PR. Every bot PR gets a
-shadow code review before a human ever sees it, and a fleet of other
-scheduled passes (maintenance audits, deploy verification, reporting)
-run alongside the issue grind. This repo is the harness itself -- the
-loop, not any one project it works on.
+every minute, the tick claims one `Agent`-labeled issue from the git
+forge across every repo the bot can push to, and ships a PR. Every bot
+PR gets a shadow code review before a human ever sees it, and a fleet
+of other scheduled passes (maintenance audits, deploy verification,
+reporting) run alongside the issue grind. This repo is the harness
+itself -- the loop, not any one project it works on.
 
 Generic harness. Project conventions live in each repo's `AGENTS.md`
 dossier (see [docs/agents-md-spec.md](docs/agents-md-spec.md) for the
 required shape); `CLAUDE.md` is legacy and only present in repos still
 mid-migration.
+
+## Mirrors
+
+**Canonical repo: <https://git.sherver.org/joshtronic/igor>**
+
+Mirrored for _your_ convenience:
+
+- <https://github.com/joshtronic/igor>
+
+_I don't monitor these services or accept pull/merge requests on them._
 
 ## What it does
 
@@ -60,7 +70,7 @@ See [docs/setup.md](docs/setup.md) for the full prereq picture
 Then:
 
 ```sh
-git clone <forgejo-url>/<bot-user>/igor ~/.local/share/agent
+git clone <git-repo-url> ~/.local/share/agent
 cd ~/.local/share/agent
 cp .env.example .env && chmod 600 .env
 $EDITOR .env                   # fill in every var -- no defaults
@@ -84,7 +94,8 @@ bin/install.sh                 # re-reads units, daemon-reloads
 re-sources it.
 
 For each repo the agent should work: add the bot user as a collaborator,
-set up labels (Forgejo's Advanced label template + a custom `Agent` label),
+set up labels (the forge's label set -- on Forgejo, the Advanced
+template -- plus a custom `Agent` label),
 and confirm via `bin/validate-repo.sh <owner>/<name>`. See
 [docs/onboarding-a-repo.md](docs/onboarding-a-repo.md) for the full
 readiness bar.
