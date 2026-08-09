@@ -95,6 +95,8 @@ DIRECTIVE=""
 
 # shellcheck source=../lib/forgejo.sh
 . "$AGENT_HOME/lib/forgejo.sh"
+# shellcheck source=../lib/context-source.sh
+. "$AGENT_HOME/lib/context-source.sh"
 # shellcheck source=../lib/cost.sh
 . "$AGENT_HOME/lib/cost.sh"
 # shellcheck source=../lib/claude.sh
@@ -142,8 +144,10 @@ DIRECTIVE_FILE="$AGENT_HOME/bin/lib/${DIRECTIVE}-directive.md"
 if [ ! -f "$VOICE_FILE" ];     then log "voice anchor not found: $VOICE_FILE"; exit 2; fi
 if [ ! -f "$DIRECTIVE_FILE" ]; then log "directive not found: $DIRECTIVE_FILE"; exit 2; fi
 
-VOICE_BODY=$(cat "$VOICE_FILE")
-DIRECTIVE_BODY=$(cat "$DIRECTIVE_FILE")
+# Sourced from the Distillery at origin/master, live, via context_surface --
+# fallback to these in-repo copies on any distillery problem (igor#485).
+VOICE_BODY=$(context_surface voice "$VOICE_FILE")
+DIRECTIVE_BODY=$(context_surface "${DIRECTIVE}-directive" "$DIRECTIVE_FILE")
 
 # -- website worktree setup ------------------------------------
 

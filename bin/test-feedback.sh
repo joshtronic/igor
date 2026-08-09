@@ -12,6 +12,8 @@ done
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../lib/dossier.sh
 . "$HERE/../lib/dossier.sh"
+# shellcheck source=../lib/context-source.sh
+. "$HERE/../lib/context-source.sh"
 # shellcheck source=../lib/feedback.sh
 . "$HERE/../lib/feedback.sh"
 

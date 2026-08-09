@@ -80,6 +80,8 @@ unset env_file_hint
 
 # shellcheck source=lib/forgejo.sh
 . "$AGENT_HOME/lib/forgejo.sh"
+# shellcheck source=lib/context-source.sh
+. "$AGENT_HOME/lib/context-source.sh"
 # shellcheck source=lib/checkpoint.sh
 . "$AGENT_HOME/lib/checkpoint.sh"
 # shellcheck source=lib/dossier.sh
@@ -368,8 +370,12 @@ init_igor_scratch() {
 # Build the full system prompt for issue-work Claude invocations.
 #
 # Two pieces, in order:
-#   bin/lib/voice.md  -- shared voice anchor (2 paragraphs)
-#   AGENTS.md         -- slim, issue-work-specific protocol/rules
+#   voice anchor      -- shared voice anchor (2 paragraphs)
+#   worker contract   -- slim, issue-work-specific protocol/rules
+#
+# Both are sourced from the Distillery at origin/master, live, via
+# context_surface -- fallback to the in-repo copies (bin/lib/voice.md,
+# AGENTS.md) on any distillery problem (lib/context-source.sh, igor#485).
 #
 # Per-repo CLAUDE.md is NOT concatenated here; Claude Code auto-
 # loads it from the worktree root when invoked there. The legacy
@@ -383,12 +389,9 @@ init_igor_scratch() {
 # classification work); the reading pipeline and site-work block
 # each compose their own prompts inside their executor scripts.
 issue_system_prompt() {
-  local voice="$AGENT_HOME/bin/lib/voice.md"
-  if [ -f "$voice" ]; then
-    cat "$voice" "$AGENT_HOME/AGENTS.md"
-  else
-    cat "$AGENT_HOME/AGENTS.md"
-  fi
+  context_surface voice "$AGENT_HOME/bin/lib/voice.md"
+  printf '\n'
+  context_surface worker-contract "$AGENT_HOME/AGENTS.md"
 }
 
 
@@ -2012,7 +2015,7 @@ do_sports_tick() {
   local covered prompt directive raw parsed attempt snippet tail_snip
   covered=$(sports_concepts_load)
   prompt=$(sports_build_prompt "$payload" "$covered" "$ydash")
-  directive=$(cat "$AGENT_HOME/bin/lib/sports-digest-directive.md")
+  directive=$(context_surface sports-digest-directive "$AGENT_HOME/bin/lib/sports-digest-directive.md")
   parsed=""
   for attempt in 1 2; do
     raw=$(claude_call "$AGENT_MODEL" "sports-digest" 16000 "$directive" "$prompt" 0 "${SPORTS_CALL_TIMEOUT_SECS:-600}") || {
@@ -3030,7 +3033,7 @@ do_review_tick() {
   title=$(jq -r '.title // ""' <<<"$target_json")
   body=$(jq -r '.body // ""' <<<"$target_json")
 
-  directive=$(cat "$AGENT_HOME/bin/lib/review-directive.md")
+  directive=$(context_surface review-directive "$AGENT_HOME/bin/lib/review-directive.md")
   # review_build_prompt (lib/review.sh) also folds in the linked issue's
   # own text and the repo's test-runner facts (igor#438) -- both
   # best-effort and additive, so a missing issue or unreadable Makefile
