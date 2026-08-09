@@ -59,16 +59,32 @@ from PR_BODY.md, opens the PR with `Closes #N`, etc.). My job is
 the actual work.
 
 - Keep changes focused on the issue. Don't refactor unrelated code.
-- **MANDATORY: keep diffs under ~400 lines. The harness HARD-BLOCKS
-  larger PRs** and asks the human to split the ticket. If I'm going
-  to blow through, block early with `agent-block.sh` rather than
-  doing work that won't ship. **Never get there by deleting tests,
-  comments, or working code to shrink the diff** -- correctness and
-  coverage always outrank diff size. If the honest diff is over
-  budget, split the work into stacked PRs, or let
-  checkpoint-and-resume carry it to the next tick instead (igor#411:
-  a prior run burned its whole turn budget deleting its own tests
-  chasing this number, and still didn't finish).
+- **Size the diff to what the task honestly requires.** No padding,
+  no drive-by refactors, no unrelated cleanup riding along. Sizing
+  judgment is the review's job (`bin/lib/review-directive.md`), not
+  a line count I optimize against.
+- **MANDATORY: the harness HARD-BLOCKS a PR over 1000 non-test
+  changed lines.** This is a runaway guard, not a target -- test
+  files (paths matching `is_test_path` in `lib/scope-gate.sh`) don't
+  count toward it, so there is no reason to trim coverage for room.
+  If I'm going to blow through it anyway, block early with
+  `agent-block.sh` rather than doing work that won't ship. **Never
+  get there by deleting tests, comments, or working code to shrink
+  the diff** -- correctness and coverage always outrank diff size.
+  If the honest diff is over budget, split the work into stacked
+  PRs, or let checkpoint-and-resume carry it to the next tick
+  instead (igor#411: a prior run burned its whole turn budget
+  deleting its own tests chasing the old line count, and still
+  didn't finish; igor#465: a later PR's only overage was pure
+  failure-mode test coverage, and the human waived it -- evidence
+  the old cap measured the wrong thing).
+- **Comment discipline.** A comment exists only to state something
+  the code can't show: a non-obvious *why*, an invariant, a
+  workaround for a specific bug. Never narrate what the next line
+  does ("call the helper", "loop over the results"), never write
+  changelog-style comments ("added X for Y"), never restate a
+  self-explanatory name in prose. Shorter is better -- zero comments
+  on self-explanatory code is correct, not a gap to fill.
 - **MANDATORY: write `.agent/PR_BODY.md` BEFORE EXIT on every ship.**
   This is not optional, and it applies to TRIVIAL changes too --
   a one-line fix still needs a PR_BODY.md. A stub with one
@@ -244,8 +260,9 @@ In this mode:
   explaining no changes were made.
 - Read the issue-level comments and inline review comments shown in
   the user message. Address what's actionable.
-- Same scope cap, TDD rules, tests + lint requirement, and the diff
-  security self-review apply as in regular PR mode.
+- Same runaway guard, TDD rules, tests + lint requirement, comment
+  discipline, and the diff security self-review apply as in regular
+  PR mode.
 - Don't write `.agent/PR_BODY.md` -- the PR body is already set.
 
 If the feedback is unanswerable in code (questions, ambiguity, "ship

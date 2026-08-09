@@ -88,6 +88,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/repo-checks.sh"
 # shellcheck source=lib/review.sh
 . "$AGENT_HOME/lib/review.sh"
+# shellcheck source=lib/scope-gate.sh
+. "$AGENT_HOME/lib/scope-gate.sh"
 # shellcheck source=lib/maintenance-checks.sh
 . "$AGENT_HOME/lib/maintenance-checks.sh"
 # shellcheck source=lib/browser-reap.sh
@@ -4779,16 +4781,16 @@ elif [ "$COMMITS" -gt 0 ]; then
     exit 0
   fi
 
-  # Scope cap. Big diffs and long commit chains get blocked instead of
-  # shipped; the human splits the work into smaller issues. Generated/
-  # lockfiles are excluded from the line count -- they're not
-  # human-reviewed code and shouldn't burn the LoC budget (a lockfile
-  # regen alone can dwarf a legitimately small change).
-  CHANGED=$(git diff --shortstat "origin/${PR_BASE}..HEAD" -- . \
-    ':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/yarn.lock' \
-    ':(exclude,glob)**/pnpm-lock.yaml' ':(exclude,glob)**/*.lock' \
-    ':(exclude,glob)**/dist/**' ':(exclude,glob)**/build/**' 2>/dev/null \
-    | awk '{ for (i=1;i<=NF;i++) if ($i ~ /insertion|deletion/) s+=$(i-1); print s+0 }')
+  # Runaway guard (igor#467, was a 400-line "scope cap"). This is a
+  # backstop against a genuinely runaway branch, not a sizing target --
+  # sizing judgment for everything else lives in the review
+  # (bin/lib/review-directive.md). Long commit chains still get blocked.
+  # Generated/lockfiles AND test files (lib/scope-gate.sh's is_test_path)
+  # are excluded from the line count: lockfiles aren't human-reviewed code,
+  # and excluding tests makes "delete tests to shrink the diff" structurally
+  # impossible (igor#411) and stops taxing coverage (igor#465).
+  CHANGED=$(git diff --numstat "origin/${PR_BASE}..HEAD" -- . 2>/dev/null \
+    | scope_gate_sum_numstat)
   CHANGED=${CHANGED:-0}
   # For the commit-count cap, exclude the harness's own WIP-checkpoint commits:
   # they're resume artifacts, not history sprawl, and would otherwise block a
@@ -4801,11 +4803,11 @@ elif [ "$COMMITS" -gt 0 ]; then
   REVIEW_COMMITS=$(git log "origin/${PR_BASE}..HEAD" --pretty=%s 2>/dev/null \
     | grep -cvE '^WIP: issue #[0-9]+ checkpoint' || true)
   REVIEW_COMMITS=${REVIEW_COMMITS:-0}
-  if [ "$REVIEW_COMMITS" -gt 10 ] || [ "$CHANGED" -gt 400 ]; then
+  if [ "$REVIEW_COMMITS" -gt 10 ] || [ "$CHANGED" -gt "$SCOPE_GATE_MAX_LINES" ]; then
     # OUTCOME: blocked
-    log "outcome: blocked (scope: $REVIEW_COMMITS non-checkpoint commits / $COMMITS total, $CHANGED lines)"
+    log "outcome: blocked (scope: $REVIEW_COMMITS non-checkpoint commits / $COMMITS total, $CHANGED non-test lines)"
     FILES=$(git diff --name-only "origin/${PR_BASE}..HEAD" | head -30 | sed 's/^/  - /')
-    agent-block.sh "Scope exceeded: this branch reached **${REVIEW_COMMITS} commits / ${CHANGED} changed lines**, over the per-issue cap (10 commits / 400 lines).
+    agent-block.sh "Scope exceeded: this branch reached **${REVIEW_COMMITS} commits / ${CHANGED} non-test changed lines**, over the per-issue runaway guard (10 commits / ${SCOPE_GATE_MAX_LINES} lines, excluding test files).
 
 Files touched (first 30):
 ${FILES}
