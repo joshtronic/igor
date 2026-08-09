@@ -87,8 +87,9 @@ A timer fires `bin/tick.sh`. Per tick:
    email that teaches sports through yesterday's news: `lib/espn.sh`
    fetches each configured league's scoreboard (yesterday) + headlines
    from ESPN's free public JSON API, and ONE `claude_call` on
-   `AGENT_MODEL` (directive: `bin/lib/sports-digest-directive.md`)
-   distills it into an ELI5 tutorial-digest. Another email sibling,
+   `AGENT_MODEL` (directive: the `sports-digest-directive` skill,
+   sourced from the Distillery) distills it into an ELI5
+   tutorial-digest. Another email sibling,
    but the first that uses the model -- a Claude health cooldown holds
    it, unlike SEO. Fires on the first tick after 03:00: a
    window-completeness gate, not a send-hour -- the digest covers
@@ -116,9 +117,10 @@ A timer fires `bin/tick.sh`. Per tick:
     not, block the issue with a clear comment and bail. (Same code
     path as Claude calling `agent-block.sh` from inside the
     worktree.)
-13. **Work.** Make a worktree, invoke Claude with `bin/lib/voice.md`
-    plus `AGENTS.md` (the project's `CLAUDE.md` is auto-loaded by
-    Claude Code), react to whatever Claude leaves behind. If
+13. **Work.** Make a worktree, invoke Claude with the `voice` +
+    `worker-contract` skills (sourced live from the Distillery, see
+    "System prompts" below; the project's `CLAUDE.md` is auto-loaded
+    by Claude Code), react to whatever Claude leaves behind. If
     discovery turned up nothing, the tick is idle and exits.
 
 There is no shift window -- every tick runs the full cascade, 24/7.
@@ -146,19 +148,24 @@ with the `Agent` label and the agent picks it up.
 ## System prompts
 
 Different surfaces inside a single tick get different system
-prompts -- not one kitchen-sink prompt for everything. The split:
+prompts -- not one kitchen-sink prompt for everything. Every prompt
+surface below is sourced live from the Distillery
+(`joshtronic/distillery`, at `origin/master`) via `context_surface`'s
+last-good cache (`lib/context-source.sh`) -- there is no in-repo
+fallback (igor#485/#487). The split:
 
-| Surface                         | System prompt                                                              |
+| Surface                         | System prompt (skill names)                                                |
 |---------------------------------|----------------------------------------------------------------------------|
-| Issue work, PR review           | `bin/lib/voice.md` + `AGENTS.md` (repo's `CLAUDE.md` is auto-loaded)       |
+| Issue work, PR review           | `voice` + `worker-contract` (repo's `CLAUDE.md` is auto-loaded)            |
 | Maintenance triage              | (none -- the user message is self-contained classification)                |
-| Reading pipeline (reflect, post drafting, post-shape decision) | `bin/lib/voice.md` + a task-specific directive      |
-| Site-work + /now pass           | `bin/lib/voice.md` + `bin/lib/{site-work,now}-directive.md` |
-| Sports digest distill           | `bin/lib/sports-digest-directive.md` (no voice anchor -- the digest has its own persona) |
+| Reading pipeline (reflect, post drafting, post-shape decision) | `voice` + a task-specific directive skill |
+| Site-work + /now pass           | `voice` + `{site-work,now}-directive`                                     |
+| Sports digest distill           | `sports-digest-directive` (no voice anchor -- the digest has its own persona) |
 
-`voice.md` is the shared voice anchor; the task directives carry
-surface-specific framing. The slim `AGENTS.md` is only what
-unattended issue/PR work actually needs.
+`voice` is the shared voice anchor; the task directives carry
+surface-specific framing. `AGENTS.md` in this repo is now just a stub
+for `bin/check-sync.sh`'s CI fallback -- it is not read by any
+prompt-consuming surface.
 
 ## Labels
 

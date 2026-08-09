@@ -4858,8 +4858,9 @@ elif [ "$COMMITS" -gt 0 ]; then
 
   # Runaway guard (igor#467, was a 400-line "scope cap"). This is a
   # backstop against a genuinely runaway branch, not a sizing target --
-  # sizing judgment for everything else lives in the review
-  # (bin/lib/review-directive.md). Long commit chains still get blocked.
+  # sizing judgment for everything else lives in the review (the
+  # review-directive skill, sourced from the Distillery -- see
+  # context_surface review-directive). Long commit chains still get blocked.
   # Generated/lockfiles AND test files (lib/scope-gate.sh's is_test_path)
   # are excluded from the line count: lockfiles aren't human-reviewed code,
   # and excluding tests makes "delete tests to shrink the diff" structurally

@@ -1,15 +1,25 @@
 #!/usr/bin/env bash
-# check-sync.sh -- Verify the AGENTS.md <-> tick.sh contract is in sync, then
-# run the repo's shell-function unit tests.
+# check-sync.sh -- Verify the worker-contract <-> tick.sh contract is in
+# sync, then run the repo's shell-function unit tests.
 #
 # Catches:
 #  1. Outcome sets diverge -- a branch in tick.sh marked with
 #     `# OUTCOME: <label>` must have a matching `<!-- OUTCOME: <label> -->`
-#     in AGENTS.md, and vice versa.
-#  2. Helper scripts referenced in AGENTS.md (anything matching
+#     in the worker-contract document, and vice versa.
+#  2. Helper scripts referenced in that document (anything matching
 #     `agent-*.sh`) must exist and be executable in `bin/`.
 #  3. Any bin/test-*.sh unit tests fail (each is self-contained and
 #     skip-safe -- a missing tool exits 0 -- so this stays the single CI gate).
+#
+# Since igor#485/#486 the actual issue-work system prompt is built from
+# `context_surface worker-contract` (lib/context-source.sh's last-good
+# Distillery cache), not this repo's AGENTS.md -- so (1) and (2) must
+# validate whichever document the worker actually receives, or they'd be
+# checking a copy the model never reads (igor#487). When a cache is
+# already seeded (every production host, mid-tick), that's the sourced
+# worker-contract body. A CI container has no cache and typically no
+# Distillery SSH access either -- see worker_contract_doc() below for the
+# best-effort seed attempt and the AGENTS.md fallback.
 #
 # Exits 0 on success, 1 on any mismatch or test failure. Run by
 # .forgejo/workflows/lint.yml on every PR and push.
@@ -21,14 +31,72 @@ cd "$AGENT_HOME"
 
 # shellcheck source=../lib/suite-guard.sh
 . "$AGENT_HOME/lib/suite-guard.sh"
+# shellcheck source=../lib/context-source.sh
+. "$AGENT_HOME/lib/context-source.sh"
 
 FAIL=0
+
+# -- Worker-contract document ------------------------------------
+#
+# Prefer the sourced worker-contract (what the worker actually reads).
+# If the cache isn't seeded yet, make one best-effort attempt to seed it
+# (mirrors bin/tick.sh's own clone/fetch + context_refresh, using
+# FORGEJO_HOST from .env if present) -- this lets a fresh host's first
+# `make test` validate the real document instead of the fallback. If
+# that doesn't produce a seeded cache (no .env, no network, no
+# Distillery access -- the normal CI case), fall back to validating the
+# in-repo AGENTS.md stub and say so loudly: it only carries the OUTCOME
+# sentinels, not the helper references, so the helper check below is
+# vacuous in that mode.
+WORKER_DOC_TMP=""
+cleanup_worker_doc() { if [ -n "$WORKER_DOC_TMP" ]; then rm -f "$WORKER_DOC_TMP"; fi; }
+trap cleanup_worker_doc EXIT
+
+if ! context_seeded; then
+  if [ -f "$AGENT_HOME/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$AGENT_HOME/.env"
+    set +a
+  fi
+  if [ -n "${FORGEJO_HOST:-}" ] && command -v git >/dev/null 2>&1; then
+    AGENT_STATE_DIR="${AGENT_STATE_DIR:-$HOME/.local/state/agent}"
+    AGENT_REPO_ROOT="${AGENT_REPO_ROOT:-$AGENT_STATE_DIR/repos}"
+    DISTILLERY_PATH="$AGENT_REPO_ROOT/distillery"
+    ssh_clone_url() {
+      if [[ "$FORGEJO_HOST" == *:* ]]; then
+        echo "ssh://git@${FORGEJO_HOST}/${1}.git"
+      else
+        echo "git@${FORGEJO_HOST}:${1}.git"
+      fi
+    }
+    if [ ! -d "$DISTILLERY_PATH/.git" ]; then
+      mkdir -p "$AGENT_REPO_ROOT"
+      git clone --quiet "$(ssh_clone_url joshtronic/distillery)" "$DISTILLERY_PATH" 2>/dev/null || true
+    else
+      (cd "$DISTILLERY_PATH" && git fetch --prune --quiet origin 2>/dev/null) || true
+    fi
+    context_refresh || true
+  fi
+fi
+
+if context_seeded; then
+  WORKER_DOC_TMP=$(mktemp)
+  context_surface worker-contract > "$WORKER_DOC_TMP"
+  WORKER_DOC="$WORKER_DOC_TMP"
+  WORKER_DOC_LABEL="the sourced worker-contract (Distillery cache)"
+else
+  WORKER_DOC="AGENTS.md"
+  WORKER_DOC_LABEL="AGENTS.md (fallback -- prompt cache unseeded; helper check will be vacuous)"
+  echo "! prompt cache unseeded and no Distillery access -- validating $WORKER_DOC_LABEL instead"
+fi
+echo "+ validating sentinels/helpers against: $WORKER_DOC_LABEL"
 
 # -- Outcome sentinels ------------------------------------------
 
 tick_outcomes=$(grep -oE '# OUTCOME: [a-z-]+'   bin/tick.sh 2>/dev/null \
                 | awk '{print $3}' | sort -u)
-agents_outcomes=$(grep -oE 'OUTCOME: [a-z-]+ ' AGENTS.md   2>/dev/null \
+agents_outcomes=$(grep -oE 'OUTCOME: [a-z-]+ ' "$WORKER_DOC" 2>/dev/null \
                 | awk '{print $2}' | sort -u)
 
 if [ -z "$tick_outcomes" ]; then
@@ -36,15 +104,15 @@ if [ -z "$tick_outcomes" ]; then
   FAIL=1
 fi
 if [ -z "$agents_outcomes" ]; then
-  echo "x no OUTCOME sentinels found in AGENTS.md"
+  echo "x no OUTCOME sentinels found in $WORKER_DOC_LABEL"
   FAIL=1
 fi
 
 if [ -n "$tick_outcomes" ] && [ -n "$agents_outcomes" ]; then
   if [ "$tick_outcomes" != "$agents_outcomes" ]; then
     echo "x outcome sets diverge"
-    echo "  bin/tick.sh: $(echo "$tick_outcomes" | tr '\n' ' ')"
-    echo "  AGENTS.md:   $(echo "$agents_outcomes" | tr '\n' ' ')"
+    echo "  bin/tick.sh:      $(echo "$tick_outcomes" | tr '\n' ' ')"
+    echo "  $WORKER_DOC_LABEL: $(echo "$agents_outcomes" | tr '\n' ' ')"
     diff <(echo "$tick_outcomes") <(echo "$agents_outcomes") | sed 's/^/    /'
     FAIL=1
   else
@@ -54,10 +122,10 @@ fi
 
 # -- Referenced helpers -----------------------------------------
 
-helpers=$(grep -oE 'agent-[a-z-]+\.sh' AGENTS.md 2>/dev/null | sort -u || true)
+helpers=$(grep -oE 'agent-[a-z-]+\.sh' "$WORKER_DOC" 2>/dev/null | sort -u || true)
 for h in $helpers; do
   if [ ! -f "bin/$h" ]; then
-    echo "x AGENTS.md references bin/$h but it does not exist"
+    echo "x $WORKER_DOC_LABEL references bin/$h but it does not exist"
     FAIL=1
   elif [ ! -x "bin/$h" ]; then
     echo "x bin/$h exists but is not executable"

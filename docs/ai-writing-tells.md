@@ -4,8 +4,8 @@ A working catalogue of the patterns that make prose read as
 machine-written, compiled from the sources at the bottom. This is the
 recall artifact: it can be exhaustive because nothing here is loaded
 into a prompt. The curated, prompt-facing subset lives in the `## Bans`
-section of `bin/lib/voice.md` -- when you change one, glance at the
-other.
+section of the `voice` skill, sourced live from the Distillery
+(`joshtronic/distillery`) -- when you change one, glance at the other.
 
 It's a living doc. Add tells as you find them, and add the source. The
 era note under Sources matters: the giveaway vocabulary shifts as models
