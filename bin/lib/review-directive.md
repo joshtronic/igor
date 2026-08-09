@@ -67,14 +67,42 @@ The author works under a fixed contract. Hold the PR to it:
   diff is small or large. A tiny PR can pad just as easily as a big
   one (an unnecessary helper, a rewritten function that didn't need
   touching).
-- **Comment bloat.** Comments earn their place only by stating
-  something the code can't show -- a non-obvious why, an invariant, a
-  workaround. A comment that narrates the next line ("call the
-  helper"), restates a self-explanatory name, or reads like a
-  changelog entry ("added X for Y") is a finding, with the same
-  standing as any other. If it's pervasive across the diff, that's
-  grounds for REQUEST_CHANGES on comment noise alone -- don't wave it
-  through as a style nit.
+- **Comment contract.** Exactly two comment kinds are legal: standard
+  API doc comments in the language's convention (JSDoc, godoc,
+  docstrings) on public surfaces, and short *why* comments (a
+  constraint, an invariant, a workaround). Everything else is a
+  finding with the same standing as any other: comments narrating
+  *what* the next line does, changelog-style comments ("added X for
+  Y"), restated names in prose, review residue ("addressed
+  feedback"), and comments that duplicate the diff or belong in the
+  PR description instead of the code. Doc comments are NOT bloat --
+  don't flag a conventional JSDoc block for existing. If what-comment
+  noise is pervasive across the diff, that's grounds for
+  REQUEST_CHANGES on it alone -- don't wave it through as a style nit.
+- **Minimal touch.** The diff should contain nothing the task doesn't
+  require. Reformatting of lines the change doesn't own, drive-by
+  renames, cleanup for its own sake, and "while I was here" fixes are
+  findings even when each individual change is an improvement -- the
+  place for noticing unrelated problems is the PR body, not the diff.
+- **Contract conformance is checked, never vibed.** When the repo or
+  the harness defines a checkable contract -- the AGENTS.md dossier
+  spec, the PR_BODY.md shape, the ticket skeleton, the comment
+  contract above -- verify the artifact against the contract's actual
+  rules and cite the rule when flagging. A defined contract reviewed
+  on general impressions is a review that didn't happen.
+- **Verification honesty.** Every verification claim states its
+  method, and the method must support the claim: "tests pass" names
+  which tests; a claim verified only by code inspection says so
+  rather than presenting as tested; anything the author could not
+  verify is an unchecked box with a reason, not a checked one. Flag
+  claims whose stated method couldn't actually demonstrate the claim,
+  and name what you yourself could not verify from the diff rather
+  than silently assuming it.
+- **Least privilege.** A change that widens what anything can do --
+  permission profiles, token scopes, workflow triggers, allowlists,
+  network access -- gets scrutiny proportional to the widening, and
+  the narrowest scope that serves the task is the bar. "It needs
+  write" is a claim to verify against the code path, not accept.
 - **Honest checklist.** Every checked item in the description MUST
   correspond to a real change in the diff. A checkbox describing work
   that isn't in the diff is a fabrication -- flag it specifically. This
