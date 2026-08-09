@@ -3704,6 +3704,18 @@ CONFLICT_EOF
     # pattern -- interpolated as a bare line in both heredoc branches below.
     PR_CI_FAILURE_MSG=$(forgejo_failing_ci_logs "$PR_REPO" "$PR_HEAD_SHA")
 
+    # igor#476: a plain reassignment (BINDING_RC_BODY empty -- the last shadow
+    # verdict was COMMENT, not REQUEST_CHANGES) hands the agent nothing
+    # actionable, because PR_ISSUE_COMMENTS/PR_INLINE_COMMENTS/PR_REVIEW_BODIES
+    # above all filter OUT bot-authored text -- exactly where a COMMENT verdict
+    # posts its findings. Surface that shadow-review comment (and anything said
+    # after it) only on this branch; the RC-binding branch already carries its
+    # own findings via BINDING_RC_BODY.
+    PR_REASSIGNMENT_FEEDBACK=""
+    if [ -z "$BINDING_RC_BODY" ]; then
+      PR_REASSIGNMENT_FEEDBACK=$(review_reassignment_feedback_section "$PR_REPO" "$PR_NUMBER" "${BOT_USER:-}")
+    fi
+
     if [ -n "$BINDING_RC_BODY" ]; then
       PR_USER_MSG=$(cat <<EOF
 You opened PR ${PR_REPO}#${PR_NUMBER}: ${PR_TITLE}
@@ -3810,7 +3822,7 @@ is HERE (not in issue-level comments below). Address what's
 actionable in these first.
 
 ${PR_REVIEW_BODIES:-(no formal review bodies on this PR)}
-
+${PR_REASSIGNMENT_FEEDBACK}
 ## Issue-level comments (the Conversation tab)
 
 ${PR_ISSUE_COMMENTS:-(no issue-level comments on this PR)}
