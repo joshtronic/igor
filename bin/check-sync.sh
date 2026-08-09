@@ -15,11 +15,9 @@
 # `context_surface worker-contract` (lib/context-source.sh's last-good
 # Distillery cache), not this repo's AGENTS.md -- so (1) and (2) must
 # validate whichever document the worker actually receives, or they'd be
-# checking a copy the model never reads (igor#487). When a cache is
-# already seeded (every production host, mid-tick), that's the sourced
-# worker-contract body. A CI container has no cache and typically no
-# Distillery SSH access either -- see the seed attempt and AGENTS.md
-# fallback below.
+# checking a copy the model never reads (igor#487). lib/worker-doc.sh
+# owns that choice: the sourced body on a seeded host, the in-repo
+# AGENTS.md (announced as a fallback) in a CI container with no cache.
 #
 # Exits 0 on success, 1 on any mismatch or test failure. Run by
 # .forgejo/workflows/lint.yml on every PR and push.
@@ -33,60 +31,25 @@ cd "$AGENT_HOME"
 . "$AGENT_HOME/lib/suite-guard.sh"
 # shellcheck source=../lib/context-source.sh
 . "$AGENT_HOME/lib/context-source.sh"
+# shellcheck source=../lib/worker-doc.sh
+. "$AGENT_HOME/lib/worker-doc.sh"
 
 FAIL=0
 
 # -- Worker-contract document ------------------------------------
-#
-# Prefer the sourced worker-contract (what the worker actually reads).
-# If the cache isn't seeded yet, make one best-effort attempt to seed it
-# (mirrors bin/tick.sh's own clone/fetch + context_refresh, using
-# FORGEJO_HOST from .env if present) -- this lets a fresh host's first
-# `make test` validate the real document instead of the fallback. If
-# that doesn't produce a seeded cache (no .env, no network, no
-# Distillery access -- the normal CI case), fall back to validating the
-# in-repo AGENTS.md and say so loudly, so a green run in that mode is
-# never mistaken for having checked the real, sourced document.
-WORKER_DOC_TMP=""
-cleanup_worker_doc() { if [ -n "$WORKER_DOC_TMP" ]; then rm -f "$WORKER_DOC_TMP"; fi; }
-trap cleanup_worker_doc EXIT
 
-if ! context_seeded; then
-  if [ -f "$AGENT_HOME/.env" ]; then
-    set -a
-    # shellcheck disable=SC1091
-    . "$AGENT_HOME/.env"
-    set +a
-  fi
-  if [ -n "${FORGEJO_HOST:-}" ] && command -v git >/dev/null 2>&1; then
-    AGENT_STATE_DIR="${AGENT_STATE_DIR:-$HOME/.local/state/agent}"
-    AGENT_REPO_ROOT="${AGENT_REPO_ROOT:-$AGENT_STATE_DIR/repos}"
-    DISTILLERY_PATH="$AGENT_REPO_ROOT/distillery"
-    ssh_clone_url() {
-      if [[ "$FORGEJO_HOST" == *:* ]]; then
-        echo "ssh://git@${FORGEJO_HOST}/${1}.git"
-      else
-        echo "git@${FORGEJO_HOST}:${1}.git"
-      fi
-    }
-    if [ ! -d "$DISTILLERY_PATH/.git" ]; then
-      mkdir -p "$AGENT_REPO_ROOT"
-      git clone --quiet "$(ssh_clone_url joshtronic/distillery)" "$DISTILLERY_PATH" 2>/dev/null || true
-    else
-      (cd "$DISTILLERY_PATH" && git fetch --prune --quiet origin 2>/dev/null) || true
-    fi
-    context_refresh || true
-  fi
+WORKER_DOC_TMP=$(mktemp)
+trap 'rm -f "$WORKER_DOC_TMP"' EXIT
+
+# A seeded cache that can't serve the surface is a broken cache, and
+# there's nothing left to check against -- exit rather than carry on
+# with an empty document, which every check below passes vacuously.
+if ! worker_doc_select "$WORKER_DOC_TMP"; then
+  echo "x prompt cache is seeded but 'worker-contract' could not be served"
+  echo "    -- refusing to validate sentinels/helpers against an empty document"
+  exit 1
 fi
-
-if context_seeded; then
-  WORKER_DOC_TMP=$(mktemp)
-  context_surface worker-contract > "$WORKER_DOC_TMP"
-  WORKER_DOC="$WORKER_DOC_TMP"
-  WORKER_DOC_LABEL="the sourced worker-contract (Distillery cache)"
-else
-  WORKER_DOC="AGENTS.md"
-  WORKER_DOC_LABEL="AGENTS.md (fallback -- prompt cache unseeded)"
+if [ "$WORKER_DOC" = "AGENTS.md" ]; then
   echo "! prompt cache unseeded and no Distillery access -- validating $WORKER_DOC_LABEL instead"
 fi
 echo "+ validating sentinels/helpers against: $WORKER_DOC_LABEL"
@@ -110,7 +73,7 @@ fi
 if [ -n "$tick_outcomes" ] && [ -n "$agents_outcomes" ]; then
   if [ "$tick_outcomes" != "$agents_outcomes" ]; then
     echo "x outcome sets diverge"
-    echo "  bin/tick.sh:      $(echo "$tick_outcomes" | tr '\n' ' ')"
+    echo "  bin/tick.sh: $(echo "$tick_outcomes" | tr '\n' ' ')"
     echo "  $WORKER_DOC_LABEL: $(echo "$agents_outcomes" | tr '\n' ' ')"
     diff <(echo "$tick_outcomes") <(echo "$agents_outcomes") | sed 's/^/    /'
     FAIL=1

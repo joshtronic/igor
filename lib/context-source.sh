@@ -211,11 +211,14 @@ context_refresh() {
 
   # Atomic swap: repoint `current` in one rename (ln + mv -T on the
   # symlink itself, never traversing into the target). The old
-  # generation is deleted right below, but a reader mid-cat of it is
-  # still unaffected: it already holds an open file descriptor, and
-  # unlinking a file doesn't invalidate descriptors already open on it
-  # (standard POSIX unlink semantics) -- the bytes stay readable until
-  # that reader closes it.
+  # generation is deleted right below, and the guarantee that buys is
+  # narrow but real: a reader that ALREADY OPENED one of its files
+  # keeps reading it to completion, since unlinking doesn't invalidate
+  # descriptors already open on the file (standard POSIX unlink
+  # semantics). A reader that resolves `current` and opens afterwards,
+  # or reads several surfaces in sequence across the swap, can still
+  # straddle two generations -- callers read one surface per `$( )`,
+  # so that window is a stale read, never a partial one.
   ln -sfn "$(basename "$gen")" "$cache_root/current.tmp"
   mv -T "$cache_root/current.tmp" "$current"
 
