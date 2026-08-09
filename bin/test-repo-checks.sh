@@ -104,6 +104,30 @@ printf '%s' '<meta name="deploy-sha" content="${sha}">' >"$f/vite.config.ts"
 commit_fixture "$f"
 no "agent.json without .smoke.url fails"          check_deploy_smoke_signal
 
+# An adopted dossier (root AGENTS.md carrying ## Metadata) is read FIRST, no
+# agent.json involved at all -- the migration step this ticket (igor#473) is
+# building toward: agent.json can be deleted once every reader takes url from
+# the dossier.
+DOSSIER=$'# snail.io\n\n## Metadata\n\n```yaml\ntype: game\nurl: https://snail.io\n```\n'
+f="$(new_fixture)"
+printf '%s' "$DOSSIER" >"$f/AGENTS.md"
+printf '%s' '<meta name="deploy-sha" content="${sha}">' >"$f/vite.config.ts"
+printf '%s' '{"scripts":{"build":"tsc && vite build"}}' >"$f/package.json"
+commit_fixture "$f"
+ok "adopted dossier url + deploy-sha marker passes (no agent.json needed)" check_deploy_smoke_signal
+
+# The fleet-wide case TODAY: a PROSE AGENTS.md (the harness writes one into
+# every repo) carries no `## Metadata`, so the repo has not adopted the spec
+# and the legacy agent.json still answers. This is what keeps igor#473
+# behavior-neutral.
+f="$(new_fixture)"
+printf '%s' $'# snail.io\n\nHouse rules for agents working here. No metadata fence.\n' >"$f/AGENTS.md"
+printf '%s' '{"smoke":{"url":"https://snail.io"}}' >"$f/agent.json"
+printf '%s' '<meta name="deploy-sha" content="${sha}">' >"$f/vite.config.ts"
+printf '%s' '{"scripts":{"build":"tsc && vite build"}}' >"$f/package.json"
+commit_fixture "$f"
+ok "prose AGENTS.md + agent.json still falls back to .smoke.url" check_deploy_smoke_signal
+
 echo "== check_ci_workflow: pull_request + verify step required =="
 DEPLOY_ONLY=$'name: deploy\non:\n  push:\n    branches: [master]\njobs:\n  deploy:\n    steps:\n      - run: rsync -a _site/ host:/var/www'
 PR_CI=$'name: ci\non:\n  pull_request:\njobs:\n  test:\n    steps:\n      - run: npm ci\n      - run: npm test'
