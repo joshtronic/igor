@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
-# check-sync.sh -- Verify the AGENTS.md <-> tick.sh contract is in sync, then
-# run the repo's shell-function unit tests.
+# check-sync.sh -- Verify the worker-contract <-> tick.sh contract is in
+# sync, then run the repo's shell-function unit tests.
 #
 # Catches:
 #  1. Outcome sets diverge -- a branch in tick.sh marked with
 #     `# OUTCOME: <label>` must have a matching `<!-- OUTCOME: <label> -->`
-#     in AGENTS.md, and vice versa.
-#  2. Helper scripts referenced in AGENTS.md (anything matching
+#     in the worker-contract document, and vice versa.
+#  2. Helper scripts referenced in that document (anything matching
 #     `agent-*.sh`) must exist and be executable in `bin/`.
 #  3. Any bin/test-*.sh unit tests fail (each is self-contained and
 #     skip-safe -- a missing tool exits 0 -- so this stays the single CI gate).
+#
+# Since igor#485/#486 the actual issue-work system prompt is built from
+# `context_surface worker-contract` (lib/context-source.sh's last-good
+# Distillery cache), not this repo's AGENTS.md -- so (1) and (2) must
+# validate whichever document the worker actually receives, or they'd be
+# checking a copy the model never reads (igor#487). lib/worker-doc.sh
+# owns that choice: the sourced body on a seeded host, the in-repo
+# AGENTS.md (announced as a fallback) in a CI container with no cache.
 #
 # Exits 0 on success, 1 on any mismatch or test failure. Run by
 # .forgejo/workflows/lint.yml on every PR and push.
@@ -21,14 +29,36 @@ cd "$AGENT_HOME"
 
 # shellcheck source=../lib/suite-guard.sh
 . "$AGENT_HOME/lib/suite-guard.sh"
+# shellcheck source=../lib/context-source.sh
+. "$AGENT_HOME/lib/context-source.sh"
+# shellcheck source=../lib/worker-doc.sh
+. "$AGENT_HOME/lib/worker-doc.sh"
 
 FAIL=0
+
+# -- Worker-contract document ------------------------------------
+
+WORKER_DOC_TMP=$(mktemp)
+trap 'rm -f "$WORKER_DOC_TMP"' EXIT
+
+# A seeded cache that can't serve the surface is a broken cache, and
+# there's nothing left to check against -- exit rather than carry on
+# with an empty document, which every check below passes vacuously.
+if ! worker_doc_select "$WORKER_DOC_TMP"; then
+  echo "x prompt cache is seeded but 'worker-contract' could not be served"
+  echo "    -- refusing to validate sentinels/helpers against an empty document"
+  exit 1
+fi
+if [ "$WORKER_DOC" = "AGENTS.md" ]; then
+  echo "! prompt cache unseeded and no Distillery access -- validating $WORKER_DOC_LABEL instead"
+fi
+echo "+ validating sentinels/helpers against: $WORKER_DOC_LABEL"
 
 # -- Outcome sentinels ------------------------------------------
 
 tick_outcomes=$(grep -oE '# OUTCOME: [a-z-]+'   bin/tick.sh 2>/dev/null \
                 | awk '{print $3}' | sort -u)
-agents_outcomes=$(grep -oE 'OUTCOME: [a-z-]+ ' AGENTS.md   2>/dev/null \
+agents_outcomes=$(grep -oE 'OUTCOME: [a-z-]+ ' "$WORKER_DOC" 2>/dev/null \
                 | awk '{print $2}' | sort -u)
 
 if [ -z "$tick_outcomes" ]; then
@@ -36,7 +66,7 @@ if [ -z "$tick_outcomes" ]; then
   FAIL=1
 fi
 if [ -z "$agents_outcomes" ]; then
-  echo "x no OUTCOME sentinels found in AGENTS.md"
+  echo "x no OUTCOME sentinels found in $WORKER_DOC_LABEL"
   FAIL=1
 fi
 
@@ -44,7 +74,7 @@ if [ -n "$tick_outcomes" ] && [ -n "$agents_outcomes" ]; then
   if [ "$tick_outcomes" != "$agents_outcomes" ]; then
     echo "x outcome sets diverge"
     echo "  bin/tick.sh: $(echo "$tick_outcomes" | tr '\n' ' ')"
-    echo "  AGENTS.md:   $(echo "$agents_outcomes" | tr '\n' ' ')"
+    echo "  $WORKER_DOC_LABEL: $(echo "$agents_outcomes" | tr '\n' ' ')"
     diff <(echo "$tick_outcomes") <(echo "$agents_outcomes") | sed 's/^/    /'
     FAIL=1
   else
@@ -54,10 +84,10 @@ fi
 
 # -- Referenced helpers -----------------------------------------
 
-helpers=$(grep -oE 'agent-[a-z-]+\.sh' AGENTS.md 2>/dev/null | sort -u || true)
+helpers=$(grep -oE 'agent-[a-z-]+\.sh' "$WORKER_DOC" 2>/dev/null | sort -u || true)
 for h in $helpers; do
   if [ ! -f "bin/$h" ]; then
-    echo "x AGENTS.md references bin/$h but it does not exist"
+    echo "x $WORKER_DOC_LABEL references bin/$h but it does not exist"
     FAIL=1
   elif [ ! -x "bin/$h" ]; then
     echo "x bin/$h exists but is not executable"
