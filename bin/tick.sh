@@ -4462,10 +4462,13 @@ while IFS= read -r repo_line; do
     # (including post-review rework fixes). EXCEPT a WIP checkpoint draft
     # (turn-cap snapshot): that IS this issue, paused mid-flight, and must be
     # RESUMED below, not skipped here -- so it stays claimable at this point.
+    #
+    # A Forgejo blip here reads as "nothing covering" (fail open) so one bad
+    # response can't stall the grind fleet-wide; the pre-worktree branch check
+    # further down is the fail-CLOSED backstop, re-querying immediately before
+    # the force-push and refusing when it can't confirm.
     C_COVERING=$(forgejo_open_pr_covers_issue "$R_NAME" "$C_NUM" 2>/dev/null || echo '[]')
-    C_OPEN=$(jq --arg wip "$CHECKPOINT_WIP_PREFIX" \
-      '[.[] | select((.title // "") | startswith($wip) | not)] | length' \
-      <<<"$C_COVERING")
+    C_OPEN=$(checkpoint_count_non_wip "$C_COVERING")
     if [ "$C_OPEN" -gt 0 ]; then
       log "skipping ${R_NAME}#${C_NUM} -- open PR already covers this issue (branch/closing-keyword match)"
       continue
@@ -4647,18 +4650,33 @@ else
   # Defense in depth (igor#496): about to carve BRANCH fresh from origin/PR_BASE,
   # and the later push is `--force-with-lease` -- which happily overwrites
   # whatever origin/$BRANCH currently holds once it's been fetched (the
-  # preflight fetch above just did). The discovery-time checks above should
-  # already have caught any issue with live work, but this is the last line of
-  # defense: if origin still carries ANY agent/<n>(-*) branch for this issue
-  # that we are NOT resuming, refuse to blow it away blind.
+  # preflight fetch above just did). A leftover agent/<n>(-*) ref is only a
+  # HAZARD when an open PR is still built on it. Nothing deletes a branch when
+  # a PR is CLOSED (only automerge's merge does, via delete_branch_after_merge),
+  # so a rejected attempt leaves its branch behind by design -- and overwriting
+  # that is precisely the second attempt the C_REJECTED strike count allows.
+  # Hence: abort only when an open PR still points at the leftover ref, and
+  # abort when that can't be determined -- this is the last check before the
+  # overwrite, so it fails closed where the discovery gate fails open.
   STALE_BRANCHES=$(git for-each-ref --format='%(refname:short)' \
     "refs/remotes/origin/agent/${ISSUE_NUMBER}" "refs/remotes/origin/agent/${ISSUE_NUMBER}-*" \
     | sed 's#^origin/##')
   if [ -n "$STALE_BRANCHES" ]; then
-    log "ABORT: origin already has branch(es) matching agent/${ISSUE_NUMBER}(-*) and this is not a resume -- refusing to overwrite: $(printf '%s' "$STALE_BRANCHES" | tr '\n' ' ')"
-    agent-block.sh "The agent aborted before starting: origin already has a branch matching \`agent/${ISSUE_NUMBER}(-*)\` ($(printf '%s' "$STALE_BRANCHES" | tr '\n' ', ')) but this claim was not a resume. Investigate -- an open PR may already cover this issue, or a stale branch needs cleanup -- before removing \`Status/Blocked\`."
-    WORKTREE=""
-    exit 0
+    STALE_LIST=$(printf '%s' "$STALE_BRANCHES" | tr '\n' ' ')
+    if COVERING_JSON=$(forgejo_open_pr_covers_issue "$FORGEJO_REPO" "$ISSUE_NUMBER" 2>/dev/null); then
+      LIVE_PRS=$(forgejo_prs_on_branches "$COVERING_JSON" "$STALE_BRANCHES")
+      LIVE_REASON="an open pull request is still built on it: ${LIVE_PRS}"
+    else
+      LIVE_PRS="?"
+      LIVE_REASON="the repo's open pull requests could not be listed, so whether one is still built on it is unknown"
+    fi
+    if [ -n "$LIVE_PRS" ]; then
+      log "ABORT: origin carries ${STALE_LIST} -- ${LIVE_REASON}"
+      agent-block.sh "The agent aborted before starting: origin already has a branch matching \`agent/${ISSUE_NUMBER}(-*)\` (${STALE_LIST}) and ${LIVE_REASON}. This claim was not a resume, so starting over would force-push over that work. Land or close the pull request, or delete the branch, before removing \`Status/Blocked\`."
+      WORKTREE=""
+      exit 0
+    fi
+    log "origin carries leftover branch(es) ${STALE_LIST} with no open PR -- resetting from ${PR_BASE}"
   fi
   git worktree add -B "$BRANCH" "$WORKTREE" "origin/${PR_BASE}"
 fi

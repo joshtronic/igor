@@ -674,38 +674,46 @@ forgejo_bot_prs_for_issue() {
 }
 
 # forgejo_open_pr_covers_issue <repo> <issue_num> -- OPEN pull requests (ANY
-# author, unlike forgejo_bot_prs_for_issue) that already cover this issue,
-# via either structural signal:
-#   - head branch is this issue's own namespace: `agent/<n>` or `agent/<n>-*`
-#   - body carries a closing keyword for <n> -- close/closes/closed,
-#     fix/fixes/fixed, resolve/resolves/resolved (case-insensitive), matching
-#     pr_body_ensure_closes's own "already satisfied" regex (checkpoint.sh)
+# author, unlike forgejo_bot_prs_for_issue) already covering this issue: head
+# branch in the issue's own `agent/<n>`/`agent/<n>-*` namespace, or a body
+# closing keyword for <n>. Returns [{number, title, head}]; paginated, and
+# returns nonzero with NO output if the listing couldn't be fetched whole --
+# callers gating a destructive step must read that as "unknown", not "none".
 #
-# igor#496: forgejo_bot_prs_for_issue's closing-keyword regex only recognizes
-# the literal word "closes", but pr_body_ensure_closes -- which decides
-# whether to APPEND a "Closes #N" line -- treats the wider close/fix/resolve
-# family as already-satisfied and leaves the body alone. A PR whose own body
-# text says e.g. "This fixes #490 by ..." (Claude's own prose, not the
-# harness's appended line) is therefore invisible to the narrower regex:
-# forgejo_bot_prs_for_issue returns it as NOT covering the issue, the
-# discovery gate sees no in-flight PR, and a ready, already-reviewed PR gets
-# silently reclaimed and overwritten. This helper is deliberately independent
-# of PR author and of any assignment/review state (discretionary-state.json
-# included) -- an open PR carrying either signal means the issue's work is
-# already in flight, full stop.
-#
-# Returns a JSON array of {number, title} for matching open PRs; empty array
-# if none.
+# INVARIANT: the keyword regex must stay at least as broad as
+# pr_body_ensure_closes's "already satisfied" regex (lib/checkpoint.sh). That
+# function skips appending `Closes #N` when the body already reads e.g.
+# "fixes #N"; anything narrower here makes such a PR permanently invisible to
+# the claim gate, which is how ready PRs got reclaimed and force-pushed over
+# (igor#496).
 forgejo_open_pr_covers_issue() {
-  local repo="$1" issue_num="$2"
-  _fj GET "/repos/${repo}/pulls?state=open&limit=50" \
-    | jq -c --arg n "$issue_num" '
-        [.[]
-         | select(
-             ((.head.ref // "") | test("^agent/" + $n + "($|-)"))
-             or ((.body // "") | test("(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\s+#" + $n + "(\\D|$)"))
-           )
-         | {number, title: (.title // "")}]'
+  local repo="$1" issue_num="$2" page=1 batch count all='[]' complete=0
+  while batch=$(_fj GET "/repos/${repo}/pulls?state=open&limit=50&page=${page}"); do
+    count=$(jq 'length' <<<"$batch")
+    [ "$count" -gt 0 ] && all=$(printf '%s\n%s' "$all" "$batch" | jq -s 'add')
+    if [ "$count" -lt 50 ]; then complete=1; break; fi
+    page=$((page + 1))
+  done
+  [ "$complete" = "1" ] || return 1
+  jq -c --arg n "$issue_num" '
+      [.[]
+       | select(
+           ((.head.ref // "") | test("^agent/" + $n + "($|-)"))
+           or ((.body // "") | test("(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\s+#" + $n + "(\\D|$)"))
+         )
+       | {number, title: (.title // ""), head: (.head.ref // "")}]' <<<"$all"
+}
+
+# forgejo_prs_on_branches <covering_json> <branches> -- of the PR entries in
+# <covering_json> (forgejo_open_pr_covers_issue's shape), those whose head ref
+# is one of the newline-separated <branches>, rendered as "#N (ref), ...".
+# Empty output means no open PR is built on any of those branches, i.e. they
+# are leftovers from closed or merged PRs and safe to reset.
+forgejo_prs_on_branches() {
+  jq -r --arg b "$2" '
+      ($b | split("\n")) as $branches
+      | [.[] | select(.head as $h | any($branches[]; . == $h)) | "#\(.number) (\(.head))"]
+      | join(", ")' <<<"$1"
 }
 
 # forgejo_edit_pr <repo> <number> [--title T] [--body B] -- patch a PR's title

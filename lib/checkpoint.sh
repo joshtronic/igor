@@ -93,6 +93,15 @@ checkpoint_is_wip() {
   case "$1" in "$CHECKPOINT_WIP_PREFIX"*) return 0 ;; *) return 1 ;; esac
 }
 
+# checkpoint_count_non_wip <pr_json_array> -- how many entries are NOT WIP
+# checkpoint drafts. This IS the discovery gate's in-flight test: a non-zero
+# count means a real PR already covers the issue (skip it), while a WIP draft
+# alone falls through to the resume path.
+checkpoint_count_non_wip() {
+  jq --arg wip "$CHECKPOINT_WIP_PREFIX" \
+    '[.[] | select((.title // "") | startswith($wip) | not)] | length' <<<"$1"
+}
+
 # checkpoint_strip_wip <pr_title> -- the title with the WIP prefix removed
 # (idempotent: a title without the prefix is returned unchanged).
 checkpoint_strip_wip() {
