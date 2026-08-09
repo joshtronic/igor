@@ -4449,22 +4449,40 @@ while IFS= read -r repo_line; do
   # rejected-PR strike count) becomes this repo's contender against
   # other repos' contenders.
   CANDIDATES=$(forgejo_find_claimable "$R_NAME" "${FORGEJO_REVIEWER:-}" || echo '[]')
+  # The open-PR listing is repo-scoped and issue-independent, so it is fetched
+  # once here rather than per candidate.
+  R_OPEN_PRS=$(forgejo_open_prs "$R_NAME" 2>/dev/null) || {
+    R_OPEN_PRS='[]'
+    log "warning: could not list open PRs on ${R_NAME} -- in-flight check degraded to \"nothing covering\" this tick"
+  }
   REPO_CONTENDER=""
   while read -r candidate; do
     [ -z "$candidate" ] && continue
     C_NUM=$(jq -r .number <<<"$candidate")
 
-    C_HISTORY=$(forgejo_bot_prs_for_issue "$R_NAME" "$C_NUM" "$BOT_USER" 2>/dev/null || echo '[]')
-    # An open bot PR normally means work in flight -> skip. EXCEPT a WIP
-    # checkpoint draft (turn-cap snapshot): that IS this issue, paused
-    # mid-flight, and must be RESUMED, not skipped -- so it stays claimable.
-    C_OPEN=$(jq --arg wip "$CHECKPOINT_WIP_PREFIX" \
-      '[.[] | select(.state == "open" and ((.title // "") | startswith($wip) | not))] | length' \
-      <<<"$C_HISTORY")
+    # Structural in-flight check (igor#496): ANY open PR (any author,
+    # unaffected by assignment/review history or discretionary-state.json)
+    # whose branch is this issue's own agent/<n>(-*) namespace, or whose body
+    # carries a standalone closing line, means the work already lives in a PR
+    # -- rebuilding it from scratch would silently replace whatever's there
+    # (including post-review rework fixes). EXCEPT a WIP checkpoint draft
+    # (turn-cap snapshot): that IS this issue, paused mid-flight, and must be
+    # RESUMED below, not skipped here -- so it stays claimable at this point.
+    #
+    # A Forgejo blip above reads as "nothing covering" (fail open) so one bad
+    # response can't stall the grind fleet-wide; the pre-worktree branch check
+    # further down is the fail-CLOSED backstop, re-querying immediately before
+    # the force-push and refusing when it can't confirm.
+    C_COVERING=$(forgejo_prs_covering_issue "$R_OPEN_PRS" "$C_NUM")
+    C_OPEN=$(checkpoint_count_non_wip "$C_COVERING")
     if [ "$C_OPEN" -gt 0 ]; then
-      log "skipping ${R_NAME}#${C_NUM} -- open bot PR (in flight)"
+      log "skipping ${R_NAME}#${C_NUM} -- open PR already covers this issue (branch/closing-line match)"
       continue
     fi
+    # Rejected-attempt strike count still needs BOT authorship specifically
+    # (a human-authored closed PR isn't a rejected agent attempt), so this
+    # stays on the narrower, author-scoped helper.
+    C_HISTORY=$(forgejo_bot_prs_for_issue "$R_NAME" "$C_NUM" "$BOT_USER" 2>/dev/null || echo '[]')
     C_REJECTED=$(jq '[.[] | select(.state == "closed" and .merged == false)] | length' <<<"$C_HISTORY")
     if [ "$C_REJECTED" -ge 2 ]; then
       log "skipping ${R_NAME}#${C_NUM} -- ${C_REJECTED} rejected bot PRs, applying Status/Blocked"
@@ -4635,6 +4653,37 @@ if [ "$IS_RESUME" = "1" ] && git rev-parse --verify --quiet "refs/remotes/origin
   log "worktree: resuming on origin/${BRANCH}"
 else
   [ "$IS_RESUME" = "1" ] && { log "resume: origin/${BRANCH} gone -- starting fresh from ${PR_BASE}"; IS_RESUME=0; CHECKPOINT_N=0; RESUME_PR=""; }
+  # Defense in depth (igor#496): about to carve BRANCH fresh from origin/PR_BASE,
+  # and the later push is `--force-with-lease` -- which happily overwrites
+  # whatever origin/$BRANCH currently holds once it's been fetched (the
+  # preflight fetch above just did). A leftover agent/<n>(-*) ref is only a
+  # HAZARD when an open PR is still built on it. Nothing deletes a branch when
+  # a PR is CLOSED (only automerge's merge does, via delete_branch_after_merge),
+  # so a rejected attempt leaves its branch behind by design -- and overwriting
+  # that is precisely the second attempt the C_REJECTED strike count allows.
+  # Hence: abort only when an open PR still points at the leftover ref, and
+  # abort when that can't be determined -- this is the last check before the
+  # overwrite, so it fails closed where the discovery gate fails open.
+  STALE_BRANCHES=$(git for-each-ref --format='%(refname:short)' \
+    "refs/remotes/origin/agent/${ISSUE_NUMBER}" "refs/remotes/origin/agent/${ISSUE_NUMBER}-*" \
+    | sed 's#^origin/##')
+  if [ -n "$STALE_BRANCHES" ]; then
+    STALE_LIST=$(printf '%s' "$STALE_BRANCHES" | tr '\n' ' ')
+    if COVERING_JSON=$(forgejo_open_pr_covers_issue "$FORGEJO_REPO" "$ISSUE_NUMBER" 2>/dev/null); then
+      LIVE_PRS=$(forgejo_prs_on_branches "$COVERING_JSON" "$STALE_BRANCHES")
+      LIVE_REASON="an open pull request is still built on it: ${LIVE_PRS}"
+    else
+      LIVE_PRS="?"
+      LIVE_REASON="the repo's open pull requests could not be listed, so whether one is still built on it is unknown"
+    fi
+    if [ -n "$LIVE_PRS" ]; then
+      log "ABORT: origin carries ${STALE_LIST} -- ${LIVE_REASON}"
+      agent-block.sh "The agent aborted before starting: origin already has a branch matching \`agent/${ISSUE_NUMBER}(-*)\` (${STALE_LIST}) and ${LIVE_REASON}. This claim was not a resume, so starting over would force-push over that work. Land or close the pull request, or delete the branch, before removing \`Status/Blocked\`."
+      WORKTREE=""
+      exit 0
+    fi
+    log "origin carries leftover branch(es) ${STALE_LIST} with no open PR -- resetting from ${PR_BASE}"
+  fi
   git worktree add -B "$BRANCH" "$WORKTREE" "origin/${PR_BASE}"
 fi
 init_igor_scratch "$WORKTREE"
