@@ -98,9 +98,34 @@ no "content after the Metadata fenced block fails" dossier_validate "$TRAILING"
 NOFENCE=$'# porksicle.com\n\nx\n\n## KPIs\n\n(none yet)\n\n## Metadata\n\ntype: tool\n'
 no "Metadata section with no fenced block fails" dossier_validate "$NOFENCE"
 
+echo "== dossier_validate: trim before comparing =="
+TYPE2SPACE=${GOOD/type: arcade/type:  arcade}
+ok "double-spaced 'type:  arcade' passes once trimmed" dossier_validate "$TYPE2SPACE"
+BADTYPE2SPACE=${GOOD/type: arcade/type:  spaceship}
+reason_has "double-spaced invalid type still fails, honestly" "$BADTYPE2SPACE" "closed list: spaceship"
+H1_2SPACE=${GOOD/'# porksicle.com'/'#  porksicle.com'}
+ok "double-spaced H1 passes once trimmed" dossier_validate "$H1_2SPACE"
+
 echo "== dossier_check_no_nested_metadata =="
 ok "prose-only nested AGENTS.md passes"  dossier_check_no_nested_metadata $'# lore\n\njust prose, no metadata\n'
 no  "nested AGENTS.md with ## Metadata fails" dossier_check_no_nested_metadata $'# lore\n\n## Metadata\n\n```yaml\ntype: tool\n```\n'
+
+echo "== check_dossier: loud missing-lib guard =="
+GUARD_OUT=$(bash -c '. "'"$HERE"'/../lib/repo-checks.sh"; check_dossier' 2>&1)
+GUARD_RC=$?
+eq "lib/dossier.sh not sourced -> rc3" 3 "$GUARD_RC"
+if [[ "$GUARD_OUT" == *"lib/dossier.sh"* ]]; then
+  printf '  + %s\n' "stderr warning names lib/dossier.sh"
+else
+  printf '  x stderr warning: %s\n' "$GUARD_OUT"; FAIL=$((FAIL + 1))
+fi
+
+echo "== dossier_keys / dossier_get: indented-key agreement =="
+INDENTED=$'# porksicle.com\n\nx\n\n## KPIs\n\n(none yet)\n\n## Metadata\n\n```yaml\n type: arcade\nurl: https://porksicle.com\n```\n'
+D6="$TMPROOT/d6"; mkdir -p "$D6"; printf '%s' "$INDENTED" >"$D6/AGENTS.md"
+no "dossier_get rejects an indented key" dossier_get "$D6" type
+eq "dossier_keys likewise excludes an indented key" "url" "$(dossier_keys "$D6")"
+reason_has "dossier_validate rejects an indented key line" "$INDENTED" "not a flat"
 
 echo "== check_dossier: un-adopted-vs-nonconforming migration gate, nested exemption =="
 new_fixture() { local p; p=$(mktemp -d "$TMPROOT/fix.XXXXXX"); git init -q -b master "$p"; git -C "$p" config user.email t@t; git -C "$p" config user.name t; printf '%s' "$p"; }

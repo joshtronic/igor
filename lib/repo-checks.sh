@@ -132,6 +132,12 @@ check_deploy_smoke_signal() {
 #        is what most of the fleet including this repo has today). The
 #        migration-window legacy path, NOT a failure; callers must not gate on
 #        it.
+#   3 -- lib/dossier.sh was never sourced -- dossier_validate is undefined.
+#        Distinct from rc2 on purpose: without this guard, calling
+#        dossier_is_declared below on an undefined function would fail with
+#        127 (command not found), which the unconditional `|| return 2`
+#        swallows into the silent legacy path instead of surfacing the dead
+#        gate. Warns on stderr too -- see validate_repo_local's catch-all.
 #
 # The rc1/rc2 split keys on ADOPTION, not on the file existing: a prose
 # AGENTS.md is the pre-spec convention and predates this gate, so conscripting
@@ -142,6 +148,10 @@ DOSSIER_REASON=""
 check_dossier() {
   local content reason files f
   DOSSIER_REASON=""
+  declare -F dossier_validate >/dev/null || {
+    printf 'check_dossier: lib/dossier.sh not sourced -- dossier_validate is undefined\n' >&2
+    return 3
+  }
   content=$(rc_file_read AGENTS.md)
   [ -n "$content" ] || return 2
   dossier_is_declared "$content" || return 2
@@ -308,10 +318,11 @@ validate_repo_local() {
     1) printf -- '- [ ] %s -- %s\n' 'AGENTS.md dossier conforms to spec' "$DOSSIER_REASON"
        fail=$((fail + 1)) ;;
     2) : ;;  # not adopted -- legacy path, not a failure
-    # Anything else means check_dossier never ran (e.g. lib/dossier.sh not
-    # sourced -> 127). Say so on stderr: tick.sh sends this checklist to
+    # rc3 (lib/dossier.sh not sourced) already warned on stderr inside
+    # check_dossier itself; anything else here is a genuinely unexpected
+    # status. Say so on stderr either way: tick.sh sends this checklist to
     # /dev/null, so a silent no-op here would hide a dead gate fleet-wide.
-    *) printf 'validation: check_dossier returned an unexpected status -- is lib/dossier.sh sourced?\n' >&2 ;;
+    *) printf 'validation: check_dossier returned an unexpected status\n' >&2 ;;
   esac
 
   # ADVISORY -- guidance, not gates. CLAUDE.md/README aren't safety-relevant, and

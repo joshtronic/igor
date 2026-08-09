@@ -21,6 +21,14 @@ _dossier_trim_blank() {
   awk '{a[NR]=$0} END{s=1; e=NR; while(s<=e && a[s]~/^[[:space:]]*$/) s++; while(e>=s && a[e]~/^[[:space:]]*$/) e--; for(i=s;i<=e;i++) print a[i]}'
 }
 
+# _dossier_trim <string> -- echoes with leading/trailing whitespace stripped.
+_dossier_trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
 # _dossier_metadata_block <agents-md-content>
 # Echoes the raw lines inside the FIRST fenced code block after the literal
 # "## Metadata" heading. Empty + rc 1 if the heading, or a fence immediately
@@ -79,10 +87,13 @@ dossier_keys() {
   if [ -f "$agents" ] && dossier_is_declared "$(cat "$agents")"; then
     content=$(cat "$agents")
     block=$(_dossier_metadata_block "$content") || return 1
-    # Key syntax per the spec's flat `key: value` rule -- this is the
-    # UNVALIDATED read path (dossier_validate may never have run), so a
-    # malformed block yields no keys rather than junk ones.
-    keys=$(sed -nE 's/^[[:space:]]*([a-z][a-z-]*):.*$/\1/p' <<<"$block")
+    # Key syntax per the spec's flat `key: value` rule -- no leading
+    # whitespace, matching dossier_get and _dossier_validate_metadata (an
+    # indented key must not be listed here as readable when neither of those
+    # can actually read it). This is the UNVALIDATED read path
+    # (dossier_validate may never have run), so a malformed block yields no
+    # keys rather than junk ones.
+    keys=$(sed -nE 's/^([a-z][a-z-]*):.*$/\1/p' <<<"$block")
     [ -n "$keys" ] || return 1
     printf '%s\n' "$keys"
     return 0
@@ -182,7 +193,7 @@ _dossier_validate_metadata() {
       echo "dossier: Metadata line is not a flat 'key: value' scalar: $line"
       return 1
     fi
-    k="${BASH_REMATCH[1]}"; v="${BASH_REMATCH[2]}"
+    k="${BASH_REMATCH[1]}"; v="$(_dossier_trim "${BASH_REMATCH[2]}")"
     case " $DOSSIER_KEYS " in *" $k "*) ;; *) echo "dossier: unknown Metadata key: $k"; return 1 ;; esac
     case "$k" in
       type) type_val="$v" ;;
@@ -199,7 +210,7 @@ _dossier_validate_metadata() {
     *" $type_val "*)
       [ -n "$url_val" ] || { echo "dossier: Metadata type '$type_val' is a site type and requires url"; return 1; }
       host="${url_val#*://}"; host="${host%%/*}"; host="${host#www.}"
-      name="${h1#\# }"
+      name="$(_dossier_trim "${h1#\#}")"
       if [ "$host" != "$name" ]; then
         echo "dossier: H1 '$name' does not match url host '$host'"
         return 1
