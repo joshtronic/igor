@@ -58,6 +58,40 @@ forgejo_repo_get_file() {
 eq "smoke_url: un-adopted repo -> falls back to legacy agent.json (fleet-neutral)" \
   "https://porksicle.com" "$(automerge_smoke_url acme/site)"
 
+# An adopted dossier is AUTHORITATIVE: it does not fall back to agent.json for
+# a key it omits (the inherited dossier_get contract). A repo that adopts the
+# fence and forgets `url` is intentionally ineligible, not silently legacy.
+forgejo_repo_get_file() {
+  case "$2" in
+    AGENTS.md)  printf '%s' $'# x\n\n## Metadata\n\n```yaml\ntype: tool\n```\n' ;;
+    agent.json) printf '%s' '{"smoke":{"url":"https://legacy.example"}}' ;;
+  esac
+}
+eq "smoke_url: adopted dossier missing url -> empty, NOT the agent.json value" \
+  "" "$(automerge_smoke_url acme/site)"
+
+# ...and it costs one API call, not two: agent.json is never fetched when the
+# dossier answers.
+# (the tally goes through a file: dossier_get_repo's fetches run in command
+# substitutions, so a shell var set in the stub would not survive)
+FETCHED="$TMP/fetched"; : >"$FETCHED"
+forgejo_repo_get_file() {
+  echo "$2" >>"$FETCHED"
+  case "$2" in AGENTS.md) printf '%s' "$DOSSIER" ;; *) return 1 ;; esac
+}
+automerge_smoke_url acme/site >/dev/null
+eq "smoke_url: adopted dossier short-circuits the legacy fetch" "AGENTS.md" "$(cat "$FETCHED")"
+
+echo "== dossier.sh wiring (igor#473): the dependency must be sourced, and loud when it isn't =="
+# The runtime caller graph is bin/tick.sh -> lib/automerge.sh. This test file
+# sources lib/dossier.sh itself, so it would pass even if production never did
+# -- assert the production wiring directly instead.
+ok "tick.sh sources lib/dossier.sh" grep -q 'lib/dossier\.sh"$' "$HERE/tick.sh"
+# And if it ever stops: an undefined dossier_get_repo must LOG, not degrade to
+# a silent empty (which automerge reads as "no repo is eligible").
+BARE=$(bash -c '. "$1/../lib/automerge.sh"; automerge_smoke_url acme/site' _ "$HERE" 2>&1)
+has "smoke_url: missing lib/dossier.sh logs instead of failing silently" "$BARE" "lib/dossier.sh not sourced"
+
 echo "== approval / mergeable gates =="
 _fj() { printf '%s' "$FJ"; }
 FJ='[{"user":{"login":"josh"},"state":"APPROVED"}]'

@@ -105,6 +105,15 @@ forgejo_repo_get_file() {
 eq "csv_url: un-adopted repo -> falls back to legacy agent.json (fleet-neutral)" \
   "https://x/pub?output=csv" "$(feedback_csv_url acme/x)"
 
+echo "== dossier.sh wiring (igor#473): the dependency must be sourced, and loud when it isn't =="
+# This test file sources lib/dossier.sh itself, so it would pass even if
+# bin/tick.sh (the real caller graph) never did -- assert that directly.
+ok "tick.sh sources lib/dossier.sh" grep -q 'lib/dossier\.sh"$' "$HERE/tick.sh"
+# And if it ever stops: an undefined dossier_get_repo must LOG, not degrade to
+# a silent empty (which feedback reads as "no repo opted in").
+BARE=$(bash -c '. "$1/../lib/feedback.sh"; feedback_csv_url acme/x' _ "$HERE" 2>&1)
+has "csv_url: missing lib/dossier.sh logs instead of failing silently" "$BARE" "lib/dossier.sh not sourced"
+
 echo "== feedback_search_prior (generic targeted dedup search) =="
 _fj() {
   case "$1 $2" in

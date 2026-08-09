@@ -37,10 +37,20 @@ _deploy_state_file() { echo "${AGENT_STATE_DIR:-$HOME/.local/state/agent}/discre
 # AGENTS.md `url`, falling back to legacy agent.json `.smoke.url` -- see
 # lib/dossier.sh), or empty: not eligible (neither source declares one), or
 # the harness's own repo.
+#
+# Needs dossier_get_repo (lib/dossier.sh) sourced -- bin/tick.sh sources
+# dossier.sh above automerge.sh; bin/test-automerge.sh mirrors that. rc0 with
+# an empty value is the ordinary "not eligible" answer (do_automerge_tick
+# reads it under set -e), so a MISSING dependency would otherwise be
+# indistinguishable from "no repo opted in" -- hence the loud guard.
 automerge_smoke_url() {
   local repo="$1"
   [ "$repo" = "$AUTOMERGE_SELF_REPO" ] && return 0
-  dossier_get_repo "$repo" url 2>/dev/null || true
+  if ! declare -F dossier_get_repo >/dev/null; then
+    log "automerge: BUG -- lib/dossier.sh not sourced; every repo reads as auto-merge-ineligible"
+    return 0
+  fi
+  dossier_get_repo "$repo" url || true
 }
 
 # automerge_require_human <repo> -- exit 0 if the repo pins itself to a HUMAN

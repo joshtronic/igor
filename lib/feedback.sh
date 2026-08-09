@@ -31,8 +31,17 @@ _feedback_state_file() { echo "${AGENT_STATE_DIR:-$HOME/.local/state/agent}/disc
 # feedback_csv_url <repo> -- the feedback CSV from the repo's dossier (root
 # AGENTS.md `feedback-csv`, falling back to legacy agent.json `.feedback.csv`
 # -- see lib/dossier.sh), or empty.
+#
+# Needs dossier_get_repo (lib/dossier.sh) sourced -- bin/tick.sh sources
+# dossier.sh above feedback.sh; bin/test-feedback.sh mirrors that. Empty is
+# the ordinary "not opted in" answer, so a MISSING dependency would otherwise
+# read as "no repo has feedback" fleet-wide -- hence the loud guard.
 feedback_csv_url() {
-  dossier_get_repo "$1" feedback-csv 2>/dev/null || true
+  if ! declare -F dossier_get_repo >/dev/null; then
+    log "feedback: BUG -- lib/dossier.sh not sourced; every repo reads as not opted in"
+    return 0
+  fi
+  dossier_get_repo "$1" feedback-csv || true
 }
 
 # feedback_fetch_rows <url> -- curl the published CSV, emit a JSON array of row

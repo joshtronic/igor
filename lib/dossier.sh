@@ -10,6 +10,12 @@
 # runs against a root AGENTS.md's content -- absent-vs-nonconforming is
 # check_dossier's call, not this function's. No YAML dependency -- the block
 # is flat so grep/awk/bash parse it without one.
+#
+# Both filenames are HARDCODED: root AGENTS.md per the spec, and the legacy
+# fallback is literally `agent.json`, NOT $AGENT_CONFIG_FILE. Callers moved
+# onto these readers (automerge, feedback) therefore stop honoring that var
+# -- deliberate, since the fallback exists only to read what the fleet has on
+# disk today, and it goes away entirely once every repo adopts the dossier.
 
 # All three lists are lifted verbatim from docs/agents-md-spec.md: the keys
 # are the table in "The Metadata block"; DOSSIER_TYPES and DOSSIER_SITE_TYPES
@@ -89,12 +95,18 @@ dossier_get() {
 # Forgejo contents API (no clone needed) -- for callers with no local
 # checkout, like lib/automerge.sh and lib/feedback.sh. Needs
 # forgejo_repo_get_file (lib/forgejo.sh) already sourced. See
-# dossier_get_content for the value contract.
+# dossier_get_content for the value contract. The legacy config is fetched
+# ONLY when the dossier won't answer, so an adopted repo costs one API call
+# per lookup rather than two.
 dossier_get_repo() {
   local repo="$1" key="$2" agents_content cfg_content
   agents_content=$(forgejo_repo_get_file "$repo" AGENTS.md 2>/dev/null) || agents_content=""
+  if [ -n "$agents_content" ] && dossier_is_declared "$agents_content"; then
+    dossier_get_content "$agents_content" "" "$key"
+    return
+  fi
   cfg_content=$(forgejo_repo_get_file "$repo" agent.json 2>/dev/null) || cfg_content=""
-  dossier_get_content "$agents_content" "$cfg_content" "$key"
+  dossier_get_content "" "$cfg_content" "$key"
 }
 
 # dossier_keys <checkout_dir> -- lists the keys present, one per line. Same
