@@ -673,6 +673,41 @@ forgejo_bot_prs_for_issue() {
          | {number, state, title: (.title // ""), merged: (.merged // false)}]'
 }
 
+# forgejo_open_pr_covers_issue <repo> <issue_num> -- OPEN pull requests (ANY
+# author, unlike forgejo_bot_prs_for_issue) that already cover this issue,
+# via either structural signal:
+#   - head branch is this issue's own namespace: `agent/<n>` or `agent/<n>-*`
+#   - body carries a closing keyword for <n> -- close/closes/closed,
+#     fix/fixes/fixed, resolve/resolves/resolved (case-insensitive), matching
+#     pr_body_ensure_closes's own "already satisfied" regex (checkpoint.sh)
+#
+# igor#496: forgejo_bot_prs_for_issue's closing-keyword regex only recognizes
+# the literal word "closes", but pr_body_ensure_closes -- which decides
+# whether to APPEND a "Closes #N" line -- treats the wider close/fix/resolve
+# family as already-satisfied and leaves the body alone. A PR whose own body
+# text says e.g. "This fixes #490 by ..." (Claude's own prose, not the
+# harness's appended line) is therefore invisible to the narrower regex:
+# forgejo_bot_prs_for_issue returns it as NOT covering the issue, the
+# discovery gate sees no in-flight PR, and a ready, already-reviewed PR gets
+# silently reclaimed and overwritten. This helper is deliberately independent
+# of PR author and of any assignment/review state (discretionary-state.json
+# included) -- an open PR carrying either signal means the issue's work is
+# already in flight, full stop.
+#
+# Returns a JSON array of {number, title} for matching open PRs; empty array
+# if none.
+forgejo_open_pr_covers_issue() {
+  local repo="$1" issue_num="$2"
+  _fj GET "/repos/${repo}/pulls?state=open&limit=50" \
+    | jq -c --arg n "$issue_num" '
+        [.[]
+         | select(
+             ((.head.ref // "") | test("^agent/" + $n + "($|-)"))
+             or ((.body // "") | test("(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\s+#" + $n + "(\\D|$)"))
+           )
+         | {number, title: (.title // "")}]'
+}
+
 # forgejo_edit_pr <repo> <number> [--title T] [--body B] -- patch a PR's title
 # and/or body. A PR IS an issue in Forgejo, so the issues PATCH endpoint edits
 # both. Used by the checkpoint flow to bump the counter in a draft's body and to

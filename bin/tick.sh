@@ -4454,17 +4454,26 @@ while IFS= read -r repo_line; do
     [ -z "$candidate" ] && continue
     C_NUM=$(jq -r .number <<<"$candidate")
 
-    C_HISTORY=$(forgejo_bot_prs_for_issue "$R_NAME" "$C_NUM" "$BOT_USER" 2>/dev/null || echo '[]')
-    # An open bot PR normally means work in flight -> skip. EXCEPT a WIP
-    # checkpoint draft (turn-cap snapshot): that IS this issue, paused
-    # mid-flight, and must be RESUMED, not skipped -- so it stays claimable.
+    # Structural in-flight check (igor#496): ANY open PR (any author,
+    # unaffected by assignment/review history or discretionary-state.json)
+    # whose branch is this issue's own agent/<n>(-*) namespace, or whose body
+    # carries a closing keyword, means the work already lives in a PR --
+    # rebuilding it from scratch would silently replace whatever's there
+    # (including post-review rework fixes). EXCEPT a WIP checkpoint draft
+    # (turn-cap snapshot): that IS this issue, paused mid-flight, and must be
+    # RESUMED below, not skipped here -- so it stays claimable at this point.
+    C_COVERING=$(forgejo_open_pr_covers_issue "$R_NAME" "$C_NUM" 2>/dev/null || echo '[]')
     C_OPEN=$(jq --arg wip "$CHECKPOINT_WIP_PREFIX" \
-      '[.[] | select(.state == "open" and ((.title // "") | startswith($wip) | not))] | length' \
-      <<<"$C_HISTORY")
+      '[.[] | select((.title // "") | startswith($wip) | not)] | length' \
+      <<<"$C_COVERING")
     if [ "$C_OPEN" -gt 0 ]; then
-      log "skipping ${R_NAME}#${C_NUM} -- open bot PR (in flight)"
+      log "skipping ${R_NAME}#${C_NUM} -- open PR already covers this issue (branch/closing-keyword match)"
       continue
     fi
+    # Rejected-attempt strike count still needs BOT authorship specifically
+    # (a human-authored closed PR isn't a rejected agent attempt), so this
+    # stays on the narrower, author-scoped helper.
+    C_HISTORY=$(forgejo_bot_prs_for_issue "$R_NAME" "$C_NUM" "$BOT_USER" 2>/dev/null || echo '[]')
     C_REJECTED=$(jq '[.[] | select(.state == "closed" and .merged == false)] | length' <<<"$C_HISTORY")
     if [ "$C_REJECTED" -ge 2 ]; then
       log "skipping ${R_NAME}#${C_NUM} -- ${C_REJECTED} rejected bot PRs, applying Status/Blocked"
@@ -4632,6 +4641,22 @@ if [ "$IS_RESUME" = "1" ] && git rev-parse --verify --quiet "refs/remotes/origin
   log "worktree: resuming on origin/${BRANCH}"
 else
   [ "$IS_RESUME" = "1" ] && { log "resume: origin/${BRANCH} gone -- starting fresh from ${PR_BASE}"; IS_RESUME=0; CHECKPOINT_N=0; RESUME_PR=""; }
+  # Defense in depth (igor#496): about to carve BRANCH fresh from origin/PR_BASE,
+  # and the later push is `--force-with-lease` -- which happily overwrites
+  # whatever origin/$BRANCH currently holds once it's been fetched (the
+  # preflight fetch above just did). The discovery-time checks above should
+  # already have caught any issue with live work, but this is the last line of
+  # defense: if origin still carries ANY agent/<n>(-*) branch for this issue
+  # that we are NOT resuming, refuse to blow it away blind.
+  STALE_BRANCHES=$(git for-each-ref --format='%(refname:short)' \
+    "refs/remotes/origin/agent/${ISSUE_NUMBER}" "refs/remotes/origin/agent/${ISSUE_NUMBER}-*" \
+    | sed 's#^origin/##')
+  if [ -n "$STALE_BRANCHES" ]; then
+    log "ABORT: origin already has branch(es) matching agent/${ISSUE_NUMBER}(-*) and this is not a resume -- refusing to overwrite: $(printf '%s' "$STALE_BRANCHES" | tr '\n' ' ')"
+    agent-block.sh "The agent aborted before starting: origin already has a branch matching \`agent/${ISSUE_NUMBER}(-*)\` ($(printf '%s' "$STALE_BRANCHES" | tr '\n' ', ')) but this claim was not a resume. Investigate -- an open PR may already cover this issue, or a stale branch needs cleanup -- before removing \`Status/Blocked\`."
+    WORKTREE=""
+    exit 0
+  fi
   git worktree add -B "$BRANCH" "$WORKTREE" "origin/${PR_BASE}"
 fi
 init_igor_scratch "$WORKTREE"
