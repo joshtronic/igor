@@ -98,10 +98,10 @@ WEBSITE_PATH="${WEBSITE_PATH:-$AGENT_STATE_DIR/repos/${WEBSITE_REPO}}"
 . "$AGENT_HOME/lib/cost.sh"
 # shellcheck source=../lib/claude.sh
 . "$AGENT_HOME/lib/claude.sh"
-# shellcheck source=../lib/brain.sh
-. "$AGENT_HOME/lib/brain.sh"
 # shellcheck source=../lib/context-source.sh
 . "$AGENT_HOME/lib/context-source.sh"
+# shellcheck source=../lib/brain.sh
+. "$AGENT_HOME/lib/brain.sh"
 # Same reason as site-work-block.sh: this pipeline opens a PR and requests the
 # operator's review, and the notifier hook is a per-process property (igor#439).
 # email.sh first: reviewnotify sends through email_send.
@@ -143,6 +143,13 @@ if ! context_seeded; then
   exit 2
 fi
 VOICE_BODY=$(context_surface voice)
+# Seeded does not imply servable, and this script has no `set -e` to catch it:
+# an empty anchor would splice into the prompt and the pass would write with no
+# voice constraints at all -- a silent quality regression. Refuse instead.
+if [ -z "$VOICE_BODY" ]; then
+  log "prompt cache is seeded but 'voice' could not be served -- refusing to run"
+  exit 2
+fi
 
 TODAY=$(date +%Y-%m-%d)
 NOW_ISO=$(date +%Y-%m-%dT%H:%M:%S%z)

@@ -108,6 +108,13 @@ if ! context_seeded; then
   exit 2
 fi
 VOICE_BODY=$(context_surface voice)
+# Seeded does not imply servable, and this script has no `set -e` to catch it:
+# an empty anchor would splice into the prompt and the pass would write with no
+# voice constraints at all -- a silent quality regression. Refuse instead.
+if [ -z "$VOICE_BODY" ]; then
+  log "prompt cache is seeded but 'voice' could not be served -- refusing to run"
+  exit 2
+fi
 
 TODAY=$(date +%Y-%m-%d)
 NOW_ISO=$(date +%Y-%m-%dT%H:%M:%S%z)
