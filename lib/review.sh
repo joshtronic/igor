@@ -40,7 +40,15 @@ fi
 
 # The issue number named by a closing keyword (close/fix/resolve, any
 # inflection), case-insensitive -- the same keyword set
-# pr_body_ensure_closes (lib/checkpoint.sh) writes. First match wins.
+# pr_body_ensure_closes (lib/checkpoint.sh) writes. LAST match wins (igor#498):
+# pr_body_ensure_closes always appends its "Closes #N" line at the very
+# bottom of the body when Claude hasn't already written a real closing
+# keyword for that exact issue, so the bottom-most match is the harness's own
+# guarantee, not a guess. A body that merely DISCUSSES an issue reference
+# earlier on -- e.g. quoting an example phrase like "this PR fixes #490 by
+# adding the missing guard" while tracing a root cause -- used to win under
+# first-match and hand the reviewer the wrong issue's requirements (PR #497
+# picked up #490 that way instead of its real #496).
 #
 # The leading (^|[^[:alnum:]]) is load-bearing (igor#444). Without it the
 # alternation matches INSIDE a longer word, so "prefixes #12", "suffixes #99",
@@ -53,7 +61,7 @@ review_closed_issue_number() {
   local body="$1"
   printf '%s\n' "$body" \
     | grep -oiE '(^|[^[:alnum:]])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+' \
-    | head -1 \
+    | tail -1 \
     | grep -oE '[0-9]+'
 }
 

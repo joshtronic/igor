@@ -37,7 +37,7 @@ eq "Closes #433 -> 433"                    "433" "$(review_closed_issue_number '
 eq "lowercase 'closes' -> 433"             "433" "$(review_closed_issue_number 'this closes #433, see notes')"
 eq "Fixes #12 -> 12"                       "12"  "$(review_closed_issue_number 'Fixes #12')"
 eq "Resolved #7 -> 7"                      "7"   "$(review_closed_issue_number 'Resolved #7')"
-eq "first match wins"                      "433" "$(review_closed_issue_number 'Closes #433 and fixes #12')"
+eq "last match wins"                       "12"  "$(review_closed_issue_number 'Closes #433 and fixes #12')"
 eq "a bare #N with no keyword -> empty"    ""    "$(review_closed_issue_number 'see #433 for context')"
 eq "no issue reference at all -> empty"    ""    "$(review_closed_issue_number 'just a description')"
 
@@ -59,6 +59,20 @@ eq "real keyword wins over an earlier in-word match" "77" \
 Closes #77')"
 # Still matched when the keyword follows punctuation rather than a space.
 eq "punctuation before the keyword still matches" "5" "$(review_closed_issue_number '(closes #5)')"
+
+# igor#498: PR #497's actual shape -- prose tracing a root cause quotes an
+# EXAMPLE closing phrase for an unrelated issue many lines above the
+# harness-appended "Closes #N" line for the real one. First-match used to
+# return the quoted example (490); last-match correctly returns the real one.
+eq "harness-appended Closes # at the bottom beats quoted prose above it (igor#498)" "496" \
+  "$(review_closed_issue_number 'Root cause: the old grep took the first close/fix/resolve + #N match
+anywhere in the body. On PR #497 that picked up #490 because the body quoted
+the example phrase "this PR fixes #490 by adding the missing guard" many
+lines above the actual reference.
+
+Part of #496
+
+Closes #496')"
 
 echo "== review_linked_issue_section: fetch + bound, skip gracefully =="
 forgejo_get_issue() {
