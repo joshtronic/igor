@@ -23,7 +23,7 @@
 # accepted and ignored for call-site symmetry with ideation-pipeline.
 #
 # Usage:
-#   bin/reading-pipeline.sh [--brain-db PATH] [--voice-anchor PATH] [--live]
+#   bin/reading-pipeline.sh [--brain-db PATH] [--live]
 #
 # Model calls go through claude_call (the `claude` CLI on the host's
 # subscription login) -- no API key needed or wanted in the env.
@@ -42,12 +42,10 @@ AGENT_HOME="${AGENT_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
 AGENT_STATE_DIR="${AGENT_STATE_DIR:-$HOME/.local/state/agent}"
 
 BRAIN_DB="$AGENT_STATE_DIR/brain.sqlite"
-VOICE_ANCHOR="$AGENT_HOME/bin/lib/voice.md"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --brain-db)      BRAIN_DB="$2"; shift 2 ;;
-    --voice-anchor)  VOICE_ANCHOR="$2"; shift 2 ;;
     --live)          shift ;;  # accepted, ignored: reads never push
     -h|--help)       sed -n '2,/^$/p' "$0" | sed 's/^# //; s/^#//'; exit 0 ;;
     *)               echo "unknown arg: $1" >&2; exit 1 ;;
@@ -82,6 +80,8 @@ MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 . "$AGENT_HOME/lib/claude.sh"
 # shellcheck source=../lib/brain.sh
 . "$AGENT_HOME/lib/brain.sh"
+# shellcheck source=../lib/context-source.sh
+. "$AGENT_HOME/lib/context-source.sh"
 
 # -- constants --------------------------------------------------
 
@@ -99,11 +99,15 @@ log() { printf 'reading-pipeline: %s\n' "$*" >&2; }
 
 brain_init || { log "failed to ensure brain db schema at $BRAIN_DB"; exit 2; }
 
-if [ ! -f "$VOICE_ANCHOR" ]; then
-  log "voice anchor not found: $VOICE_ANCHOR"
+# Sourced from the Distillery at origin/master, live, via context_surface's
+# last-good cache -- no in-repo fallback (lib/context-source.sh, igor#485).
+# tick.sh's bootstrap gate normally guarantees a seeded cache before this
+# ever runs; the check below is defense-in-depth for a standalone invocation.
+if ! context_seeded; then
+  log "prompt cache never seeded (lib/context-source.sh) -- refusing to run"
   exit 2
 fi
-VOICE_BODY=$(cat "$VOICE_ANCHOR")
+VOICE_BODY=$(context_surface voice)
 
 TODAY=$(date +%Y-%m-%d)
 NOW_ISO=$(date +%Y-%m-%dT%H:%M:%S%z)
