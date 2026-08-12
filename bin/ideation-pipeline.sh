@@ -238,9 +238,23 @@ website_post_paths() {
     | grep -E '\.md$' | sort
 }
 
-# Content of a repo-relative path at origin/master.
+# Content of a repo-relative path at origin/master. Empty (status 0 at the
+# call sites, which all test the content, not the status) when the path is
+# not in the ref -- `git show` exits 128 there, and the script runs without
+# `set -e`, so an absent page degrades rather than aborting.
 website_show() {
   git -C "$WEBSITE_PATH" show "origin/master:$1" 2>/dev/null
+}
+
+# True if origin/master resolves at all. Every read above swallows git's
+# stderr, so an unresolvable ref (no origin, a failed first fetch, a
+# differently named default branch) would come back as "the site has no
+# posts" -- shipped_digest silently empty, post_slug_exists false for every
+# slug, the collision gate waving anything through. That is exactly #507's
+# duplicate-post failure by another route, so main checks this once and
+# refuses to draft rather than drafting blind.
+website_ref_ok() {
+  git -C "$WEBSITE_PATH" rev-parse --verify --quiet origin/master >/dev/null 2>&1
 }
 
 # True if any post at origin/master resolves to this slug -- basename
@@ -1113,8 +1127,15 @@ log "start ($mode_label); db=$BRAIN_DB; website=$WEBSITE_PATH"
 # goes through this ref, never the (stale, detached) working tree --
 # post_done_today does its own fetch too, but evolve_voice_notes runs
 # BEFORE that, so it needs this one (igor#507).
-if [ -d "$WEBSITE_PATH/.git" ]; then
-  git -C "$WEBSITE_PATH" fetch --quiet origin master 2>/dev/null || true
+git -C "$WEBSITE_PATH" fetch --quiet origin master 2>/dev/null || true
+
+# A fetch is allowed to fail (offline tick, transient remote); an
+# UNRESOLVABLE ref is not. Without origin/master every dedup read comes back
+# empty and every gate passes silently, which is how a duplicate post ships.
+# Loud and fatal beats drafting blind -- the daily slot retries next tick.
+if ! website_ref_ok; then
+  log "cannot resolve origin/master in $WEBSITE_PATH -- the shipped digest and slug-collision gate would both read empty; refusing to draft blind (igor#507)"
+  exit 1
 fi
 
 # Refine the voice notes BEFORE the daily-refrain check. Voice learning is

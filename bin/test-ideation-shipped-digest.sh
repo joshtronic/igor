@@ -15,7 +15,16 @@
 # These tests build a real fixture clone whose working tree is deliberately
 # checked out one commit BEHIND origin/master (mirroring the bug) and assert
 # that shipped_digest, recent_post_territory_tokens, posts_cited_sources,
-# broken_internal_links, and post_slug_exists all still see the newest post.
+# broken_internal_links, post_slug_exists, and the today-post guard
+# (post_done_today) all still see the newest post.
+#
+# The conversion swapped `[ -f "$f" ] || continue` guards for command
+# substitutions of git, which changes EXIT STATUSES, so the last two blocks
+# pin the degradation paths: an absent file and an unresolvable origin/master
+# must come back empty with status 0, never abort mid-pipeline. The `set -`
+# line below deliberately MATCHES bin/ideation-pipeline.sh's own (`-uo
+# pipefail`, no `-e`) so those statuses are exercised under the same options
+# the real script runs with.
 #
 # Functions are lifted straight out of bin/ideation-pipeline.sh (sed range
 # extraction, same technique bin/test-cascade.sh uses for cascade_run) rather
@@ -43,9 +52,9 @@ lift() {
   eval "$src"
 }
 
-for fn in website_post_paths website_show post_slug_exists shipped_digest \
-          recent_post_territory_tokens posts_cited_sources recent_post_bodies \
-          links_roster broken_internal_links; do
+for fn in website_post_paths website_show post_slug_exists website_ref_ok \
+          shipped_digest recent_post_territory_tokens posts_cited_sources \
+          recent_post_bodies links_roster broken_internal_links post_done_today; do
   lift "$fn" || exit 1
 done
 
@@ -177,6 +186,68 @@ git -C "$SEED" push -q origin master
 git -C "$CLONE" fetch -q origin master
 ROSTER=$(links_roster)
 contains "roster reflects the ref, not the stale checkout" "Fresh Source" "$ROSTER"
+
+# -- the today-post guard ------------------------------------------
+#
+# post_done_today is the daily refrain: miss the post that shipped today and
+# the pass drafts a second one. It already read origin/master before this
+# fix, but it is the guard whose failure double-posts, so pin it against the
+# same stale-tree fixture (igor#507's Tests section asks for exactly this).
+# The fixture's newest post is dated 2026-08-11, so that is "today" here.
+
+echo "== the today-post guard sees today's post through the stale checkout =="
+# shellcheck disable=SC2034  # read by the eval'd post_done_today
+WEBSITE_REPO="fixture/website"
+# shellcheck disable=SC2034
+BOT_USER="igor"
+forgejo_list_open_bot_prs() { printf '[]\n'; }
+forgejo_pr_files() { printf '[]\n'; }
+
+TODAY_POST_RE='^src/posts/[0-9]{4}/2026-08-11-.+\.md$'
+if post_done_today; then ok "guard sees the post that shipped on the ref"; else bad "guard sees the post that shipped on the ref"; fi
+
+# shellcheck disable=SC2034  # read by the eval'd post_done_today
+TODAY_POST_RE='^src/posts/[0-9]{4}/2026-08-12-.+\.md$'
+if command -v jq >/dev/null 2>&1; then
+  if post_done_today; then bad "guard reports no post on a day with none"; else ok "guard reports no post on a day with none"; fi
+else
+  echo "  . jq absent -- skipping the no-post-today case (its fallback path needs jq)"
+fi
+
+# -- degradation paths ---------------------------------------------
+#
+# Absent inputs must degrade to empty, not abort. `git show` exits 128 on a
+# path that is not in the ref and `website_post_paths`' grep exits 1 on an
+# empty post set, so these pin that the callers still hand back empty with
+# status 0 (the behavior the old `[ -f ... ] || return 0` guards gave).
+
+echo "== an absent file degrades to empty, status 0 =="
+git -C "$SEED" rm -q src/links.md
+git -C "$SEED" commit -q -m "drop the links roster"
+git -C "$SEED" push -q origin master
+git -C "$CLONE" fetch -q origin master
+ROSTER_GONE=$(links_roster); RC=$?
+eq "links_roster is empty when src/links.md is not in the ref" "" "$ROSTER_GONE"
+eq "links_roster still exits 0" "0" "$RC"
+
+echo "== an unresolvable origin/master degrades to empty, and website_ref_ok catches it =="
+if website_ref_ok; then ok "website_ref_ok accepts the fetched clone"; else bad "website_ref_ok accepts the fetched clone"; fi
+
+NOREF="$TMPROOT/noref"
+git init -q "$NOREF"
+WEBSITE_PATH="$NOREF"
+eq "website_post_paths is empty with no origin/master" "" "$(website_post_paths)"
+DIGEST_NOREF=$(shipped_digest); RC=$?
+eq "shipped_digest is empty with no origin/master" "" "$DIGEST_NOREF"
+eq "shipped_digest still exits 0" "0" "$RC"
+# The reason main hard-checks the ref: with nothing to compare against, every
+# slug reads as un-shipped and the collision gate waves anything through --
+# igor#507's duplicate-post failure by another route, and silent without the
+# check, since each helper swallows git's stderr.
+if post_slug_exists "an-older-post"; then bad "post_slug_exists is fail-open with no ref"; else ok "post_slug_exists is fail-open with no ref (why website_ref_ok gates main)"; fi
+if website_ref_ok; then bad "website_ref_ok rejects a repo with no origin/master"; else ok "website_ref_ok rejects a repo with no origin/master"; fi
+# shellcheck disable=SC2034  # restores the good fixture for any block added below
+WEBSITE_PATH="$CLONE"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-ideation-shipped-digest: all checks passed"
