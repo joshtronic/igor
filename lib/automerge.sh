@@ -5,11 +5,11 @@
 # dossier declaring a live `url` marks it auto-merge-eligible -- root
 # AGENTS.md `url` (docs/agents-md-spec.md), falling back to legacy agent.json
 # (AGENT_CONFIG_FILE) `.smoke.url` via lib/dossier.sh's dossier_get_repo for
-# any repo that hasn't adopted the spec yet. The
-# harness merges a bot PR ONLY when the human (FORGEJO_REVIEWER) has submitted an
-# APPROVED review, CI is green on the head, it is cleanly mergeable, and the
-# shadow verdict is not REQUEST_CHANGES. On merge it stamps a pending deploy
-# under .deploy in discretionary-state.
+# any repo that hasn't adopted the spec yet.
+#
+# Merge gate: shadow-review APPROVE is the default; agent.json
+# .automerge.require_human pins a repo to the human gate. Design: igor#404.
+# On merge it stamps a pending deploy under .deploy in discretionary-state.
 #
 # The deploy barrier (do_deploy_barrier, run EARLY each tick) then watches that
 # deploy to verified-healthy -- CI green + the live URL responds -- and ENDS the
