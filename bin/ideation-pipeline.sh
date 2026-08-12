@@ -220,6 +220,58 @@ corpus_sample() {
      ORDER BY ts DESC;" 2>/dev/null
 }
 
+# -- reading the website repo (ref, never the checkout) --------
+#
+# The working tree sits detached at the PREVIOUS run's end state
+# (push_and_open_pr's cleanup checkout, ~line 1015), so it is always one
+# publish behind. Every read of the website repo below goes through the
+# fetched origin/master ref instead -- same read-the-ref-never-the-checkout
+# pattern as lib/context-source.sh and rc_local_init (lib/repo-checks.sh).
+# Main fetches origin/master once up front so these always see the current
+# tick's state (igor#507).
+
+# Repo-relative paths of every post markdown file at origin/master.
+# Date-prefixed filenames (src/posts/YYYY/YYYY-MM-DD-slug.md) sort
+# chronologically, so a lexical sort is oldest -> newest.
+website_post_paths() {
+  git -C "$WEBSITE_PATH" ls-tree -r --name-only origin/master -- src/posts 2>/dev/null \
+    | grep -E '\.md$' | sort
+}
+
+# Content of a repo-relative path at origin/master. Empty (status 0 at the
+# call sites, which all test the content, not the status) when the path is
+# not in the ref -- `git show` exits 128 there, and the script runs without
+# `set -e`, so an absent page degrades rather than aborting.
+website_show() {
+  git -C "$WEBSITE_PATH" show "origin/master:$1" 2>/dev/null
+}
+
+# True if origin/master resolves at all. Every read above swallows git's
+# stderr, so an unresolvable ref (no origin, a failed first fetch, a
+# differently named default branch) would come back as "the site has no
+# posts" -- shipped_digest silently empty, post_slug_exists false for every
+# slug, the collision gate waving anything through. That is exactly #507's
+# duplicate-post failure by another route, so main checks this once and
+# refuses to draft rather than drafting blind.
+website_ref_ok() {
+  git -C "$WEBSITE_PATH" rev-parse --verify --quiet origin/master >/dev/null 2>&1
+}
+
+# True if any post at origin/master resolves to this slug -- basename
+# "<slug>.md" or "<anything>-<slug>.md", matching write_post_file's
+# YYYY-MM-DD-<slug>.md naming.
+post_slug_exists() {
+  local slug="$1" p
+  while IFS= read -r p; do
+    case "$p" in
+      *"-${slug}.md" | *"/${slug}.md") return 0 ;;
+    esac
+  done <<EOF
+$(website_post_paths)
+EOF
+  return 1
+}
+
 # -- shipped digest (dedup signal) ------------------------------
 #
 # Posts already on the site, as "- title [tags] -- description", fed
@@ -232,9 +284,7 @@ corpus_sample() {
 
 shipped_digest() {
   local files total chosen included f fm title desc tags
-  # Date-prefixed filenames (src/posts/YYYY/YYYY-MM-DD-slug.md) sort
-  # chronologically, so a lexical sort is oldest -> newest.
-  files=$(find "$WEBSITE_PATH"/src/posts -type f -name '*.md' 2>/dev/null | sort)
+  files=$(website_post_paths)
   [ -z "$files" ] && return 0
   total=$(printf '%s\n' "$files" | grep -c .)
 
@@ -256,8 +306,8 @@ shipped_digest() {
   log "shipped digest: $included of $total post(s) (dedup signal)"
 
   printf '%s\n' "$chosen" | while IFS= read -r f; do
-    [ -f "$f" ] || continue
-    fm=$(awk 'NR==1&&/^---/{f=1;next} f&&/^---/{exit} f{print}' "$f")
+    [ -z "$f" ] && continue
+    fm=$(website_show "$f" | awk 'NR==1&&/^---/{f=1;next} f&&/^---/{exit} f{print}')
     title=$(printf '%s' "$fm" | sed -n 's/^title:[[:space:]]*//p' | head -1 | sed 's/^"//; s/"$//')
     desc=$(printf '%s'  "$fm" | sed -n 's/^description:[[:space:]]*//p' | head -1 | sed 's/^"//; s/"$//')
     tags=$(printf '%s'  "$fm" | sed -n 's/^tags:[[:space:]]*//p' | head -1)
@@ -276,13 +326,12 @@ shipped_digest() {
 # so the arg is intentionally never passed.
 recent_post_territory_tokens() {
   local count="${1:-6}" files f
-  files=$(find "$WEBSITE_PATH"/src/posts -type f -name '*.md' 2>/dev/null \
-    | sort | tail -n "$count")
+  files=$(website_post_paths | tail -n "$count")
   [ -z "$files" ] && return 0
   {
     while IFS= read -r f; do
-      [ -f "$f" ] || continue
-      awk 'NR==1&&/^---/{x=1;next} x&&/^---/{exit} x&&/^tags:/{print; exit}' "$f"
+      [ -z "$f" ] && continue
+      website_show "$f" | awk 'NR==1&&/^---/{x=1;next} x&&/^---/{exit} x&&/^tags:/{print; exit}'
     done <<EOF
 $files
 EOF
@@ -306,9 +355,9 @@ EOF
 
 posts_cited_sources() {
   local f
-  for f in "$WEBSITE_PATH"/src/posts/*/*.md; do
-    [ -f "$f" ] || continue
-    grep -oE '\]\(https?://[^)]+\)' "$f"
+  website_post_paths | while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    website_show "$f" | grep -oE '\]\(https?://[^)]+\)'
   done \
     | sed -E 's/^\]\(//; s/\)$//; s#/+$##' \
     | grep -viE '://(igor\.bot|localhost)' \
@@ -369,13 +418,12 @@ voice_notes_stamp_week() {
 recent_post_bodies() {
   local count="${1:-$VOICE_NOTES_RECENT_POSTS}"
   local files f body out=""
-  files=$(find "$WEBSITE_PATH"/src/posts -type f -name '*.md' 2>/dev/null \
-    | sort | tail -n "$count")
+  files=$(website_post_paths | tail -n "$count")
   [ -z "$files" ] && return 0
   while IFS= read -r f; do
-    [ -f "$f" ] || continue
+    [ -z "$f" ] && continue
     # Print everything after the second '---' (i.e. the body, no frontmatter).
-    body=$(awk 'f>=2{print} /^---[[:space:]]*$/{f++}' "$f")
+    body=$(website_show "$f" | awk 'f>=2{print} /^---[[:space:]]*$/{f++}')
     out="${out}
 
 ## ${f##*/}
@@ -497,9 +545,10 @@ build_voice_notes_block() {
 # can hand the model that allow-list. Empty (and the rule then forbids
 # naming anyone) if the page is absent. Mirrors build_voice_notes_block.
 links_roster() {
-  local f="$WEBSITE_PATH/src/links.md"
-  [ -f "$f" ] || return 0
-  grep -oE '\[[^]]+\]\(https?://[^)]+\)' "$f" 2>/dev/null \
+  local content
+  content=$(website_show "src/links.md")
+  [ -z "$content" ] && return 0
+  printf '%s' "$content" | grep -oE '\[[^]]+\]\(https?://[^)]+\)' 2>/dev/null \
     | sed -E 's#\[([^]]+)\]\(https?://([^/)]+)[^)]*\)#\1 (\2)#' \
     | sort -u
 }
@@ -804,9 +853,7 @@ broken_internal_links() {
     | sort -u \
     | while IFS= read -r slug; do
         [ -z "$slug" ] && continue
-        find "$WEBSITE_PATH/src/posts" -type f \
-             \( -name "*-${slug}.md" -o -name "${slug}.md" \) 2>/dev/null \
-          | grep -q . || printf '%s\n' "$slug"
+        post_slug_exists "$slug" || printf '%s\n' "$slug"
       done
 }
 
@@ -1076,6 +1123,21 @@ mode_label="dry-run"
 [ "$LIVE" = "1" ] && mode_label="LIVE"
 log "start ($mode_label); db=$BRAIN_DB; website=$WEBSITE_PATH"
 
+# Fetch once, up front. Every website_post_paths/website_show read below
+# goes through this ref, never the (stale, detached) working tree --
+# post_done_today does its own fetch too, but evolve_voice_notes runs
+# BEFORE that, so it needs this one (igor#507).
+git -C "$WEBSITE_PATH" fetch --quiet origin master 2>/dev/null || true
+
+# A fetch is allowed to fail (offline tick, transient remote); an
+# UNRESOLVABLE ref is not. Without origin/master every dedup read comes back
+# empty and every gate passes silently, which is how a duplicate post ships.
+# Loud and fatal beats drafting blind -- the daily slot retries next tick.
+if ! website_ref_ok; then
+  log "cannot resolve origin/master in $WEBSITE_PATH -- the shipped digest and slug-collision gate would both read empty; refusing to draft blind (igor#507)"
+  exit 1
+fi
+
 # Refine the voice notes BEFORE the daily-refrain check. Voice learning is
 # about the archive, not today's post, so it should run (and bootstrap on
 # the first ever run) even on a day that already has a post. Live only --
@@ -1119,7 +1181,7 @@ log "angle: $ANGLE"
 # hint to the model and doesn't reliably catch a same-slug regeneration, so
 # reject it HERE, before the expensive draft and an un-mergeable PR. Exiting
 # clean lets the daily slot retry next tick and re-roll a fresh idea.
-if find "$WEBSITE_PATH/src/posts" -type f \( -name "*-${SLUG}.md" -o -name "${SLUG}.md" \) 2>/dev/null | grep -q .; then
+if post_slug_exists "$SLUG"; then
   log "chosen slug '$SLUG' collides with an already-shipped post -- skipping to avoid a duplicate-permalink PR (#367); will re-roll next tick"
   exit 0
 fi
