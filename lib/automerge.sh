@@ -257,11 +257,14 @@ automerge_block_record() {
 }
 
 automerge_block_clear() {
-  # <state-file> <key> -- drop the block (on a successful merge).
+  # <state-file> <key> -- drop this PR's per-PR auto-merge state (on a
+  # successful merge): the block, and the risk-gate notification stamp. A
+  # merged PR is never revisited, so both would otherwise accumulate forever.
   local sf="$1" key="$2" tmp
   [ -f "$sf" ] || return 0
   tmp=$(mktemp)
-  if jq --arg k "$key" 'if .automerge_block then .automerge_block |= del(.[$k]) else . end' "$sf" >"$tmp" 2>/dev/null; then
+  if jq --arg k "$key" '(if .automerge_block then .automerge_block |= del(.[$k]) else . end)
+                        | (if .automerge_risk_notified then .automerge_risk_notified |= del(.[$k]) else . end)' "$sf" >"$tmp" 2>/dev/null; then
     mv "$tmp" "$sf"
   else
     rm -f "$tmp"
@@ -280,16 +283,27 @@ AUTOMERGE_RISK_MAX_FILES=20    # changed file count
 
 # automerge_risk_gate <repo> <pr> -- exit 0 if the PR is within the
 # deterministic risk bounds (safe for the shadow-APPROVE path to merge
-# unattended). On refusal (exit 1), echoes "lines=N files=N path=P" for the
+# unattended). On refusal (exit 1), echoes "lines=N, files=N, path=P" for the
 # caller to log -- P is the first deny-listed path matched, or "none" if the
-# refusal is purely size-based. Fails CLOSED (refuses) if the changed-files
-# data can't be fetched -- a merge can't be proven safe without it.
+# refusal is purely size-based. Any other text means the gate could not
+# EVALUATE (as opposed to a bound being exceeded); the caller distinguishes
+# them by the leading "lines=".
+#
+# Fails CLOSED (refuses) whenever the changed-file data can't be trusted: the
+# fetch failed (forgejo_pr_files pages, so a truncated listing is a failure,
+# not a short array), the response isn't an array, or any element is missing
+# numeric additions/deletions. That last one matters because defaulting a
+# missing count to 0 would be the one place this function opens rather than
+# closes -- a shape without per-file counts would score lines=0 and sail
+# through.
 automerge_risk_gate() {
   local repo="$1" pr="$2" files nfiles lines path
   files=$(forgejo_pr_files "$repo" "$pr" 2>/dev/null) || { printf 'unable to fetch changed files'; return 1; }
   nfiles=$(jq -r 'if type == "array" then length else empty end' <<<"$files" 2>/dev/null)
   [ -n "$nfiles" ] || { printf 'unable to fetch changed files'; return 1; }
-  lines=$(jq -r '[.[] | ((.additions // 0) + (.deletions // 0))] | add // 0' <<<"$files" 2>/dev/null)
+  lines=$(jq -r 'if all(.[]; (.additions | type) == "number" and (.deletions | type) == "number")
+                 then ([.[] | .additions + .deletions] | add // 0) else empty end' <<<"$files" 2>/dev/null)
+  [ -n "$lines" ] || { printf 'changed-file data has no additions/deletions counts'; return 1; }
   path=$(jq -r '.[] | (.filename // .old_filename // empty)' <<<"$files" 2>/dev/null | {
     while IFS= read -r f; do
       case "$f" in
@@ -301,7 +315,7 @@ automerge_risk_gate() {
   if [ "${lines:-0}" -gt "$AUTOMERGE_RISK_MAX_LINES" ] 2>/dev/null \
      || [ "${nfiles:-0}" -gt "$AUTOMERGE_RISK_MAX_FILES" ] 2>/dev/null \
      || [ -n "$path" ]; then
-    printf 'lines=%s files=%s path=%s' "${lines:-0}" "${nfiles:-0}" "${path:-none}"
+    printf 'lines=%s, files=%s, path=%s' "${lines:-0}" "${nfiles:-0}" "${path:-none}"
     return 1
   fi
   return 0
@@ -581,12 +595,23 @@ do_automerge_tick() {
           log "automerge: ${key} not mergeable yet (shadow verdict='${verdict:-none}' reviewed=${reviewed_sha:0:8} head=${head:0:8}; no human approve) -- not auto-merging"; continue
         fi
       fi
+      ci=$(forgejo_commit_status "$repo" "$head")
+      if [ "$ci" != "success" ]; then
+        log "automerge: ${key} CI=${ci:-unknown} -- not merging"; continue
+      fi
+      automerge_mergeable "$repo" "$pr" || { log "automerge: ${key} not cleanly mergeable -- skipping"; continue; }
       # Risk gate (igor#514): a human-approved merge is never gated (a human
       # already saw the diff) -- only the shadow-only path, the default and
-      # only unattended-approval route, is bounded here.
+      # only unattended-approval route, is bounded here. Sits BELOW the CI and
+      # mergeability checks deliberately: a PR that isn't otherwise merge-ready
+      # would have stopped above anyway, so gating it first would only pull the
+      # human in on a red-CI head that no one was going to auto-merge.
       if [ "$shadow_only" = "1" ]; then
         if ! risk_reason=$(automerge_risk_gate "$repo" "$pr"); then
-          log "automerge: ${key} exceeds risk gate (${risk_reason}) -- requesting human review"
+          case "$risk_reason" in
+            lines=*) log "automerge: ${key} exceeds risk gate (${risk_reason}) -- requesting human review" ;;
+            *)       log "automerge: ${key} risk gate could not evaluate (${risk_reason}) -- requesting human review" ;;
+          esac
           if ! automerge_risk_notified "$sf" "$key" "$head"; then
             if forgejo_request_review "$repo" "$pr" "$FORGEJO_REVIEWER" 2>/dev/null; then
               automerge_risk_notify_record "$sf" "$key" "$head"
@@ -595,11 +620,6 @@ do_automerge_tick() {
           continue
         fi
       fi
-      ci=$(forgejo_commit_status "$repo" "$head")
-      if [ "$ci" != "success" ]; then
-        log "automerge: ${key} CI=${ci:-unknown} -- not merging"; continue
-      fi
-      automerge_mergeable "$repo" "$pr" || { log "automerge: ${key} not cleanly mergeable -- skipping"; continue; }
       # Require-up-to-date: the merge API rejects a behind-base PR, so check it
       # OURSELVES rather than POST a doomed merge (the old "merge API failed"
       # warning). 0 = current -> merge now; >0 = behind -> remember it; -1 =

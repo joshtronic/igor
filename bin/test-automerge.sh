@@ -431,9 +431,26 @@ FILES='[{"filename":"migrations/001_init.sql","additions":1,"deletions":1}]'
 no "risk_gate: **/*.sql -> blocked"                automerge_risk_gate acme/x 7
 FILES='[{"filename":"scripts/other.sh","additions":1,"deletions":1}]'
 ok "risk_gate: scripts/ non-deploy file -> ok"     automerge_risk_gate acme/x 7
+FILES=$(jq -n '[range(0;20) | {filename: ("f" + (. | tostring) + ".txt"), additions:1, deletions:0}]')
+ok "risk_gate: exactly 20 files -> within bounds"  automerge_risk_gate acme/x 7
+# A response shape WITHOUT per-file counts must refuse, not score lines=0 and
+# pass -- defaulting a missing count to zero is the one way this gate could
+# open rather than close.
+FILES='[{"filename":"a.txt"},{"filename":"b.txt"}]'
+no "risk_gate: no additions/deletions fields -> fail closed" automerge_risk_gate acme/x 7
+has "risk_gate: shape refusal is not phrased as a bound" \
+  "$(automerge_risk_gate acme/x 7 2>&1)" "no additions/deletions counts"
+FILES='[{"filename":"a.txt","additions":1,"deletions":1},{"filename":"b.txt","additions":2}]'
+no "risk_gate: one element missing deletions -> fail closed" automerge_risk_gate acme/x 7
 FILES=""
 forgejo_pr_files() { return 1; }
 no "risk_gate: API failure -> fail closed (blocked)" automerge_risk_gate acme/x 7
+# forgejo_pr_files is nonzero when the listing can't be walked to the end
+# (including a truncated/capped page walk), so an unwalkable list refuses here
+# rather than being read as a small PR. The paging itself is covered by
+# bin/test-forgejo.sh.
+has "risk_gate: fetch refusal is not phrased as a bound" \
+  "$(automerge_risk_gate acme/x 7 2>&1)" "unable to fetch changed files"
 
 echo "== do_automerge_tick merge decision =="
 export FORGEJO_REVIEWER=josh BOT_USER=igor
@@ -644,6 +661,25 @@ ok "risk-gate: human-approved path unaffected by size -> merges" do_automerge_ti
 eq "risk-gate: human-approved recorded deploy" "acme/site"   "$(jq -r '.deploy.repo // ""' "$STATE")"
 eq "risk-gate: human-approved path never re-requests" "0"    "$REQUESTS"
 automerge_approved_by() { return 1; }   # reset
+
+# A PR that isn't merge-ready anyway stops at the CI check ABOVE the gate, so a
+# red-CI head never pulls the human in on size.
+_fj() { echo '{"head":{"sha":"headshaC"}}'; }
+forgejo_commit_status() { echo failure; }
+forgejo_pr_files() { printf '[{"filename":"big.txt","additions":400,"deletions":400}]'; }
+echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headshaC"}}}' > "$STATE"
+REQUESTS=0
+no "risk-gate: red CI stops above the gate (rc1)"           do_automerge_tick
+eq "risk-gate: red CI does not request the human" "0"        "$REQUESTS"
+forgejo_commit_status() { echo success; }   # reset
+
+# The notification stamp is per-PR state, dropped when the PR merges -- it must
+# not accumulate a key per PR forever.
+CSF="$TMP/risk-clear-state.json"; echo '{}' > "$CSF"
+automerge_risk_notify_record "$CSF" "acme/x#5" "headA"
+ok "risk-gate: stamp recorded"                    automerge_risk_notified "$CSF" "acme/x#5" "headA"
+automerge_block_clear "$CSF" "acme/x#5"
+no "risk-gate: merge clears the stamp"            automerge_risk_notified "$CSF" "acme/x#5" "headA"
 
 if [ "$FAIL" -eq 0 ]; then echo "test-automerge: all checks passed"; exit 0; fi
 echo "test-automerge: $FAIL check(s) FAILED"
