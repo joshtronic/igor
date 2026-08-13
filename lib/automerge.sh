@@ -268,6 +268,69 @@ automerge_block_clear() {
   fi
 }
 
+# -- Risk gate (igor#514) -----------------------------------------------
+#
+# Deterministic bounds on the shadow-APPROVE auto-merge path ONLY: a
+# human-approved merge is never gated here (a human already saw the diff).
+# Hardcoded, no config knob (deliberately -- see the issue: "no per-repo
+# config for thresholds").
+
+AUTOMERGE_RISK_MAX_LINES=500   # total additions+deletions
+AUTOMERGE_RISK_MAX_FILES=20    # changed file count
+
+# automerge_risk_gate <repo> <pr> -- exit 0 if the PR is within the
+# deterministic risk bounds (safe for the shadow-APPROVE path to merge
+# unattended). On refusal (exit 1), echoes "lines=N files=N path=P" for the
+# caller to log -- P is the first deny-listed path matched, or "none" if the
+# refusal is purely size-based. Fails CLOSED (refuses) if the changed-files
+# data can't be fetched -- a merge can't be proven safe without it.
+automerge_risk_gate() {
+  local repo="$1" pr="$2" files nfiles lines path
+  files=$(forgejo_pr_files "$repo" "$pr" 2>/dev/null) || { printf 'unable to fetch changed files'; return 1; }
+  nfiles=$(jq -r 'if type == "array" then length else empty end' <<<"$files" 2>/dev/null)
+  [ -n "$nfiles" ] || { printf 'unable to fetch changed files'; return 1; }
+  lines=$(jq -r '[.[] | ((.additions // 0) + (.deletions // 0))] | add // 0' <<<"$files" 2>/dev/null)
+  path=$(jq -r '.[] | (.filename // .old_filename // empty)' <<<"$files" 2>/dev/null | {
+    while IFS= read -r f; do
+      case "$f" in
+        .forgejo/workflows/*|agent.json|AGENTS.md|install.sh|scripts/deploy*|*.sql)
+          printf '%s' "$f"; break ;;
+      esac
+    done
+  })
+  if [ "${lines:-0}" -gt "$AUTOMERGE_RISK_MAX_LINES" ] 2>/dev/null \
+     || [ "${nfiles:-0}" -gt "$AUTOMERGE_RISK_MAX_FILES" ] 2>/dev/null \
+     || [ -n "$path" ]; then
+    printf 'lines=%s files=%s path=%s' "${lines:-0}" "${nfiles:-0}" "${path:-none}"
+    return 1
+  fi
+  return 0
+}
+
+# automerge_risk_notified <state-file> <key> <head> -- exit 0 if we already
+# requested the human for this EXACT head (so a refused PR doesn't nag every
+# tick); exit 1 otherwise. A new commit (different head) clears it -- fresh
+# content deserves a fresh notification.
+automerge_risk_notified() {
+  local sf="$1" key="$2" head="$3" sha
+  [ -f "$sf" ] || return 1
+  sha=$(jq -r --arg k "$key" '.automerge_risk_notified[$k].sha // ""' "$sf" 2>/dev/null)
+  [ -n "$sha" ] && [ "$sha" = "$head" ]
+}
+
+# automerge_risk_notify_record <state-file> <key> <head> -- remember that the
+# human was asked for this head, so later ticks skip re-asking.
+automerge_risk_notify_record() {
+  local sf="$1" key="$2" head="$3" tmp
+  [ -f "$sf" ] || echo '{}' >"$sf"
+  tmp=$(mktemp)
+  if jq --arg k "$key" --arg s "$head" '.automerge_risk_notified[$k] = {sha:$s}' "$sf" >"$tmp" 2>/dev/null; then
+    mv "$tmp" "$sf"
+  else
+    rm -f "$tmp"
+  fi
+}
+
 # automerge_behind_count <repo> <pr> -- how many base-branch commits the PR head
 # is missing (0 = up to date, which is exactly what require-up-to-date enforces).
 # Echoes -1 when it can't be determined, so the caller skips rather than guesses.
@@ -461,7 +524,7 @@ do_automerge_tick() {
   [ -f "$sf" ] && [ -n "$(jq -r '.deploy.repo // ""' "$sf" 2>/dev/null)" ] && return 1
 
   local repo url req_human prs pr head verdict reviewed_sha key ci sha behind
-  local behind_repo="" behind_pr="" behind_n=""
+  local behind_repo="" behind_pr="" behind_n="" shadow_only risk_reason
   while IFS= read -r repo; do
     [ -n "$repo" ] || continue
     url=$(automerge_smoke_url "$repo"); [ -n "$url" ] || continue   # not eligible
@@ -470,6 +533,7 @@ do_automerge_tick() {
     while IFS= read -r pr; do
       if [ -z "$pr" ] || [ "$pr" = "null" ]; then continue; fi
       key="${repo}#${pr}"
+      shadow_only=0   # reset per-PR: set below only on the shadow-only (no human eyes) merge path
       # Fetch the head sha up front: the default path binds the shadow APPROVE to
       # it (below), and the CI check needs it.
       head=$(_fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null | jq -r '.head.sha // ""')
@@ -512,9 +576,23 @@ do_automerge_tick() {
            && automerge_approval_covers_head "$repo" "$pr" "$FORGEJO_REVIEWER" "$head"; then
           : # human approved THIS net diff (live, or a base-merge-staled approval) -> merge
         elif [ "$verdict" = "APPROVE" ] && [ "$reviewed_sha" = "$head" ]; then
-          : # the shadow approved the current head -> merge
+          shadow_only=1   # the shadow approved the current head, no human eyes -> gate on risk
         else
           log "automerge: ${key} not mergeable yet (shadow verdict='${verdict:-none}' reviewed=${reviewed_sha:0:8} head=${head:0:8}; no human approve) -- not auto-merging"; continue
+        fi
+      fi
+      # Risk gate (igor#514): a human-approved merge is never gated (a human
+      # already saw the diff) -- only the shadow-only path, the default and
+      # only unattended-approval route, is bounded here.
+      if [ "$shadow_only" = "1" ]; then
+        if ! risk_reason=$(automerge_risk_gate "$repo" "$pr"); then
+          log "automerge: ${key} exceeds risk gate (${risk_reason}) -- requesting human review"
+          if ! automerge_risk_notified "$sf" "$key" "$head"; then
+            if forgejo_request_review "$repo" "$pr" "$FORGEJO_REVIEWER" 2>/dev/null; then
+              automerge_risk_notify_record "$sf" "$key" "$head"
+            fi
+          fi
+          continue
         fi
       fi
       ci=$(forgejo_commit_status "$repo" "$head")

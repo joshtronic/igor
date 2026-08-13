@@ -404,6 +404,37 @@ UP=""; _fj() { case "$1 $2" in "POST "*/update) UP="$2" ;; esac; return 0; }
 automerge_update_branch acme/x 9 >/dev/null 2>&1
 has "update_branch: POSTs to /pulls/N/update" "$UP" "/pulls/9/update"
 
+echo "== automerge_risk_gate (size cap + deny-list, igor#514) =="
+forgejo_pr_files() { printf '%s' "$FILES"; }
+FILES='[{"filename":"foo.txt","additions":10,"deletions":5}]'
+ok "risk_gate: small PR -> within bounds"          automerge_risk_gate acme/x 7
+FILES=$(jq -n '[range(0;25) | {filename: ("f" + (. | tostring) + ".txt"), additions:1, deletions:0}]')
+no "risk_gate: >20 files -> blocked"               automerge_risk_gate acme/x 7
+has "risk_gate: reason mentions files="            "$(automerge_risk_gate acme/x 7 2>&1)" "files=25"
+FILES='[{"filename":"big.txt","additions":300,"deletions":300}]'
+no "risk_gate: >500 total lines -> blocked"        automerge_risk_gate acme/x 7
+has "risk_gate: reason mentions lines="            "$(automerge_risk_gate acme/x 7 2>&1)" "lines=600"
+FILES='[{"filename":"small.txt","additions":250,"deletions":250}]'
+ok "risk_gate: exactly 500 lines -> within bounds" automerge_risk_gate acme/x 7
+FILES='[{"filename":".forgejo/workflows/ci.yml","additions":1,"deletions":1}]'
+no "risk_gate: deny-listed workflow path -> blocked" automerge_risk_gate acme/x 7
+has "risk_gate: reason mentions the path"          "$(automerge_risk_gate acme/x 7 2>&1)" ".forgejo/workflows/ci.yml"
+FILES='[{"filename":"agent.json","additions":1,"deletions":1}]'
+no "risk_gate: agent.json -> blocked"              automerge_risk_gate acme/x 7
+FILES='[{"filename":"AGENTS.md","additions":1,"deletions":1}]'
+no "risk_gate: AGENTS.md -> blocked"               automerge_risk_gate acme/x 7
+FILES='[{"filename":"install.sh","additions":1,"deletions":1}]'
+no "risk_gate: install.sh -> blocked"              automerge_risk_gate acme/x 7
+FILES='[{"filename":"scripts/deploy-prod.sh","additions":1,"deletions":1}]'
+no "risk_gate: scripts/deploy* -> blocked"         automerge_risk_gate acme/x 7
+FILES='[{"filename":"migrations/001_init.sql","additions":1,"deletions":1}]'
+no "risk_gate: **/*.sql -> blocked"                automerge_risk_gate acme/x 7
+FILES='[{"filename":"scripts/other.sh","additions":1,"deletions":1}]'
+ok "risk_gate: scripts/ non-deploy file -> ok"     automerge_risk_gate acme/x 7
+FILES=""
+forgejo_pr_files() { return 1; }
+no "risk_gate: API failure -> fail closed (blocked)" automerge_risk_gate acme/x 7
+
 echo "== do_automerge_tick merge decision =="
 export FORGEJO_REVIEWER=josh BOT_USER=igor
 export VALIDATED_REPOS_JSON='{"full_name":"acme/site"}'
@@ -418,6 +449,7 @@ _fj() { echo '{"head":{"sha":"headsha7"}}'; }
 automerge_require_human() { return 1; }      # default: shadow-gated repo
 automerge_approved_by() { return 1; }        # no human review -> exercises the shadow path
 automerge_approval_covers_head() { return 0; }  # default: the approval covers the head (base-merge/live)
+forgejo_pr_files() { printf '[{"filename":"x.txt","additions":1,"deletions":1}]'; }  # small diff by default
 
 # Default (shadow-gated) repo: the shadow verdict APPROVE is the gate.
 echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
@@ -550,6 +582,68 @@ automerge_reviewer_blocks() { return 0; }
 echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
 no "automerge: default repo, human RC vetoes shadow APPROVE"   do_automerge_tick
 automerge_reviewer_blocks() { return 1; }
+
+echo "== do_automerge_tick: risk gate on the shadow-only APPROVE path (igor#514) =="
+export VALIDATED_REPOS_JSON='{"full_name":"acme/site"}'
+automerge_smoke_url() { echo "https://x"; }
+forgejo_list_open_bot_prs() { echo '[{"number":7}]'; }
+forgejo_commit_status() { echo success; }
+automerge_mergeable() { return 0; }
+automerge_behind_count() { echo 0; }
+automerge_do_merge() { echo "mergesha7"; }
+automerge_require_human() { return 1; }      # default (shadow-gated) repo
+automerge_approved_by() { return 1; }        # no human review -> shadow-only merge path
+automerge_approval_covers_head() { return 0; }
+REQUESTS=0; forgejo_request_review() { REQUESTS=$((REQUESTS + 1)); return 0; }
+
+# Under the cap -> merges exactly as before, no human requested.
+_fj() { echo '{"head":{"sha":"headsha7"}}'; }
+forgejo_pr_files() { printf '[{"filename":"x.txt","additions":1,"deletions":1}]'; }
+echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
+ok "risk-gate: under-limit shadow APPROVE -> merges"        do_automerge_tick
+eq "risk-gate: under-limit recorded deploy" "acme/site" "$(jq -r '.deploy.repo // ""' "$STATE")"
+eq "risk-gate: under-limit did not request human" "0" "$REQUESTS"
+
+# Over the line-count cap -> refuses to merge, requests the human instead.
+_fj() { echo '{"head":{"sha":"headsha7"}}'; }
+forgejo_pr_files() { printf '[{"filename":"big.txt","additions":400,"deletions":400}]'; }
+echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
+REQUESTS=0
+no "risk-gate: over line-count cap -> refuses merge (rc1)"  do_automerge_tick
+eq "risk-gate: over-cap recorded no deploy" ""             "$(jq -r '.deploy.repo // ""' "$STATE")"
+eq "risk-gate: over-cap requested human once"  "1"          "$REQUESTS"
+
+# Same PR, same head, next tick -> still refuses, but does NOT nag the human again.
+no "risk-gate: same head next tick -> still refuses (rc1)" do_automerge_tick
+eq "risk-gate: same head does not re-request"  "1"          "$REQUESTS"
+
+# A new commit lands (head moves) -> the gate re-evaluates and may notify again.
+_fj() { echo '{"head":{"sha":"headsha7b"}}'; }
+echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7b"}}}' > "$STATE"
+no "risk-gate: new head re-evaluates -> still refuses (rc1)" do_automerge_tick
+eq "risk-gate: new head requests the human again" "2"        "$REQUESTS"
+
+# Deny-listed path -> refuses to merge, requests the human.
+_fj() { echo '{"head":{"sha":"headsha8"}}'; }
+forgejo_pr_files() { printf '[{"filename":"agent.json","additions":1,"deletions":1}]'; }
+echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha8"}}}' > "$STATE"
+REQUESTS=0
+no "risk-gate: deny-listed path -> refuses merge (rc1)"     do_automerge_tick
+eq "risk-gate: deny-listed recorded no deploy" ""            "$(jq -r '.deploy.repo // ""' "$STATE")"
+eq "risk-gate: deny-listed requested human once" "1"         "$REQUESTS"
+
+# A human-approved merge (live approval, not the shadow) is UNAFFECTED by the risk
+# gate -- a human already saw the diff, oversized or not.
+_fj() { echo '{"head":{"sha":"headsha9"}}'; }
+automerge_approved_by() { return 0; }
+automerge_approval_covers_head() { return 0; }
+forgejo_pr_files() { printf '[{"filename":"big.txt","additions":1000,"deletions":1000}]'; }
+echo '{"review":{"acme/site#7":{"verdict":"COMMENT"}}}' > "$STATE"
+REQUESTS=0
+ok "risk-gate: human-approved path unaffected by size -> merges" do_automerge_tick
+eq "risk-gate: human-approved recorded deploy" "acme/site"   "$(jq -r '.deploy.repo // ""' "$STATE")"
+eq "risk-gate: human-approved path never re-requests" "0"    "$REQUESTS"
+automerge_approved_by() { return 1; }   # reset
 
 if [ "$FAIL" -eq 0 ]; then echo "test-automerge: all checks passed"; exit 0; fi
 echo "test-automerge: $FAIL check(s) FAILED"
