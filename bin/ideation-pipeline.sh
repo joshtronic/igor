@@ -1040,6 +1040,11 @@ write_post_file() {
     printf '%s\n' "$body"
   } > "$post_file"
   sed -i.bak -e 's/–/--/g' -e 's/—/--/g' "$post_file" && rm -f "${post_file}.bak"
+  # Squeeze consecutive blank lines anywhere in the file -- including right
+  # after the frontmatter fence, where markdownlint's leading-blank exemption
+  # otherwise lets a double blank through (igor#509).
+  awk 'BEGIN{b=0} /^[[:space:]]*$/{b++; if(b>1) next} !/^[[:space:]]*$/{b=0} {print}' \
+    "$post_file" > "${post_file}.squeezed" && mv "${post_file}.squeezed" "$post_file"
   printf '%s\n' "$post_file"
 }
 
