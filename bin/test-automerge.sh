@@ -14,6 +14,11 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../lib/automerge.sh
 . "$HERE/../lib/automerge.sh"
 
+# Sections below stub automerge_url_status wholesale. Keep a copy of the real
+# one under another name so the self-repo carve-out can be exercised for real,
+# rather than simulated by a stub returning what it is supposed to return.
+eval "$(declare -f automerge_url_status | sed '1s/^automerge_url_status/_real_url_status/')"
+
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 export AGENT_STATE_DIR="$TMP"
 STATE="$TMP/discretionary-state.json"
@@ -122,6 +127,46 @@ BARE=$(bash -c '. "$1/../lib/automerge.sh"; automerge_url_status acme/site' _ "$
 has "url_status: missing lib/dossier.sh logs instead of failing silently" "$BARE" "lib/dossier.sh not sourced"
 eq "url_status: missing lib/dossier.sh fails CLOSED (error)" "error" \
   "$(bash -c '. "$1/../lib/automerge.sh"; automerge_url_status acme/site' _ "$HERE" 2>/dev/null | cut -f1)"
+
+echo "== end-to-end: automerge_url_status -> dossier -> forgejo, curl the only stub =="
+# Everything above stubs one of the three layers, so the real chain
+# (automerge_url_status -> dossier_get_repo_status -> forgejo_repo_get_file_status
+# -> curl) is never run whole. It is what production runs, and the HTTP-status
+# discrimination it rests on lives at the bottom layer -- so exercise it here in
+# a fresh shell sourcing the libs in tick.sh's order, with only curl replaced.
+E2E_SCRIPT=$(cat <<'EOS'
+set -uo pipefail
+HERE="$1"; MODE="$2"
+export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+. "$HERE/../lib/forgejo.sh"
+. "$HERE/../lib/dossier.sh"
+. "$HERE/../lib/automerge.sh"
+B64=$(printf '%s' '{"smoke":{"url":"https://e2e.example"}}' | base64 | tr -d '\n')
+curl() {
+  local url="${*: -1}"
+  case "$MODE:$url" in
+    legacy:*/contents/AGENTS.md)  printf '{"errors":["object does not exist"]}\n404' ;;
+    legacy:*/contents/agent.json) printf '{"content":"%s"}\n200' "$B64" ;;
+    forbidden:*)                  printf '{"message":"token does not have at least one of required scope(s)"}\n403' ;;
+    bare:*)                       printf '{"errors":["object does not exist"]}\n404' ;;
+    self:*)                       printf 'THE SELF-REPO MUST NOT REACH THE API\n200' ;;
+  esac
+}
+case "$MODE" in
+  self) automerge_url_status "$AUTOMERGE_SELF_REPO" ;;
+  *)    automerge_url_status acme/site ;;
+esac
+EOS
+)
+e2e() { bash -c "$E2E_SCRIPT" _ "$HERE" "$1" 2>/dev/null; }
+eq "e2e: a 404 on AGENTS.md still resolves the legacy agent.json url" \
+  "$(printf 'ok\thttps://e2e.example')" "$(e2e legacy)"
+eq "e2e: a 403 on AGENTS.md is an error, NOT a url-less repo" \
+  "$(printf 'error\t')" "$(e2e forbidden)"
+eq "e2e: 404 on both files -> ok, genuinely url-less" \
+  "$(printf 'ok\t')" "$(e2e bare)"
+eq "e2e: the self repo short-circuits before any fetch" \
+  "$(printf 'ok\t')" "$(e2e self)"
 
 echo "== approval / mergeable gates =="
 _fj() { printf '%s' "$FJ"; }
@@ -797,9 +842,16 @@ automerge_approved_by() { return 0; }   # reset
 
 # The harness's own repo takes the SAME human-approval path as any other
 # url-less repo -- merges on approval, no deploy stamp, never shadow-gated.
+# The REAL automerge_url_status runs here, over a dossier layer that answers
+# "url-BEARING": only the self-repo short-circuit can produce a url-less merge
+# from that, so this fails if the carve-out ever stops applying.
+automerge_url_status() { _real_url_status "$@"; }
+dossier_get_repo_status() { printf 'ok\thttps://x'; }
+eq "self-repo: that same dossier answer on any OTHER repo is url-BEARING" \
+  "$(printf 'ok\thttps://x')" "$(automerge_url_status acme/other)"
 VALIDATED_REPOS_JSON="{\"full_name\":\"${AUTOMERGE_SELF_REPO}\"}"
 echo '{}' > "$STATE"
-ok "self-repo: human APPROVED -> merges via the human-approval path" do_automerge_tick
+ok "self-repo: human APPROVED -> merges even though the dossier declares a url" do_automerge_tick
 eq "self-repo: merge recorded NO deploy" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
 
 echo "== do_automerge_tick: dossier fetch failure -> skip entirely, retry next tick (igor#520 amendment) =="

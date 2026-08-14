@@ -404,7 +404,10 @@ respective tools on the host; install or skip.
   never merge it. `automerge_url_status` distinguishes that genuine "no url"
   from a dossier fetch that merely FAILED this tick (`dossier_get_repo_status`
   / `forgejo_repo_get_file_status` returning `error`, not `ok` with an empty
-  value) -- a fetch failure skips the repo entirely for the tick (retried
+  value; only a real 404 reads as "absent", so a 403 or a 5xx is `error` --
+  which is why that one read owns its curl instead of going through `_fj`,
+  whose `-f` collapses every HTTP >= 400 into the same exit 22)
+  -- a fetch failure skips the repo entirely for the tick (retried
   next tick) rather than being misread as "url-less" and silently downgrading
   a url-bearing repo's merge to the no-deploy-watch path. `do_automerge_tick`
   merges a bot PR only when the human (`FORGEJO_REVIEWER`)

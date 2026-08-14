@@ -142,10 +142,13 @@ dossier_get_repo_status() {
   fi
   out=$(forgejo_repo_get_file_status "$repo" agent.json)
   c_status=${out%%$'\t'*}; c_content=${out#*$'\t'}
+  # `*` covers `error` and anything a future forgejo_repo_get_file_status might
+  # add: an unrecognized status must fail CLOSED, since printing nothing here
+  # would reach the caller as an empty status it reads as "no url declared".
   case "$c_status" in
-    error)   printf 'error\t' ;;
     found)   printf 'ok\t%s' "$(dossier_get_content "" "$c_content" "$key" 2>/dev/null)" ;;
     missing) printf 'ok\t' ;;
+    *)       printf 'error\t' ;;
   esac
 }
 

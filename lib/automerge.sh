@@ -585,7 +585,10 @@ do_automerge_tick() {
     [ -n "$repo" ] || continue
     url_out=$(automerge_url_status "$repo")
     url_status=${url_out%%$'\t'*}; url=${url_out#*$'\t'}
-    if [ "$url_status" = "error" ]; then
+    # Anything but a clean `ok` is unknown, not "declares no url" -- reading an
+    # unrecognized status as url-less is the silent downgrade of the deploy
+    # guarantee this whole status channel exists to prevent, so it fails CLOSED.
+    if [ "$url_status" != "ok" ]; then
       log "automerge: ${repo} dossier fetch failed this tick -- skipping (retry next tick)"
       continue
     fi
