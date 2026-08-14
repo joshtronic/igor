@@ -325,11 +325,14 @@ AUTOMERGE_RISK_MAX_FILES=20    # changed file count
 #
 # Fails CLOSED (refuses) whenever the changed-file data can't be trusted: the
 # fetch failed (forgejo_pr_files pages, so a truncated listing is a failure,
-# not a short array), the response isn't an array, or any element is missing
-# numeric additions/deletions. That last one matters because defaulting a
-# missing count to 0 would be the one place this function opens rather than
-# closes -- a shape without per-file counts would score lines=0 and sail
-# through.
+# not a short array), the response isn't an array, any element is missing
+# numeric additions/deletions, or any element is missing a string filename.
+# That last one matters because silently skipping a filename-less element
+# would be another place this function opens rather than closes -- a shape
+# change that drops filenames would make the deny-list walk vacuous instead
+# of refusing. `previous_filename` (Forgejo's rename field) is also matched
+# against the deny-list, alongside `filename`, so a rename FROM a denied path
+# is caught too.
 automerge_risk_gate() {
   local repo="$1" pr="$2" files nfiles lines path
   files=$(forgejo_pr_files "$repo" "$pr" 2>/dev/null) || { printf 'unable to fetch changed files'; return 1; }
@@ -338,7 +341,9 @@ automerge_risk_gate() {
   lines=$(jq -r 'if all(.[]; (.additions | type) == "number" and (.deletions | type) == "number")
                  then ([.[] | .additions + .deletions] | add // 0) else empty end' <<<"$files" 2>/dev/null)
   [ -n "$lines" ] || { printf 'changed-file data has no additions/deletions counts'; return 1; }
-  path=$(jq -r '.[] | (.filename // .old_filename // empty)' <<<"$files" 2>/dev/null | {
+  jq -e 'all(.[]; (.filename | type) == "string")' <<<"$files" >/dev/null 2>&1 \
+    || { printf 'changed-file data has no filename'; return 1; }
+  path=$(jq -r '.[] | (.filename, (.previous_filename // empty))' <<<"$files" 2>/dev/null | {
     while IFS= read -r f; do
       case "$f" in
         .forgejo/workflows/*|agent.json|AGENTS.md|install.sh|scripts/deploy*|*.sql)
@@ -660,14 +665,19 @@ do_automerge_tick() {
       # human in on a red-CI head that no one was going to auto-merge.
       if [ "$shadow_only" = "1" ]; then
         if ! risk_reason=$(automerge_risk_gate "$repo" "$pr"); then
-          case "$risk_reason" in
-            lines=*) log "automerge: ${key} exceeds risk gate (${risk_reason}) -- requesting human review" ;;
-            *)       log "automerge: ${key} risk gate could not evaluate (${risk_reason}) -- requesting human review" ;;
-          esac
           if ! automerge_risk_notified "$sf" "$key" "$head"; then
+            case "$risk_reason" in
+              lines=*) log "automerge: ${key} exceeds risk gate (${risk_reason}) -- requesting human review" ;;
+              *)       log "automerge: ${key} risk gate could not evaluate (${risk_reason}) -- requesting human review" ;;
+            esac
             if forgejo_request_review "$repo" "$pr" "$FORGEJO_REVIEWER" 2>/dev/null; then
               automerge_risk_notify_record "$sf" "$key" "$head"
             fi
+          else
+            case "$risk_reason" in
+              lines=*) log "automerge: ${key} exceeds risk gate (${risk_reason}) -- risk-gated (human already requested)" ;;
+              *)       log "automerge: ${key} risk gate could not evaluate (${risk_reason}) -- risk-gated (human already requested)" ;;
+            esac
           fi
           continue
         fi
