@@ -485,6 +485,48 @@ eq "agent-block.sh calls forgejo_append_issue_body" "true" \
 eq "agent-block.sh's comment references the issue description, not just itself" "true" \
   "$(grep -q 'issue description' "$AGENT_BLOCK" && echo true || echo false)"
 
+# forgejo_pr_files walks the WHOLE list. The auto-merge risk gate (igor#514)
+# bounds an unattended merge on this array's length and its additions/deletions
+# sum, so a single-page read on an instance whose page size sits below the
+# gate's own 20-file cap would undercount a big PR and let it merge -- the
+# opposite of the gate's fail-closed posture.
+echo "== forgejo_pr_files: pages the changed-file list (igor#514) =="
+# A server with a page size of 3 -- deliberately below that 20-file cap.
+_fj() {
+  local page="${2##*page=}"
+  case "$page" in
+    1) jq -nc '[range(0;3) | {filename:("a" + (. | tostring) + ".txt"), additions:1, deletions:1}]' ;;
+    2) jq -nc '[range(3;5) | {filename:("a" + (. | tostring) + ".txt"), additions:1, deletions:1}]' ;;
+    *) printf '[]' ;;
+  esac
+}
+PF=$(forgejo_pr_files acme/x 7)
+eq "pr_files: assembles every page, not just the first" "5" "$(jq 'length' <<<"$PF")"
+eq "pr_files: keeps the later page's entries" "a4.txt" "$(jq -r '.[4].filename' <<<"$PF")"
+eq "pr_files: sums lines across pages" "10" "$(jq '[.[] | .additions + .deletions] | add' <<<"$PF")"
+
+# _fj runs in a command-substitution subshell here, so capture its URL to a
+# temp file, not a var (same as the forgejo_list_open_bot_prs block above).
+PF_URLF=$(mktemp); _fj() { printf '%s\n' "$2" >>"$PF_URLF"; printf '[]'; }
+forgejo_pr_files acme/x 7 >/dev/null
+eq "pr_files: asks for an explicit page" "true" \
+  "$(grep -q 'limit=50&page=1' "$PF_URLF" && echo true || echo false)"
+rm -f "$PF_URLF"
+
+# Unwalkable list -> nonzero with NO output, so the risk gate reads "unknown"
+# rather than "small".
+_fj() { return 1; }
+forgejo_pr_files acme/x 7 >/dev/null 2>&1; eq "pr_files: request failure -> rc1" "1" "$?"
+eq "pr_files: request failure emits nothing" "" "$(forgejo_pr_files acme/x 7 2>/dev/null)"
+_fj() { printf 'not json'; }
+forgejo_pr_files acme/x 7 >/dev/null 2>&1; eq "pr_files: unparseable page -> rc1" "1" "$?"
+# A server that never returns an empty page stops at the cap and FAILS, instead
+# of spinning the tick forever.
+# shellcheck disable=SC2034  # read by forgejo_pr_files (lib/forgejo.sh)
+FORGEJO_PR_FILES_MAX_PAGES=3
+_fj() { jq -nc '[range(0;50) | {filename:("f" + (. | tostring)), additions:1, deletions:1}]'; }
+forgejo_pr_files acme/x 7 >/dev/null 2>&1; eq "pr_files: page cap -> rc1 (no spin)" "1" "$?"
+
 if [ "$FAIL" -eq 0 ]; then echo "test-forgejo: all checks passed"; exit 0; fi
 echo "test-forgejo: $FAIL check(s) FAILED"
 exit 1

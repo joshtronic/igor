@@ -471,12 +471,36 @@ forgejo_list_open_bot_prs() {
           | {number, title, head: .head.ref}]'
 }
 
-# Files changed in a PR with status (added/modified/removed/renamed).
-# Returns JSON array of {filename, status}. Used by the post cooldown
-# to detect in-flight post PRs before they merge to master.
+# Page cap for forgejo_pr_files. 20 pages x 50 = 1000 changed files, far past
+# any PR a human would open; it exists so a server that keeps answering with a
+# full page can't spin the tick forever.
+FORGEJO_PR_FILES_MAX_PAGES="${FORGEJO_PR_FILES_MAX_PAGES:-20}"
+
+# Files changed in a PR with status (added/modified/removed/renamed) and
+# per-file additions/deletions. Returns JSON array of {filename, status,
+# additions, deletions}. Used by the post cooldown to detect in-flight post PRs
+# before they merge to master, and by the auto-merge risk gate to bound an
+# unattended merge.
+#
+# Pages until a page comes back EMPTY rather than short, for the same reason
+# forgejo_open_prs does: `limit=50` is a request, not a promise, and an
+# instance with a lower MAX_RESPONSE_ITEMS (or DEFAULT_PAGING_NUM below the
+# risk gate's own file cap) would make a truncated first page look like the
+# whole list -- which would undercount a big PR's lines and let it through the
+# gate. Nonzero with NO output when the list can't be walked to the end (a
+# failed request, an unparseable page, or the page cap), so a caller gating a
+# merge reads that as "unknown", not "small".
 forgejo_pr_files() {
-  local repo="$1" number="$2"
-  _fj GET "/repos/${repo}/pulls/${number}/files"
+  local repo="$1" number="$2" page=1 batch count all='[]'
+  while [ "$page" -le "$FORGEJO_PR_FILES_MAX_PAGES" ]; do
+    batch=$(_fj GET "/repos/${repo}/pulls/${number}/files?limit=50&page=${page}") || return 1
+    count=$(jq 'length' <<<"$batch" 2>/dev/null) || return 1
+    case "$count" in '' | *[!0-9]*) return 1 ;; esac
+    [ "$count" -eq 0 ] && { printf '%s' "$all"; return 0; }
+    all=$(printf '%s\n%s' "$all" "$batch" | jq -s 'add') || return 1
+    page=$((page + 1))
+  done
+  return 1
 }
 
 # Raw unified diff for a PR, as text/plain (NOT JSON -- the caller
