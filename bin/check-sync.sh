@@ -25,10 +25,8 @@
 # Every check below reports failure inline as its own "x <reason>" line, then
 # keeps going -- so a run with dozens of checks after the failing one pushes
 # that line out of a truncated tail (a CI-log-tail-fed rework prompt saw
-# nothing but a run of passes and the runner's bare exit code, igor#522). The
-# whole thing runs inside check_sync() and is piped through `tee` so the
-# accumulated "x" lines can be reprinted as a summary right before the exit
-# code that made them matter, landing the reason inside any tail window.
+# nothing but a run of passes and the runner's bare exit code, igor#522). Hence
+# the summary before the exit code: it lands the reason inside any tail window.
 
 set -euo pipefail
 
@@ -43,11 +41,19 @@ cd "$AGENT_HOME"
 . "$AGENT_HOME/lib/worker-doc.sh"
 
 check_sync() {
+  # The caller disables errexit around the pipeline this runs in (see below),
+  # and that reaches in here too -- leaving every check to carry on past a
+  # command that died mid-way, which is how a broken run reports green. Re-arm
+  # it. This executes in the pipeline's subshell, so it cannot leak back out.
+  set -e
+
   local FAIL=0
 
   # -- Worker-contract document ------------------------------------
 
   WORKER_DOC_TMP=$(mktemp)
+  # Set inside the pipeline's subshell, where bash has reset the inherited EXIT
+  # trap -- so this one owns WORKER_DOC_TMP and the caller's still owns LOG_TMP.
   trap 'rm -f "$WORKER_DOC_TMP"' EXIT
 
   # A seeded cache that can't serve the surface is a broken cache, and
@@ -221,7 +227,9 @@ set -e
 if [ "$FAIL" -ne 0 ]; then
   echo
   echo "== FAILURES =="
-  grep '^x ' "$LOG_TMP"
+  # Guarded: grep exits 1 on no match, which under errexit would kill the
+  # script here and rewrite $FAIL to 1 under a heading with nothing beneath it.
+  grep '^x ' "$LOG_TMP" || echo "(no 'x' lines -- the run died mid-check; see the full output above)"
 fi
 
 exit "$FAIL"
