@@ -394,14 +394,28 @@ respective tools on the host; install or skip.
   (auto-Agent-label, daily steering) stays a deliberate, human-gated step per
   "start tight, loosen as trust earns it."
 - The auto-merge + deploy barrier (`lib/automerge.sh`, Phase 1) is the "after you
-  approve, your job ends" step -- convention opt-in like the CEO/logwatch: a repo
-  is auto-merge-eligible IFF its root `agent.json` (`AGENT_CONFIG_FILE` -- the
-  shared per-repo machine-config dossier, jq-parsed; each feature reads its own
-  key) carries a `.smoke.url` declaring its live URL. `do_automerge_tick` merges a
-  bot PR only when the human (`FORGEJO_REVIEWER`)
+  approve, your job ends" step -- convention opt-in like the CEO/logwatch, but
+  now with TWO merge paths keyed on `automerge_url_status` (dossier root
+  AGENTS.md `url`, falling back to legacy `agent.json` `.smoke.url` via
+  `dossier_get_repo_status`): a repo that declares a live URL gets the
+  SHADOW-gated default path (below); a repo that genuinely declares NO url
+  (igor, distillery -- igor#520) gets an implicitly HUMAN-gated path instead,
+  same posture as `automerge.require_human` -- the shadow verdict alone can
+  never merge it. `automerge_url_status` distinguishes that genuine "no url"
+  from a dossier fetch that merely FAILED this tick (`dossier_get_repo_status`
+  / `forgejo_repo_get_file_status` returning `error`, not `ok` with an empty
+  value; only a real 404 reads as "absent", so a 403 or a 5xx is `error` --
+  which is why that one read owns its curl instead of going through `_fj`,
+  whose `-f` collapses every HTTP >= 400 into the same exit 22)
+  -- a fetch failure skips the repo entirely for the tick (retried
+  next tick) rather than being misread as "url-less" and silently downgrading
+  a url-bearing repo's merge to the no-deploy-watch path. `do_automerge_tick`
+  merges a bot PR only when the human (`FORGEJO_REVIEWER`)
   has an APPROVED review, CI is green on the head, it's cleanly mergeable, AND the
   shadow verdict isn't `REQUEST_CHANGES` (an RC blocks the merge even past a human
-  approve); it then stamps a pending deploy under `.deploy`. **Require-up-to-date
+  approve); on a url-bearing repo it then stamps a pending deploy under
+  `.deploy`, while a url-less merge SKIPS the stamp -- there's no live URL for
+  the barrier to watch. **Require-up-to-date
   is handled, not fought:** the gate also checks `automerge_behind_count` (the PR
   head vs its base branch) -- the merge API rejects a behind PR, so rather than
   POST a doomed merge (the old "merge API failed" warning), a ready-but-behind PR
@@ -437,10 +451,15 @@ respective tools on the host; install or skip.
   builds it also sits above the gate (igor#386: it used to sit below, so a live
   cooldown silently starved auto-merge fleet-wide for the cooldown's whole
   duration even though the merge itself needs no model call).
-  **Phase 1 is alert-only -- NO auto-revert.** NEVER the harness's own repo: a watcher can't reliably watch
-  itself (a broken self-deploy could crash the very tick meant to smoke-test it),
-  so igor stays a manual merge -- enforced by `AUTOMERGE_SELF_REPO` AND by having
-  no `agent.json` `.smoke.url`. Clear `.deploy` to abandon a stuck deploy.
+  **Phase 1 is alert-only -- NO auto-revert.** The harness's own repo
+  (`AUTOMERGE_SELF_REPO`) never declares a url and is hard-excluded from the
+  SHADOW-gated path and from deploy-watching -- a watcher can't reliably watch
+  itself (a broken self-deploy could crash the very tick meant to smoke-test
+  it) -- but it DOES take the url-less human-approval path like any other
+  url-less repo (igor#520): that path never self-smoke-watches, and the
+  harness's own self-pull picks up merged master on the next tick as it
+  always has, so a human APPROVE + green CI now merges igor's own PRs without
+  a manual click too. Clear `.deploy` to abandon a stuck deploy.
 - The feedback-triage pass (`do_feedback_tick`, `lib/feedback.sh`) is
   convention-driven via `agent.json` `.feedback.csv` -- the published Google-Form
   CSV of player feedback (the second `agent.json` consumer after auto-merge).
