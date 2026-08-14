@@ -442,6 +442,18 @@ has "risk_gate: shape refusal is not phrased as a bound" \
   "$(automerge_risk_gate acme/x 7 2>&1)" "no additions/deletions counts"
 FILES='[{"filename":"a.txt","additions":1,"deletions":1},{"filename":"b.txt","additions":2}]'
 no "risk_gate: one element missing deletions -> fail closed" automerge_risk_gate acme/x 7
+# igor#517: a filename-less element must refuse too -- a shape change that
+# drops filenames must not quietly make the deny-list walk vacuous.
+FILES='[{"additions":1,"deletions":1}]'
+no "risk_gate: element with no filename -> fail closed" automerge_risk_gate acme/x 7
+has "risk_gate: filename-less refusal is not phrased as a bound" \
+  "$(automerge_risk_gate acme/x 7 2>&1)" "no filename"
+# A rename FROM a denied path (Forgejo's actual field is previous_filename,
+# not old_filename) must still be caught by the deny-list.
+FILES='[{"filename":"ci.yml","previous_filename":".forgejo/workflows/ci.yml","additions":1,"deletions":1}]'
+no "risk_gate: rename from denied previous_filename -> blocked" automerge_risk_gate acme/x 7
+has "risk_gate: reason mentions the denied previous_filename" \
+  "$(automerge_risk_gate acme/x 7 2>&1)" ".forgejo/workflows/ci.yml"
 FILES=""
 forgejo_pr_files() { return 1; }
 no "risk_gate: API failure -> fail closed (blocked)" automerge_risk_gate acme/x 7
@@ -626,13 +638,32 @@ _fj() { echo '{"head":{"sha":"headsha7"}}'; }
 forgejo_pr_files() { printf '[{"filename":"big.txt","additions":400,"deletions":400}]'; }
 echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
 REQUESTS=0
-no "risk-gate: over line-count cap -> refuses merge (rc1)"  do_automerge_tick
+RGOUTFILE="$TMP/rgout1"
+do_automerge_tick >"$RGOUTFILE" 2>&1; RGRC=$?
+RGOUT=$(cat "$RGOUTFILE")
+if [ "$RGRC" -ne 0 ]; then printf '  + %s\n' "risk-gate: over line-count cap -> refuses merge (rc1)"
+else printf '  x %s\n' "risk-gate: over line-count cap -> refuses merge (rc1)"; FAIL=$((FAIL + 1)); fi
 eq "risk-gate: over-cap recorded no deploy" ""             "$(jq -r '.deploy.repo // ""' "$STATE")"
 eq "risk-gate: over-cap requested human once"  "1"          "$REQUESTS"
+# igor#517: the first tick that notifies logs "requesting human review", not
+# the repeat-tick wording -- the notify happened just now, on this tick.
+has "risk-gate: first refusal logs requesting human review" "$RGOUT" "requesting human review"
 
 # Same PR, same head, next tick -> still refuses, but does NOT nag the human again.
-no "risk-gate: same head next tick -> still refuses (rc1)" do_automerge_tick
+RGOUTFILE2="$TMP/rgout2"
+do_automerge_tick >"$RGOUTFILE2" 2>&1; RGRC2=$?
+RGOUT2=$(cat "$RGOUTFILE2")
+if [ "$RGRC2" -ne 0 ]; then printf '  + %s\n' "risk-gate: same head next tick -> still refuses (rc1)"
+else printf '  x %s\n' "risk-gate: same head next tick -> still refuses (rc1)"; FAIL=$((FAIL + 1)); fi
 eq "risk-gate: same head does not re-request"  "1"          "$REQUESTS"
+# igor#517: a repeat tick on the same already-notified head must NOT repeat
+# "requesting human review" -- forgejo_request_review is deduped, so the log
+# must say so rather than overstating that a new request went out.
+has "risk-gate: repeat tick logs already-requested wording" "$RGOUT2" "risk-gated (human already requested)"
+case "$RGOUT2" in
+  *"requesting human review"*) printf '  x %s\n' "risk-gate: repeat tick does not say requesting human review"; FAIL=$((FAIL + 1)) ;;
+  *) printf '  + %s\n' "risk-gate: repeat tick does not say requesting human review" ;;
+esac
 
 # A new commit lands (head moves) -> the gate re-evaluates and may notify again.
 _fj() { echo '{"head":{"sha":"headsha7b"}}'; }
