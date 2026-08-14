@@ -107,6 +107,14 @@ dossier_get() {
 # dossier_get_content for the value contract. The legacy config is fetched
 # ONLY when the dossier won't answer, so an adopted repo costs one API call
 # per lookup rather than two.
+#
+# The adoption/fallback sequence below is deliberately mirrored in
+# dossier_get_repo_status, NOT shared: the two differ in their fetch
+# primitive (forgejo_repo_get_file retries via _fj and collapses every
+# failure into an empty string; forgejo_repo_get_file_status is a single
+# unretried curl that reports WHY it has no content) and in their return
+# contract (a value here, a status-prefixed value there). Edit one, read
+# the other.
 dossier_get_repo() {
   local repo="$1" key="$2" agents_content cfg_content
   agents_content=$(forgejo_repo_get_file "$repo" AGENTS.md 2>/dev/null) || agents_content=""
@@ -118,7 +126,8 @@ dossier_get_repo() {
   dossier_get_content "" "$cfg_content" "$key"
 }
 
-# dossier_get_repo_status <repo> <key> -- like dossier_get_repo, but
+# dossier_get_repo_status <repo> <key> -- like dossier_get_repo (whose
+# adoption/fallback sequence this mirrors -- see the note there), but
 # distinguishes a genuine "no such key" from a fetch that failed THIS TICK.
 # dossier_get_repo (and dossier_get_content underneath it) swallow every
 # forgejo_repo_get_file failure -- network blip or a real 404 alike -- into

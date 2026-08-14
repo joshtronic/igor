@@ -149,7 +149,11 @@ curl() {
     legacy:*/contents/agent.json) printf '{"content":"%s"}\n200' "$B64" ;;
     forbidden:*)                  printf '{"message":"token does not have at least one of required scope(s)"}\n403' ;;
     bare:*)                       printf '{"errors":["object does not exist"]}\n404' ;;
-    self:*)                       printf 'THE SELF-REPO MUST NOT REACH THE API\n200' ;;
+    # Answers with a real url. Garbage would ALSO produce "ok\t" -- via jq
+    # failing to parse it -- so the assertion below would survive deleting the
+    # short-circuit. This way the un-short-circuited chain resolves a url and
+    # the expected "ok\t" only holds if the carve-out fired first.
+    self:*)                       printf '{"content":"%s"}\n200' "$B64" ;;
   esac
 }
 case "$MODE" in
@@ -825,6 +829,19 @@ echo '{}' > "$STATE"
 no "url-less: dismissed approval -> no merge (rc1)"                do_automerge_tick
 eq "url-less: dismissed-approval records nothing" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
 automerge_approved_by() { return 0; }   # reset
+
+# Approval stands, but the head carries content the human never saw (a real
+# new commit, not a base-merge). The url-less path inherits the same staleness
+# rule as the require_human carve-out -- an approval only counts for the net
+# diff it was given.
+automerge_approval_covers_head() { return 1; }
+echo '{}' > "$STATE"
+AUTOMERGE_OUT=$(do_automerge_tick 2>&1); AUTOMERGE_RC=$?
+if [ "$AUTOMERGE_RC" -ne 0 ]; then printf '  + %s\n' "url-less: approval predating the head's content -> no merge (rc1)"
+else printf '  x %s\n' "url-less: approval predating the head's content -> no merge (rc1)"; FAIL=$((FAIL + 1)); fi
+eq "url-less: stale-approval records nothing" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
+has "url-less: log names the staleness" "$AUTOMERGE_OUT" "approval predates the current head"
+automerge_approval_covers_head() { return 0; }   # reset
 
 # Human approved, but the shadow verdict on THIS head is REQUEST_CHANGES ->
 # veto, exactly like the require_human carve-out path.

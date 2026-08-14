@@ -903,7 +903,7 @@ forgejo_repo_get_file_status() {
     "$FORGEJO_URL/api/v1/repos/${repo}/contents/${path}" 2>/dev/null) || true
   code=${out##*$'\n'}; body=${out%$'\n'*}
   case "$code" in
-    2[0-9][0-9]) printf 'found\t%s' "$(jq -r '.content // empty' <<<"$body" | base64 -d 2>/dev/null || true)" ;;
+    2[0-9][0-9]) printf 'found\t%s' "$(jq -r '.content // empty' <<<"$body" 2>/dev/null | base64 -d 2>/dev/null || true)" ;;
     404)         printf 'missing\t' ;;
     *)           printf 'error\t' ;;
   esac

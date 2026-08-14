@@ -277,24 +277,11 @@ case "$(jq -r 'keys|join(" ")' <<<"$SET")" in
   *acme/urlless/pr/11*) printf '  x %s\n' "a dossier fetch failure wrongly flags the PR"; FAIL=$((FAIL + 1)) ;;
   *) printf '  + %s\n' "a dossier fetch failure does not flag the PR" ;;
 esac
-automerge_url_status() { printf 'ok\thttps://x'; }   # reset to url-bearing for later sections
-forgejo_list_open_bot_prs() {
-  case "$1" in
-    acme/site) printf '%s' "$PULLS_SITE" ;;
-    acme/blog) printf '%s' '[]' ;;
-    *) return 1 ;;
-  esac
-}
-_fj() {
-  case "$2" in
-    */acme/site/issues*) printf '%s' '[{"number":3,"labels":[{"name":"Status/Blocked"}]}]' ;;
-    */acme/blog/issues*) printf '%s' '[{"number":9,"labels":[{"name":"Agent"}]}]' ;;
-    *) return 1 ;;
-  esac
-}
+# The only stub below that later sections care about: they scan acme/site,
+# which must read as url-bearing again. The acme/urlless arms of the
+# list/_fj stubs are inert once acme/urlless leaves ANALYSIS_REPOS_JSON.
+automerge_url_status() { printf 'ok\thttps://x'; }
 echo '{"review":{"acme/site#7":{"verdict":"COMMENT"}}}' > "$STATE"
-ANALYSIS_REPOS_JSON='{"full_name":"acme/site"}
-{"full_name":"acme/blog"}'
 
 echo "== the pass: announce once, and never believe a partial scan =="
 # shellcheck disable=SC2034  # read by needsyou_scan_set, via needsyou_pass
