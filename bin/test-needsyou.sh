@@ -194,6 +194,7 @@ _fj() {
   esac
 }
 automerge_require_human()   { return 1; }
+automerge_url_status()      { printf 'ok\thttps://x'; }   # url-bearing by default
 maintenance_repo_validated() { return 0; }
 review_rework_rounds()      { printf '0'; }
 echo '{"review":{"acme/site#7":{"verdict":"COMMENT"}}}' > "$STATE"
@@ -224,6 +225,63 @@ eq "no repos -> an empty set, not a crash" "{}" "$(needsyou_scan_set || true)"
 rcn "and no repos is reported as INCOMPLETE, not as 'nothing waiting'" needsyou_scan_set
 ANALYSIS_REPOS_JSON='{"full_name":"acme/nope"}'
 rcn "a list call that did not answer is incomplete too" needsyou_scan_set
+
+echo "== a url-less repo is implicitly human-gated (igor#520) =="
+# do_automerge_tick never merges a url-less repo on the shadow verdict alone
+# (a human must approve). Without this, the digest would say "nothing needs
+# you" on exactly the PR whose merge is stuck waiting on a click -- the bug
+# igor#520 exists to fix.
+PULLS_URLLESS='[{"number":11,"title":"fix: a thing","head":"agent/11"}]'
+forgejo_list_open_bot_prs() {
+  case "$1" in
+    acme/site)    printf '%s' "$PULLS_SITE" ;;
+    acme/blog)    printf '%s' '[]' ;;
+    acme/urlless) printf '%s' "$PULLS_URLLESS" ;;
+    *) return 1 ;;
+  esac
+}
+_fj() {
+  case "$2" in
+    */acme/site/issues*)    printf '%s' '[{"number":3,"labels":[{"name":"Status/Blocked"}]}]' ;;
+    */acme/blog/issues*)    printf '%s' '[{"number":9,"labels":[{"name":"Agent"}]}]' ;;
+    */acme/urlless/issues*) printf '%s' '[]' ;;
+    *) return 1 ;;
+  esac
+}
+automerge_url_status() {
+  case "$1" in
+    acme/urlless) printf 'ok\t' ;;              # genuinely no url
+    *)            printf 'ok\thttps://x' ;;
+  esac
+}
+echo '{"review":{"acme/site#7":{"verdict":"COMMENT"},"acme/urlless#11":{"verdict":"APPROVE","sha":""}}}' > "$STATE"
+ANALYSIS_REPOS_JSON='{"full_name":"acme/site"}
+{"full_name":"acme/blog"}
+{"full_name":"acme/urlless"}'
+SET=$(needsyou_scan_set)
+has "a url-less repo's shadow APPROVE still needs the operator" \
+  "$(jq -r 'keys|join(" ")' <<<"$SET")" "acme/urlless/pr/11"
+has "...because it reads as pinned to your review" \
+  "$(jq -r '."acme/urlless/pr/11".why' <<<"$SET")" "pinned to your review"
+# A dossier fetch failure ("error") this tick is left alone, not flagged --
+# it isn't actionable by the operator and self-heals.
+automerge_url_status() {
+  case "$1" in
+    acme/urlless) printf 'error\t' ;;
+    *)            printf 'ok\thttps://x' ;;
+  esac
+}
+echo '{"review":{"acme/site#7":{"verdict":"COMMENT"},"acme/urlless#11":{"verdict":"APPROVE","sha":""}}}' > "$STATE"
+SET=$(needsyou_scan_set)
+case "$(jq -r 'keys|join(" ")' <<<"$SET")" in
+  *acme/urlless/pr/11*) printf '  x %s\n' "a dossier fetch failure wrongly flags the PR"; FAIL=$((FAIL + 1)) ;;
+  *) printf '  + %s\n' "a dossier fetch failure does not flag the PR" ;;
+esac
+# The only stub below that later sections care about: they scan acme/site,
+# which must read as url-bearing again. The acme/urlless arms of the
+# list/_fj stubs are inert once acme/urlless leaves ANALYSIS_REPOS_JSON.
+automerge_url_status() { printf 'ok\thttps://x'; }
+echo '{"review":{"acme/site#7":{"verdict":"COMMENT"}}}' > "$STATE"
 
 echo "== the pass: announce once, and never believe a partial scan =="
 # shellcheck disable=SC2034  # read by needsyou_scan_set, via needsyou_pass

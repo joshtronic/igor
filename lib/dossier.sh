@@ -107,6 +107,14 @@ dossier_get() {
 # dossier_get_content for the value contract. The legacy config is fetched
 # ONLY when the dossier won't answer, so an adopted repo costs one API call
 # per lookup rather than two.
+#
+# The adoption/fallback sequence below is deliberately mirrored in
+# dossier_get_repo_status, NOT shared: the two differ in their fetch
+# primitive (forgejo_repo_get_file retries via _fj and collapses every
+# failure into an empty string; forgejo_repo_get_file_status is a single
+# unretried curl that reports WHY it has no content) and in their return
+# contract (a value here, a status-prefixed value there). Edit one, read
+# the other.
 dossier_get_repo() {
   local repo="$1" key="$2" agents_content cfg_content
   agents_content=$(forgejo_repo_get_file "$repo" AGENTS.md 2>/dev/null) || agents_content=""
@@ -116,6 +124,41 @@ dossier_get_repo() {
   fi
   cfg_content=$(forgejo_repo_get_file "$repo" agent.json 2>/dev/null) || cfg_content=""
   dossier_get_content "" "$cfg_content" "$key"
+}
+
+# dossier_get_repo_status <repo> <key> -- like dossier_get_repo (whose
+# adoption/fallback sequence this mirrors -- see the note there), but
+# distinguishes a genuine "no such key" from a fetch that failed THIS TICK.
+# dossier_get_repo (and dossier_get_content underneath it) swallow every
+# forgejo_repo_get_file failure -- network blip or a real 404 alike -- into
+# the same empty string, which is fine for a best-effort read but unsafe for
+# a decision as consequential as "does this repo have a live URL to watch"
+# (igor#520). Needs forgejo_repo_get_file_status (lib/forgejo.sh) sourced.
+# Echoes "<status>\t<value>":
+#   ok    -- every fetch needed to answer landed (whether by finding a file
+#            or being told 404 -- both are real answers); value is the key's
+#            value, or empty when the repo genuinely doesn't declare it
+#   error -- a fetch needed to answer failed transport-wise -- the caller
+#            must NOT read the empty value as "absent"; skip and retry
+dossier_get_repo_status() {
+  local repo="$1" key="$2" out a_status a_content c_status c_content
+  out=$(forgejo_repo_get_file_status "$repo" AGENTS.md)
+  a_status=${out%%$'\t'*}; a_content=${out#*$'\t'}
+  if [ "$a_status" = "error" ]; then printf 'error\t'; return 0; fi
+  if [ "$a_status" = "found" ] && dossier_is_declared "$a_content"; then
+    printf 'ok\t%s' "$(dossier_get_content "$a_content" "" "$key" 2>/dev/null)"
+    return 0
+  fi
+  out=$(forgejo_repo_get_file_status "$repo" agent.json)
+  c_status=${out%%$'\t'*}; c_content=${out#*$'\t'}
+  # `*` covers `error` and anything a future forgejo_repo_get_file_status might
+  # add: an unrecognized status must fail CLOSED, since printing nothing here
+  # would reach the caller as an empty status it reads as "no url declared".
+  case "$c_status" in
+    found)   printf 'ok\t%s' "$(dossier_get_content "" "$c_content" "$key" 2>/dev/null)" ;;
+    missing) printf 'ok\t' ;;
+    *)       printf 'error\t' ;;
+  esac
 }
 
 # dossier_keys <checkout_dir> -- lists the keys present, one per line. Same

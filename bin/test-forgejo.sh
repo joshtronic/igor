@@ -527,6 +527,31 @@ FORGEJO_PR_FILES_MAX_PAGES=3
 _fj() { jq -nc '[range(0;50) | {filename:("f" + (. | tostring)), additions:1, deletions:1}]'; }
 forgejo_pr_files acme/x 7 >/dev/null 2>&1; eq "pr_files: page cap -> rc1 (no spin)" "1" "$?"
 
+echo "== forgejo_repo_get_file_status: only a 404 is 'missing' (igor#520) =="
+# The HTTP status IS the answer, which is why this one reads curl directly:
+# _fj's `-f` collapses 404, 403 and 502 alike into exit 22, so it cannot tell
+# "the file isn't there" from "the API couldn't answer". Only the former may
+# be read as absent. Stub curl the way the function parses it: body, then the
+# status code on a final line.
+CURL_BODY='' CURL_CODE=''
+_reply() { CURL_BODY="$1"; CURL_CODE="$2"; }
+curl() { printf '%s\n%s' "$CURL_BODY" "$CURL_CODE"; }
+_reply '{"content":"aGVsbG8="}' 200   # base64 "hello"
+eq "200 -> found" "found" "$(forgejo_repo_get_file_status acme/x AGENTS.md | cut -f1)"
+eq "200 -> decoded content" "hello" "$(forgejo_repo_get_file_status acme/x AGENTS.md | cut -f2-)"
+_reply '{"errors":["object does not exist [id: , rel_path: AGENTS.md]"]}' 404
+eq "404 -> missing" "missing" "$(forgejo_repo_get_file_status acme/x AGENTS.md | cut -f1)"
+eq "404 -> no content" "" "$(forgejo_repo_get_file_status acme/x AGENTS.md | cut -f2-)"
+_reply '{"message":"token does not have at least one of required scope(s)"}' 403
+eq "403 -> error, NEVER 'missing'" "error" "$(forgejo_repo_get_file_status acme/x AGENTS.md | cut -f1)"
+_reply '<html>502 Bad Gateway</html>' 502
+eq "502 -> error, NEVER 'missing'" "error" "$(forgejo_repo_get_file_status acme/x AGENTS.md | cut -f1)"
+curl() { printf '\n000'; return 28; }   # transport failure: no response at all
+eq "no response -> error" "error" "$(forgejo_repo_get_file_status acme/x AGENTS.md | cut -f1)"
+curl() { printf ''; return 7; }         # curl wrote nothing whatsoever
+eq "no output at all -> error" "error" "$(forgejo_repo_get_file_status acme/x AGENTS.md | cut -f1)"
+unset -f curl _reply
+
 if [ "$FAIL" -eq 0 ]; then echo "test-forgejo: all checks passed"; exit 0; fi
 echo "test-forgejo: $FAIL check(s) FAILED"
 exit 1

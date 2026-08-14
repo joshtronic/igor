@@ -248,7 +248,7 @@ _needsyou_listed() {
 # exactly like an empty one and must not be mistaken for "nothing is waiting".
 needsyou_scan_set() {
   local sf repo_line repo pulls prs pr verdict out='{}' item why line num
-  local require_human validated issues repos=0 failed=0
+  local require_human validated issues repos=0 failed=0 url_status_out
   sf=$(discretionary_state_file)
   while IFS= read -r repo_line; do
     [ -n "$repo_line" ] || continue
@@ -270,6 +270,15 @@ needsyou_scan_set() {
     require_human=false; validated=false
     if [ -n "$prs" ]; then
       automerge_require_human "$repo" && require_human=true
+      # A url-less repo is implicitly human-gated (igor#520): a shadow APPROVE
+      # there will never self-merge, so it must read the same as a
+      # require_human carve-out here -- otherwise this digest tells the
+      # operator nothing needs them on exactly the PRs whose merge is stuck
+      # waiting on a click, the failure mode igor#520 exists to fix. A
+      # dossier fetch that failed this tick is left alone (no flag) -- it's
+      # not actionable by the operator and self-heals next tick.
+      url_status_out=$(automerge_url_status "$repo")
+      [ "${url_status_out%%$'\t'*}" = "ok" ] && [ -z "${url_status_out#*$'\t'}" ] && require_human=true
       maintenance_repo_validated "$repo" && validated=true
     fi
     while IFS= read -r pr; do
