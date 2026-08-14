@@ -527,6 +527,21 @@ FORGEJO_PR_FILES_MAX_PAGES=3
 _fj() { jq -nc '[range(0;50) | {filename:("f" + (. | tostring)), additions:1, deletions:1}]'; }
 forgejo_pr_files acme/x 7 >/dev/null 2>&1; eq "pr_files: page cap -> rc1 (no spin)" "1" "$?"
 
+echo "== forgejo_repo_get_file_status: distinguishes missing-vs-error (igor#520) =="
+# _fj's own return code IS the answer here: 0 = found, 22 = HTTP error (an
+# absent file's normal 404 response, deliberately never retried), anything
+# else = a transport failure that must NOT be read as "the file is absent".
+_fj() { printf '%s' '{"content":"aGVsbG8="}'; }   # base64 "hello"
+eq "found: status" "found" "$(forgejo_repo_get_file_status acme/x AGENTS.md | cut -f1)"
+eq "found: decoded content" "hello" "$(forgejo_repo_get_file_status acme/x AGENTS.md | cut -f2-)"
+_fj() { return 22; }
+eq "missing (HTTP error, e.g. 404) -> status=missing" "missing" \
+  "$(forgejo_repo_get_file_status acme/x AGENTS.md | cut -f1)"
+eq "missing -> no content" "" "$(forgejo_repo_get_file_status acme/x AGENTS.md | cut -f2-)"
+_fj() { return 28; }   # a transport/timeout failure -- NOT an answer
+eq "error (transport failure) -> status=error, never 'missing'" "error" \
+  "$(forgejo_repo_get_file_status acme/x AGENTS.md | cut -f1)"
+
 if [ "$FAIL" -eq 0 ]; then echo "test-forgejo: all checks passed"; exit 0; fi
 echo "test-forgejo: $FAIL check(s) FAILED"
 exit 1

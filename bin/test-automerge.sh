@@ -25,72 +25,103 @@ eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: exp
 has() { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
 
 echo "== agent.json (.smoke.url) opt-in (legacy fallback -- no repo has adopted the dossier yet) =="
-forgejo_repo_get_file() { printf '%s' '{"smoke":{"url":"https://porksicle.com"}}'; }
-eq "smoke_url: extracts .smoke.url"        "https://porksicle.com" "$(automerge_smoke_url acme/site)"
-eq "smoke_url: self repo never eligible"   ""                      "$(automerge_smoke_url "$AUTOMERGE_SELF_REPO")"
-forgejo_repo_get_file() { printf '%s' '{"feedback":{"csv":"x"}}'; }
-eq "smoke_url: agent.json without .smoke -> empty" ""              "$(automerge_smoke_url acme/site)"
-forgejo_repo_get_file() { return 1; }
-eq "smoke_url: no agent.json -> empty"     ""                      "$(automerge_smoke_url acme/site)"
+forgejo_repo_get_file_status() { printf 'found\t%s' '{"smoke":{"url":"https://porksicle.com"}}'; }
+eq "url_status: extracts .smoke.url"       "$(printf 'ok\thttps://porksicle.com')" "$(automerge_url_status acme/site)"
+eq "url_status: self repo always ok, url-less" "$(printf 'ok\t')" "$(automerge_url_status "$AUTOMERGE_SELF_REPO")"
+forgejo_repo_get_file_status() { printf 'found\t%s' '{"feedback":{"csv":"x"}}'; }
+eq "url_status: agent.json without .smoke -> ok, empty url" "$(printf 'ok\t')" "$(automerge_url_status acme/site)"
+forgejo_repo_get_file_status() { printf 'missing\t'; }
+eq "url_status: no agent.json -> ok, empty url (genuinely url-less)" "$(printf 'ok\t')" "$(automerge_url_status acme/site)"
+forgejo_repo_get_file_status() { printf 'error\t'; }
+eq "url_status: dossier fetch failure -> error, not 'no url'" "$(printf 'error\t')" "$(automerge_url_status acme/site)"
 
-echo "== automerge_smoke_url is dossier_get_repo (igor#473): adopted AGENTS.md vs legacy fallback =="
+echo "== automerge_url_status is dossier_get_repo_status (igor#473/#520): adopted AGENTS.md vs legacy fallback =="
 # A repo that HAS adopted the spec: root AGENTS.md carries the fence, no
 # agent.json involved at all.
 DOSSIER=$'# dossier.example\n\n## Metadata\n\n```yaml\ntype: tool\nurl: https://dossier.example\n```\n'
-forgejo_repo_get_file() {
+forgejo_repo_get_file_status() {
   case "$2" in
-    AGENTS.md) printf '%s' "$DOSSIER" ;;
-    *) return 1 ;;
+    AGENTS.md) printf 'found\t%s' "$DOSSIER" ;;
+    *) printf 'missing\t' ;;
   esac
 }
-eq "smoke_url: adopted dossier -> reads root AGENTS.md Metadata" \
-  "https://dossier.example" "$(automerge_smoke_url acme/site)"
+eq "url_status: adopted dossier -> reads root AGENTS.md Metadata" \
+  "$(printf 'ok\thttps://dossier.example')" "$(automerge_url_status acme/site)"
 
 # A repo that has NOT adopted the spec (the whole fleet today): no root
 # AGENTS.md dossier, so it falls back to legacy agent.json -- same value as
 # the pre-#473 direct read, i.e. fleet behavior is unchanged.
-forgejo_repo_get_file() {
+forgejo_repo_get_file_status() {
   case "$2" in
-    agent.json) printf '%s' '{"smoke":{"url":"https://porksicle.com"}}' ;;
-    *) return 1 ;;
+    agent.json) printf 'found\t%s' '{"smoke":{"url":"https://porksicle.com"}}' ;;
+    *) printf 'missing\t' ;;
   esac
 }
-eq "smoke_url: un-adopted repo -> falls back to legacy agent.json (fleet-neutral)" \
-  "https://porksicle.com" "$(automerge_smoke_url acme/site)"
+eq "url_status: un-adopted repo -> falls back to legacy agent.json (fleet-neutral)" \
+  "$(printf 'ok\thttps://porksicle.com')" "$(automerge_url_status acme/site)"
 
 # An adopted dossier is AUTHORITATIVE: it does not fall back to agent.json for
 # a key it omits (the inherited dossier_get contract). A repo that adopts the
-# fence and forgets `url` is intentionally ineligible, not silently legacy.
-forgejo_repo_get_file() {
+# fence and forgets `url` is intentionally url-less, not silently legacy.
+forgejo_repo_get_file_status() {
   case "$2" in
-    AGENTS.md)  printf '%s' $'# x\n\n## Metadata\n\n```yaml\ntype: tool\n```\n' ;;
-    agent.json) printf '%s' '{"smoke":{"url":"https://legacy.example"}}' ;;
+    AGENTS.md)  printf 'found\t%s' $'# x\n\n## Metadata\n\n```yaml\ntype: tool\n```\n' ;;
+    agent.json) printf 'found\t%s' '{"smoke":{"url":"https://legacy.example"}}' ;;
   esac
 }
-eq "smoke_url: adopted dossier missing url -> empty, NOT the agent.json value" \
-  "" "$(automerge_smoke_url acme/site)"
+eq "url_status: adopted dossier missing url -> ok+empty, NOT the agent.json value" \
+  "$(printf 'ok\t')" "$(automerge_url_status acme/site)"
 
 # ...and it costs one API call, not two: agent.json is never fetched when the
 # dossier answers.
-# (the tally goes through a file: dossier_get_repo's fetches run in command
-# substitutions, so a shell var set in the stub would not survive)
+# (the tally goes through a file: dossier_get_repo_status's fetches run in
+# command substitutions, so a shell var set in the stub would not survive)
 FETCHED="$TMP/fetched"; : >"$FETCHED"
-forgejo_repo_get_file() {
+forgejo_repo_get_file_status() {
   echo "$2" >>"$FETCHED"
-  case "$2" in AGENTS.md) printf '%s' "$DOSSIER" ;; *) return 1 ;; esac
+  case "$2" in AGENTS.md) printf 'found\t%s' "$DOSSIER" ;; *) printf 'missing\t' ;; esac
 }
-automerge_smoke_url acme/site >/dev/null
-eq "smoke_url: adopted dossier short-circuits the legacy fetch" "AGENTS.md" "$(cat "$FETCHED")"
+automerge_url_status acme/site >/dev/null
+eq "url_status: adopted dossier short-circuits the legacy fetch" "AGENTS.md" "$(cat "$FETCHED")"
+
+# A repo genuinely declaring nothing (both fetches answer "missing", i.e. a
+# real 404) is a clean "ok, url-less" -- distinct from a fetch that errored.
+forgejo_repo_get_file_status() { printf 'missing\t'; }
+eq "url_status: neither file exists -> ok, url-less (not an error)" \
+  "$(printf 'ok\t')" "$(automerge_url_status acme/site)"
+
+# A transport failure on EITHER leg must propagate as error, never be read as
+# "declares no url" -- the exact conflation igor#520's amendment called out.
+forgejo_repo_get_file_status() {
+  case "$2" in
+    AGENTS.md) printf 'error\t' ;;
+    *) printf 'found\t%s' '{"smoke":{"url":"https://x"}}' ;;
+  esac
+}
+eq "url_status: AGENTS.md fetch errors -> error (never falls back to agent.json)" \
+  "$(printf 'error\t')" "$(automerge_url_status acme/site)"
+forgejo_repo_get_file_status() {
+  case "$2" in
+    AGENTS.md) printf 'missing\t' ;;
+    agent.json) printf 'error\t' ;;
+  esac
+}
+eq "url_status: agent.json fetch errors after a missing AGENTS.md -> error" \
+  "$(printf 'error\t')" "$(automerge_url_status acme/site)"
 
 echo "== dossier.sh wiring (igor#473): the dependency must be sourced, and loud when it isn't =="
 # The runtime caller graph is bin/tick.sh -> lib/automerge.sh. This test file
 # sources lib/dossier.sh itself, so it would pass even if production never did
 # -- assert the production wiring directly instead.
 ok "tick.sh sources lib/dossier.sh" grep -q 'lib/dossier\.sh"$' "$HERE/tick.sh"
-# And if it ever stops: an undefined dossier_get_repo must LOG, not degrade to
-# a silent empty (which automerge reads as "no repo is eligible").
-BARE=$(bash -c '. "$1/../lib/automerge.sh"; automerge_smoke_url acme/site' _ "$HERE" 2>&1)
-has "smoke_url: missing lib/dossier.sh logs instead of failing silently" "$BARE" "lib/dossier.sh not sourced"
+# And if it ever stops: an undefined dossier_get_repo_status must LOG and fail
+# CLOSED (error, not "ok" with an empty url) -- reading it as "every repo is
+# url-less" would flip every url-bearing repo onto the un-watched merge path,
+# silently disabling the deploy barrier fleet-wide instead of just refusing.
+BARE=$(bash -c '. "$1/../lib/automerge.sh"; automerge_url_status acme/site' _ "$HERE" 2>&1)
+has "url_status: missing lib/dossier.sh logs instead of failing silently" "$BARE" "lib/dossier.sh not sourced"
+eq "url_status: missing lib/dossier.sh fails CLOSED (error)" "error" \
+  "$(bash -c '. "$1/../lib/automerge.sh"; automerge_url_status acme/site' _ "$HERE" 2>/dev/null | cut -f1)"
 
 echo "== approval / mergeable gates =="
 _fj() { printf '%s' "$FJ"; }
@@ -138,12 +169,19 @@ forgejo_repo_get_file() { return 1; }
 no "require_human: no agent.json -> shadow gate"      automerge_require_human acme/site
 
 echo "== automerge_will_take (do_review_tick suppresses the human request) =="
-forgejo_repo_get_file() { printf '%s' '{"smoke":{"url":"x"}}'; }   # default (shadow-gated) repo
+automerge_url_status() { printf 'ok\thttps://x'; }   # url-bearing repo throughout this section
+forgejo_repo_get_file() { printf '%s' '{"automerge":{"require_human":false}}'; }   # default (shadow-gated) repo
 ok "will_take: default repo + APPROVE -> auto-merge takes it"     automerge_will_take acme/site APPROVE
 no "will_take: default repo + COMMENT -> human still asked"       automerge_will_take acme/site COMMENT
 no "will_take: default repo + REQUEST_CHANGES -> not a take"      automerge_will_take acme/site REQUEST_CHANGES
-forgejo_repo_get_file() { printf '%s' '{"automerge":{"require_human":true}}'; }   # carve-out
+forgejo_repo_get_file() { printf '%s' '{"automerge":{"require_human":true}}'; }   # carve-out, still url-bearing
 no "will_take: carve-out + APPROVE -> human is the gate"          automerge_will_take acme/site APPROVE
+forgejo_repo_get_file() { printf '%s' '{"automerge":{"require_human":false}}'; }   # reset
+automerge_url_status() { printf 'ok\t'; }   # url-LESS repo -- igor#520: never a shadow-alone take
+no "will_take: url-less repo + APPROVE -> never a shadow take"    automerge_will_take acme/site APPROVE
+automerge_url_status() { printf 'error\t'; }   # dossier fetch failed this tick -- unknown, not a take
+no "will_take: dossier fetch error + APPROVE -> not a take"       automerge_will_take acme/site APPROVE
+automerge_url_status() { printf 'ok\thttps://x'; }   # reset
 
 echo "== automerge_reviewer_blocks (human veto on a shadow-gated repo) =="
 _fj() { printf '%s' "$FJ"; }
@@ -455,7 +493,7 @@ has "risk_gate: fetch refusal is not phrased as a bound" \
 echo "== do_automerge_tick merge decision =="
 export FORGEJO_REVIEWER=josh BOT_USER=igor
 export VALIDATED_REPOS_JSON='{"full_name":"acme/site"}'
-automerge_smoke_url() { echo "https://x"; }
+automerge_url_status() { printf 'ok\thttps://x'; }   # url-bearing repo throughout this section
 forgejo_list_open_bot_prs() { echo '[{"number":7}]'; }
 forgejo_commit_status() { echo success; }
 automerge_mergeable() { return 0; }
@@ -518,17 +556,18 @@ automerge_approved_by() { return 1; }        # reset: no human for the sections 
 
 echo "== do_automerge_tick multi-repo iteration (production stream shape) =="
 # VALIDATED_REPOS_JSON is a NEWLINE-DELIMITED STREAM, not an array. The loop must
-# iterate every line: skip the first repo (no agent.json -> ineligible) and merge
-# the eligible second one. A single-object stub can't catch a broken iteration.
+# iterate every line: the first repo is url-less with no human approval (so it
+# stops at the approval gate, never merging) and the second is url-bearing and
+# shadow-approved. A single-object stub can't catch a broken iteration.
 VALIDATED_REPOS_JSON="$(printf '%s\n%s\n' '{"full_name":"acme/first"}' '{"full_name":"acme/second"}')"
-automerge_smoke_url() { case "$1" in acme/second) echo "https://x" ;; *) echo "" ;; esac; }
+automerge_url_status() { case "$1" in acme/second) printf 'ok\thttps://x' ;; *) printf 'ok\t' ;; esac; }
 echo '{"review":{"acme/second#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
-ok "automerge: iterates stream, skips ineligible, merges 2nd"  do_automerge_tick
+ok "automerge: iterates stream, skips the unapproved url-less repo, merges 2nd"  do_automerge_tick
 eq "automerge: merged the eligible repo"   "acme/second" "$(jq -r '.deploy.repo // ""' "$STATE")"
 
 echo "== do_automerge_tick: behind base -> update branch, do NOT merge =="
 export VALIDATED_REPOS_JSON='{"full_name":"acme/site"}'
-automerge_smoke_url() { echo "https://x"; }
+automerge_url_status() { printf 'ok\thttps://x'; }
 forgejo_list_open_bot_prs() { echo '[{"number":7}]'; }
 echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
 MERGED=0; automerge_do_merge() { MERGED=1; echo "sha"; }
@@ -551,7 +590,7 @@ echo "== do_automerge_tick: active block skips AND logs it (igor#386) =="
 # at the log during the block window sees nothing and assumes the tick never
 # reached this PR at all.
 export VALIDATED_REPOS_JSON='{"full_name":"acme/site"}'
-automerge_smoke_url() { echo "https://x"; }
+automerge_url_status() { printf 'ok\thttps://x'; }
 forgejo_list_open_bot_prs() { echo '[{"number":7}]'; }
 automerge_approved_by() { return 0; }
 automerge_behind_count() { echo 0; }
@@ -569,7 +608,7 @@ has "automerge: active block logs the skip"     "$AUTOMERGE_OUT" "still backing 
 
 echo "== do_automerge_tick: review-gate paths (human-flagged vs default) =="
 export VALIDATED_REPOS_JSON='{"full_name":"acme/site"}'
-automerge_smoke_url() { echo "https://x"; }
+automerge_url_status() { printf 'ok\thttps://x'; }
 forgejo_list_open_bot_prs() { echo '[{"number":7}]'; }
 forgejo_commit_status() { echo success; }
 automerge_mergeable() { return 0; }
@@ -602,7 +641,7 @@ automerge_reviewer_blocks() { return 1; }
 
 echo "== do_automerge_tick: risk gate on the shadow-only APPROVE path (igor#514) =="
 export VALIDATED_REPOS_JSON='{"full_name":"acme/site"}'
-automerge_smoke_url() { echo "https://x"; }
+automerge_url_status() { printf 'ok\thttps://x'; }
 forgejo_list_open_bot_prs() { echo '[{"number":7}]'; }
 forgejo_commit_status() { echo success; }
 automerge_mergeable() { return 0; }
@@ -680,6 +719,71 @@ automerge_risk_notify_record "$CSF" "acme/x#5" "headA"
 ok "risk-gate: stamp recorded"                    automerge_risk_notified "$CSF" "acme/x#5" "headA"
 automerge_block_clear "$CSF" "acme/x#5"
 no "risk-gate: merge clears the stamp"            automerge_risk_notified "$CSF" "acme/x#5" "headA"
+
+echo "== do_automerge_tick: URL-less human-approval path (igor#520) =="
+# A repo that genuinely declares no url (a clean fetch, no key) gets a merge
+# path too -- gated on a live human APPROVED review, like automerge.require_human,
+# but skipping the deploy stamp entirely (nothing to smoke-test).
+VALIDATED_REPOS_JSON='{"full_name":"acme/urlless"}'
+automerge_url_status() { printf 'ok\t'; }
+forgejo_list_open_bot_prs() { echo '[{"number":11}]'; }
+forgejo_commit_status() { echo success; }
+automerge_mergeable() { return 0; }
+automerge_behind_count() { echo 0; }
+automerge_do_merge() { echo "mergesha11"; }
+_fj() { echo '{"head":{"sha":"headsha11"}}'; }
+automerge_require_human() { return 1; }   # irrelevant -- url-less overrides this unconditionally
+automerge_approved_by() { return 0; }     # human APPROVED
+automerge_approval_covers_head() { return 0; }
+echo '{}' > "$STATE"   # no shadow review at all -- the human approval alone gates it
+AUTOMERGE_OUT=$(do_automerge_tick 2>&1); AUTOMERGE_RC=$?
+if [ "$AUTOMERGE_RC" -eq 0 ]; then printf '  + %s\n' "url-less: human APPROVED + CI green -> merges (rc0)"
+else printf '  x %s\n' "url-less: human APPROVED + CI green -> merges (rc0)"; FAIL=$((FAIL + 1)); fi
+eq "url-less: merge recorded NO deploy (nothing to watch)" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
+has "url-less: log says it skipped the deploy watch" "$AUTOMERGE_OUT" "skipping deploy watch"
+
+# Approval dismissed (automerge_approved_by reads Forgejo's `dismissed` flag) ->
+# no counting approval -> no merge.
+automerge_approved_by() { return 1; }
+echo '{}' > "$STATE"
+no "url-less: dismissed approval -> no merge (rc1)"                do_automerge_tick
+eq "url-less: dismissed-approval records nothing" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
+automerge_approved_by() { return 0; }   # reset
+
+# Human approved, but the shadow verdict on THIS head is REQUEST_CHANGES ->
+# veto, exactly like the require_human carve-out path.
+echo '{"review":{"acme/urlless#11":{"verdict":"REQUEST_CHANGES"}}}' > "$STATE"
+no "url-less: human approved but shadow RC vetoes -> no merge (rc1)" do_automerge_tick
+eq "url-less: RC-vetoed records nothing" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
+
+# Shadow APPROVE ALONE (no human review at all) must NEVER merge a url-less
+# repo -- deliverable 2's core guarantee.
+automerge_approved_by() { return 1; }
+echo '{"review":{"acme/urlless#11":{"verdict":"APPROVE","sha":"headsha11"}}}' > "$STATE"
+no "url-less: shadow APPROVE alone never merges (rc1)"              do_automerge_tick
+eq "url-less: shadow-APPROVE-alone records nothing" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
+automerge_approved_by() { return 0; }   # reset
+
+# The harness's own repo takes the SAME human-approval path as any other
+# url-less repo -- merges on approval, no deploy stamp, never shadow-gated.
+VALIDATED_REPOS_JSON="{\"full_name\":\"${AUTOMERGE_SELF_REPO}\"}"
+echo '{}' > "$STATE"
+ok "self-repo: human APPROVED -> merges via the human-approval path" do_automerge_tick
+eq "self-repo: merge recorded NO deploy" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
+
+echo "== do_automerge_tick: dossier fetch failure -> skip entirely, retry next tick (igor#520 amendment) =="
+# A repo with a pending human-APPROVED, CI-green PR whose dossier fetch FAILS
+# this tick must not merge via EITHER path -- the empty url from a flaky
+# fetch must never be read as "declares no url".
+VALIDATED_REPOS_JSON='{"full_name":"acme/flaky"}'
+automerge_url_status() { printf 'error\t'; }
+echo '{}' > "$STATE"
+AUTOMERGE_OUT=$(do_automerge_tick 2>&1); AUTOMERGE_RC=$?
+if [ "$AUTOMERGE_RC" -ne 0 ]; then printf '  + %s\n' "flaky-dossier: no merge (rc1)"
+else printf '  x %s\n' "flaky-dossier: no merge (rc1)"; FAIL=$((FAIL + 1)); fi
+eq "flaky-dossier: recorded no deploy" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
+has "flaky-dossier: logs the skip"      "$AUTOMERGE_OUT" "dossier fetch failed"
+automerge_url_status() { printf 'ok\thttps://x'; }   # reset
 
 if [ "$FAIL" -eq 0 ]; then echo "test-automerge: all checks passed"; exit 0; fi
 echo "test-automerge: $FAIL check(s) FAILED"

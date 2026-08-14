@@ -1,31 +1,41 @@
 #!/usr/bin/env bash
 # automerge.sh -- auto-merge-on-approve + the deploy barrier. Sourced by bin/tick.sh.
 #
-# "After you approve, your job ends." A repo opts in by CONVENTION: its
-# dossier declaring a live `url` marks it auto-merge-eligible -- root
-# AGENTS.md `url` (docs/agents-md-spec.md), falling back to legacy agent.json
-# (AGENT_CONFIG_FILE) `.smoke.url` via lib/dossier.sh's dossier_get_repo for
-# any repo that hasn't adopted the spec yet.
+# "After you approve, your job ends." A repo's dossier declaring a live `url`
+# marks it auto-merge-eligible for the SHADOW-gated path -- root AGENTS.md
+# `url` (docs/agents-md-spec.md), falling back to legacy agent.json
+# (AGENT_CONFIG_FILE) `.smoke.url` via lib/dossier.sh's dossier_get_repo_status
+# for any repo that hasn't adopted the spec yet. A repo that genuinely
+# declares NO url is not left without a merge path, though: it gets the
+# URL-LESS human-approval path instead (igor#520) -- implicitly human-gated,
+# like `automerge.require_human`, but skipping the deploy stamp/watch below
+# since there's no live URL to smoke-test.
 #
-# Merge gate: shadow-review APPROVE is the default; agent.json
-# .automerge.require_human pins a repo to the human gate. Design: igor#404.
-# On merge it stamps a pending deploy under .deploy in discretionary-state.
+# Merge gate on a url-bearing repo: shadow-review APPROVE is the default;
+# agent.json .automerge.require_human pins it to the human gate instead.
+# Design: igor#404. On a url-bearing merge it stamps a pending deploy under
+# .deploy in discretionary-state; a url-less merge skips that stamp entirely.
 #
-# The deploy barrier (do_deploy_barrier, run EARLY each tick) then watches that
-# deploy to verified-healthy -- CI green + the live URL responds -- and ENDS the
-# tick each minute while it is still deploying, so no long work starts mid-deploy
-# (the 1-minute cadence IS the polling loop; the tick is never held open). On a
-# failed deploy/smoke it emails ALERT_RECIPIENTS. Phase 1 is alert-only: NO
-# automatic revert.
+# The deploy barrier (do_deploy_barrier, run EARLY each tick) then watches a
+# stamped deploy to verified-healthy -- CI green + the live URL responds --
+# and ENDS the tick each minute while it is still deploying, so no long work
+# starts mid-deploy (the 1-minute cadence IS the polling loop; the tick is
+# never held open). On a failed deploy/smoke it emails ALERT_RECIPIENTS.
+# Phase 1 is alert-only: NO automatic revert.
 #
-# NEVER the harness's own repo: a watcher can't reliably watch itself (a broken
-# self-deploy could crash the very tick meant to smoke-test it), so igor stays a
-# manual merge. No-ops cleanly when no repo opts in.
+# The harness's own repo (AUTOMERGE_SELF_REPO) never declares a url and is
+# excluded from the SHADOW-gated path and from deploy-watching -- a watcher
+# can't reliably watch itself (a broken self-deploy could crash the very tick
+# meant to smoke-test it) -- but it takes the URL-LESS human-approval path
+# like any other url-less repo: the concern above is specifically about
+# self-SMOKE-watching, which that path never does, and the harness's own
+# self-pull picks up merged master on the next tick as it always has.
+# No-ops cleanly when no repo opts in.
 
 AGENT_CONFIG_FILE="agent.json"                               # repo root; per-repo machine-config dossier (jq-parsed)
 AUTOMERGE_SMOKE_MAX_ATTEMPTS=5                                # propagation grace before a smoke alert
 AUTOMERGE_CI_MAX_ATTEMPTS=30                                  # ~30 ticks before a never-reporting deploy CI self-heals
-AUTOMERGE_SELF_REPO="${AUTOMERGE_SELF_REPO:-joshtronic/igor}" # never auto-merge the harness
+AUTOMERGE_SELF_REPO="${AUTOMERGE_SELF_REPO:-joshtronic/igor}" # url-less: human-approval merge, but never shadow-gated or deploy-watched
 AUTOMERGE_BLOCK_COOLDOWN_SECS=3600                            # after a rejected merge, back off ~1h before re-trying the same head
 
 # Fallback logger so this module is sourceable standalone (tests).
@@ -33,31 +43,49 @@ if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*" >&2; }; 
 
 _deploy_state_file() { echo "${AGENT_STATE_DIR:-$HOME/.local/state/agent}/discretionary-state.json"; }
 
-# automerge_smoke_url <repo> -- the live URL from the repo's dossier (root
+# automerge_url_status <repo> -- the live URL from the repo's dossier (root
 # AGENTS.md `url`, falling back to legacy agent.json `.smoke.url` -- see
-# lib/dossier.sh), or empty: not eligible (neither source declares one), or
-# the harness's own repo.
+# lib/dossier.sh), distinguishing a genuine "no url declared" from a dossier
+# fetch that failed THIS TICK (igor#520). A plain dossier_get_repo swallows
+# both into the same empty string, which would silently downgrade a
+# url-bearing repo with a standing human approve to the no-deploy-watch
+# url-less path on one flaky tick -- exactly the "silent downgrade of the
+# deploy guarantee" this function exists to prevent. Echoes "<status>\t<url>":
+#   ok    -- the dossier (or legacy agent.json) was read cleanly; url is the
+#            declared value, or empty when the repo genuinely has none (the
+#            repo is auto-merge-eligible via the URL-LESS human-approval
+#            path in do_automerge_tick, below)
+#   error -- the fetch failed this tick -- the repo must be SKIPPED entirely
+#            (no merge, either path) and retried next tick
 #
-# Needs dossier_get_repo (lib/dossier.sh) sourced -- bin/tick.sh sources
-# dossier.sh above automerge.sh; bin/test-automerge.sh mirrors that. rc0 with
-# an empty value is the ordinary "not eligible" answer (do_automerge_tick
-# reads it under set -e), so a MISSING dependency would otherwise be
-# indistinguishable from "no repo opted in" -- hence the loud guard.
-automerge_smoke_url() {
+# The harness's own repo is always "ok" with an empty url: it never declares
+# a smoke URL, so there's nothing to fetch or fail on -- it always takes the
+# url-less human-approval path (see the file header).
+#
+# Needs dossier_get_repo_status (lib/dossier.sh) sourced -- bin/tick.sh
+# sources dossier.sh above automerge.sh; bin/test-automerge.sh mirrors that.
+# A MISSING dependency fails CLOSED ("error", not "ok" with an empty url) --
+# treating it as "every repo declares no url" would flip every url-bearing
+# repo onto the un-watched merge path, silently disabling the deploy barrier
+# fleet-wide instead of just refusing to merge.
+automerge_url_status() {
   local repo="$1"
-  [ "$repo" = "$AUTOMERGE_SELF_REPO" ] && return 0
-  if ! declare -F dossier_get_repo >/dev/null; then
-    log "automerge: BUG -- lib/dossier.sh not sourced; every repo reads as auto-merge-ineligible"
+  if [ "$repo" = "$AUTOMERGE_SELF_REPO" ]; then printf 'ok\t'; return 0; fi
+  if ! declare -F dossier_get_repo_status >/dev/null; then
+    log "automerge: BUG -- lib/dossier.sh not sourced; every repo reads as unfetchable (fail closed)"
+    printf 'error\t'
     return 0
   fi
-  dossier_get_repo "$repo" url || true
+  dossier_get_repo_status "$repo" url
 }
 
 # automerge_require_human <repo> -- exit 0 if the repo pins itself to a HUMAN
 # review gate (`agent.json` `.automerge.require_human == true`); exit 1 otherwise
 # (the default -- the shadow review's APPROVE gates the merge). The carve-out for
 # repos whose real defect class a diff review can't judge (joshing.you, igor.bot,
-# porksicle.com). igor is already excluded upstream by automerge_smoke_url.
+# porksicle.com). A url-less repo (including igor itself) is ALREADY
+# human-gated upstream, unconditionally, regardless of this flag -- see
+# do_automerge_tick's use of automerge_url_status.
 automerge_require_human() {
   local repo="$1"
   [ "$(forgejo_repo_get_file "$repo" "$AGENT_CONFIG_FILE" 2>/dev/null \
@@ -65,15 +93,21 @@ automerge_require_human() {
 }
 
 # automerge_will_take <repo> <verdict> -- exit 0 if the auto-merge tick will merge
-# on this shadow verdict alone: a default (shadow-gated) repo with an APPROVE.
-# Used by do_review_tick to skip requesting the human when the merge is going to
-# happen without them anyway -- requesting would just be noise for a self-merging
-# PR (awareness comes via the ship-report). This is only about the APPROVAL
-# signal; CI/mergeable/behind still gate the real merge. A COMMENT (won't
-# auto-merge) or a require_human carve-out returns 1 -> the human is still asked.
+# on this shadow verdict alone: a default (shadow-gated, url-bearing) repo with
+# an APPROVE. Used by do_review_tick to skip requesting the human when the merge
+# is going to happen without them anyway -- requesting would just be noise for a
+# self-merging PR (awareness comes via the ship-report). This is only about the
+# APPROVAL signal; CI/mergeable/behind still gate the real merge. A COMMENT
+# (won't auto-merge), a require_human carve-out, a url-less repo (igor#520 --
+# implicitly human-gated, shadow-APPROVE alone must never take it), or a dossier
+# fetch we couldn't read this tick all return 1 -> the human is still asked.
 automerge_will_take() {
-  local repo="$1" verdict="$2"
-  [ "$verdict" = "APPROVE" ] && ! automerge_require_human "$repo"
+  local repo="$1" verdict="$2" url_out url_status url
+  [ "$verdict" = "APPROVE" ] || return 1
+  url_out=$(automerge_url_status "$repo")
+  url_status=${url_out%%$'\t'*}; url=${url_out#*$'\t'}
+  [ "$url_status" = "ok" ] && [ -n "$url" ] || return 1
+  ! automerge_require_human "$repo"
 }
 
 # automerge_approved_by <repo> <pr> <user> -- exit 0 if <user>'s CURRENT review on
@@ -529,20 +563,38 @@ do_deploy_barrier() {
   _deploy_clear; return 1
 }
 
-# do_automerge_tick -- merge ONE human-approved bot PR on an auto-merge-eligible
-# repo, stamping a pending deploy for the barrier. Returns 0 if it merged.
+# do_automerge_tick -- merge ONE approved bot PR on an auto-merge-eligible
+# repo. A url-bearing repo stamps a pending deploy for the barrier
+# regardless of which gate approved it (shadow or human/require_human); a
+# url-less repo has no live URL to watch and skips the stamp entirely.
+# Returns 0 if it merged.
 do_automerge_tick() {
   [ -n "${FORGEJO_REVIEWER:-}" ] || return 1
   local sf; sf=$(_deploy_state_file)
   # one deploy at a time (the barrier guards this too, but belt + suspenders)
   [ -f "$sf" ] && [ -n "$(jq -r '.deploy.repo // ""' "$sf" 2>/dev/null)" ] && return 1
 
-  local repo url req_human prs pr head verdict reviewed_sha key ci sha behind
+  local repo url url_out url_status req_human prs pr head verdict reviewed_sha key ci sha behind
   local behind_repo="" behind_pr="" behind_n="" shadow_only risk_reason
   while IFS= read -r repo; do
     [ -n "$repo" ] || continue
-    url=$(automerge_smoke_url "$repo"); [ -n "$url" ] || continue   # not eligible
-    if automerge_require_human "$repo"; then req_human=1; else req_human=0; fi
+    url_out=$(automerge_url_status "$repo")
+    url_status=${url_out%%$'\t'*}; url=${url_out#*$'\t'}
+    if [ "$url_status" = "error" ]; then
+      log "automerge: ${repo} dossier fetch failed this tick -- skipping (retry next tick)"
+      continue
+    fi
+    # A repo that genuinely declares no url is implicitly human-gated
+    # (igor#520): never merge on the shadow verdict alone, and skip the
+    # deploy stamp/watch below (there's nothing to smoke-test). A url-bearing
+    # repo falls back to its own require_human pin, as before.
+    if [ -z "$url" ]; then
+      req_human=1
+    elif automerge_require_human "$repo"; then
+      req_human=1
+    else
+      req_human=0
+    fi
     prs=$(forgejo_list_open_bot_prs "$repo" "$BOT_USER" 2>/dev/null) || continue
     while IFS= read -r pr; do
       if [ -z "$pr" ] || [ "$pr" = "null" ]; then continue; fi
@@ -639,8 +691,12 @@ do_automerge_tick() {
         if sha=$(automerge_do_merge "$repo" "$pr"); then
           automerge_block_clear "$sf" "$key"
           [ -n "$sha" ] || sha="$head"   # fall back to the head if the merge SHA didn't come back
-          _deploy_record "$repo" "$pr" "$sha" "$url"
-          log "automerge: merged ${key} (approved by ${FORGEJO_REVIEWER}, CI green) -- watching deploy ${sha:0:8}"
+          if [ -n "$url" ]; then
+            _deploy_record "$repo" "$pr" "$sha" "$url"
+            log "automerge: merged ${key} (approved by ${FORGEJO_REVIEWER}, CI green) -- watching deploy ${sha:0:8}"
+          else
+            log "automerge: merged ${key} (approved by ${FORGEJO_REVIEWER}, CI green) -- no live URL, skipping deploy watch"
+          fi
           return 0
         else
           # $sha holds the reason on failure ("HTTP 405: User not allowed ...").

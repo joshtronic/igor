@@ -869,6 +869,32 @@ forgejo_repo_get_file() {
   jq -r '.content // empty' <<<"$resp" | base64 -d 2>/dev/null || true
 }
 
+# forgejo_repo_get_file_status <repo> <path> -- like forgejo_repo_get_file,
+# but distinguishes WHY there's no content instead of collapsing every
+# failure into the same nonzero. Echoes "<status>\t<content>" (content only
+# set when status=found; rc is always 0 -- the status IS the answer):
+#   found   -- the file exists; content (base64-decoded) follows
+#   missing -- the API answered with an HTTP error (curl exit 22 under _fj's
+#              `-f`) -- per FORGEJO_RETRY_CURL_CODES this is deliberately NOT
+#              retried, since it's an ANSWER (a 404 for an absent file is the
+#              normal response), not a hiccup: a legitimate "no such file"
+#   error   -- the fetch itself failed (a transport hiccup, retries
+#              exhausted) -- the caller cannot trust this as "absent" and
+#              should treat it as "unknown this tick"
+# Callers that need this distinction: lib/dossier.sh's dossier_get_repo_status
+# (igor#520 -- a plain dossier_get_repo swallows a flaky fetch into the same
+# empty value as a repo that genuinely declares nothing, which is unsafe for
+# a decision as consequential as "does this repo have a live URL to watch").
+forgejo_repo_get_file_status() {
+  local repo="$1" path="$2" resp rc
+  resp=$(_fj GET "/repos/${repo}/contents/${path}" 2>/dev/null); rc=$?
+  case "$rc" in
+    0)  printf 'found\t%s' "$(jq -r '.content // empty' <<<"$resp" | base64 -d 2>/dev/null || true)" ;;
+    22) printf 'missing\t' ;;
+    *)  printf 'error\t' ;;
+  esac
+}
+
 # Names of the entries in a repo directory, one per line. Non-zero
 # when the API call fails OR the directory doesn't exist -- callers
 # (logwatch service discovery) treat both as "nothing to list".

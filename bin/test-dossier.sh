@@ -199,6 +199,45 @@ git -C "$GWORK" push -q origin master; git -C "$GCLONE" pull -q
 V=0; validate_repo_local demo/good "$GCLONE" >/dev/null 2>&1 || V=$?
 eq "otherwise-complete repo with a broken dossier -> rc1" 1 "$V"
 
+echo "== dossier_get_repo_status: missing-vs-error, not swallowed alike (igor#520) =="
+# forgejo_repo_get_file_status is the only dependency -- stub it directly, no
+# need to source lib/forgejo.sh.
+forgejo_repo_get_file_status() {
+  case "$2" in
+    AGENTS.md) printf 'found\t%s' "$GOOD" ;;
+    *) printf 'missing\t' ;;
+  esac
+}
+eq "adopted dossier -> ok, reads the Metadata block" \
+  "$(printf 'ok\thttps://www.porksicle.com')" "$(dossier_get_repo_status acme/x url)"
+forgejo_repo_get_file_status() {
+  case "$2" in
+    agent.json) printf 'found\t%s' '{"smoke":{"url":"https://legacy.example"}}' ;;
+    *) printf 'missing\t' ;;
+  esac
+}
+eq "un-adopted repo -> falls back to legacy agent.json" \
+  "$(printf 'ok\thttps://legacy.example')" "$(dossier_get_repo_status acme/x url)"
+forgejo_repo_get_file_status() { printf 'missing\t'; }
+eq "neither file exists -> ok, genuinely no url (not an error)" \
+  "$(printf 'ok\t')" "$(dossier_get_repo_status acme/x url)"
+forgejo_repo_get_file_status() {
+  case "$2" in
+    AGENTS.md) printf 'error\t' ;;
+    *) printf 'found\t%s' '{"smoke":{"url":"https://x"}}' ;;
+  esac
+}
+eq "AGENTS.md fetch fails -> error (never falls back)" \
+  "$(printf 'error\t')" "$(dossier_get_repo_status acme/x url)"
+forgejo_repo_get_file_status() {
+  case "$2" in
+    AGENTS.md) printf 'missing\t' ;;
+    agent.json) printf 'error\t' ;;
+  esac
+}
+eq "agent.json fetch fails after a missing AGENTS.md -> error" \
+  "$(printf 'error\t')" "$(dossier_get_repo_status acme/x url)"
+
 if [ "$FAIL" -eq 0 ]; then
   echo "test-dossier: all passed"
 else
