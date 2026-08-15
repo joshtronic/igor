@@ -142,7 +142,7 @@ echo "== do_automerge_tick wiring: a url-less merge on igor stamps .landed, not 
 export FORGEJO_REVIEWER=josh BOT_USER=igor
 echo '{}' > "$STATE"
 automerge_url_status() { printf 'ok\t'; }   # url-less, like AUTOMERGE_SELF_REPO's real dossier answer
-VALIDATED_REPOS_JSON="{\"full_name\":\"${AUTOMERGE_SELF_REPO}\"}"
+export VALIDATED_REPOS_JSON="{\"full_name\":\"${AUTOMERGE_SELF_REPO}\"}"
 forgejo_list_open_bot_prs() { echo '[{"number":521}]'; }
 forgejo_commit_status() { echo success; }
 automerge_mergeable() { return 0; }
@@ -161,7 +161,7 @@ eq ".landed pr recorded"                        "521" "$(jq -r --arg r "$AUTOMER
 echo "== do_automerge_tick wiring: a url-BEARING repo's merge is untouched (still .deploy only) =="
 echo '{}' > "$STATE"
 automerge_url_status() { printf 'ok\thttps://porksicle.com'; }
-VALIDATED_REPOS_JSON='{"full_name":"acme/site"}'
+export VALIDATED_REPOS_JSON='{"full_name":"acme/site"}'
 ok "do_automerge_tick merges the url-bearing repo" do_automerge_tick
 eq ".deploy stamped as before"    "acme/site" "$(jq -r '.deploy.repo // ""' "$STATE")"
 eq "no .landed entry created"     "" "$(jq -r '.landed // {} | keys | join(",")' "$STATE")"
