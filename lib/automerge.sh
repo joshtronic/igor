@@ -31,6 +31,10 @@
 # self-SMOKE-watching, which that path never does, and the harness's own
 # self-pull picks up merged master on the next tick as it always has.
 # No-ops cleanly when no repo opts in.
+#
+# Two of the url-less repos (igor itself, the distillery) get a HOST-STATE
+# landed-watch in place of the deploy/smoke watch -- see lib/landed.sh,
+# stamped by landed_record below on their merge.
 
 AGENT_CONFIG_FILE="agent.json"                               # repo root; per-repo machine-config dossier (jq-parsed)
 AUTOMERGE_SMOKE_MAX_ATTEMPTS=5                                # propagation grace before a smoke alert
@@ -707,6 +711,13 @@ do_automerge_tick() {
           if [ -n "$url" ]; then
             _deploy_record "$repo" "$pr" "$sha" "$url"
             log "automerge: merged ${key} (approved by ${FORGEJO_REVIEWER}, CI green) -- watching deploy ${sha:0:8}"
+          elif landed_applies "$repo"; then
+            # igor#512: the two url-less repos this checker knows how to
+            # verify (igor itself, the distillery) get a host-state
+            # landed-watch instead of a deploy/smoke watch -- see
+            # lib/landed.sh.
+            landed_record "$repo" "$pr" "$sha"
+            log "automerge: merged ${key} (approved by ${FORGEJO_REVIEWER}, CI green) -- no live URL, watching landed-verification ${sha:0:8}"
           else
             log "automerge: merged ${key} (approved by ${FORGEJO_REVIEWER}, CI green) -- no live URL, skipping deploy watch"
           fi

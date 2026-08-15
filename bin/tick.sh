@@ -133,6 +133,8 @@ unset env_file_hint
 # shellcheck source=lib/sports-digest.sh
 . "$AGENT_HOME/lib/sports-digest.sh"
 . "$AGENT_HOME/lib/ceo.sh"
+# shellcheck source=lib/landed.sh
+. "$AGENT_HOME/lib/landed.sh"
 # shellcheck source=lib/automerge.sh
 . "$AGENT_HOME/lib/automerge.sh"
 . "$AGENT_HOME/lib/ship-report.sh"
@@ -1831,7 +1833,9 @@ do_seo_tick() {
 # FULLY SCRIPTED (no model), so it sits ABOVE the health gate and sends even
 # during a Claude cooldown. Daily stamp under .shipreport; clear it to resend.
 # Assembly/render/stamp live in lib/ship-report.sh; the Forgejo gathering is
-# here, like do_seo_tick's.
+# here, like do_seo_tick's. Also drains lib/landed.sh's landed-verification
+# notes (igor#512) behind the same gates -- see the shipreport_landed_*
+# calls below.
 do_shipreport_tick() {
   # Opt-in gate: same email creds as the other digests.
   if [ -z "${PRIMARY_RECIPIENTS:-}" ] || [ -z "${SMTP2GO_API_KEY:-}" ] \
@@ -1872,27 +1876,37 @@ do_shipreport_tick() {
     items=$(jq -c --argjson m "${merged:-[]}" --argjson o "${open:-[]}" '. + $m + $o' <<<"$items" 2>/dev/null || printf '%s' "$items")
   done <<<"$ANALYSIS_REPOS_JSON"
 
+  # igor#512: drain any landed-verification notes (lib/landed.sh) queued
+  # since the last send -- BEHIND the creds/hour/sent-today gates above, so
+  # a landing confirmed overnight rides the normal morning send rather than
+  # firing anything of its own. A report carrying only landed notes (no
+  # shipped/needs-you/inflight PR activity) is NOT "quiet" -- it still sends.
+  local landed_notes; landed_notes=$(shipreport_landed_read)
+
   local report; report=$(printf '%s' "$items" | shipreport_build)
+  report=$(shipreport_merge_landed "$report" "$landed_notes")
   if shipreport_is_empty "$report"; then
     log "shipreport: quiet 24h -- nothing to report (stamping done)"
     shipreport_mark_sent
     return 0
   fi
 
-  local ns nsh nif html text subject recipients
+  local ns nsh nif nld html text subject recipients
   ns=$(jq -r '.needs_you | length' <<<"$report")
   nsh=$(jq -r '.shipped | length' <<<"$report")
   nif=$(jq -r '.inflight | length' <<<"$report")
+  nld=$(jq -r '.landed | length' <<<"$report")
   html=$(shipreport_render_html <<<"$report")
   text=$(shipreport_render_text <<<"$report")
-  subject="[Ship Report] $(date +%F) -- ${nsh} shipped, ${ns} need you, ${nif} in flight"
+  subject="[Ship Report] $(date +%F) -- ${nsh} shipped, ${ns} need you, ${nif} in flight, ${nld} landed"
   recipients=$(recipients_with_primary "${SHIPREPORT_RECIPIENTS:-}")
   if email_send "$subject" "$html" "$text" "$recipients"; then
-    log "shipreport: sent (${nsh} shipped, ${ns} needs-you, ${nif} in-flight) to $recipients"
+    log "shipreport: sent (${nsh} shipped, ${ns} needs-you, ${nif} in-flight, ${nld} landed) to $recipients"
   else
     log "warning: shipreport email failed (continuing)"
   fi
   shipreport_mark_sent
+  shipreport_landed_clear
   return 0
 }
 
@@ -3246,6 +3260,21 @@ else
     || log "warning: fetch of joshtronic/distillery failed; context cache serves last-good"
 fi
 context_refresh || true
+
+# -- Landed verification for URL-less merges (igor#512) ------------
+#
+# Re-checks every pending landed-watch (stamped by do_automerge_tick on a
+# merge to igor or the distillery -- the two url-less repos this checker
+# knows how to verify) against its host-state assertion: igor's self-pull
+# HEAD (just kept fresh at the very top of this script) and the
+# distillery's context-cache generation marker (just refreshed above).
+# Non-model (git + file reads only), so it runs every tick, including
+# during a Claude health cooldown. Unlike the deploy barrier it never ends
+# the tick -- nothing here is disrupted by concurrent work. See
+# lib/landed.sh for the host-state assertions, the grace/alert mechanics,
+# and the honest scope limit (can't catch a merge that bricks tick.sh
+# itself -- that's the external task-heartbeat's job).
+do_landed_tick || true
 
 # -- Validation sweep ------------------------------------------
 #
