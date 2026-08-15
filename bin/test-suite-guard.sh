@@ -75,6 +75,26 @@ no_ "a fixture echoing the phrase as data" \
 no_ "a description mentioning an unbound variable" \
   "  + rejects an unbound variable in the template"
 
+echo "== the shared missing-tool skip convention is recognized (igor#523) =="
+# Every skip-safe suite's top-of-file guard echoes exactly one line ending
+# "-- skipping" and exits 0 before running any assertions -- indistinguishable
+# from a real pass by exit code alone. suite_output_skip_reason names it.
+SKIP_LINE="test-automerge: jq absent -- skipping"
+reason=$(suite_output_skip_reason "$SKIP_LINE")
+if [ "$reason" = "$SKIP_LINE" ]; then
+  printf '  + %s\n' "recognizes the missing-tool skip line"
+else
+  printf '  x %s: got [%s]\n' "skip-reason extraction" "$reason"
+  FAIL=$((FAIL + 1))
+fi
+no_reason=$(suite_output_skip_reason "$CLEAN_OUT")
+if [ -z "$no_reason" ]; then
+  printf '  + %s\n' "a clean pass has no skip reason"
+else
+  printf '  x %s: got [%s]\n' "clean output falsely read as a skip" "$no_reason"
+  FAIL=$((FAIL + 1))
+fi
+
 echo "== the reported lines name the offender =="
 LINES=$(suite_skipped_lines "$TYPO_OUT")
 case "$LINES" in
@@ -155,6 +175,38 @@ fi
 case "$PASS_OUT" in
   *"+ $FIXTURES/test-zz-passes.sh passed"*) printf '  + %s\n' "it is reported as '+ <suite> passed'" ;;
   *) printf '  x %s: got [%s]\n' "passing suite verdict" "$PASS_OUT"; FAIL=$((FAIL + 1)) ;;
+esac
+
+echo "== suite_run_report distinguishes a skip from a pass (igor#523) =="
+# A CI runner missing jq must not read a whole class of suites (automerge,
+# dossier, forgejo, needsyou, ...) as ordinary passes -- that's exactly how
+# the merge machinery's coverage went silently unexecuted.
+cat >"$FIXTURES/test-mm-skips.sh" <<'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+echo "test-mm-skips: jq absent -- skipping"
+exit 0
+EOF
+SKIP_OUT=$(suite_run_report "$FIXTURES/test-mm-skips.sh" 2>&1)
+SKIP_RC=$?
+if [ "$SKIP_RC" -eq 0 ]; then
+  printf '  + %s\n' "a skipped suite still returns 0 -- not a CI failure"
+else
+  printf '  x %s: returned %s, expected 0\n' "skipped suite" "$SKIP_RC"
+  FAIL=$((FAIL + 1))
+fi
+case "$SKIP_OUT" in
+  *"! $FIXTURES/test-mm-skips.sh skipped (test-mm-skips: jq absent -- skipping)"*)
+    printf '  + %s\n' "it is reported as '! <suite> skipped (<reason>)', not '+ <suite> passed'" ;;
+  *)
+    printf '  x %s: got [%s]\n' "skipped suite verdict" "$SKIP_OUT"
+    FAIL=$((FAIL + 1)) ;;
+esac
+case "$SKIP_OUT" in
+  *"+ $FIXTURES/test-mm-skips.sh passed"*)
+    printf '  x %s\n' "a skip must not also be reported as an ordinary pass"
+    FAIL=$((FAIL + 1)) ;;
+  *) printf '  + %s\n' "not double-reported as a pass" ;;
 esac
 
 echo "== a silent suite emits no stray blank line =="
