@@ -76,7 +76,8 @@ shipreport_landed_clear() {
 # (which only knows about Forgejo PR items) so callers that never touch
 # landed notes -- including every existing caller of shipreport_build --
 # get a report with no `landed` key at all, and the renderers below treat
-# that as "omit the section" rather than "empty section".
+# that as "omit the section" rather than "empty section". do_shipreport_tick
+# skips the merge on an empty queue for that same reason.
 shipreport_merge_landed() {
   local report="$1" landed="$2"
   jq -c --argjson l "${landed:-[]}" '. + {landed: $l}' <<<"$report" 2>/dev/null || printf '%s' "$report"

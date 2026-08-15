@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # landed.sh -- host-state "landed" verification for the two URL-less
-# auto-merge repos (igor#520): igor itself, and the distillery. Companion to
+# auto-merge repos (igor#512): igor itself, and the distillery -- the pair
+# whose merge path igor#520 made human-gated for want of a URL. Companion to
 # the deploy barrier (lib/automerge.sh) for repos with no live URL to
 # smoke-test -- "landed" here is a HOST-STATE assertion instead of an HTTP
 # one. Sourced by bin/tick.sh.
@@ -100,7 +101,7 @@ landed_clear() {
   local repo="$1" sf tmp
   sf=$(_landed_state_file); [ -f "$sf" ] || return 0
   tmp=$(mktemp)
-  if jq --arg r "$repo" '.landed |= (if . then del(.[$r]) else . end)' "$sf" > "$tmp" 2>/dev/null; then
+  if jq --arg r "$repo" 'if (.landed|type) == "object" then .landed |= del(.[$r]) else . end' "$sf" > "$tmp" 2>/dev/null; then
     mv "$tmp" "$sf"
   else
     rm -f "$tmp"
@@ -249,6 +250,9 @@ do_landed_tick() {
     attempts=$(jq -r '.attempts // 0' <<<"$entry" 2>/dev/null)
     [ -n "$sha" ] || { landed_clear "$repo"; continue; }
     [ -n "$attempts" ] || attempts=0
+    # Reset per iteration rather than `unset`ing on the landed path -- `unset`
+    # would drop the `local` binding and expose any global of the same name.
+    detail=""
 
     case "$kind" in
       igor)
@@ -265,11 +269,10 @@ do_landed_tick() {
         ;;
     esac
 
-    if [ -n "${detail:-}" ]; then
+    if [ -n "$detail" ]; then
       log "landed: ${repo}#${pr} ${sha:0:8} confirmed landed (${detail})"
       landed_note_queue "$repo" "$pr" "$sha" "$detail"
       landed_clear "$repo"
-      unset detail
       continue
     fi
 

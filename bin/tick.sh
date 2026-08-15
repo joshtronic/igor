@@ -1884,7 +1884,12 @@ do_shipreport_tick() {
   local landed_notes; landed_notes=$(shipreport_landed_read)
 
   local report; report=$(printf '%s' "$items" | shipreport_build)
-  report=$(shipreport_merge_landed "$report" "$landed_notes")
+  # Merge only when there IS something to report: shipreport_merge_landed's
+  # contract is "no `landed` key -> the renderers omit the section", so merging
+  # unconditionally would put an empty LANDED block on every daily report.
+  if [ "$(jq -r 'length' <<<"$landed_notes" 2>/dev/null || echo 0)" != "0" ]; then
+    report=$(shipreport_merge_landed "$report" "$landed_notes")
+  fi
   if shipreport_is_empty "$report"; then
     log "shipreport: quiet 24h -- nothing to report (stamping done)"
     shipreport_mark_sent
@@ -1895,18 +1900,21 @@ do_shipreport_tick() {
   ns=$(jq -r '.needs_you | length' <<<"$report")
   nsh=$(jq -r '.shipped | length' <<<"$report")
   nif=$(jq -r '.inflight | length' <<<"$report")
-  nld=$(jq -r '.landed | length' <<<"$report")
+  nld=$(jq -r '.landed | length' <<<"$report")   # absent key -> null|length -> 0
   html=$(shipreport_render_html <<<"$report")
   text=$(shipreport_render_text <<<"$report")
-  subject="[Ship Report] $(date +%F) -- ${nsh} shipped, ${ns} need you, ${nif} in flight, ${nld} landed"
+  subject="[Ship Report] $(date +%F) -- ${nsh} shipped, ${ns} need you, ${nif} in flight"
+  [ "$nld" = "0" ] || subject+=", ${nld} landed"
   recipients=$(recipients_with_primary "${SHIPREPORT_RECIPIENTS:-}")
   if email_send "$subject" "$html" "$text" "$recipients"; then
     log "shipreport: sent (${nsh} shipped, ${ns} needs-you, ${nif} in-flight, ${nld} landed) to $recipients"
+    # Drain only on a send that actually went out -- a failed email must leave
+    # the notes queued so they ride the next report instead of vanishing.
+    shipreport_landed_clear
   else
-    log "warning: shipreport email failed (continuing)"
+    log "warning: shipreport email failed (continuing); ${nld} landed note(s) stay queued"
   fi
   shipreport_mark_sent
-  shipreport_landed_clear
   return 0
 }
 
@@ -3263,17 +3271,12 @@ context_refresh || true
 
 # -- Landed verification for URL-less merges (igor#512) ------------
 #
-# Re-checks every pending landed-watch (stamped by do_automerge_tick on a
-# merge to igor or the distillery -- the two url-less repos this checker
-# knows how to verify) against its host-state assertion: igor's self-pull
-# HEAD (just kept fresh at the very top of this script) and the
-# distillery's context-cache generation marker (just refreshed above).
-# Non-model (git + file reads only), so it runs every tick, including
-# during a Claude health cooldown. Unlike the deploy barrier it never ends
-# the tick -- nothing here is disrupted by concurrent work. See
-# lib/landed.sh for the host-state assertions, the grace/alert mechanics,
-# and the honest scope limit (can't catch a merge that bricks tick.sh
-# itself -- that's the external task-heartbeat's job).
+# Re-checks every pending landed-watch against its host-state assertion --
+# see lib/landed.sh. Placed HERE because both assertions read state this
+# script has just refreshed: igor's self-pull HEAD (top of the script) and
+# the distillery's context cache (immediately above). Non-model, so it sits
+# above the claude_health_blocked gate and runs during a cooldown; unlike
+# the deploy barrier it never ends the tick.
 do_landed_tick || true
 
 # -- Validation sweep ------------------------------------------

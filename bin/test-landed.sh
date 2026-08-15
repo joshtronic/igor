@@ -42,10 +42,14 @@ export AGENT_STATE_DIR="$TMP"
 STATE="$TMP/discretionary-state.json"
 
 FAIL=0
-ok()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  + %s\n' "$d"; else printf '  x %s (expected rc0)\n' "$d"; FAIL=$((FAIL + 1)); fi; }
-no()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (expected rc!=0)\n' "$d"; FAIL=$((FAIL + 1)); else printf '  + %s\n' "$d"; fi; }
-eq()  { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
-has() { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
+# PASS is reported at the end so a "N checks passed" claim about this suite is
+# checkable against the run rather than carried over from an earlier one.
+PASS=0
+pass() { PASS=$((PASS + 1)); printf '  + %s\n' "$1"; }
+ok()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$d"; else printf '  x %s (expected rc0)\n' "$d"; FAIL=$((FAIL + 1)); fi; }
+no()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (expected rc!=0)\n' "$d"; FAIL=$((FAIL + 1)); else pass "$d"; fi; }
+eq()  { if [ "$2" = "$3" ]; then pass "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
+has() { case "$2" in *"$3"*) pass "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
 
 echo "== landed_kind / landed_applies: the two hardcoded repos, nothing else =="
 eq "kind: igor self-repo"        "igor"       "$(landed_kind "$AUTOMERGE_SELF_REPO")"
@@ -68,6 +72,10 @@ eq "re-record on the same repo resets attempts" "0" "$(jq -r '.attempts' <<<"$(l
 landed_clear "$AUTOMERGE_SELF_REPO"
 eq "clear drops the entry" "{}" "$(landed_pending_entry "$AUTOMERGE_SELF_REPO")"
 eq "clear leaves no pending repos" "" "$(landed_pending_repos)"
+echo '{"unrelated":1}' > "$STATE"
+landed_clear "$AUTOMERGE_SELF_REPO"
+eq "clear on a state with no .landed writes no null key" "false" "$(jq -r 'has("landed")' "$STATE")"
+eq "clear leaves the rest of the state alone"            "1"     "$(jq -r '.unrelated' "$STATE")"
 
 echo "== landed_assert_igor: ancestor check against a REAL fixture git repo =="
 FIXTURE="$TMP/igor-fixture"
@@ -116,6 +124,23 @@ eq "entry still pending"                    "1" "$(jq -r '.attempts' <<<"$(lande
 eq "no note queued yet"                     "0" "$(jq -r '.landed_notes // [] | length' "$STATE")"
 do_landed_tick
 eq "second miss -> attempts=2"              "2" "$(jq -r '.attempts' <<<"$(landed_pending_entry "$AUTOMERGE_SELF_REPO")")"
+
+echo "== do_landed_tick: a landed repo does not mark a later not-landed one =="
+# The confirmed-landing detail must not carry across loop iterations. Order
+# matters: landed_pending_repos yields jq `keys` (sorted), so the distillery
+# key is renamed to sort AFTER igor's, putting the landing first.
+LANDED_DISTILLERY_REPO="joshtronic/zz-distillery"
+export CONTEXT_CACHE_DIR="$TMP/unseeded-cache"
+echo '{}' > "$STATE"
+landed_record "$AUTOMERGE_SELF_REPO"      521 "$SHA2"
+landed_record "$LANDED_DISTILLERY_REPO"   4   "distsha-never-served"
+do_landed_tick
+eq "the landed repo cleared"        "{}" "$(landed_pending_entry "$AUTOMERGE_SELF_REPO")"
+eq "the other repo stays pending"   "1"  "$(jq -r '.attempts' <<<"$(landed_pending_entry "$LANDED_DISTILLERY_REPO")")"
+eq "exactly one note queued"        "1"  "$(jq -r '.landed_notes | length' "$STATE")"
+eq "the note is the repo that DID land" "$AUTOMERGE_SELF_REPO" "$(jq -r '.landed_notes[0].repo' "$STATE")"
+LANDED_DISTILLERY_REPO="joshtronic/distillery"
+unset CONTEXT_CACHE_DIR
 
 echo "== do_landed_tick: grace exceeded -> alerts and clears =="
 EMAIL_CALLS=0
@@ -166,6 +191,6 @@ ok "do_automerge_tick merges the url-bearing repo" do_automerge_tick
 eq ".deploy stamped as before"    "acme/site" "$(jq -r '.deploy.repo // ""' "$STATE")"
 eq "no .landed entry created"     "" "$(jq -r '.landed // {} | keys | join(",")' "$STATE")"
 
-[ "$FAIL" -eq 0 ] && { echo "test-landed: all checks passed"; exit 0; }
-echo "test-landed: $FAIL check(s) FAILED"
+[ "$FAIL" -eq 0 ] && { echo "test-landed: all $PASS checks passed"; exit 0; }
+echo "test-landed: $FAIL of $((PASS + FAIL)) check(s) FAILED"
 exit 1

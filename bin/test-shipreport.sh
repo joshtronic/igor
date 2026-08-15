@@ -63,6 +63,10 @@ eq "landed_read: nothing queued -> empty array" "[]" "$(shipreport_landed_read)"
 MERGED_EMPTY=$(shipreport_merge_landed '{"needs_you":[],"shipped":[],"inflight":[]}' "[]")
 eq "merge_landed with an empty array adds an empty landed key" "0" "$(jq -r '.landed | length' <<<"$MERGED_EMPTY")"
 ok "is_empty: landed key present but empty still counts as empty" shipreport_is_empty "$MERGED_EMPTY"
+ETEXT=$(shipreport_render_text <<<"$MERGED_EMPTY")
+has "text: an explicitly-merged empty bucket renders an empty section" "$ETEXT" "(nothing landed)"
+EHTML=$(shipreport_render_html <<<"$MERGED_EMPTY")
+has "html: an explicitly-merged empty bucket renders an empty section" "$EHTML" "nothing landed"
 
 LANDED_JSON='[{"repo":"joshtronic/igor","pr":"521","sha":"c0ffee1234567890","detail":"self-pull HEAD is c0ffee12"}]'
 MERGED=$(shipreport_merge_landed '{"needs_you":[],"shipped":[],"inflight":[]}' "$LANDED_JSON")
