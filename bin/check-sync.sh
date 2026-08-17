@@ -224,6 +224,24 @@ check_sync 2>&1 | tee "$LOG_TMP"
 FAIL=${PIPESTATUS[0]}
 set -e
 
+# A missing-tool skip (suite_run_report's `! <suite> skipped (...)` line, see
+# lib/suite-guard.sh) exits 0 and is otherwise indistinguishable in the log
+# from an ordinary pass -- which is how a jq-less CI runner let the
+# automerge/dossier/forgejo/needsyou suites go unexecuted while this stayed
+# green (igor#523). Always print the count, even zero, so its absence is
+# itself legible rather than silent.
+skipped_count=$(grep -cE '^! .+ skipped \(' "$LOG_TMP" || true)
+
+# Skip-safe is for a laptop/host missing an optional tool; it is NOT meant to
+# hide a CI runner whose own install step silently regressed. CHECK_SYNC_STRICT
+# is set only in .forgejo/workflows/lint.yml, which installs jq itself -- there,
+# a skip means the install step failed, a build break wearing a green badge
+# (igor#527). `make test` on a bare host stays green by leaving the var unset.
+if [ "$skipped_count" -gt 0 ] && [ "${CHECK_SYNC_STRICT:-0}" = "1" ]; then
+  echo "x $skipped_count suite(s) skipped for missing tools under CHECK_SYNC_STRICT" >> "$LOG_TMP"
+  FAIL=1
+fi
+
 if [ "$FAIL" -ne 0 ]; then
   echo
   echo "== FAILURES =="
@@ -232,13 +250,6 @@ if [ "$FAIL" -ne 0 ]; then
   grep '^x ' "$LOG_TMP" || echo "(no 'x' lines -- the run died mid-check; see the full output above)"
 fi
 
-# A missing-tool skip (suite_run_report's `! <suite> skipped (...)` line, see
-# lib/suite-guard.sh) exits 0 and is otherwise indistinguishable in the log
-# from an ordinary pass -- which is how a jq-less CI runner let the
-# automerge/dossier/forgejo/needsyou suites go unexecuted while this stayed
-# green (igor#523). Always print the count, even zero, so its absence is
-# itself legible rather than silent.
-skipped_count=$(grep -cE '^! .+ skipped \(' "$LOG_TMP" || true)
 echo
 echo "$skipped_count suite(s) skipped for missing tools"
 

@@ -14,4 +14,6 @@ jobs:
         run: apt-get update -qq && apt-get install -y -qq jq
 
       - name: Check AGENTS.md <-> tick.sh sync
+        env:
+          CHECK_SYNC_STRICT: "1"
         run: bin/check-sync.sh

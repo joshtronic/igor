@@ -77,6 +77,31 @@ has "the skip is reported distinctly, not folded into an ordinary pass" \
   "! bin/test-aaa-needs-jq.sh skipped (test-aaa-needs-jq: jq absent -- skipping)" "$out"
 has "the summary counts it" "1 suite(s) skipped for missing tools" "$out"
 
+echo "== CHECK_SYNC_STRICT turns a missing-tool skip into a failure (igor#527) =="
+HOME_D="$(make_home strict-skip)"
+cat > "$HOME_D/bin/test-aaa-needs-jq.sh" <<'SUITE'
+#!/usr/bin/env bash
+echo "test-aaa-needs-jq: jq absent -- skipping"
+exit 0
+SUITE
+
+out=$(CHECK_SYNC_STRICT=1 bash "$HOME_D/bin/check-sync.sh" 2>&1); rc=$?
+eq "a skip fails the run under strict mode" "1" "$rc"
+has "the strict reason lands in the summary" \
+  "x 1 suite(s) skipped for missing tools under CHECK_SYNC_STRICT" "$out"
+has "the plain skip count still prints" "1 suite(s) skipped for missing tools" "$out"
+
+echo "== CHECK_SYNC_STRICT with nothing skipped stays green =="
+HOME_E="$(make_home strict-no-skip)"
+cat > "$HOME_E/bin/test-zzz-passes.sh" <<'SUITE'
+#!/usr/bin/env bash
+echo "  + one real assertion"
+SUITE
+
+out=$(CHECK_SYNC_STRICT=1 bash "$HOME_E/bin/check-sync.sh" 2>&1); rc=$?
+eq "no skips, strict mode does not fail the run" "0" "$rc"
+has "the summary still says zero skipped" "0 suite(s) skipped for missing tools" "$out"
+
 echo "== a nonzero exit with no 'x' lines keeps its status and says so =="
 # Abort check_sync before any check can print: mktemp succeeds once (the
 # runner's own log file) and then fails, which is an errexit abort out of the
