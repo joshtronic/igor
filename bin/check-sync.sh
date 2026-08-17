@@ -231,6 +231,9 @@ set -e
 # green (igor#523). Always print the count, even zero, so its absence is
 # itself legible rather than silent.
 skipped_count=$(grep -cE '^! .+ skipped \(' "$LOG_TMP" || true)
+# grep prints nothing on an error (rc 2), and an empty count would silently
+# read as "not greater than zero" in the strict check below.
+skipped_count=${skipped_count:-0}
 
 # Skip-safe is for a laptop/host missing an optional tool; it is NOT meant to
 # hide a CI runner whose own install step silently regressed. CHECK_SYNC_STRICT

@@ -41,6 +41,11 @@ TICK
 # depend on whether this host happens to be seeded.
 export CONTEXT_CACHE_DIR="$TMPROOT/no-cache"
 
+# CI sets CHECK_SYNC_STRICT=1 on the check-sync.sh step that runs this file, so
+# it would otherwise reach every nested check-sync below and make the non-strict
+# cases assert strict behavior. The strict cases set it themselves.
+unset CHECK_SYNC_STRICT
+
 echo "== a failing suite names itself in the summary, inside a truncated tail =="
 HOME_A="$(make_home fail-suite)"
 cat > "$HOME_A/bin/test-aaa-boom.sh" <<'SUITE'
