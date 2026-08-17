@@ -10,5 +10,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install jq
+        run: apt-get update -qq && apt-get install -y -qq jq
+
       - name: Check AGENTS.md <-> tick.sh sync
         run: bin/check-sync.sh

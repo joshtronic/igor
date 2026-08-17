@@ -57,6 +57,25 @@ has "prints the summary heading" "== FAILURES ==" "$out"
 has "a failing suite emits an 'x' line at all" "x bin/test-aaa-boom.sh failed" "$out"
 has "later suites still run -- a failure is not fail-fast" "+ bin/test-zzz-noise.sh passed" "$out"
 has "and the reason survives a 20-line tail" "x bin/test-aaa-boom.sh failed" "$(tail -n 20 <<<"$out")"
+has "no suites skipped here -- the summary says so" "0 suite(s) skipped for missing tools" "$out"
+
+echo "== a missing-tool skip is counted in the summary, not read as a pass (igor#523) =="
+HOME_C="$(make_home skip-suite)"
+cat > "$HOME_C/bin/test-aaa-needs-jq.sh" <<'SUITE'
+#!/usr/bin/env bash
+echo "test-aaa-needs-jq: jq absent -- skipping"
+exit 0
+SUITE
+cat > "$HOME_C/bin/test-zzz-passes.sh" <<'SUITE'
+#!/usr/bin/env bash
+echo "  + one real assertion"
+SUITE
+
+out=$(bash "$HOME_C/bin/check-sync.sh" 2>&1); rc=$?
+eq "a skip alone does not fail the run" "0" "$rc"
+has "the skip is reported distinctly, not folded into an ordinary pass" \
+  "! bin/test-aaa-needs-jq.sh skipped (test-aaa-needs-jq: jq absent -- skipping)" "$out"
+has "the summary counts it" "1 suite(s) skipped for missing tools" "$out"
 
 echo "== a nonzero exit with no 'x' lines keeps its status and says so =="
 # Abort check_sync before any check can print: mktemp succeeds once (the

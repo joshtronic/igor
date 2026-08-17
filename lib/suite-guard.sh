@@ -49,6 +49,21 @@ suite_skipped_lines() {
   grep -E "$SUITE_GUARD_PATTERNS" <<<"$1" || true
 }
 
+# suite_output_skip_reason <combined-output>
+# Every jq/git/whatever-dependent bin/test-*.sh shares one top-of-file guard
+# convention: `command -v <tool> ... || { echo "<suite>: <reason> --
+# skipping"; exit 0; }`. That exits 0 before running a single assertion, so by
+# exit code alone it is identical to a real pass -- which is how a CI runner
+# missing jq let the automerge/dossier/forgejo/needsyou suites go unexecuted
+# while check-sync stayed green (igor#523). Echoes the offending line (empty
+# if this isn't that shape) so the runner can tell "passed" from "never ran".
+suite_output_skip_reason() {
+  # `|| true`, not a bare pipeline: under pipefail (the runner's own set -e
+  # options) a no-match grep makes the pipeline report grep's exit 1 even
+  # though tail, the rightmost command, succeeded.
+  grep -E -- '-- skipping$' <<<"$1" | tail -1 || true
+}
+
 # suite_run_report <suite-path>
 # Run one suite, echo its output verbatim, then a verdict line. Returns 0 when
 # the suite passed, 1 when it failed or skipped an assertion.
@@ -82,6 +97,15 @@ suite_run_report() {
     echo "  a skipped assertion cannot fail, so this is NOT a pass:"
     suite_skipped_lines "$out" | sed 's/^/    /'
     return 1
+  fi
+  local skip_reason
+  skip_reason=$(suite_output_skip_reason "$out")
+  if [ -n "$skip_reason" ]; then
+    # A missing-tool skip exits 0 before any assertion runs -- report it
+    # distinctly so it can be counted, not folded into an ordinary pass
+    # (igor#523).
+    echo "! $suite skipped ($skip_reason)"
+    return 0
   fi
   echo "+ $suite passed"
 }
