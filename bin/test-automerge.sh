@@ -891,36 +891,81 @@ eq "flaky-dossier: recorded no deploy" "" "$(jq -r '.deploy.repo // ""' "$STATE"
 has "flaky-dossier: logs the skip"      "$AUTOMERGE_OUT" "dossier fetch failed"
 automerge_url_status() { printf 'ok\thttps://x'; }   # reset
 
-echo "== automerge_maintenance_tier_branch_ok: same-repo review->master pin (igor#516) =="
-PRJ='{"head":{"ref":"review","repo":{"full_name":"joshtronic/joshing.you"}},"base":{"ref":"master","repo":{"full_name":"joshtronic/joshing.you"}}}'
-ok "branch_ok: review->master, same repo"          automerge_maintenance_tier_branch_ok "$PRJ"
-PRJ='{"head":{"ref":"checkpoint/foo","repo":{"full_name":"joshtronic/joshing.you"}},"base":{"ref":"master","repo":{"full_name":"joshtronic/joshing.you"}}}'
-no "branch_ok: non-review head branch -> rejected"  automerge_maintenance_tier_branch_ok "$PRJ"
-PRJ='{"head":{"ref":"review","repo":{"full_name":"joshtronic/joshing.you"}},"base":{"ref":"develop","repo":{"full_name":"joshtronic/joshing.you"}}}'
-no "branch_ok: non-master base -> rejected"         automerge_maintenance_tier_branch_ok "$PRJ"
-PRJ='{"head":{"ref":"review","repo":{"full_name":"forker/joshing.you"}},"base":{"ref":"master","repo":{"full_name":"joshtronic/joshing.you"}}}'
-no "branch_ok: fork head repo -> rejected"          automerge_maintenance_tier_branch_ok "$PRJ"
-PRJ='{"head":{"ref":"review"},"base":{"ref":"master","repo":{"full_name":"joshtronic/joshing.you"}}}'
-no "branch_ok: missing head repo -> fail closed"    automerge_maintenance_tier_branch_ok "$PRJ"
+echo "== automerge_maintenance_declaration: REQUIRED-AND-EXPLICIT dossier opt-in (igor#537) =="
+JY_DECL='{"branch":"review","allowlist":["src/_data/sites.json","src/_data/feeds.json","src/_data/rejected.json","src/images/screenshots/*"],"data_file":"src/_data/sites.json"}'
+forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$JY_DECL" '{automerge:{require_human:true,maintenance:$d}}')"; }
+eq "declaration: full valid declaration -> echoes it" \
+  "$(jq -c . <<<"$JY_DECL")" "$(jq -c . <<<"$(automerge_maintenance_declaration joshtronic/joshing.you)")"
+forgejo_repo_get_file() { printf '%s' '{"automerge":{"require_human":true}}'; }
+no "declaration: no automerge.maintenance key -> tier off"  automerge_maintenance_declaration acme/x
+forgejo_repo_get_file() { return 1; }
+no "declaration: no agent.json -> tier off"                 automerge_maintenance_declaration acme/x
+PARTIAL='{"branch":"review","allowlist":["src/_data/sites.json"]}'   # missing data_file
+forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$PARTIAL" '{automerge:{maintenance:$d}}')"; }
+DECL_OUT=$(automerge_maintenance_declaration acme/x 2>&1); DECL_RC=$?
+if [ "$DECL_RC" -ne 0 ]; then printf '  + %s\n' "declaration: partial (no data_file) -> tier off"
+else printf '  x %s\n' "declaration: partial (no data_file) -> tier off"; FAIL=$((FAIL + 1)); fi
+has "declaration: partial declaration logs one loud line" "$DECL_OUT" "partial automerge.maintenance"
+EMPTYLIST='{"branch":"review","allowlist":[],"data_file":"src/_data/sites.json"}'
+forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$EMPTYLIST" '{automerge:{maintenance:$d}}')"; }
+no "declaration: empty allowlist array -> tier off"         automerge_maintenance_declaration acme/x
+BLANKENTRY='{"branch":"review","allowlist":["src/_data/sites.json",""],"data_file":"src/_data/sites.json"}'
+forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$BLANKENTRY" '{automerge:{maintenance:$d}}')"; }
+no "declaration: blank allowlist entry -> tier off"         automerge_maintenance_declaration acme/x
 
-echo "== automerge_maintenance_tier_files_ok: the maintenance data allowlist (igor#516) =="
+DOSSIER_IN_ALLOW='{"branch":"review","allowlist":["src/_data/sites.json","agent.json"],"data_file":"src/_data/sites.json"}'
+forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$DOSSIER_IN_ALLOW" '{automerge:{maintenance:$d}}')"; }
+DECL_OUT=$(automerge_maintenance_declaration acme/x 2>&1); DECL_RC=$?
+if [ "$DECL_RC" -ne 0 ]; then printf '  + %s\n' "declaration: agent.json literally in allowlist -> refused"
+else printf '  x %s\n' "declaration: agent.json literally in allowlist -> refused"; FAIL=$((FAIL + 1)); fi
+has "declaration: dossier-in-allowlist logs the refusal reason" "$DECL_OUT" "own dossier"
+
+GLOB_CATCHES_DOSSIER='{"branch":"review","allowlist":["*"],"data_file":"src/_data/sites.json"}'
+forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$GLOB_CATCHES_DOSSIER" '{automerge:{maintenance:$d}}')"; }
+no "declaration: a wildcard allowlist entry that would match agent.json -> refused" \
+  automerge_maintenance_declaration acme/x
+
+DATA_FILE_IS_DOSSIER='{"branch":"review","allowlist":["AGENTS.md"],"data_file":"AGENTS.md"}'
+forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$DATA_FILE_IS_DOSSIER" '{automerge:{maintenance:$d}}')"; }
+no "declaration: data_file itself is a dossier file -> refused" \
+  automerge_maintenance_declaration acme/x
+forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$JY_DECL" '{automerge:{require_human:true,maintenance:$d}}')"; }   # reset
+
+echo "== automerge_maintenance_tier_branch_ok: same-repo <branch>->master pin (igor#516/#537) =="
+PRJ='{"head":{"ref":"review","repo":{"full_name":"joshtronic/joshing.you"}},"base":{"ref":"master","repo":{"full_name":"joshtronic/joshing.you"}}}'
+ok "branch_ok: review->master, same repo"          automerge_maintenance_tier_branch_ok "$PRJ" review
+PRJ='{"head":{"ref":"checkpoint/foo","repo":{"full_name":"joshtronic/joshing.you"}},"base":{"ref":"master","repo":{"full_name":"joshtronic/joshing.you"}}}'
+no "branch_ok: non-declared head branch -> rejected"  automerge_maintenance_tier_branch_ok "$PRJ" review
+PRJ='{"head":{"ref":"review","repo":{"full_name":"joshtronic/joshing.you"}},"base":{"ref":"develop","repo":{"full_name":"joshtronic/joshing.you"}}}'
+no "branch_ok: non-master base -> rejected"         automerge_maintenance_tier_branch_ok "$PRJ" review
+PRJ='{"head":{"ref":"review","repo":{"full_name":"forker/joshing.you"}},"base":{"ref":"master","repo":{"full_name":"joshtronic/joshing.you"}}}'
+no "branch_ok: fork head repo -> rejected"          automerge_maintenance_tier_branch_ok "$PRJ" review
+PRJ='{"head":{"ref":"review"},"base":{"ref":"master","repo":{"full_name":"joshtronic/joshing.you"}}}'
+no "branch_ok: missing head repo -> fail closed"    automerge_maintenance_tier_branch_ok "$PRJ" review
+
+echo "== automerge_maintenance_tier_files_ok: the DECLARED maintenance data allowlist (igor#516/#537) =="
+MTALLOW='["src/_data/sites.json","src/_data/feeds.json","src/_data/rejected.json","src/images/screenshots/*"]'
 forgejo_pr_files() { printf '%s' "$MTFILES"; }
 MTFILES='[{"filename":"src/_data/sites.json"}]'
-has "files_ok: sites.json alone -> ok, echoes count" "$(automerge_maintenance_tier_files_ok acme/x 1)" "1"
+has "files_ok: sites.json alone -> ok, echoes count" "$(automerge_maintenance_tier_files_ok acme/x 1 "$MTALLOW")" "1"
 MTFILES='[{"filename":"src/_data/sites.json"},{"filename":"src/_data/feeds.json"},{"filename":"src/_data/rejected.json"},{"filename":"src/images/screenshots/a/b.png"}]'
-ok "files_ok: full allowlist set -> ok"             automerge_maintenance_tier_files_ok acme/x 1
+ok "files_ok: full allowlist set -> ok"             automerge_maintenance_tier_files_ok acme/x 1 "$MTALLOW"
 MTFILES='[{"filename":"src/_data/sites.json"},{"filename":"scripts/refresh.sh"}]'
-no "files_ok: out-of-allowlist path -> rejected"    automerge_maintenance_tier_files_ok acme/x 1
+no "files_ok: out-of-allowlist path -> rejected"    automerge_maintenance_tier_files_ok acme/x 1 "$MTALLOW"
 MTFILES='[{"filename":".forgejo/workflows/refresh.yml"}]'
-no "files_ok: workflow path -> rejected"            automerge_maintenance_tier_files_ok acme/x 1
+no "files_ok: workflow path -> rejected"            automerge_maintenance_tier_files_ok acme/x 1 "$MTALLOW"
 MTFILES='[{"filename":"src/images/screenshots/new.png","previous_filename":"scripts/old.sh"}]'
-no "files_ok: rename from out-of-allowlist -> rejected" automerge_maintenance_tier_files_ok acme/x 1
+no "files_ok: rename from out-of-allowlist -> rejected" automerge_maintenance_tier_files_ok acme/x 1 "$MTALLOW"
 MTFILES='[{"foo":"bar"}]'
-no "files_ok: filename-less element -> fail closed" automerge_maintenance_tier_files_ok acme/x 1
+no "files_ok: filename-less element -> fail closed" automerge_maintenance_tier_files_ok acme/x 1 "$MTALLOW"
 forgejo_pr_files() { return 1; }
-no "files_ok: unwalkable listing -> fail closed"    automerge_maintenance_tier_files_ok acme/x 1
+no "files_ok: unwalkable listing -> fail closed"    automerge_maintenance_tier_files_ok acme/x 1 "$MTALLOW"
+forgejo_pr_files() { printf '%s' '[{"filename":"other/data.json"}]'; }
+OTHERALLOW='["other/data.json"]'
+ok "files_ok: a DIFFERENT repo's own allowlist is honored (agnostic pin, igor#537)" \
+  automerge_maintenance_tier_files_ok acme/x 1 "$OTHERALLOW"
 
-echo "== automerge_maintenance_tier_data_ok: sites.json / rejected.json structural diff, real git (igor#516) =="
+echo "== automerge_maintenance_tier_data_ok: data_file / rejected.json structural diff, real git (igor#516/#537) =="
 DP="$(mktemp -d "$TMP/data.XXXXXX")"
 git init -q -b master "$DP"
 git -C "$DP" config user.email t@t; git -C "$DP" config user.name t
@@ -939,7 +984,7 @@ BASE_SHA="$(git -C "$DP" rev-parse HEAD)"
 sed -i 's/"title":"A"/"title":"A2"/' "$DP/src/_data/sites.json"
 git -C "$DP" commit -qam metadata
 ok "data_ok: metadata-only churn -> ok" \
-  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)"
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW"
 
 # Added listing (new addedDate line, count grows) -> rejected.
 git -C "$DP" reset -q --hard "$BASE_SHA"
@@ -952,7 +997,7 @@ cat > "$DP/src/_data/sites.json" <<'JSON'
 JSON
 git -C "$DP" commit -qam added
 no "data_ok: added listing -> rejected" \
-  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)"
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW"
 
 # Added listing that OMITS addedDate entirely -- the exact igor#516 security
 # review gap (a textual "did an addedDate line appear" check would miss this;
@@ -967,14 +1012,14 @@ cat > "$DP/src/_data/sites.json" <<'JSON'
 JSON
 git -C "$DP" commit -qam added-no-addeddate
 no "data_ok: added listing with no addedDate field -> still rejected" \
-  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)"
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW"
 
 # Removed listing -> rejected.
 git -C "$DP" reset -q --hard "$BASE_SHA"
 echo '[{"url":"https://a.example","addedDate":"2026-01-01","title":"A"}]' > "$DP/src/_data/sites.json"
 git -C "$DP" commit -qam removed
 no "data_ok: removed listing -> rejected" \
-  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)"
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW"
 
 # Same-count swap (one removed, a different one added) -> the core-identity
 # set comparison catches this even though a bare element-count check would not.
@@ -987,7 +1032,7 @@ cat > "$DP/src/_data/sites.json" <<'JSON'
 JSON
 git -C "$DP" commit -qam swap
 no "data_ok: same-count swap -> rejected" \
-  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)"
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW"
 
 # Guard rejection gained (rejected.json) -> rejected, even reformatted onto
 # one line (jq-structural, not a line count -- igor#516 security review).
@@ -995,14 +1040,26 @@ git -C "$DP" reset -q --hard "$BASE_SHA"
 printf '%s' '[{"url":"https://c.example","reason":"no-josh-visible"},{"url":"https://d.example","reason":"no-josh-visible"}]' > "$DP/src/_data/rejected.json"
 git -C "$DP" commit -qam guard
 no "data_ok: gained guard-rejection entry -> rejected" \
-  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)"
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW"
 
 # A DROP in guard rejections is not itself suspicious (no listing implicated).
 git -C "$DP" reset -q --hard "$BASE_SHA"
 echo '[]' > "$DP/src/_data/rejected.json"
 git -C "$DP" commit -qam unguard
 ok "data_ok: fewer guard rejections -> ok" \
-  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)"
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW"
+
+# igor#537: the guard-rejection belt has no field in the declared shape, so
+# it stays hardcoded to AUTOMERGE_MAINTENANCE_REJECTED_FILE and applies
+# ONLY when the repo's OWN allowlist opts that literal path in. A repo
+# whose allowlist doesn't mention it gets no belt -- a gained
+# guard-rejection entry is simply not evaluated.
+git -C "$DP" reset -q --hard "$BASE_SHA"
+printf '%s' '[{"url":"https://c.example","reason":"no-josh-visible"},{"url":"https://d.example","reason":"no-josh-visible"}]' > "$DP/src/_data/rejected.json"
+git -C "$DP" commit -qam guard-unwatched
+NOREJALLOW='["src/_data/sites.json"]'
+ok "data_ok: gained guard-rejection entry is a no-op when allowlist omits rejected.json (igor#537)" \
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$NOREJALLOW"
 
 echo "== do_automerge_tick: joshing.you maintenance-tier carve-out end to end (igor#516) =="
 # Restore the REAL automerge_reviewer_blocks -- the review-gate section above
@@ -1035,6 +1092,10 @@ _fj() {
 }
 MTFILES='[{"filename":"src/_data/sites.json"}]'
 forgejo_pr_files() { printf '%s' "$MTFILES"; }
+# joshing.you's OWN dossier declaration (igor#537) -- automerge_maintenance_tier_ok
+# now reads this via automerge_maintenance_declaration instead of matching a
+# hardcoded repo constant.
+forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$JY_DECL" '{automerge:{require_human:true,maintenance:$d}}')"; }
 
 export VALIDATED_REPOS_JSON='{"full_name":"joshtronic/joshing.you"}'
 automerge_url_status() { printf 'ok\thttps://joshing.you'; }
@@ -1083,13 +1144,16 @@ echo "{\"review\":{\"joshtronic/joshing.you#42\":{\"verdict\":\"APPROVE\",\"sha\
 no "maint-tier: non-review head branch -> falls back to human gate, no merge" do_automerge_tick
 eq "maint-tier: non-review branch recorded no deploy" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
 
-echo "== do_automerge_tick: maintenance-tier carve-out is scoped to joshing.you only (igor#516) =="
-# A stub classifier that would ALWAYS say yes proves the REPO PIN -- not the
-# classifier's own logic -- is what keeps every other require_human repo
-# gated. Placed last: it permanently overrides automerge_maintenance_tier_ok.
+echo "== do_automerge_tick: maintenance tier requires the repo's OWN declaration (igor#537) =="
+# The repo pin is no longer a hardcoded constant -- it's "does this repo's
+# OWN agent.json declare a complete automerge.maintenance." Uses the REAL
+# automerge_maintenance_tier_ok (not stubbed): a require_human repo that
+# never declared the tier -- even with a metadata-only diff that would
+# otherwise qualify -- still needs human approval.
 export VALIDATED_REPOS_JSON='{"full_name":"acme/flagged"}'
 automerge_url_status() { printf 'ok\thttps://x'; }
-automerge_require_human() { return 0; }   # acme/flagged is ALSO require_human-pinned
+automerge_require_human() { return 0; }   # acme/flagged is require_human-pinned
+forgejo_repo_get_file() { printf '%s' '{"automerge":{"require_human":true}}'; }   # NO .maintenance key
 forgejo_list_open_bot_prs() { echo '[{"number":9}]'; }
 forgejo_commit_status() { echo success; }
 automerge_mergeable() { return 0; }
@@ -1097,10 +1161,21 @@ automerge_behind_count() { echo 0; }
 automerge_do_merge() { echo "sha9"; }
 _fj() { echo '{"head":{"sha":"head9"},"base":{"sha":"base9","ref":"master"}}'; }
 automerge_approved_by() { return 1; }   # no human approval
-automerge_maintenance_tier_ok() { printf 'files=1, +0 sites, -0 sites'; return 0; }
 echo '{"review":{"acme/flagged#9":{"verdict":"APPROVE","sha":"head9"}}}' > "$STATE"
-no "maint-scope: non-joshing.you require_human repo still needs human approval" do_automerge_tick
+no "maint-scope: require_human repo with no automerge.maintenance declared still needs human approval" do_automerge_tick
 eq "maint-scope: no deploy recorded" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
+
+# The same repo, now WITH a complete declaration whose allowlist doesn't
+# cover this PR's changed file (foo.txt isn't in the allowlist) -- proves
+# a declaring repo still gets refused on a diff outside its OWN allowlist,
+# not just an undeclared one.
+OWNALLOW='{"branch":"review","allowlist":["src/_data/sites.json"],"data_file":"src/_data/sites.json"}'
+forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$OWNALLOW" '{automerge:{require_human:true,maintenance:$d}}')"; }
+forgejo_pr_files() { printf '%s' '[{"filename":"foo.txt"}]'; }
+_fj() { echo '{"head":{"ref":"review","sha":"head9","repo":{"full_name":"acme/flagged"}},"base":{"ref":"master","sha":"base9","repo":{"full_name":"acme/flagged"}}}'; }
+echo '{"review":{"acme/flagged#9":{"verdict":"APPROVE","sha":"head9"}}}' > "$STATE"
+no "maint-scope: declared repo, out-of-allowlist file -> still needs human approval" do_automerge_tick
+eq "maint-scope: out-of-allowlist diff recorded no deploy" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
 
 if [ "$FAIL" -eq 0 ]; then echo "test-automerge: all checks passed"; exit 0; fi
 echo "test-automerge: $FAIL check(s) FAILED"
