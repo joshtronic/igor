@@ -35,7 +35,10 @@
 # kind-declaring repo stamps a pending entry under `.landed` in
 # discretionary-state.json (do_automerge_tick, via landed_record); every
 # tick (do_landed_tick, called near the top of the cascade, non-model) then
-# re-checks each pending entry's host-state assertion. Landed -> clear +
+# re-checks each pending entry's host-state assertion. The kind is resolved
+# ONCE, at record time, and persisted on the entry -- the tick loop never
+# re-reads the dossier, so a Forgejo blip can't turn a pending watch into a
+# dropped one. Landed -> clear +
 # queue a ship-report note (drained by lib/ship-report.sh's
 # shipreport_landed_read/shipreport_landed_clear, behind its usual
 # creds/hour/sent-today gates). Not landed after LANDED_GRACE_TICKS ticks ->
@@ -71,24 +74,33 @@ LANDED_GRACE_TICKS=10   # ~10 ticks of grace before a stuck watch alerts
 _landed_state_file() { echo "${AGENT_STATE_DIR:-$HOME/.local/state/agent}/discretionary-state.json"; }
 
 # landed_kind <repo> -- echoes the repo's declared `landed-kind` dossier
-# value ("self-pull" or "context-cache") and returns 0 when it's one of
-# LANDED_KINDS. Returns 1 (echoing nothing) when: the repo declares no
-# landed-kind at all (quiet -- same as any other repo this module doesn't
-# watch), or the dossier fetch itself failed this tick (also quiet -- a
-# missed watch is retried whenever the caller next asks, and this checker is
-# a post-hoc confirmation, not a gate, so a network blip here is not worth
-# failing loud over). A DECLARED value outside LANDED_KINDS is different --
-# that is loud: one log line, never a silent default (the operator's
-# standing rule -- igor#538). Needs dossier_get_repo (lib/dossier.sh)
-# sourced -- bin/tick.sh sources dossier.sh above landed.sh;
-# bin/test-landed.sh mirrors that.
+# value ("self-pull" or "context-cache"). Three-way return, because "this
+# repo declares no kind" and "Forgejo wouldn't tell us this tick" are
+# different answers and a caller holding a pending watch must not conflate
+# them:
+#   0 -- a recognized kind, echoed on stdout.
+#   1 -- no watch. The repo declares no landed-kind at all (quiet -- same as
+#        any other repo this module doesn't watch), or declares a value
+#        outside LANDED_KINDS (loud -- one log line, never a silent default,
+#        the operator's standing rule), or lib/dossier.sh was never sourced
+#        (a code defect, not a transient one: retrying can't fix it).
+#   2 -- unknown: the dossier read itself failed transport-wise this tick.
+#        NOT "absent" -- treating it as absent would drop a pending watch on
+#        a Forgejo blip, handing the module whose whole purpose is catching
+#        silent failures a silent failure of its own (igor#538 review).
+# Reads through dossier_get_repo_status rather than dossier_get_repo for
+# exactly that distinction: dossier_get_repo collapses a blip and a real 404
+# into the same empty string. Needs lib/dossier.sh sourced -- bin/tick.sh
+# sources it above landed.sh; bin/test-landed.sh mirrors that.
 landed_kind() {
-  local repo="$1" kind
-  if ! declare -F dossier_get_repo >/dev/null; then
+  local repo="$1" out status kind
+  if ! declare -F dossier_get_repo_status >/dev/null; then
     log "landed: BUG -- lib/dossier.sh not sourced; landed-kind unreadable"
     return 1
   fi
-  kind=$(dossier_get_repo "$repo" landed-kind 2>/dev/null) || return 1
+  out=$(dossier_get_repo_status "$repo" landed-kind 2>/dev/null) || return 2
+  status=${out%%$'\t'*}; kind=${out#*$'\t'}
+  [ "$status" = "ok" ] || return 2
   [ -n "$kind" ] || return 1
   case " $LANDED_KINDS " in
     *" $kind "*) printf '%s' "$kind"; return 0 ;;
@@ -97,20 +109,50 @@ landed_kind() {
   return 1
 }
 
-# landed_applies <repo> -- exit 0 if landed_kind recognizes this repo.
-landed_applies() { landed_kind "$1" >/dev/null 2>&1; }
+# landed_applies <repo> -- exit 0 if a merge on this repo should stamp a
+# landed-watch: a recognized kind, or a kind that couldn't be READ this tick.
+# The unknown case stamps a watch carrying an empty kind, which do_landed_tick
+# resolves on a later tick -- so a Forgejo blip at merge time defers the
+# decision instead of losing the watch outright. A repo that genuinely
+# declares nothing still gets no watch.
+landed_applies() {
+  local rc=0
+  landed_kind "$1" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 1 ]
+}
 
 # landed_record <repo> <pr> <sha> -- stamp a pending landed-watch, keyed by
-# repo full_name. A second merge on the same repo before the first watch
+# repo full_name, with the repo's landed-kind resolved HERE and persisted on
+# the entry. do_landed_tick reads that kind back out of state instead of
+# re-querying the dossier every tick: the watch then survives a Forgejo blip
+# (which a per-tick re-query would read as "no longer a watched repo"), and
+# the tick loop sheds a network call. An unreadable dossier stamps an empty
+# kind for do_landed_tick to resolve later.
+#
+# A second merge on the same repo before the first watch
 # clears just overwrites it with the newer sha and resets attempts to 0 --
 # the newer merge implies the older one (a self-pull/cache-swap that reaches
 # the newer sha necessarily passed through, or superseded, the older one).
 landed_record() {
-  local repo="$1" pr="$2" sha="$3" sf tmp
+  local repo="$1" pr="$2" sha="$3" kind sf tmp
+  kind=$(landed_kind "$repo" 2>/dev/null) || kind=""
   sf=$(_landed_state_file); [ -f "$sf" ] || echo '{}' > "$sf"
   tmp=$(mktemp)
-  if jq --arg r "$repo" --arg p "$pr" --arg s "$sha" \
-    '.landed[$r] = {pr:$p, sha:$s, attempts:0}' "$sf" > "$tmp" 2>/dev/null; then
+  if jq --arg r "$repo" --arg p "$pr" --arg s "$sha" --arg k "$kind" \
+    '.landed[$r] = {pr:$p, sha:$s, kind:$k, attempts:0}' "$sf" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$sf"
+  else
+    rm -f "$tmp"
+  fi
+}
+
+# landed_kind_set <repo> <kind> -- persist a lazily-resolved kind onto an
+# existing watch (see do_landed_tick's empty-kind path).
+landed_kind_set() {
+  local repo="$1" kind="$2" sf tmp
+  sf=$(_landed_state_file); [ -f "$sf" ] || return 0
+  tmp=$(mktemp)
+  if jq --arg r "$repo" --arg k "$kind" '.landed[$r].kind = $k' "$sf" > "$tmp" 2>/dev/null; then
     mv "$tmp" "$sf"
   else
     rm -f "$tmp"
@@ -256,17 +298,30 @@ Eyes on it."
 # clear. Never ends the tick (always returns 0) -- call as
 # `do_landed_tick || true`.
 do_landed_tick() {
-  local repo entry kind pr sha attempts observed detail
+  local repo entry kind rc pr sha attempts observed detail
   while IFS= read -r repo; do
     [ -n "$repo" ] || continue
-    if ! kind=$(landed_kind "$repo"); then
-      # A pending entry for a repo this module no longer recognizes (its
-      # dossier's landed-kind changed, was removed, or now reads as
-      # unrecognized) -- nothing to check; drop it.
-      landed_clear "$repo"
-      continue
-    fi
     entry=$(landed_pending_entry "$repo")
+    kind=$(jq -r '.kind // ""' <<<"$entry" 2>/dev/null)
+    if [ -z "$kind" ]; then
+      # No kind on the entry: it predates landed_record persisting one, or the
+      # dossier was unreadable at merge time. Resolve it now.
+      rc=0; kind=$(landed_kind "$repo") || rc=$?
+      case "$rc" in
+        0) landed_kind_set "$repo" "$kind" ;;
+        2) # Unreadable this tick -- unknown, not absent. Keep the watch and
+           # fall through with no kind, so the assertion is skipped but the
+           # attempt counter still runs: a repo whose dossier NEVER comes back
+           # expires out of the grace window instead of pending forever.
+           log "landed: ${repo} landed-kind unreadable this tick -- watch kept pending"
+           kind="" ;;
+        *) # This module no longer recognizes the repo (its dossier's
+           # landed-kind changed, was removed, or reads as unrecognized) --
+           # nothing to check; drop it.
+           landed_clear "$repo"
+           continue ;;
+      esac
+    fi
     pr=$(jq -r '.pr // ""' <<<"$entry" 2>/dev/null)
     sha=$(jq -r '.sha // ""' <<<"$entry" 2>/dev/null)
     attempts=$(jq -r '.attempts // 0' <<<"$entry" 2>/dev/null)
@@ -274,7 +329,7 @@ do_landed_tick() {
     [ -n "$attempts" ] || attempts=0
     # Reset per iteration rather than `unset`ing on the landed path -- `unset`
     # would drop the `local` binding and expose any global of the same name.
-    detail=""
+    detail=""; observed=""
 
     case "$kind" in
       self-pull)

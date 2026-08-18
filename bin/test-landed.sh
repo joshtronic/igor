@@ -6,7 +6,9 @@
 # a dispatcher over the two IMPLEMENTED kinds, self-pull and context-cache.
 #   landed_kind/landed_applies  -- dispatches on the declared landed-kind
 #                                   dossier value; undeclared is quiet,
-#                                   unrecognized is loud, both are "no watch".
+#                                   unrecognized is loud, both are "no watch",
+#                                   and an UNREADABLE dossier is neither (rc2)
+#                                   -- the watch is kept, never dropped.
 #   landed_record/landed_clear/landed_pending_* -- the .landed state round-trip.
 #   landed_assert_self_pull     -- ancestor check against a REAL fixture repo.
 #   landed_assert_context_cache -- exact-match check against a fixture cache dir.
@@ -21,7 +23,8 @@
 # no network, no real Forgejo state. landed_kind's dossier read goes through
 # lib/dossier.sh for real (that wiring is the point of this genericization),
 # with forgejo_repo_get_file the one stubbed boundary underneath it -- see
-# the fixture repos below. BOT_USER and FORGEJO_REVIEWER are exported
+# the fixture repos below, whose one stubbed boundary is
+# forgejo_repo_get_file_status. BOT_USER and FORGEJO_REVIEWER are exported
 # explicitly (igor#512 review of the prior attempt, PR #525:
 # do_automerge_tick reaches forgejo_list_open_bot_prs "$repo" "$BOT_USER" --
 # an unexported BOT_USER is an unbound-variable crash under a clean shell's
@@ -63,17 +66,24 @@ SELF_REPO="$AUTOMERGE_SELF_REPO"    # joshtronic/igor -- declares landed-kind: s
 CACHE_REPO="joshtronic/distillery"  # declares landed-kind: context-cache
 PLAIN_REPO="acme/plain"             # declares no landed-kind at all
 WEIRD_REPO="acme/weird"             # declares an unrecognized landed-kind value
+BLIP_REPO="acme/blip"               # dossier unreadable -- Forgejo blip, NOT "declares nothing"
+# Sorts after SELF_REPO so the ordering section below sees the landing first.
+ZZ_CACHE_REPO="joshtronic/zz-distillery"
 
-forgejo_repo_get_file() {
+forgejo_repo_get_file_status() {
   local repo="$1" path="$2"
-  [ "$path" = "AGENTS.md" ] && return 1   # no fixture repo has adopted the dossier
+  [ "$repo" = "$BLIP_REPO" ] && { printf 'error\t'; return 0; }   # transport failure, both files
+  [ "$path" = "AGENTS.md" ] && { printf 'missing\t'; return 0; }  # no fixture repo has adopted the dossier
   case "$repo" in
-    "$SELF_REPO")  printf '%s' '{"landed":{"kind":"self-pull"}}' ;;
-    "$CACHE_REPO") printf '%s' '{"landed":{"kind":"context-cache"}}' ;;
-    "$WEIRD_REPO") printf '%s' '{"landed":{"kind":"quantum-tunnel"}}' ;;
-    *)             return 1 ;;
+    "$SELF_REPO")   printf 'found\t%s' '{"landed":{"kind":"self-pull"}}' ;;
+    "$CACHE_REPO"|"$ZZ_CACHE_REPO") printf 'found\t%s' '{"landed":{"kind":"context-cache"}}' ;;
+    "$WEIRD_REPO")  printf 'found\t%s' '{"landed":{"kind":"quantum-tunnel"}}' ;;
+    *)              printf 'missing\t' ;;
   esac
 }
+
+# rc <fn...> -- echoes the exit status, for the three-way landed_kind contract.
+rc() { "$@" >/dev/null 2>&1; echo $?; }
 
 echo "== landed_kind / landed_applies: dispatches over the declared landed-kind dossier value =="
 eq "kind: self-pull repo"                 "self-pull"     "$(landed_kind "$SELF_REPO")"
@@ -82,6 +92,14 @@ eq "kind: undeclared repo echoes nothing" ""               "$(landed_kind "$PLAI
 ok "applies: self-pull repo"              landed_applies "$SELF_REPO"
 ok "applies: context-cache repo"          landed_applies "$CACHE_REPO"
 no "applies: undeclared repo"             landed_applies "$PLAIN_REPO"
+
+echo "== landed_kind: an unreadable dossier is rc2 (unknown), NOT rc1 (absent) =="
+eq "kind: undeclared repo is rc1 -- a real answer" "1" "$(rc landed_kind "$PLAIN_REPO")"
+eq "kind: unrecognized value is rc1 -- also a real answer" "1" "$(rc landed_kind "$WEIRD_REPO")"
+eq "kind: unreadable dossier is rc2"               "2" "$(rc landed_kind "$BLIP_REPO")"
+eq "kind: unreadable dossier echoes nothing"       ""  "$(landed_kind "$BLIP_REPO" 2>/dev/null)"
+ok "applies: unreadable dossier still stamps a watch (resolved later, never dropped)" \
+  landed_applies "$BLIP_REPO"
 
 echo "== landed_kind: unrecognized value is fail-fast (logs loudly), undeclared is quiet =="
 no "kind: unrecognized value fails"          landed_kind "$WEIRD_REPO"
@@ -104,6 +122,12 @@ eq "pending_repos lists the stamped repo" "$SELF_REPO" "$(landed_pending_repos)"
 eq "pending_entry: pr"       "521"   "$(jq -r '.pr' <<<"$(landed_pending_entry "$SELF_REPO")")"
 eq "pending_entry: sha"      "sha521" "$(jq -r '.sha' <<<"$(landed_pending_entry "$SELF_REPO")")"
 eq "pending_entry: attempts starts at 0" "0" "$(jq -r '.attempts' <<<"$(landed_pending_entry "$SELF_REPO")")"
+eq "pending_entry: kind resolved and persisted AT RECORD TIME (no per-tick re-query)" \
+  "self-pull" "$(jq -r '.kind' <<<"$(landed_pending_entry "$SELF_REPO")")"
+landed_record "$BLIP_REPO" 9 sha9
+eq "pending_entry: an unreadable dossier stamps an EMPTY kind, resolved later" \
+  "" "$(jq -r '.kind' <<<"$(landed_pending_entry "$BLIP_REPO")")"
+landed_clear "$BLIP_REPO"
 landed_attempts_set "$SELF_REPO" 3
 eq "attempts_set persists"   "3"     "$(jq -r '.attempts' <<<"$(landed_pending_entry "$SELF_REPO")")"
 landed_record "$SELF_REPO" 522 sha522
@@ -166,19 +190,8 @@ eq "second miss -> attempts=2"              "2" "$(jq -r '.attempts' <<<"$(lande
 
 echo "== do_landed_tick: a landed repo does not mark a later not-landed one =="
 # The confirmed-landing detail must not carry across loop iterations. Order
-# matters: landed_pending_repos yields jq `keys` (sorted), so the second repo
-# is named to sort AFTER the self-pull repo's, putting the landing first.
-ZZ_CACHE_REPO="joshtronic/zz-distillery"
-_saved_forgejo_repo_get_file=$(declare -f forgejo_repo_get_file)
-forgejo_repo_get_file() {
-  local repo="$1" path="$2"
-  [ "$path" = "AGENTS.md" ] && return 1
-  case "$repo" in
-    "$SELF_REPO")     printf '%s' '{"landed":{"kind":"self-pull"}}' ;;
-    "$ZZ_CACHE_REPO") printf '%s' '{"landed":{"kind":"context-cache"}}' ;;
-    *)                return 1 ;;
-  esac
-}
+# matters: landed_pending_repos yields jq `keys` (sorted), so ZZ_CACHE_REPO is
+# named to sort AFTER the self-pull repo's, putting the landing first.
 export CONTEXT_CACHE_DIR="$TMP/unseeded-cache"
 echo '{}' > "$STATE"
 landed_record "$SELF_REPO"      521 "$SHA2"
@@ -188,7 +201,6 @@ eq "the landed repo cleared"        "{}" "$(landed_pending_entry "$SELF_REPO")"
 eq "the other repo stays pending"   "1"  "$(jq -r '.attempts' <<<"$(landed_pending_entry "$ZZ_CACHE_REPO")")"
 eq "exactly one note queued"        "1"  "$(jq -r '.landed_notes | length' "$STATE")"
 eq "the note is the repo that DID land" "$SELF_REPO" "$(jq -r '.landed_notes[0].repo' "$STATE")"
-eval "$_saved_forgejo_repo_get_file"
 unset CONTEXT_CACHE_DIR
 
 echo "== do_landed_tick: grace exceeded -> alerts and clears =="
@@ -211,6 +223,33 @@ echo '{}' > "$STATE"
 jq -n --arg r "acme/orphan" '{landed: {($r): {pr:"1", sha:"x", attempts:0}}}' > "$STATE"
 do_landed_tick
 eq "orphaned entry dropped, no crash" "" "$(landed_pending_repos)"
+
+echo "== do_landed_tick: an UNREADABLE dossier keeps the watch pending (it is not 'undeclared') =="
+# The regression the #542 review caught: a Forgejo blip must not read as "no
+# longer a watched repo" and abandon the watch silently. Entry carries no
+# kind, so the tick has to go ask -- and gets rc2, not rc1.
+echo '{}' > "$STATE"
+jq -n --arg r "$BLIP_REPO" '{landed: {($r): {pr:"7", sha:"blipsha", kind:"", attempts:0}}}' > "$STATE"
+BLIP_LOG=$(do_landed_tick 2>&1 1>/dev/null)
+eq "entry SURVIVES the failed read"     "$BLIP_REPO" "$(landed_pending_repos)"
+eq "attempt counted, so it still expires out of the grace window eventually" \
+  "1" "$(jq -r '.attempts' <<<"$(landed_pending_entry "$BLIP_REPO")")"
+eq "no bogus kind persisted"            "" "$(jq -r '.kind' <<<"$(landed_pending_entry "$BLIP_REPO")")"
+has "the skipped check is logged, not silent" "$BLIP_LOG" "landed-kind unreadable this tick"
+
+echo "== do_landed_tick: an entry with no kind (stamped before this was persisted) resolves it once =="
+export AGENT_HOME="$FIXTURE"
+echo '{}' > "$STATE"
+jq -n --arg r "$SELF_REPO" --arg s "$SHA2" '{landed: {($r): {pr:"9", sha:$s, attempts:0}}}' > "$STATE"
+do_landed_tick
+eq "the kind-less entry was resolved and confirmed" "{}" "$(landed_pending_entry "$SELF_REPO")"
+eq "its landing queued a note" "$SELF_REPO" "$(jq -r '.landed_notes[0].repo' "$STATE")"
+echo '{}' > "$STATE"
+jq -n --arg r "$SELF_REPO" '{landed: {($r): {pr:"9", sha:"deadbeef", attempts:0}}}' > "$STATE"
+do_landed_tick
+eq "a still-pending kind-less entry has its kind persisted for later ticks" \
+  "self-pull" "$(jq -r '.kind' <<<"$(landed_pending_entry "$SELF_REPO")")"
+unset AGENT_HOME
 
 echo "== do_automerge_tick wiring: a url-less merge on a kind-declaring repo stamps .landed, not .deploy =="
 export FORGEJO_REVIEWER=josh BOT_USER=igor
@@ -239,6 +278,15 @@ ok "do_automerge_tick merges the url-less undeclared repo" do_automerge_tick
 eq "no .deploy stamped"   "" "$(jq -r '.deploy.repo // ""' "$STATE")"
 eq "no .landed entry created (undeclared -- same as before this repo ever opted in)" \
   "" "$(jq -r '.landed // {} | keys | join(",")' "$STATE")"
+
+echo "== do_automerge_tick wiring: a url-less merge whose dossier read FAILS still stamps a watch =="
+# Merge-time half of the same regression: an unreadable dossier must not merge
+# with no watch at all. Stamp it kind-less; do_landed_tick resolves it.
+echo '{}' > "$STATE"
+export VALIDATED_REPOS_JSON="{\"full_name\":\"${BLIP_REPO}\"}"
+ok "do_automerge_tick merges the url-less repo with the unreadable dossier" do_automerge_tick
+eq ".landed stamped despite the failed read" "mergedsha521" "$(jq -r --arg r "$BLIP_REPO" '.landed[$r].sha // ""' "$STATE")"
+eq "stamped kind is empty, for a later tick to resolve" "" "$(jq -r --arg r "$BLIP_REPO" '.landed[$r].kind' "$STATE")"
 
 echo "== do_automerge_tick wiring: a url-BEARING repo's merge is untouched (still .deploy only) =="
 echo '{}' > "$STATE"
