@@ -1,22 +1,28 @@
 #!/usr/bin/env bash
 # test-landed.sh -- unit tests for lib/landed.sh: the host-state
-# landed-verification companion to the deploy barrier for the two url-less
-# repos (igor#512) -- igor itself (self-pull HEAD) and the distillery
-# (context-cache generation marker).
-#   landed_kind/landed_applies  -- the two hardcoded repos, nothing else.
+# landed-verification companion to the deploy barrier for url-less
+# auto-merge repos (igor#512, genericized igor#538). The repo -> kind
+# binding lives in each repo's own dossier (`landed-kind`); this module is
+# a dispatcher over the two IMPLEMENTED kinds, self-pull and context-cache.
+#   landed_kind/landed_applies  -- dispatches on the declared landed-kind
+#                                   dossier value; undeclared is quiet,
+#                                   unrecognized is loud, both are "no watch".
 #   landed_record/landed_clear/landed_pending_* -- the .landed state round-trip.
-#   landed_assert_igor          -- ancestor check against a REAL fixture repo.
-#   landed_assert_distillery    -- exact-match check against a fixture cache dir.
+#   landed_assert_self_pull     -- ancestor check against a REAL fixture repo.
+#   landed_assert_context_cache -- exact-match check against a fixture cache dir.
 #   do_landed_tick              -- landed -> note+clear; not-landed -> attempts++;
 #                                   grace exceeded -> alert+clear.
-#   do_automerge_tick wiring    -- a url-less merge on igor/distillery stamps
-#                                   .landed (not .deploy); a url-bearing repo's
-#                                   merge is untouched (still .deploy only).
+#   do_automerge_tick wiring    -- a url-less merge on a kind-declaring repo
+#                                   stamps .landed (not .deploy); a url-bearing
+#                                   repo's merge is untouched (still .deploy only).
 #
-# Every boundary this suite reaches beyond lib/landed.sh itself (_fj,
-# forgejo_*, email_send, do_automerge_tick's approval/CI/mergeable checks) is
-# STUBBED -- no network, no real Forgejo state. BOT_USER and FORGEJO_REVIEWER
-# are exported explicitly (igor#512 review of the prior attempt, PR #525:
+# Every boundary this suite reaches beyond lib/landed.sh itself (forgejo_*,
+# email_send, do_automerge_tick's approval/CI/mergeable checks) is STUBBED --
+# no network, no real Forgejo state. landed_kind's dossier read goes through
+# lib/dossier.sh for real (that wiring is the point of this genericization),
+# with forgejo_repo_get_file the one stubbed boundary underneath it -- see
+# the fixture repos below. BOT_USER and FORGEJO_REVIEWER are exported
+# explicitly (igor#512 review of the prior attempt, PR #525:
 # do_automerge_tick reaches forgejo_list_open_bot_prs "$repo" "$BOT_USER" --
 # an unexported BOT_USER is an unbound-variable crash under a clean shell's
 # `set -u`, even though it silently inherits a value when run from a shell
@@ -51,33 +57,66 @@ no()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (expec
 eq()  { if [ "$2" = "$3" ]; then pass "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
 has() { case "$2" in *"$3"*) pass "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
 
-echo "== landed_kind / landed_applies: the two hardcoded repos, nothing else =="
-eq "kind: igor self-repo"        "igor"       "$(landed_kind "$AUTOMERGE_SELF_REPO")"
-eq "kind: distillery"            "distillery" "$(landed_kind "$LANDED_DISTILLERY_REPO")"
-eq "kind: an unrelated repo"     ""           "$(landed_kind acme/site)"
-ok "applies: igor"               landed_applies "$AUTOMERGE_SELF_REPO"
-ok "applies: distillery"         landed_applies "$LANDED_DISTILLERY_REPO"
-no "applies: an unrelated repo"  landed_applies acme/site
+# Fixture repos, none of which have adopted the AGENTS.md dossier (legacy
+# agent.json `.landed.kind` path only) -- reused across every section below.
+SELF_REPO="$AUTOMERGE_SELF_REPO"    # joshtronic/igor -- declares landed-kind: self-pull, for real
+CACHE_REPO="joshtronic/distillery"  # declares landed-kind: context-cache
+PLAIN_REPO="acme/plain"             # declares no landed-kind at all
+WEIRD_REPO="acme/weird"             # declares an unrecognized landed-kind value
+
+forgejo_repo_get_file() {
+  local repo="$1" path="$2"
+  [ "$path" = "AGENTS.md" ] && return 1   # no fixture repo has adopted the dossier
+  case "$repo" in
+    "$SELF_REPO")  printf '%s' '{"landed":{"kind":"self-pull"}}' ;;
+    "$CACHE_REPO") printf '%s' '{"landed":{"kind":"context-cache"}}' ;;
+    "$WEIRD_REPO") printf '%s' '{"landed":{"kind":"quantum-tunnel"}}' ;;
+    *)             return 1 ;;
+  esac
+}
+
+echo "== landed_kind / landed_applies: dispatches over the declared landed-kind dossier value =="
+eq "kind: self-pull repo"                 "self-pull"     "$(landed_kind "$SELF_REPO")"
+eq "kind: context-cache repo"             "context-cache" "$(landed_kind "$CACHE_REPO")"
+eq "kind: undeclared repo echoes nothing" ""               "$(landed_kind "$PLAIN_REPO")"
+ok "applies: self-pull repo"              landed_applies "$SELF_REPO"
+ok "applies: context-cache repo"          landed_applies "$CACHE_REPO"
+no "applies: undeclared repo"             landed_applies "$PLAIN_REPO"
+
+echo "== landed_kind: unrecognized value is fail-fast (logs loudly), undeclared is quiet =="
+no "kind: unrecognized value fails"          landed_kind "$WEIRD_REPO"
+eq "kind: unrecognized value echoes nothing" "" "$(landed_kind "$WEIRD_REPO" 2>/dev/null)"
+LOUD=$(landed_kind "$WEIRD_REPO" 2>&1 1>/dev/null)
+has "kind: unrecognized value logs loudly, names the repo and the bad value" \
+  "$LOUD" "$WEIRD_REPO declares unrecognized landed-kind 'quantum-tunnel'"
+QUIET=$(landed_kind "$PLAIN_REPO" 2>&1 1>/dev/null)
+eq "kind: undeclared repo logs nothing -- quiet, same as any other unwatched repo" "" "$QUIET"
+
+echo "== landed_kind: a missing lib/dossier.sh dependency fails CLOSED and logs =="
+BARE=$(bash -c '. "$1/../lib/landed.sh"; landed_kind acme/site' _ "$HERE" 2>&1)
+has "kind: missing lib/dossier.sh logs instead of failing silently" "$BARE" "lib/dossier.sh not sourced"
+BARE_RC=$(bash -c '. "$1/../lib/landed.sh"; landed_kind acme/site >/dev/null 2>&1; echo $?' _ "$HERE")
+eq "kind: missing lib/dossier.sh fails CLOSED (rc1, no watch)" "1" "$BARE_RC"
 
 echo "== landed_record / landed_clear / landed_pending_* round-trip =="
-landed_record "$AUTOMERGE_SELF_REPO" 521 sha521
-eq "pending_repos lists the stamped repo" "$AUTOMERGE_SELF_REPO" "$(landed_pending_repos)"
-eq "pending_entry: pr"       "521"   "$(jq -r '.pr' <<<"$(landed_pending_entry "$AUTOMERGE_SELF_REPO")")"
-eq "pending_entry: sha"      "sha521" "$(jq -r '.sha' <<<"$(landed_pending_entry "$AUTOMERGE_SELF_REPO")")"
-eq "pending_entry: attempts starts at 0" "0" "$(jq -r '.attempts' <<<"$(landed_pending_entry "$AUTOMERGE_SELF_REPO")")"
-landed_attempts_set "$AUTOMERGE_SELF_REPO" 3
-eq "attempts_set persists"   "3"     "$(jq -r '.attempts' <<<"$(landed_pending_entry "$AUTOMERGE_SELF_REPO")")"
-landed_record "$AUTOMERGE_SELF_REPO" 522 sha522
-eq "re-record on the same repo resets attempts" "0" "$(jq -r '.attempts' <<<"$(landed_pending_entry "$AUTOMERGE_SELF_REPO")")"
-landed_clear "$AUTOMERGE_SELF_REPO"
-eq "clear drops the entry" "{}" "$(landed_pending_entry "$AUTOMERGE_SELF_REPO")"
+landed_record "$SELF_REPO" 521 sha521
+eq "pending_repos lists the stamped repo" "$SELF_REPO" "$(landed_pending_repos)"
+eq "pending_entry: pr"       "521"   "$(jq -r '.pr' <<<"$(landed_pending_entry "$SELF_REPO")")"
+eq "pending_entry: sha"      "sha521" "$(jq -r '.sha' <<<"$(landed_pending_entry "$SELF_REPO")")"
+eq "pending_entry: attempts starts at 0" "0" "$(jq -r '.attempts' <<<"$(landed_pending_entry "$SELF_REPO")")"
+landed_attempts_set "$SELF_REPO" 3
+eq "attempts_set persists"   "3"     "$(jq -r '.attempts' <<<"$(landed_pending_entry "$SELF_REPO")")"
+landed_record "$SELF_REPO" 522 sha522
+eq "re-record on the same repo resets attempts" "0" "$(jq -r '.attempts' <<<"$(landed_pending_entry "$SELF_REPO")")"
+landed_clear "$SELF_REPO"
+eq "clear drops the entry" "{}" "$(landed_pending_entry "$SELF_REPO")"
 eq "clear leaves no pending repos" "" "$(landed_pending_repos)"
 echo '{"unrelated":1}' > "$STATE"
-landed_clear "$AUTOMERGE_SELF_REPO"
+landed_clear "$SELF_REPO"
 eq "clear on a state with no .landed writes no null key" "false" "$(jq -r 'has("landed")' "$STATE")"
 eq "clear leaves the rest of the state alone"            "1"     "$(jq -r '.unrelated' "$STATE")"
 
-echo "== landed_assert_igor: ancestor check against a REAL fixture git repo =="
+echo "== landed_assert_self_pull: ancestor check against a REAL fixture git repo =="
 FIXTURE="$TMP/igor-fixture"
 git init -q -b master "$FIXTURE"
 git -C "$FIXTURE" config user.email t@t
@@ -86,60 +125,70 @@ git -C "$FIXTURE" config user.name  t
 SHA1=$(git -C "$FIXTURE" rev-parse HEAD)
 : > "$FIXTURE/b.txt"; git -C "$FIXTURE" add -A; git -C "$FIXTURE" commit -q -m two
 SHA2=$(git -C "$FIXTURE" rev-parse HEAD)
-ok "assert_igor: HEAD equals the merged sha"        landed_assert_igor "$SHA2" "$FIXTURE"
-ok "assert_igor: HEAD DESCENDS from an earlier merged sha" landed_assert_igor "$SHA1" "$FIXTURE"
-no "assert_igor: a sha never reached by HEAD fails" landed_assert_igor "deadbeef0000000000000000000000000000dead" "$FIXTURE"
-eq "igor_observed: reports the fixture's real HEAD" "$SHA2" "$(landed_igor_observed "$FIXTURE")"
-no "assert_igor: no repo at the path fails"         landed_assert_igor "$SHA1" "$TMP/no-such-repo"
+ok "assert_self_pull: HEAD equals the merged sha"        landed_assert_self_pull "$SHA2" "$FIXTURE"
+ok "assert_self_pull: HEAD DESCENDS from an earlier merged sha" landed_assert_self_pull "$SHA1" "$FIXTURE"
+no "assert_self_pull: a sha never reached by HEAD fails" landed_assert_self_pull "deadbeef0000000000000000000000000000dead" "$FIXTURE"
+eq "self_pull_observed: reports the fixture's real HEAD" "$SHA2" "$(landed_self_pull_observed "$FIXTURE")"
+no "assert_self_pull: no repo at the path fails"         landed_assert_self_pull "$SHA1" "$TMP/no-such-repo"
 
-echo "== landed_assert_distillery: exact-match against a fixture cache dir =="
+echo "== landed_assert_context_cache: exact-match against a fixture cache dir =="
 CACHE="$TMP/context-cache"
 mkdir -p "$CACHE/current"
 printf 'distsha123' > "$CACHE/current/HEAD"
-eq "distillery_observed: reads the generation marker" "distsha123" "$(landed_distillery_observed "$CACHE")"
-ok "assert_distillery: marker equals the merged sha"      landed_assert_distillery "distsha123" "$CACHE"
-no "assert_distillery: marker is a DIFFERENT sha (stale generation)" landed_assert_distillery "distsha999" "$CACHE"
-no "assert_distillery: cache never seeded (no HEAD file)" landed_assert_distillery "distsha123" "$TMP/unseeded-cache"
+eq "context_cache_observed: reads the generation marker" "distsha123" "$(landed_context_cache_observed "$CACHE")"
+ok "assert_context_cache: marker equals the merged sha"      landed_assert_context_cache "distsha123" "$CACHE"
+no "assert_context_cache: marker is a DIFFERENT sha (stale generation)" landed_assert_context_cache "distsha999" "$CACHE"
+no "assert_context_cache: cache never seeded (no HEAD file)" landed_assert_context_cache "distsha123" "$TMP/unseeded-cache"
 
 echo "== do_landed_tick: landed -> queues a ship-report note and clears =="
 echo '{}' > "$STATE"
-landed_record "$AUTOMERGE_SELF_REPO" 521 "$SHA2"
+landed_record "$SELF_REPO" 521 "$SHA2"
 # Point the checker at the fixture repo, not the real AGENT_HOME, by
-# overriding AGENT_HOME for the duration of this section (landed_assert_igor
-# / landed_igor_observed default to it).
+# overriding AGENT_HOME for the duration of this section (landed_assert_self_pull
+# / landed_self_pull_observed default to it).
 export AGENT_HOME="$FIXTURE"
 ok "do_landed_tick returns 0" do_landed_tick
-eq "landed entry cleared after confirming"    "{}" "$(landed_pending_entry "$AUTOMERGE_SELF_REPO")"
+eq "landed entry cleared after confirming"    "{}" "$(landed_pending_entry "$SELF_REPO")"
 NOTES=$(jq -c '.landed_notes' "$STATE")
 eq "one note queued"                          "1"  "$(jq -r 'length' <<<"$NOTES")"
-eq "note names the repo"                      "$AUTOMERGE_SELF_REPO" "$(jq -r '.[0].repo' <<<"$NOTES")"
+eq "note names the repo"                      "$SELF_REPO" "$(jq -r '.[0].repo' <<<"$NOTES")"
 eq "note names the pr"                        "521" "$(jq -r '.[0].pr' <<<"$NOTES")"
 has "note detail mentions self-pull"          "$(jq -r '.[0].detail' <<<"$NOTES")" "self-pull"
 
 echo "== do_landed_tick: not landed yet -> attempts increments, stays pending =="
 echo '{}' > "$STATE"
-landed_record "$AUTOMERGE_SELF_REPO" 521 "deadbeef0000000000000000000000000000dead"
+landed_record "$SELF_REPO" 521 "deadbeef0000000000000000000000000000dead"
 ok "do_landed_tick returns 0 even mid-wait" do_landed_tick
-eq "entry still pending"                    "1" "$(jq -r '.attempts' <<<"$(landed_pending_entry "$AUTOMERGE_SELF_REPO")")"
+eq "entry still pending"                    "1" "$(jq -r '.attempts' <<<"$(landed_pending_entry "$SELF_REPO")")"
 eq "no note queued yet"                     "0" "$(jq -r '.landed_notes // [] | length' "$STATE")"
 do_landed_tick
-eq "second miss -> attempts=2"              "2" "$(jq -r '.attempts' <<<"$(landed_pending_entry "$AUTOMERGE_SELF_REPO")")"
+eq "second miss -> attempts=2"              "2" "$(jq -r '.attempts' <<<"$(landed_pending_entry "$SELF_REPO")")"
 
 echo "== do_landed_tick: a landed repo does not mark a later not-landed one =="
 # The confirmed-landing detail must not carry across loop iterations. Order
-# matters: landed_pending_repos yields jq `keys` (sorted), so the distillery
-# key is renamed to sort AFTER igor's, putting the landing first.
-LANDED_DISTILLERY_REPO="joshtronic/zz-distillery"
+# matters: landed_pending_repos yields jq `keys` (sorted), so the second repo
+# is named to sort AFTER the self-pull repo's, putting the landing first.
+ZZ_CACHE_REPO="joshtronic/zz-distillery"
+_saved_forgejo_repo_get_file=$(declare -f forgejo_repo_get_file)
+forgejo_repo_get_file() {
+  local repo="$1" path="$2"
+  [ "$path" = "AGENTS.md" ] && return 1
+  case "$repo" in
+    "$SELF_REPO")     printf '%s' '{"landed":{"kind":"self-pull"}}' ;;
+    "$ZZ_CACHE_REPO") printf '%s' '{"landed":{"kind":"context-cache"}}' ;;
+    *)                return 1 ;;
+  esac
+}
 export CONTEXT_CACHE_DIR="$TMP/unseeded-cache"
 echo '{}' > "$STATE"
-landed_record "$AUTOMERGE_SELF_REPO"      521 "$SHA2"
-landed_record "$LANDED_DISTILLERY_REPO"   4   "distsha-never-served"
+landed_record "$SELF_REPO"      521 "$SHA2"
+landed_record "$ZZ_CACHE_REPO"  4   "distsha-never-served"
 do_landed_tick
-eq "the landed repo cleared"        "{}" "$(landed_pending_entry "$AUTOMERGE_SELF_REPO")"
-eq "the other repo stays pending"   "1"  "$(jq -r '.attempts' <<<"$(landed_pending_entry "$LANDED_DISTILLERY_REPO")")"
+eq "the landed repo cleared"        "{}" "$(landed_pending_entry "$SELF_REPO")"
+eq "the other repo stays pending"   "1"  "$(jq -r '.attempts' <<<"$(landed_pending_entry "$ZZ_CACHE_REPO")")"
 eq "exactly one note queued"        "1"  "$(jq -r '.landed_notes | length' "$STATE")"
-eq "the note is the repo that DID land" "$AUTOMERGE_SELF_REPO" "$(jq -r '.landed_notes[0].repo' "$STATE")"
-LANDED_DISTILLERY_REPO="joshtronic/distillery"
+eq "the note is the repo that DID land" "$SELF_REPO" "$(jq -r '.landed_notes[0].repo' "$STATE")"
+eval "$_saved_forgejo_repo_get_file"
 unset CONTEXT_CACHE_DIR
 
 echo "== do_landed_tick: grace exceeded -> alerts and clears =="
@@ -148,10 +197,10 @@ email_send() { EMAIL_CALLS=$((EMAIL_CALLS + 1)); return 0; }
 forgejo_comment() { COMMENT_BODY="$3"; return 0; }
 export PRIMARY_RECIPIENTS=josh@example.com SMTP2GO_API_KEY=k SMTP2GO_SENDER=s@example.com
 echo '{}' > "$STATE"
-landed_record "$AUTOMERGE_SELF_REPO" 521 "deadbeef0000000000000000000000000000dead"
-jq '.landed[$r].attempts = ($n|tonumber)' --arg r "$AUTOMERGE_SELF_REPO" --arg n "$((LANDED_GRACE_TICKS - 1))" "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+landed_record "$SELF_REPO" 521 "deadbeef0000000000000000000000000000dead"
+jq '.landed[$r].attempts = ($n|tonumber)' --arg r "$SELF_REPO" --arg n "$((LANDED_GRACE_TICKS - 1))" "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
 ok "do_landed_tick returns 0 on the grace-exceeding check" do_landed_tick
-eq "entry cleared after the alert"          "{}" "$(landed_pending_entry "$AUTOMERGE_SELF_REPO")"
+eq "entry cleared after the alert"          "{}" "$(landed_pending_entry "$SELF_REPO")"
 eq "exactly one alert email sent"           "1"  "$EMAIL_CALLS"
 has "PR comment names the merged sha"       "$COMMENT_BODY" "deadbeef"
 unset -f email_send forgejo_comment
@@ -163,11 +212,11 @@ jq -n --arg r "acme/orphan" '{landed: {($r): {pr:"1", sha:"x", attempts:0}}}' > 
 do_landed_tick
 eq "orphaned entry dropped, no crash" "" "$(landed_pending_repos)"
 
-echo "== do_automerge_tick wiring: a url-less merge on igor stamps .landed, not .deploy =="
+echo "== do_automerge_tick wiring: a url-less merge on a kind-declaring repo stamps .landed, not .deploy =="
 export FORGEJO_REVIEWER=josh BOT_USER=igor
 echo '{}' > "$STATE"
-automerge_url_status() { printf 'ok\t'; }   # url-less, like AUTOMERGE_SELF_REPO's real dossier answer
-export VALIDATED_REPOS_JSON="{\"full_name\":\"${AUTOMERGE_SELF_REPO}\"}"
+automerge_url_status() { printf 'ok\t'; }   # url-less, like SELF_REPO's real dossier answer
+export VALIDATED_REPOS_JSON="{\"full_name\":\"${SELF_REPO}\"}"
 forgejo_list_open_bot_prs() { echo '[{"number":521}]'; }
 forgejo_commit_status() { echo success; }
 automerge_mergeable() { return 0; }
@@ -178,10 +227,18 @@ automerge_require_human() { return 1; }
 automerge_approved_by() { return 0; }
 automerge_approval_covers_head() { return 0; }
 automerge_reviewer_blocks() { return 1; }
-ok "do_automerge_tick merges the url-less igor repo" do_automerge_tick
+ok "do_automerge_tick merges the url-less self-pull repo" do_automerge_tick
 eq "no .deploy stamped (nothing to smoke-test)" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
-eq ".landed stamped for igor"                   "mergedsha521" "$(jq -r --arg r "$AUTOMERGE_SELF_REPO" '.landed[$r].sha // ""' "$STATE")"
-eq ".landed pr recorded"                        "521" "$(jq -r --arg r "$AUTOMERGE_SELF_REPO" '.landed[$r].pr // ""' "$STATE")"
+eq ".landed stamped for the repo"               "mergedsha521" "$(jq -r --arg r "$SELF_REPO" '.landed[$r].sha // ""' "$STATE")"
+eq ".landed pr recorded"                        "521" "$(jq -r --arg r "$SELF_REPO" '.landed[$r].pr // ""' "$STATE")"
+
+echo "== do_automerge_tick wiring: a url-less merge on a repo with NO landed-kind skips the watch entirely =="
+echo '{}' > "$STATE"
+export VALIDATED_REPOS_JSON="{\"full_name\":\"${PLAIN_REPO}\"}"
+ok "do_automerge_tick merges the url-less undeclared repo" do_automerge_tick
+eq "no .deploy stamped"   "" "$(jq -r '.deploy.repo // ""' "$STATE")"
+eq "no .landed entry created (undeclared -- same as before this repo ever opted in)" \
+  "" "$(jq -r '.landed // {} | keys | join(",")' "$STATE")"
 
 echo "== do_automerge_tick wiring: a url-BEARING repo's merge is untouched (still .deploy only) =="
 echo '{}' > "$STATE"

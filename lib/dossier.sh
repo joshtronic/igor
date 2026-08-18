@@ -21,7 +21,7 @@
 # are the table in "The Metadata block"; DOSSIER_TYPES and DOSSIER_SITE_TYPES
 # are the `type` closed list in the paragraph directly under that table
 # (site types serve a live domain and therefore require `url`).
-DOSSIER_KEYS="type url test lint verify feedback-csv"
+DOSSIER_KEYS="type url test lint verify feedback-csv landed-kind"
 DOSSIER_TYPES="arcade game content tool api personal infra"
 DOSSIER_SITE_TYPES="arcade game content api personal"
 
@@ -62,7 +62,8 @@ _dossier_metadata_block() {
 # lib/feedback.sh), and check_deploy_smoke_signal (the local anchor clone via
 # rc_file_read/git-show -- lib/repo-checks.sh). Same value contract
 # everywhere: echoes the value + rc0, or empty + rc1. Falls back to legacy
-# agent.json (url <- .smoke.url, feedback-csv <- .feedback.csv) when the repo
+# agent.json (url <- .smoke.url, feedback-csv <- .feedback.csv,
+# landed-kind <- .landed.kind) when the repo
 # hasn't adopted the dossier -- no AGENTS.md content, or a prose one with no
 # `## Metadata` (same keying as check_dossier's rc2). Empty + rc 1 when the
 # key is absent, or when an adopted dossier's block is unreadable.
@@ -83,6 +84,7 @@ dossier_get_content() {
   case "$key" in
     url)          value=$(jq -r '.smoke.url // empty' <<<"$cfg_content" 2>/dev/null) ;;
     feedback-csv) value=$(jq -r '.feedback.csv // empty' <<<"$cfg_content" 2>/dev/null) ;;
+    landed-kind)  value=$(jq -r '.landed.kind // empty' <<<"$cfg_content" 2>/dev/null) ;;
     *) return 1 ;;
   esac
   value="$(_dossier_trim "$value")"
@@ -184,6 +186,7 @@ dossier_keys() {
   [ -f "$cfg" ] || return 1
   [ -n "$(jq -r '.smoke.url // empty' "$cfg" 2>/dev/null)" ]      && { echo url; found=0; }
   [ -n "$(jq -r '.feedback.csv // empty' "$cfg" 2>/dev/null)" ]   && { echo feedback-csv; found=0; }
+  [ -n "$(jq -r '.landed.kind // empty' "$cfg" 2>/dev/null)" ]    && { echo landed-kind; found=0; }
   return $found
 }
 

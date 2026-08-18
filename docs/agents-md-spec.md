@@ -81,10 +81,17 @@ the harness can simply take the first one after the literal heading
 | `lint` | no | Command that runs the linter(s) |
 | `verify` | no | Command for end-to-end/visual verification (e.g. a Playwright script) |
 | `feedback-csv` | no | Published CSV of user feedback for the triage pass (was `agent.json` `.feedback.csv`) |
+| `landed-kind` | no | Host-state landed-verification kind for a url-less auto-merge (`lib/landed.sh`); one of `self-pull` or `context-cache` (was `agent.json` `.landed.kind`) |
 
 Note on `test`: validation's existing test-signal rules apply
 unchanged -- a repo needs a test signal (a `test:` command or a live
 `url` acting as a smoke check) to validate for work.
+
+Note on `landed-kind`: undeclared means no landed-verification watch
+at all (the common case -- most url-less repos have nothing for
+`lib/landed.sh` to check). A declared value outside the closed list
+is a hard fail-fast: `lib/landed.sh` logs it loudly and still records
+no watch, rather than guessing.
 
 `type` closed list: `arcade`, `game`, `content`, `tool`, `api`,
 `personal`, `infra`. Of these, the **site types** -- the ones that
