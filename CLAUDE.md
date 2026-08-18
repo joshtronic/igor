@@ -460,6 +460,26 @@ respective tools on the host; install or skip.
   harness's own self-pull picks up merged master on the next tick as it
   always has, so a human APPROVE + green CI now merges igor's own PRs without
   a manual click too. Clear `.deploy` to abandon a stuck deploy.
+  **Maintenance-tier carve-out for joshing.you (igor#516):** a single, narrow,
+  deterministic exception to a `require_human` pin, hardcoded to ONE repo
+  (`AUTOMERGE_MAINTENANCE_TIER_REPO` -- not an env knob). The refresh
+  pipeline's own `review`->`master` PR merges WITHOUT the human gate when ALL
+  hold: same-repo `review`->`master` (never a fork of the same branch name),
+  every changed path sits in the maintenance data allowlist
+  (`src/_data/{sites,feeds,rejected}.json`, `src/images/screenshots/**`), the
+  sites.json diff adds or removes no listing (a CORE-IDENTITY jq-structural
+  compare -- every field the carve-out treats as safe churn (`updatedDate`,
+  `title`, `feeds`) stripped, then the sorted remainder compared between the
+  PR's pinned `base.sha`/`head.sha`, read via `git show` off the local
+  validation-sweep clone -- never a branch tip, which would race a push
+  landing between the read and the classification), rejected.json gains no
+  `no-josh-visible` guard entries (same jq-structural posture, not a line
+  count), CI is green, and -- since the shadow review is the ONLY review
+  signal on this path -- the recorded shadow verdict is an affirmative
+  APPROVE bound to the exact head sha. A live human `REQUEST_CHANGES` still
+  vetoes it exactly as it vetoes every other merge path: the `require_human`
+  pin exists to give the human MORE authority, not less. New-site days (an
+  added `addedDate`) and listing deletions keep the human gate, deliberately.
 - The feedback-triage pass (`do_feedback_tick`, `lib/feedback.sh`) is
   convention-driven via `agent.json` `.feedback.csv` -- the published Google-Form
   CSV of player feedback (the second `agent.json` consumer after auto-merge).

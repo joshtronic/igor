@@ -6,7 +6,8 @@
 # boundary (_fj, curl, forgejo_*, email) is stubbed -- no network, no real state.
 set -uo pipefail
 
-command -v jq >/dev/null 2>&1 || { echo "test-automerge: jq absent -- skipping"; exit 0; }
+command -v jq  >/dev/null 2>&1 || { echo "test-automerge: jq absent -- skipping"; exit 0; }
+command -v git >/dev/null 2>&1 || { echo "test-automerge: git absent -- skipping"; exit 0; }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../lib/dossier.sh
@@ -18,6 +19,11 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # one under another name so the self-repo carve-out can be exercised for real,
 # rather than simulated by a stub returning what it is supposed to return.
 eval "$(declare -f automerge_url_status | sed '1s/^automerge_url_status/_real_url_status/')"
+# Same deal for automerge_reviewer_blocks: the review-gate section below
+# permanently stubs it to `return 1` (never resetting it to the real
+# definition), so the maintenance-tier tests -- which need the REAL function
+# reading a live human REQUEST_CHANGES off _fj -- restore it from this copy.
+eval "$(declare -f automerge_reviewer_blocks | sed '1s/^automerge_reviewer_blocks/_real_reviewer_blocks/')"
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 export AGENT_STATE_DIR="$TMP"
@@ -884,6 +890,217 @@ else printf '  x %s\n' "flaky-dossier: no merge (rc1)"; FAIL=$((FAIL + 1)); fi
 eq "flaky-dossier: recorded no deploy" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
 has "flaky-dossier: logs the skip"      "$AUTOMERGE_OUT" "dossier fetch failed"
 automerge_url_status() { printf 'ok\thttps://x'; }   # reset
+
+echo "== automerge_maintenance_tier_branch_ok: same-repo review->master pin (igor#516) =="
+PRJ='{"head":{"ref":"review","repo":{"full_name":"joshtronic/joshing.you"}},"base":{"ref":"master","repo":{"full_name":"joshtronic/joshing.you"}}}'
+ok "branch_ok: review->master, same repo"          automerge_maintenance_tier_branch_ok "$PRJ"
+PRJ='{"head":{"ref":"checkpoint/foo","repo":{"full_name":"joshtronic/joshing.you"}},"base":{"ref":"master","repo":{"full_name":"joshtronic/joshing.you"}}}'
+no "branch_ok: non-review head branch -> rejected"  automerge_maintenance_tier_branch_ok "$PRJ"
+PRJ='{"head":{"ref":"review","repo":{"full_name":"joshtronic/joshing.you"}},"base":{"ref":"develop","repo":{"full_name":"joshtronic/joshing.you"}}}'
+no "branch_ok: non-master base -> rejected"         automerge_maintenance_tier_branch_ok "$PRJ"
+PRJ='{"head":{"ref":"review","repo":{"full_name":"forker/joshing.you"}},"base":{"ref":"master","repo":{"full_name":"joshtronic/joshing.you"}}}'
+no "branch_ok: fork head repo -> rejected"          automerge_maintenance_tier_branch_ok "$PRJ"
+PRJ='{"head":{"ref":"review"},"base":{"ref":"master","repo":{"full_name":"joshtronic/joshing.you"}}}'
+no "branch_ok: missing head repo -> fail closed"    automerge_maintenance_tier_branch_ok "$PRJ"
+
+echo "== automerge_maintenance_tier_files_ok: the maintenance data allowlist (igor#516) =="
+forgejo_pr_files() { printf '%s' "$MTFILES"; }
+MTFILES='[{"filename":"src/_data/sites.json"}]'
+has "files_ok: sites.json alone -> ok, echoes count" "$(automerge_maintenance_tier_files_ok acme/x 1)" "1"
+MTFILES='[{"filename":"src/_data/sites.json"},{"filename":"src/_data/feeds.json"},{"filename":"src/_data/rejected.json"},{"filename":"src/images/screenshots/a/b.png"}]'
+ok "files_ok: full allowlist set -> ok"             automerge_maintenance_tier_files_ok acme/x 1
+MTFILES='[{"filename":"src/_data/sites.json"},{"filename":"scripts/refresh.sh"}]'
+no "files_ok: out-of-allowlist path -> rejected"    automerge_maintenance_tier_files_ok acme/x 1
+MTFILES='[{"filename":".forgejo/workflows/refresh.yml"}]'
+no "files_ok: workflow path -> rejected"            automerge_maintenance_tier_files_ok acme/x 1
+MTFILES='[{"filename":"src/images/screenshots/new.png","previous_filename":"scripts/old.sh"}]'
+no "files_ok: rename from out-of-allowlist -> rejected" automerge_maintenance_tier_files_ok acme/x 1
+MTFILES='[{"foo":"bar"}]'
+no "files_ok: filename-less element -> fail closed" automerge_maintenance_tier_files_ok acme/x 1
+forgejo_pr_files() { return 1; }
+no "files_ok: unwalkable listing -> fail closed"    automerge_maintenance_tier_files_ok acme/x 1
+
+echo "== automerge_maintenance_tier_data_ok: sites.json / rejected.json structural diff, real git (igor#516) =="
+DP="$(mktemp -d "$TMP/data.XXXXXX")"
+git init -q -b master "$DP"
+git -C "$DP" config user.email t@t; git -C "$DP" config user.name t
+mkdir -p "$DP/src/_data"
+cat > "$DP/src/_data/sites.json" <<'JSON'
+[
+  {"url":"https://a.example","addedDate":"2026-01-01","title":"A","updatedDate":"2026-01-01"},
+  {"url":"https://b.example","addedDate":"2026-01-02","title":"B","updatedDate":"2026-01-02"}
+]
+JSON
+echo '[{"url":"https://c.example","reason":"no-josh-visible"}]' > "$DP/src/_data/rejected.json"
+git -C "$DP" add -A; git -C "$DP" commit -q -m base
+BASE_SHA="$(git -C "$DP" rev-parse HEAD)"
+
+# Metadata-only churn (title/updatedDate on an existing entry) -> ok.
+sed -i 's/"title":"A"/"title":"A2"/' "$DP/src/_data/sites.json"
+git -C "$DP" commit -qam metadata
+ok "data_ok: metadata-only churn -> ok" \
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)"
+
+# Added listing (new addedDate line, count grows) -> rejected.
+git -C "$DP" reset -q --hard "$BASE_SHA"
+cat > "$DP/src/_data/sites.json" <<'JSON'
+[
+  {"url":"https://a.example","addedDate":"2026-01-01","title":"A"},
+  {"url":"https://b.example","addedDate":"2026-01-02","title":"B"},
+  {"url":"https://n.example","addedDate":"2026-02-01","title":"New"}
+]
+JSON
+git -C "$DP" commit -qam added
+no "data_ok: added listing -> rejected" \
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)"
+
+# Added listing that OMITS addedDate entirely -- the exact igor#516 security
+# review gap (a textual "did an addedDate line appear" check would miss this;
+# the core-identity structural compare does not).
+git -C "$DP" reset -q --hard "$BASE_SHA"
+cat > "$DP/src/_data/sites.json" <<'JSON'
+[
+  {"url":"https://a.example","addedDate":"2026-01-01","title":"A"},
+  {"url":"https://b.example","addedDate":"2026-01-02","title":"B"},
+  {"url":"https://n.example","title":"New, no addedDate"}
+]
+JSON
+git -C "$DP" commit -qam added-no-addeddate
+no "data_ok: added listing with no addedDate field -> still rejected" \
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)"
+
+# Removed listing -> rejected.
+git -C "$DP" reset -q --hard "$BASE_SHA"
+echo '[{"url":"https://a.example","addedDate":"2026-01-01","title":"A"}]' > "$DP/src/_data/sites.json"
+git -C "$DP" commit -qam removed
+no "data_ok: removed listing -> rejected" \
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)"
+
+# Same-count swap (one removed, a different one added) -> the core-identity
+# set comparison catches this even though a bare element-count check would not.
+git -C "$DP" reset -q --hard "$BASE_SHA"
+cat > "$DP/src/_data/sites.json" <<'JSON'
+[
+  {"url":"https://a.example","addedDate":"2026-01-01","title":"A"},
+  {"url":"https://swap.example","addedDate":"2026-02-01","title":"Swap"}
+]
+JSON
+git -C "$DP" commit -qam swap
+no "data_ok: same-count swap -> rejected" \
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)"
+
+# Guard rejection gained (rejected.json) -> rejected, even reformatted onto
+# one line (jq-structural, not a line count -- igor#516 security review).
+git -C "$DP" reset -q --hard "$BASE_SHA"
+printf '%s' '[{"url":"https://c.example","reason":"no-josh-visible"},{"url":"https://d.example","reason":"no-josh-visible"}]' > "$DP/src/_data/rejected.json"
+git -C "$DP" commit -qam guard
+no "data_ok: gained guard-rejection entry -> rejected" \
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)"
+
+# A DROP in guard rejections is not itself suspicious (no listing implicated).
+git -C "$DP" reset -q --hard "$BASE_SHA"
+echo '[]' > "$DP/src/_data/rejected.json"
+git -C "$DP" commit -qam unguard
+ok "data_ok: fewer guard rejections -> ok" \
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)"
+
+echo "== do_automerge_tick: joshing.you maintenance-tier carve-out end to end (igor#516) =="
+# Restore the REAL automerge_reviewer_blocks -- the review-gate section above
+# permanently stubbed it to `return 1`, but this section needs it reading a
+# live human REQUEST_CHANGES off _fj for the amendment-2 veto test below.
+automerge_reviewer_blocks() { _real_reviewer_blocks "$@"; }
+MTDIR="$(mktemp -d "$TMP/joshing.XXXXXX")"
+git init -q -b master "$MTDIR"
+git -C "$MTDIR" config user.email t@t; git -C "$MTDIR" config user.name t
+mkdir -p "$MTDIR/src/_data"
+echo '[{"url":"https://a.example","addedDate":"2026-01-01","title":"A"}]' > "$MTDIR/src/_data/sites.json"
+echo '[]' > "$MTDIR/src/_data/rejected.json"
+git -C "$MTDIR" add -A; git -C "$MTDIR" commit -q -m base
+MTBASE="$(git -C "$MTDIR" rev-parse HEAD)"
+sed -i 's/"title":"A"/"title":"A-updated"/' "$MTDIR/src/_data/sites.json"
+git -C "$MTDIR" commit -qam metadata
+MTHEAD="$(git -C "$MTDIR" rev-parse HEAD)"
+
+MTPR=$(jq -n --arg h "$MTHEAD" --arg b "$MTBASE" \
+  '{head:{ref:"review",sha:$h,repo:{full_name:"joshtronic/joshing.you"}},base:{ref:"master",sha:$b,repo:{full_name:"joshtronic/joshing.you"}}}')
+MTREVIEWS='[]'
+repo_path_for() { echo "$MTDIR"; }
+ensure_repo_local() { :; }
+_fj() {
+  case "$1 $2" in
+    "GET /repos/joshtronic/joshing.you/pulls/42")         printf '%s' "$MTPR" ;;
+    "GET /repos/joshtronic/joshing.you/pulls/42/reviews") printf '%s' "$MTREVIEWS" ;;
+    *) printf '{}' ;;
+  esac
+}
+MTFILES='[{"filename":"src/_data/sites.json"}]'
+forgejo_pr_files() { printf '%s' "$MTFILES"; }
+
+export VALIDATED_REPOS_JSON='{"full_name":"joshtronic/joshing.you"}'
+automerge_url_status() { printf 'ok\thttps://joshing.you'; }
+automerge_require_human() { [ "$1" = "joshtronic/joshing.you" ]; }
+forgejo_list_open_bot_prs() { echo '[{"number":42}]'; }
+forgejo_commit_status() { echo success; }
+automerge_mergeable() { return 0; }
+automerge_behind_count() { echo 0; }
+automerge_do_merge() { echo "mtsha"; }
+automerge_approved_by() { return 1; }   # no human review anywhere in this section
+
+echo "{\"review\":{\"joshtronic/joshing.you#42\":{\"verdict\":\"APPROVE\",\"sha\":\"${MTHEAD}\"}}}" > "$STATE"
+AUTOMERGE_OUT=$(do_automerge_tick 2>&1); AUTOMERGE_RC=$?
+if [ "$AUTOMERGE_RC" -eq 0 ]; then printf '  + %s\n' "maint-tier: metadata-only + shadow APPROVE-on-head, no human -> merges"
+else printf '  x %s\n' "maint-tier: metadata-only + shadow APPROVE-on-head, no human -> merges"; FAIL=$((FAIL + 1)); fi
+eq "maint-tier: merge recorded deploy"   "joshtronic/joshing.you" "$(jq -r '.deploy.repo // ""' "$STATE")"
+has "maint-tier: log names the tier"     "$AUTOMERGE_OUT" "maintenance-tier"
+has "maint-tier: log says no human gate" "$AUTOMERGE_OUT" "merging without human gate"
+
+# Amendment 1: an absent/non-APPROVE shadow verdict never qualifies -- falls
+# back to the (unmet) human gate, no merge.
+echo '{"review":{"joshtronic/joshing.you#42":{"verdict":"COMMENT"}}}' > "$STATE"
+no "maint-tier: shadow COMMENT (not APPROVE) -> no merge" do_automerge_tick
+eq "maint-tier: shadow-COMMENT records nothing" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
+
+# Amendment 2: a live human REQUEST_CHANGES vetoes the maintenance tier even
+# though the diff and shadow verdict both qualify.
+MTREVIEWS='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","stale":false,"dismissed":false}]'
+echo "{\"review\":{\"joshtronic/joshing.you#42\":{\"verdict\":\"APPROVE\",\"sha\":\"${MTHEAD}\"}}}" > "$STATE"
+no "maint-tier: live human REQUEST_CHANGES vetoes -> no merge" do_automerge_tick
+eq "maint-tier: human-veto records nothing" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
+MTREVIEWS='[]'   # reset
+
+# Non-review head branch -> falls back to the human gate (no human approve
+# stubbed in this section, so it stays unmerged).
+NRPR=$(jq -n --arg h "$MTHEAD" --arg b "$MTBASE" \
+  '{head:{ref:"some-other-branch",sha:$h,repo:{full_name:"joshtronic/joshing.you"}},base:{ref:"master",sha:$b,repo:{full_name:"joshtronic/joshing.you"}}}')
+_fj() {
+  case "$1 $2" in
+    "GET /repos/joshtronic/joshing.you/pulls/42")         printf '%s' "$NRPR" ;;
+    "GET /repos/joshtronic/joshing.you/pulls/42/reviews") printf '%s' "$MTREVIEWS" ;;
+    *) printf '{}' ;;
+  esac
+}
+echo "{\"review\":{\"joshtronic/joshing.you#42\":{\"verdict\":\"APPROVE\",\"sha\":\"${MTHEAD}\"}}}" > "$STATE"
+no "maint-tier: non-review head branch -> falls back to human gate, no merge" do_automerge_tick
+eq "maint-tier: non-review branch recorded no deploy" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
+
+echo "== do_automerge_tick: maintenance-tier carve-out is scoped to joshing.you only (igor#516) =="
+# A stub classifier that would ALWAYS say yes proves the REPO PIN -- not the
+# classifier's own logic -- is what keeps every other require_human repo
+# gated. Placed last: it permanently overrides automerge_maintenance_tier_ok.
+export VALIDATED_REPOS_JSON='{"full_name":"acme/flagged"}'
+automerge_url_status() { printf 'ok\thttps://x'; }
+automerge_require_human() { return 0; }   # acme/flagged is ALSO require_human-pinned
+forgejo_list_open_bot_prs() { echo '[{"number":9}]'; }
+forgejo_commit_status() { echo success; }
+automerge_mergeable() { return 0; }
+automerge_behind_count() { echo 0; }
+automerge_do_merge() { echo "sha9"; }
+_fj() { echo '{"head":{"sha":"head9"},"base":{"sha":"base9","ref":"master"}}'; }
+automerge_approved_by() { return 1; }   # no human approval
+automerge_maintenance_tier_ok() { printf 'files=1, +0 sites, -0 sites'; return 0; }
+echo '{"review":{"acme/flagged#9":{"verdict":"APPROVE","sha":"head9"}}}' > "$STATE"
+no "maint-scope: non-joshing.you require_human repo still needs human approval" do_automerge_tick
+eq "maint-scope: no deploy recorded" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
 
 if [ "$FAIL" -eq 0 ]; then echo "test-automerge: all checks passed"; exit 0; fi
 echo "test-automerge: $FAIL check(s) FAILED"

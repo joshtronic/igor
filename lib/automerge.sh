@@ -42,6 +42,18 @@ AUTOMERGE_CI_MAX_ATTEMPTS=30                                  # ~30 ticks before
 AUTOMERGE_SELF_REPO="${AUTOMERGE_SELF_REPO:-joshtronic/igor}" # url-less: human-approval merge, but never shadow-gated or deploy-watched
 AUTOMERGE_BLOCK_COOLDOWN_SECS=3600                            # after a rejected merge, back off ~1h before re-trying the same head
 
+# -- Maintenance-tier carve-out for joshing.you (igor#516) -----------------
+#
+# A single, narrow, deterministic exception to a require_human pin: the
+# refresh pipeline's own review->master PR on joshing.you merges WITHOUT the
+# human gate when every automerge_maintenance_tier_* check below agrees the
+# diff is pure maintenance churn (no listing added or removed). Hardcoded --
+# NOT an env knob (an exported override would re-point "merge without the
+# human gate" at any require_human repo; see igor#516's security review).
+AUTOMERGE_MAINTENANCE_TIER_REPO="joshtronic/joshing.you"
+AUTOMERGE_MAINTENANCE_TIER_HEAD_BRANCH="review"
+AUTOMERGE_MAINTENANCE_TIER_BASE_BRANCH="master"
+
 # Fallback logger so this module is sourceable standalone (tests).
 if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*" >&2; }; fi
 
@@ -223,6 +235,134 @@ automerge_reviewer_blocks() {
         | last
         | (. != null) and (.state == "REQUEST_CHANGES") and ((.stale // false) == false)
       ' >/dev/null 2>&1
+}
+
+# automerge_maintenance_tier_branch_ok <pr_json> -- exit 0 if this is the
+# refresh pipeline's own SAME-REPO review->master PR: head branch "review",
+# base branch "master", and the head repo is literally the base repo (not a
+# fork that happens to name its branch "review" too -- the branch-name pin
+# alone would be satisfied while the local clone's origin/review is entirely
+# unrelated content; igor#516 security review).
+automerge_maintenance_tier_branch_ok() {
+  local pr_json="$1" head_ref base_ref head_full base_full
+  head_ref=$(jq -r '.head.ref // ""' <<<"$pr_json" 2>/dev/null)
+  base_ref=$(jq -r '.base.ref // ""' <<<"$pr_json" 2>/dev/null)
+  head_full=$(jq -r '.head.repo.full_name // ""' <<<"$pr_json" 2>/dev/null)
+  base_full=$(jq -r '.base.repo.full_name // ""' <<<"$pr_json" 2>/dev/null)
+  [ "$head_ref" = "$AUTOMERGE_MAINTENANCE_TIER_HEAD_BRANCH" ] \
+    && [ "$base_ref" = "$AUTOMERGE_MAINTENANCE_TIER_BASE_BRANCH" ] \
+    && [ -n "$head_full" ] && [ "$head_full" = "$base_full" ]
+}
+
+# automerge_maintenance_tier_files_ok <repo> <pr> -- exit 0 (echoing the
+# changed-file count) if every changed path -- and, for a rename, its
+# previous path too -- sits inside the maintenance data allowlist:
+# src/_data/{sites,feeds,rejected}.json or src/images/screenshots/**.
+# Anything else (scripts, workflows, templates, evidence/) refuses. Fails
+# CLOSED on an unwalkable file listing (forgejo_pr_files pages; a truncated
+# listing must never read as "all allowlisted") or a filename-less element,
+# same posture as automerge_risk_gate.
+automerge_maintenance_tier_files_ok() {
+  local repo="$1" pr="$2" files nfiles bad
+  files=$(forgejo_pr_files "$repo" "$pr" 2>/dev/null) || return 1
+  nfiles=$(jq -r 'if type == "array" then length else empty end' <<<"$files" 2>/dev/null)
+  [ -n "$nfiles" ] || return 1
+  jq -e 'all(.[]; (.filename | type) == "string")' <<<"$files" >/dev/null 2>&1 || return 1
+  bad=$(jq -r '.[] | (.filename, (.previous_filename // empty))' <<<"$files" 2>/dev/null | {
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      case "$f" in
+        src/_data/sites.json|src/_data/feeds.json|src/_data/rejected.json|src/images/screenshots/*) ;;
+        *) printf '%s' "$f"; break ;;
+      esac
+    done
+  })
+  [ -z "$bad" ] || return 1
+  printf '%s' "$nfiles"
+}
+
+# automerge_maintenance_tier_data_ok <clone-path> <base-sha> <head-sha> --
+# exit 0 if sites.json/rejected.json changed only in ways the maintenance
+# tier trusts unattended: no listing added or removed from sites.json, and no
+# net GAIN of "no-josh-visible" guard-rejection entries in rejected.json.
+#
+# sites.json is compared by CORE IDENTITY, not a line-level diff or a bare
+# element count: each entry with the fields the issue itself names as
+# legitimate metadata churn (updatedDate, title, feeds) stripped, then the
+# SORTED set of what's left compared between base and head. Two entry sets
+# are "the same listings" only if every core-identity object on one side has
+# an exact match on the other -- which catches an outright add/remove (the
+# set sizes differ), a same-count SWAP (one listing removed, a different one
+# added -- a bare count check would miss this), AND an added entry that
+# happens to omit addedDate entirely (a textual "did an addedDate line
+# appear" check would miss this too -- both were igor#516 security review
+# findings). Immune to reformatting/line-wrapping since nothing here reads
+# the file as text.
+#
+# rejected.json's gained-guard-rejections check is likewise jq-structural
+# over the whole tree (not a line count, which reformatting/minifying
+# defeats -- same review).
+#
+# Reads every blob off the PINNED shas via `git show`, never a branch tip and
+# never the working tree -- diffing branch names races a push landing between
+# the PR read and the classification (same review). Fails CLOSED on any
+# unreadable blob or unparseable JSON.
+automerge_maintenance_tier_data_ok() {
+  local path="$1" base="$2" head="$3"
+  local old_sites new_sites old_core new_core old_rej new_rej old_rn new_rn
+
+  old_sites=$(git -C "$path" show "${base}:src/_data/sites.json" 2>/dev/null) || return 1
+  new_sites=$(git -C "$path" show "${head}:src/_data/sites.json" 2>/dev/null) || return 1
+  jq -e 'type == "array"' <<<"$old_sites" >/dev/null 2>&1 || return 1
+  jq -e 'type == "array"' <<<"$new_sites" >/dev/null 2>&1 || return 1
+  old_core=$(jq -c '[.[] | del(.updatedDate, .title, .feeds)] | sort_by(tostring)' <<<"$old_sites" 2>/dev/null)
+  new_core=$(jq -c '[.[] | del(.updatedDate, .title, .feeds)] | sort_by(tostring)' <<<"$new_sites" 2>/dev/null)
+  [ -n "$old_core" ] && [ -n "$new_core" ] || return 1
+  [ "$old_core" = "$new_core" ] || return 1
+
+  old_rej=$(git -C "$path" show "${base}:src/_data/rejected.json" 2>/dev/null) || return 1
+  new_rej=$(git -C "$path" show "${head}:src/_data/rejected.json" 2>/dev/null) || return 1
+  old_rn=$(jq -r '[.. | strings | select(. == "no-josh-visible")] | length' <<<"$old_rej" 2>/dev/null)
+  new_rn=$(jq -r '[.. | strings | select(. == "no-josh-visible")] | length' <<<"$new_rej" 2>/dev/null)
+  [ -n "$old_rn" ] && [ -n "$new_rn" ] || return 1
+  [ "$new_rn" -le "$old_rn" ] 2>/dev/null
+}
+
+# automerge_maintenance_tier_ok <repo> <pr> <pr_json> <head> <verdict>
+# <reviewed_sha> -- exit 0 (echoing "files=N, +0 sites, -0 sites" for the log
+# line) if this require_human PR qualifies for the maintenance-tier
+# carve-out. ALL of:
+#   - the shadow review is the ONLY review signal on this path (there is no
+#     human in the loop here), so it must be an affirmative APPROVE bound to
+#     THIS exact head -- an absent/COMMENT/stale verdict never qualifies;
+#   - the human hasn't lodged a live REQUEST_CHANGES -- the require_human pin
+#     exists to give the human MORE authority, not less, so their veto still
+#     applies exactly as it does on every other merge path (igor#516
+#     amendment 2);
+#   - automerge_maintenance_tier_branch_ok (same-repo review->master);
+#   - automerge_maintenance_tier_files_ok (the data allowlist);
+#   - automerge_maintenance_tier_data_ok (no listing added or removed).
+# <pr_json> is the caller's own /pulls/<pr> fetch, reused here rather than
+# re-fetched -- a second fetch would only widen the race between what gets
+# classified and what gets merged.
+automerge_maintenance_tier_ok() {
+  local repo="$1" pr="$2" pr_json="$3" head="$4" verdict="$5" reviewed_sha="$6"
+  local base_sha nfiles clone_path
+
+  [ "$verdict" = "APPROVE" ] && [ "$reviewed_sha" = "$head" ] || return 1
+  automerge_reviewer_blocks "$repo" "$pr" "${FORGEJO_REVIEWER:-}" && return 1
+
+  automerge_maintenance_tier_branch_ok "$pr_json" || return 1
+  base_sha=$(jq -r '.base.sha // ""' <<<"$pr_json" 2>/dev/null)
+  [ -n "$base_sha" ] || return 1
+
+  nfiles=$(automerge_maintenance_tier_files_ok "$repo" "$pr") || return 1
+
+  ensure_repo_local "$repo"
+  clone_path=$(repo_path_for "$repo")
+  automerge_maintenance_tier_data_ok "$clone_path" "$base_sha" "$head" || return 1
+
+  printf 'files=%s, +0 sites, -0 sites' "$nfiles"
 }
 
 # automerge_mergeable <repo> <pr> -- exit 0 if the PR is open AND cleanly mergeable.
@@ -585,6 +725,7 @@ do_automerge_tick() {
 
   local repo url url_out url_status req_human prs pr head verdict reviewed_sha key ci sha behind
   local behind_repo="" behind_pr="" behind_n="" shadow_only risk_reason
+  local pr_json maint_class
   while IFS= read -r repo; do
     [ -n "$repo" ] || continue
     url_out=$(automerge_url_status "$repo")
@@ -612,26 +753,41 @@ do_automerge_tick() {
       if [ -z "$pr" ] || [ "$pr" = "null" ]; then continue; fi
       key="${repo}#${pr}"
       shadow_only=0   # reset per-PR: set below only on the shadow-only (no human eyes) merge path
-      # Fetch the head sha up front: the default path binds the shadow APPROVE to
-      # it (below), and the CI check needs it.
-      head=$(_fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null | jq -r '.head.sha // ""')
+      # Fetch the PR object up front: the default path binds the shadow APPROVE
+      # to head.sha (below), the CI check needs it, and the maintenance tier
+      # (below) reuses this SAME fetch for its branch/base checks rather than
+      # re-fetching (a second fetch would only widen the classify-vs-merge race).
+      pr_json=$(_fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null)
+      head=$(jq -r '.head.sha // ""' <<<"$pr_json" 2>/dev/null)
       [ -n "$head" ] || continue
       verdict=$(jq -r --arg k "$key" '.review[$k].verdict // ""' "$sf" 2>/dev/null)
+      reviewed_sha=$(jq -r --arg k "$key" '.review[$k].sha // ""' "$sf" 2>/dev/null)
       # Approval gate. A flagged repo needs the HUMAN reviewer's live APPROVED
       # review (today's behavior). A default repo merges on the SHADOW review's
       # affirmative APPROVE -- APPROVE only, never COMMENT. On BOTH paths a live
       # REQUEST_CHANGES vetoes: the shadow's on the human path, the human's on the
       # default path -- we never merge over a "no".
       if [ "$req_human" = "1" ]; then
-        automerge_approved_by "$repo" "$pr" "$FORGEJO_REVIEWER" || continue
-        # A stale-but-not-dismissed approval counts (automerge_approved_by), but
-        # ONLY if the current head is the SAME net diff the human approved -- a
-        # base-merge, never new agent-pushed content the human never saw.
-        if ! automerge_approval_covers_head "$repo" "$pr" "$FORGEJO_REVIEWER" "$head"; then
-          log "automerge: ${key} approval predates the current head's content (not a base-merge) -- not merging"; continue
+        # Maintenance-tier carve-out (igor#516): scoped to ONE hardcoded repo --
+        # a classifier bug can at worst mis-gate joshing.you, never widen the
+        # bypass to any other require_human repo.
+        maint_class=""
+        if [ "$repo" = "$AUTOMERGE_MAINTENANCE_TIER_REPO" ]; then
+          maint_class=$(automerge_maintenance_tier_ok "$repo" "$pr" "$pr_json" "$head" "$verdict" "$reviewed_sha") || true
         fi
-        if [ "$verdict" = "REQUEST_CHANGES" ]; then
-          log "automerge: ${key} human-approved but shadow verdict is REQUEST_CHANGES -- not merging"; continue
+        if [ -n "$maint_class" ]; then
+          log "automerge: ${key} maintenance-tier (${maint_class}) -- merging without human gate"
+        else
+          automerge_approved_by "$repo" "$pr" "$FORGEJO_REVIEWER" || continue
+          # A stale-but-not-dismissed approval counts (automerge_approved_by), but
+          # ONLY if the current head is the SAME net diff the human approved -- a
+          # base-merge, never new agent-pushed content the human never saw.
+          if ! automerge_approval_covers_head "$repo" "$pr" "$FORGEJO_REVIEWER" "$head"; then
+            log "automerge: ${key} approval predates the current head's content (not a base-merge) -- not merging"; continue
+          fi
+          if [ "$verdict" = "REQUEST_CHANGES" ]; then
+            log "automerge: ${key} human-approved but shadow verdict is REQUEST_CHANGES -- not merging"; continue
+          fi
         fi
       else
         # Default (shadow-gated). Never merge over a REQUEST_CHANGES -- the shadow's
@@ -643,7 +799,6 @@ do_automerge_tick() {
         # advanced with a real change not yet re-reviewed) must NOT merge the
         # unreviewed code; a base-merge keeps sha == head (review_update_sha), so
         # those still qualify.
-        reviewed_sha=$(jq -r --arg k "$key" '.review[$k].sha // ""' "$sf" 2>/dev/null)
         if [ "$verdict" = "REQUEST_CHANGES" ]; then
           log "automerge: ${key} shadow verdict is REQUEST_CHANGES -- not merging"; continue
         fi
