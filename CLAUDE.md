@@ -460,26 +460,42 @@ respective tools on the host; install or skip.
   harness's own self-pull picks up merged master on the next tick as it
   always has, so a human APPROVE + green CI now merges igor's own PRs without
   a manual click too. Clear `.deploy` to abandon a stuck deploy.
-  **Maintenance-tier carve-out for joshing.you (igor#516):** a single, narrow,
-  deterministic exception to a `require_human` pin, hardcoded to ONE repo
-  (`AUTOMERGE_MAINTENANCE_TIER_REPO` -- not an env knob). The refresh
-  pipeline's own `review`->`master` PR merges WITHOUT the human gate when ALL
-  hold: same-repo `review`->`master` (never a fork of the same branch name),
-  every changed path sits in the maintenance data allowlist
-  (`src/_data/{sites,feeds,rejected}.json`, `src/images/screenshots/**`), the
-  sites.json diff adds or removes no listing (a CORE-IDENTITY jq-structural
+  **Maintenance-tier carve-out (igor#516, agnostic per igor#537):** a narrow,
+  deterministic exception to a `require_human` pin. The repo pin is now "any
+  repo whose OWN `agent.json` declares a complete `automerge.maintenance`"
+  (`{branch, allowlist: [paths...], data_file}`) -- REQUIRED-AND-EXPLICIT,
+  read via `automerge_maintenance_declaration`: missing or partial (any of
+  the three fields absent/empty) reads as "the tier does not exist for this
+  repo," no defaults, with one loud log line on a partial declaration. The
+  declared branch's own `<branch>`->`master` PR merges WITHOUT the human gate
+  when ALL hold: same-repo `<branch>`->`master` (never a fork of the same
+  branch name), every changed path sits in the DECLARED `allowlist`, the
+  `data_file` diff adds or removes no listing (a CORE-IDENTITY jq-structural
   compare -- every field the carve-out treats as safe churn (`updatedDate`,
   `title`, `feeds`) stripped, then the sorted remainder compared between the
   PR's pinned `base.sha`/`head.sha`, read via `git show` off the local
   validation-sweep clone -- never a branch tip, which would race a push
-  landing between the read and the classification), rejected.json gains no
-  `no-josh-visible` guard entries (same jq-structural posture, not a line
-  count), CI is green, and -- since the shadow review is the ONLY review
-  signal on this path -- the recorded shadow verdict is an affirmative
-  APPROVE bound to the exact head sha. A live human `REQUEST_CHANGES` still
-  vetoes it exactly as it vetoes every other merge path: the `require_human`
-  pin exists to give the human MORE authority, not less. New-site days (an
-  added `addedDate`) and listing deletions keep the human gate, deliberately.
+  landing between the read and the classification), CI is green, and --
+  since the shadow review is the ONLY review signal on this path -- the
+  recorded shadow verdict is an affirmative APPROVE bound to the exact head
+  sha. A live human `REQUEST_CHANGES` still vetoes it exactly as it vetoes
+  every other merge path: the `require_human` pin exists to give the human
+  MORE authority, not less. New-site days (an added `addedDate`) and listing
+  deletions keep the human gate, deliberately. **Security invariant:** a
+  dossier file (`agent.json`, `AGENTS.md`) can never sit inside a declared
+  `allowlist` or equal `data_file` -- `automerge_maintenance_declaration`
+  refuses the WHOLE declaration if it does, so a repo can READ its own
+  privileges from its dossier but never CHANGE them unattended (reinforced
+  by `forgejo_repo_get_file` reading the DEFAULT BRANCH, never the PR head
+  under classification -- a maintenance-tier PR editing its own `agent.json`
+  can't retarget what's read until AFTER it merges). One check has no field
+  in the declared shape and stays hardcoded: the rejected.json
+  "guard-rejection belt" (no net GAIN of `no-josh-visible` entries,
+  `AUTOMERGE_MAINTENANCE_REJECTED_FILE`) applies only when a declaring
+  repo's own allowlist opts that literal path in -- joshing.you's does
+  (unchanged behavior), a repo without that convention just doesn't get the
+  extra belt. Base branch (`master`) also stays hardcoded -- a fleet-wide
+  convention, not a per-repo fact.
 - The feedback-triage pass (`do_feedback_tick`, `lib/feedback.sh`) is
   convention-driven via `agent.json` `.feedback.csv` -- the published Google-Form
   CSV of player feedback (the second `agent.json` consumer after auto-merge).
