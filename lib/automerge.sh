@@ -981,10 +981,9 @@ do_automerge_tick() {
             _deploy_record "$repo" "$pr" "$sha" "$url"
             log "automerge: merged ${key} (approved by ${FORGEJO_REVIEWER}, CI green) -- watching deploy ${sha:0:8}"
           elif landed_applies "$repo"; then
-            # igor#512: the two url-less repos this checker knows how to
-            # verify (igor itself, the distillery) get a host-state
-            # landed-watch instead of a deploy/smoke watch -- see
-            # lib/landed.sh.
+            # igor#512, genericized igor#538: a url-less repo whose dossier
+            # declares a `landed-kind` gets a host-state landed-watch instead
+            # of a deploy/smoke watch -- see lib/landed.sh.
             landed_record "$repo" "$pr" "$sha"
             log "automerge: merged ${key} (approved by ${FORGEJO_REVIEWER}, CI green) -- no live URL, watching landed-verification ${sha:0:8}"
           else
