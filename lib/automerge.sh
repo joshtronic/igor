@@ -42,17 +42,46 @@ AUTOMERGE_CI_MAX_ATTEMPTS=30                                  # ~30 ticks before
 AUTOMERGE_SELF_REPO="${AUTOMERGE_SELF_REPO:-joshtronic/igor}" # url-less: human-approval merge, but never shadow-gated or deploy-watched
 AUTOMERGE_BLOCK_COOLDOWN_SECS=3600                            # after a rejected merge, back off ~1h before re-trying the same head
 
-# -- Maintenance-tier carve-out for joshing.you (igor#516) -----------------
+# -- Maintenance-tier carve-out (igor#516, agnostic per igor#537) ----------
 #
-# A single, narrow, deterministic exception to a require_human pin: the
-# refresh pipeline's own review->master PR on joshing.you merges WITHOUT the
-# human gate when every automerge_maintenance_tier_* check below agrees the
-# diff is pure maintenance churn (no listing added or removed). Hardcoded --
-# NOT an env knob (an exported override would re-point "merge without the
-# human gate" at any require_human repo; see igor#516's security review).
-AUTOMERGE_MAINTENANCE_TIER_REPO="joshtronic/joshing.you"
-AUTOMERGE_MAINTENANCE_TIER_HEAD_BRANCH="review"
+# A narrow, deterministic exception to a require_human pin: a repo's OWN
+# review->master PR merges WITHOUT the human gate when every
+# automerge_maintenance_tier_* check below agrees the diff is pure
+# maintenance churn (no listing added or removed). igor#516 scoped this to
+# ONE hardcoded repo (joshtronic/joshing.you); igor#537 made the repo pin
+# "any repo whose dossier declares automerge.maintenance" -- the safety
+# no longer comes from being pinned to one repo, it comes from the
+# declaration being REQUIRED-AND-EXPLICIT (missing/partial = tier off, no
+# defaults -- automerge_maintenance_declaration) plus the dossier-file
+# refusal guard below.
+#
+# The base branch stays hardcoded: only the review branch's NAME was ever a
+# per-repo fact (the head side of the refresh pipeline's own PR); "master"
+# is this harness's fleet-wide default-branch convention (see PR_BASE in
+# AGENTS.md), not a joshing.you-specific detail.
 AUTOMERGE_MAINTENANCE_TIER_BASE_BRANCH="master"
+
+# Filenames that must never fall inside a declared maintenance-tier
+# allowlist or data_file -- the security invariant (igor#537): a repo can
+# READ its own automerge.maintenance privileges from its dossier, but must
+# never be able to CHANGE them unattended. If a maintenance-tier PR could
+# touch its own dossier, it could quietly widen its own allowlist (or flip
+# require_human) for a LATER PR that no human ever reviewed. Enforced at
+# declaration-read time (automerge_maintenance_declaration), not per-diff --
+# a repo whose declaration violates this never qualifies for the tier at
+# all, on any PR.
+AUTOMERGE_MAINTENANCE_DOSSIER_FILES="agent.json AGENTS.md"
+
+# The one piece of igor#516's checks the declared shape ({branch, allowlist,
+# data_file}, igor#537) has no field for: the rejected.json "guard-rejection
+# belt" (no net GAIN of "no-josh-visible" entries) is joshing.you-specific
+# vocabulary, not a general dossier fact. It stays hardcoded here and
+# applies ONLY when a declaring repo's own allowlist opts this literal path
+# in -- joshing.you's declaration does, so its behavior is unchanged; a
+# different repo's maintenance tier simply doesn't get this extra belt. A
+# future ticket can parameterize it fully if a second repo needs an
+# equivalent guard.
+AUTOMERGE_MAINTENANCE_REJECTED_FILE="src/_data/rejected.json"
 
 # Fallback logger so this module is sourceable standalone (tests).
 if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*" >&2; }; fi
@@ -237,33 +266,104 @@ automerge_reviewer_blocks() {
       ' >/dev/null 2>&1
 }
 
-# automerge_maintenance_tier_branch_ok <pr_json> -- exit 0 if this is the
-# refresh pipeline's own SAME-REPO review->master PR: head branch "review",
-# base branch "master", and the head repo is literally the base repo (not a
-# fork that happens to name its branch "review" too -- the branch-name pin
-# alone would be satisfied while the local clone's origin/review is entirely
-# unrelated content; igor#516 security review).
+# _automerge_maintenance_path_allowed <path> <allowlist-json-array> -- exit 0
+# if <path> matches one of the glob patterns in <allowlist-json-array>
+# (a compact JSON array of strings). Shared glob-match primitive for the
+# files/data checks below.
+_automerge_maintenance_path_allowed() {
+  local f="$1" allowlist="$2" pat
+  while IFS= read -r pat; do
+    [ -n "$pat" ] || continue
+    # shellcheck disable=SC2254  # deliberate glob match -- $pat is a declared allowlist pattern, not a literal
+    case "$f" in $pat) return 0 ;; esac
+  done < <(jq -r '.[]?' <<<"$allowlist" 2>/dev/null)
+  return 1
+}
+
+# automerge_maintenance_declaration <repo> -- echoes the repo's agent.json
+# `.automerge.maintenance` declaration as a compact single-line JSON object
+# {branch, allowlist, data_file} and returns 0 IFF it is
+# REQUIRED-AND-EXPLICIT: branch and data_file are non-empty strings,
+# allowlist is a non-empty array of non-empty strings, and neither the
+# allowlist nor data_file can ever match a dossier file
+# (AUTOMERGE_MAINTENANCE_DOSSIER_FILES, above -- deliverable 3, igor#537).
+# Missing or partial declaration reads as "the maintenance tier does not
+# exist for this repo" -- no defaults; a partial one logs ONE loud line so
+# the gap is visible instead of silently no-op'ing.
+#
+# Reads agent.json off forgejo_repo_get_file, which -- passed no `ref` --
+# resolves against the repo's DEFAULT BRANCH (see lib/review.sh's
+# trust-model note), never a PR head under classification. That is what
+# makes a maintenance-tier PR editing its own agent.json powerless to affect
+# its OWN classification: the edit can only take effect for a LATER PR,
+# after this one already merged (or didn't) through today's rules.
+automerge_maintenance_declaration() {
+  local repo="$1" cfg decl branch data_file allowlist allowlist_len
+
+  cfg=$(forgejo_repo_get_file "$repo" "$AGENT_CONFIG_FILE" 2>/dev/null) || return 1
+  [ -n "$cfg" ] || return 1
+  decl=$(jq -c '.automerge.maintenance // empty' <<<"$cfg" 2>/dev/null)
+  [ -n "$decl" ] && [ "$decl" != "null" ] || return 1
+
+  branch=$(jq -r '.branch // empty' <<<"$decl" 2>/dev/null)
+  data_file=$(jq -r '.data_file // empty' <<<"$decl" 2>/dev/null)
+  allowlist=$(jq -c '.allowlist // empty' <<<"$decl" 2>/dev/null)
+  allowlist_len=$(jq -r 'if type == "array" then length else empty end' <<<"$allowlist" 2>/dev/null)
+
+  if [ -z "$branch" ] || [ -z "$data_file" ] || [ -z "$allowlist_len" ] || [ "$allowlist_len" -eq 0 ] \
+     || ! jq -e 'all(.[]; type == "string" and length > 0)' <<<"$allowlist" >/dev/null 2>&1; then
+    log "automerge: ${repo} declares a partial automerge.maintenance (branch, allowlist, and data_file are all required, non-empty) -- tier off"
+    return 1
+  fi
+
+  if _automerge_maintenance_declares_dossier_file "$allowlist" "$data_file"; then
+    log "automerge: ${repo} automerge.maintenance allowlist/data_file would match its own dossier (${AUTOMERGE_MAINTENANCE_DOSSIER_FILES}) -- refusing the declaration (a repo can read its privileges, never change them unattended)"
+    return 1
+  fi
+
+  printf '%s' "$decl"
+}
+
+# _automerge_maintenance_declares_dossier_file <allowlist-json-array>
+# <data_file> -- exit 0 if <data_file>, or any AUTOMERGE_MAINTENANCE_DOSSIER_FILES
+# name, matches one of the allowlist's glob patterns -- i.e. the declaration
+# would let a maintenance-tier PR touch its own dossier.
+_automerge_maintenance_declares_dossier_file() {
+  local allowlist="$1" data_file="$2" dossier
+  for dossier in $AUTOMERGE_MAINTENANCE_DOSSIER_FILES; do
+    _automerge_maintenance_path_allowed "$dossier" "$allowlist" && return 0
+    [ "$data_file" = "$dossier" ] && return 0
+  done
+  return 1
+}
+
+# automerge_maintenance_tier_branch_ok <pr_json> <head_branch> -- exit 0 if
+# this is the declared refresh pipeline's own SAME-REPO
+# <head_branch>->master PR: the head repo is literally the base repo (not a
+# fork that happens to name its branch the same -- the branch-name pin alone
+# would be satisfied while the local clone's origin/<head_branch> is
+# entirely unrelated content; igor#516 security review). Base branch is
+# always AUTOMERGE_MAINTENANCE_TIER_BASE_BRANCH (see the constant's comment).
 automerge_maintenance_tier_branch_ok() {
-  local pr_json="$1" head_ref base_ref head_full base_full
+  local pr_json="$1" head_branch="$2" head_ref base_ref head_full base_full
   head_ref=$(jq -r '.head.ref // ""' <<<"$pr_json" 2>/dev/null)
   base_ref=$(jq -r '.base.ref // ""' <<<"$pr_json" 2>/dev/null)
   head_full=$(jq -r '.head.repo.full_name // ""' <<<"$pr_json" 2>/dev/null)
   base_full=$(jq -r '.base.repo.full_name // ""' <<<"$pr_json" 2>/dev/null)
-  [ "$head_ref" = "$AUTOMERGE_MAINTENANCE_TIER_HEAD_BRANCH" ] \
+  [ "$head_ref" = "$head_branch" ] \
     && [ "$base_ref" = "$AUTOMERGE_MAINTENANCE_TIER_BASE_BRANCH" ] \
     && [ -n "$head_full" ] && [ "$head_full" = "$base_full" ]
 }
 
-# automerge_maintenance_tier_files_ok <repo> <pr> -- exit 0 (echoing the
-# changed-file count) if every changed path -- and, for a rename, its
-# previous path too -- sits inside the maintenance data allowlist:
-# src/_data/{sites,feeds,rejected}.json or src/images/screenshots/**.
+# automerge_maintenance_tier_files_ok <repo> <pr> <allowlist-json-array> --
+# exit 0 (echoing the changed-file count) if every changed path -- and, for
+# a rename, its previous path too -- sits inside the declared allowlist.
 # Anything else (scripts, workflows, templates, evidence/) refuses. Fails
 # CLOSED on an unwalkable file listing (forgejo_pr_files pages; a truncated
 # listing must never read as "all allowlisted") or a filename-less element,
 # same posture as automerge_risk_gate.
 automerge_maintenance_tier_files_ok() {
-  local repo="$1" pr="$2" files nfiles bad
+  local repo="$1" pr="$2" allowlist="$3" files nfiles bad
   files=$(forgejo_pr_files "$repo" "$pr" 2>/dev/null) || return 1
   nfiles=$(jq -r 'if type == "array" then length else empty end' <<<"$files" 2>/dev/null)
   [ -n "$nfiles" ] || return 1
@@ -271,22 +371,23 @@ automerge_maintenance_tier_files_ok() {
   bad=$(jq -r '.[] | (.filename, (.previous_filename // empty))' <<<"$files" 2>/dev/null | {
     while IFS= read -r f; do
       [ -n "$f" ] || continue
-      case "$f" in
-        src/_data/sites.json|src/_data/feeds.json|src/_data/rejected.json|src/images/screenshots/*) ;;
-        *) printf '%s' "$f"; break ;;
-      esac
+      _automerge_maintenance_path_allowed "$f" "$allowlist" && continue
+      printf '%s' "$f"; break
     done
   })
   [ -z "$bad" ] || return 1
   printf '%s' "$nfiles"
 }
 
-# automerge_maintenance_tier_data_ok <clone-path> <base-sha> <head-sha> --
-# exit 0 if sites.json/rejected.json changed only in ways the maintenance
-# tier trusts unattended: no listing added or removed from sites.json, and no
-# net GAIN of "no-josh-visible" guard-rejection entries in rejected.json.
+# automerge_maintenance_tier_data_ok <clone-path> <base-sha> <head-sha>
+# <data_file> <allowlist-json-array> -- exit 0 if <data_file> changed only
+# in ways the maintenance tier trusts unattended: no listing added or
+# removed. Additionally applies the rejected.json "guard-rejection belt"
+# (no net GAIN of "no-josh-visible" entries) IF the repo's own allowlist
+# opts AUTOMERGE_MAINTENANCE_REJECTED_FILE in (see that constant's comment
+# -- this half stays hardcoded, unlike data_file).
 #
-# sites.json is compared by CORE IDENTITY, not a line-level diff or a bare
+# <data_file> is compared by CORE IDENTITY, not a line-level diff or a bare
 # element count: each entry with the fields the issue itself names as
 # legitimate metadata churn (updatedDate, title, feeds) stripped, then the
 # SORTED set of what's left compared between base and head. Two entry sets
@@ -308,11 +409,11 @@ automerge_maintenance_tier_files_ok() {
 # the PR read and the classification (same review). Fails CLOSED on any
 # unreadable blob or unparseable JSON.
 automerge_maintenance_tier_data_ok() {
-  local path="$1" base="$2" head="$3"
+  local path="$1" base="$2" head="$3" data_file="$4" allowlist="$5"
   local old_sites new_sites old_core new_core old_rej new_rej old_rn new_rn
 
-  old_sites=$(git -C "$path" show "${base}:src/_data/sites.json" 2>/dev/null) || return 1
-  new_sites=$(git -C "$path" show "${head}:src/_data/sites.json" 2>/dev/null) || return 1
+  old_sites=$(git -C "$path" show "${base}:${data_file}" 2>/dev/null) || return 1
+  new_sites=$(git -C "$path" show "${head}:${data_file}" 2>/dev/null) || return 1
   jq -e 'type == "array"' <<<"$old_sites" >/dev/null 2>&1 || return 1
   jq -e 'type == "array"' <<<"$new_sites" >/dev/null 2>&1 || return 1
   old_core=$(jq -c '[.[] | del(.updatedDate, .title, .feeds)] | sort_by(tostring)' <<<"$old_sites" 2>/dev/null)
@@ -320,18 +421,24 @@ automerge_maintenance_tier_data_ok() {
   [ -n "$old_core" ] && [ -n "$new_core" ] || return 1
   [ "$old_core" = "$new_core" ] || return 1
 
-  old_rej=$(git -C "$path" show "${base}:src/_data/rejected.json" 2>/dev/null) || return 1
-  new_rej=$(git -C "$path" show "${head}:src/_data/rejected.json" 2>/dev/null) || return 1
-  old_rn=$(jq -r '[.. | strings | select(. == "no-josh-visible")] | length' <<<"$old_rej" 2>/dev/null)
-  new_rn=$(jq -r '[.. | strings | select(. == "no-josh-visible")] | length' <<<"$new_rej" 2>/dev/null)
-  [ -n "$old_rn" ] && [ -n "$new_rn" ] || return 1
-  [ "$new_rn" -le "$old_rn" ] 2>/dev/null
+  if _automerge_maintenance_path_allowed "$AUTOMERGE_MAINTENANCE_REJECTED_FILE" "$allowlist"; then
+    old_rej=$(git -C "$path" show "${base}:${AUTOMERGE_MAINTENANCE_REJECTED_FILE}" 2>/dev/null) || return 1
+    new_rej=$(git -C "$path" show "${head}:${AUTOMERGE_MAINTENANCE_REJECTED_FILE}" 2>/dev/null) || return 1
+    old_rn=$(jq -r '[.. | strings | select(. == "no-josh-visible")] | length' <<<"$old_rej" 2>/dev/null)
+    new_rn=$(jq -r '[.. | strings | select(. == "no-josh-visible")] | length' <<<"$new_rej" 2>/dev/null)
+    [ -n "$old_rn" ] && [ -n "$new_rn" ] || return 1
+    [ "$new_rn" -le "$old_rn" ] 2>/dev/null || return 1
+  fi
+  return 0
 }
 
 # automerge_maintenance_tier_ok <repo> <pr> <pr_json> <head> <verdict>
 # <reviewed_sha> -- exit 0 (echoing "files=N, +0 sites, -0 sites" for the log
 # line) if this require_human PR qualifies for the maintenance-tier
 # carve-out. ALL of:
+#   - automerge_maintenance_declaration -- the repo's OWN dossier declares a
+#     complete, valid automerge.maintenance (REQUIRED-AND-EXPLICIT opt-in;
+#     igor#537 -- undeclared/partial repos never reach the checks below);
 #   - the shadow review is the ONLY review signal on this path (there is no
 #     human in the loop here), so it must be an affirmative APPROVE bound to
 #     THIS exact head -- an absent/COMMENT/stale verdict never qualifies;
@@ -339,28 +446,34 @@ automerge_maintenance_tier_data_ok() {
 #     exists to give the human MORE authority, not less, so their veto still
 #     applies exactly as it does on every other merge path (igor#516
 #     amendment 2);
-#   - automerge_maintenance_tier_branch_ok (same-repo review->master);
-#   - automerge_maintenance_tier_files_ok (the data allowlist);
-#   - automerge_maintenance_tier_data_ok (no listing added or removed).
+#   - automerge_maintenance_tier_branch_ok (same-repo <branch>->master);
+#   - automerge_maintenance_tier_files_ok (the declared allowlist);
+#   - automerge_maintenance_tier_data_ok (no listing added or removed in
+#     the declared data_file).
 # <pr_json> is the caller's own /pulls/<pr> fetch, reused here rather than
 # re-fetched -- a second fetch would only widen the race between what gets
 # classified and what gets merged.
 automerge_maintenance_tier_ok() {
   local repo="$1" pr="$2" pr_json="$3" head="$4" verdict="$5" reviewed_sha="$6"
-  local base_sha nfiles clone_path
+  local decl branch data_file allowlist base_sha nfiles clone_path
 
   [ "$verdict" = "APPROVE" ] && [ "$reviewed_sha" = "$head" ] || return 1
   automerge_reviewer_blocks "$repo" "$pr" "${FORGEJO_REVIEWER:-}" && return 1
 
-  automerge_maintenance_tier_branch_ok "$pr_json" || return 1
+  decl=$(automerge_maintenance_declaration "$repo") || return 1
+  branch=$(jq -r '.branch' <<<"$decl" 2>/dev/null)
+  data_file=$(jq -r '.data_file' <<<"$decl" 2>/dev/null)
+  allowlist=$(jq -c '.allowlist' <<<"$decl" 2>/dev/null)
+
+  automerge_maintenance_tier_branch_ok "$pr_json" "$branch" || return 1
   base_sha=$(jq -r '.base.sha // ""' <<<"$pr_json" 2>/dev/null)
   [ -n "$base_sha" ] || return 1
 
-  nfiles=$(automerge_maintenance_tier_files_ok "$repo" "$pr") || return 1
+  nfiles=$(automerge_maintenance_tier_files_ok "$repo" "$pr" "$allowlist") || return 1
 
   ensure_repo_local "$repo"
   clone_path=$(repo_path_for "$repo")
-  automerge_maintenance_tier_data_ok "$clone_path" "$base_sha" "$head" || return 1
+  automerge_maintenance_tier_data_ok "$clone_path" "$base_sha" "$head" "$data_file" "$allowlist" || return 1
 
   printf 'files=%s, +0 sites, -0 sites' "$nfiles"
 }
@@ -768,13 +881,14 @@ do_automerge_tick() {
       # REQUEST_CHANGES vetoes: the shadow's on the human path, the human's on the
       # default path -- we never merge over a "no".
       if [ "$req_human" = "1" ]; then
-        # Maintenance-tier carve-out (igor#516): scoped to ONE hardcoded repo --
-        # a classifier bug can at worst mis-gate joshing.you, never widen the
-        # bypass to any other require_human repo.
-        maint_class=""
-        if [ "$repo" = "$AUTOMERGE_MAINTENANCE_TIER_REPO" ]; then
-          maint_class=$(automerge_maintenance_tier_ok "$repo" "$pr" "$pr_json" "$head" "$verdict" "$reviewed_sha") || true
-        fi
+        # Maintenance-tier carve-out (igor#516; agnostic per igor#537): the
+        # repo pin is now "any repo whose OWN dossier declares
+        # automerge.maintenance" -- automerge_maintenance_tier_ok's first
+        # check is automerge_maintenance_declaration, which fails closed
+        # (tier off) on anything missing/partial/dossier-touching, so a
+        # classifier bug can at worst mis-gate a repo that opted itself in,
+        # never widen the bypass to a repo that never declared the tier.
+        maint_class=$(automerge_maintenance_tier_ok "$repo" "$pr" "$pr_json" "$head" "$verdict" "$reviewed_sha") || true
         if [ -n "$maint_class" ]; then
           log "automerge: ${key} maintenance-tier (${maint_class}) -- merging without human gate"
         else
