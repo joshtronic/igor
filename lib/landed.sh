@@ -115,9 +115,15 @@ landed_kind() {
 # resolves on a later tick -- so a Forgejo blip at merge time defers the
 # decision instead of losing the watch outright. A repo that genuinely
 # declares nothing still gets no watch.
+#
+# Only stdout is discarded, never stderr: this is the dispatch path that runs
+# in production (do_automerge_tick), so swallowing stderr here would swallow
+# landed_kind's unrecognized-kind line before it reaches the journal, leaving
+# the operator with no watch AND no notice. An undeclared repo logs nothing,
+# so letting stderr through adds no per-tick noise for the fleet at large.
 landed_applies() {
   local rc=0
-  landed_kind "$1" >/dev/null 2>&1 || rc=$?
+  landed_kind "$1" >/dev/null || rc=$?
   [ "$rc" -ne 1 ]
 }
 
@@ -127,7 +133,10 @@ landed_applies() {
 # re-querying the dossier every tick: the watch then survives a Forgejo blip
 # (which a per-tick re-query would read as "no longer a watched repo"), and
 # the tick loop sheds a network call. An unreadable dossier stamps an empty
-# kind for do_landed_tick to resolve later.
+# kind for do_landed_tick to resolve later. Stderr IS suppressed on this
+# lookup -- unlike landed_applies, which is the gate that reaches this call --
+# because the only caller (do_automerge_tick) has already run landed_applies
+# on the same repo, so anything worth logging was logged one line ago.
 #
 # A second merge on the same repo before the first watch
 # clears just overwrites it with the newer sha and resets attempts to 0 --

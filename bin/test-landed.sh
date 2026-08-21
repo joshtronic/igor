@@ -5,10 +5,14 @@
 # binding lives in each repo's own dossier (`landed-kind`); this module is
 # a dispatcher over the two IMPLEMENTED kinds, self-pull and context-cache.
 #   landed_kind/landed_applies  -- dispatches on the declared landed-kind
-#                                   dossier value; undeclared is quiet,
-#                                   unrecognized is loud, both are "no watch",
-#                                   and an UNREADABLE dossier is neither (rc2)
-#                                   -- the watch is kept, never dropped.
+#                                   dossier value, read off EITHER an adopted
+#                                   AGENTS.md `## Metadata` row or the legacy
+#                                   agent.json; undeclared is quiet,
+#                                   unrecognized is loud (all the way out to
+#                                   the journal, through do_automerge_tick),
+#                                   both are "no watch", and an UNREADABLE
+#                                   dossier is neither (rc2) -- the watch is
+#                                   kept, never dropped.
 #   landed_record/landed_clear/landed_pending_* -- the .landed state round-trip.
 #   landed_assert_self_pull     -- ancestor check against a REAL fixture repo.
 #   landed_assert_context_cache -- exact-match check against a fixture cache dir.
@@ -60,24 +64,52 @@ no()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (expec
 eq()  { if [ "$2" = "$3" ]; then pass "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
 has() { case "$2" in *"$3"*) pass "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
 
-# Fixture repos, none of which have adopted the AGENTS.md dossier (legacy
-# agent.json `.landed.kind` path only) -- reused across every section below.
+# Fixture repos. All but DOSSIER_REPO are on the legacy agent.json
+# `.landed.kind` path -- which is what the fleet actually has on disk today.
+# DOSSIER_REPO is on the ADOPTED path (a root AGENTS.md `## Metadata` block
+# carrying `landed-kind:`), the shape this genericization exists to establish
+# and the one distillery#7 will add. Reused across every section below.
 SELF_REPO="$AUTOMERGE_SELF_REPO"    # joshtronic/igor -- declares landed-kind: self-pull, for real
 CACHE_REPO="joshtronic/distillery"  # declares landed-kind: context-cache
 PLAIN_REPO="acme/plain"             # declares no landed-kind at all
 WEIRD_REPO="acme/weird"             # declares an unrecognized landed-kind value
 BLIP_REPO="acme/blip"               # dossier unreadable -- Forgejo blip, NOT "declares nothing"
+DOSSIER_REPO="acme/adopted"         # declares landed-kind in an AGENTS.md Metadata block
 # Sorts after SELF_REPO so the ordering section below sees the landing first.
 ZZ_CACHE_REPO="joshtronic/zz-distillery"
+
+# DOSSIER_REPO's root AGENTS.md, spec-shaped (docs/agents-md-spec.md). Its
+# legacy agent.json below deliberately declares a DIFFERENT kind, so an
+# assertion that reads back `context-cache` proves the Metadata block is what
+# answered rather than the fallback.
+DOSSIER_AGENTS_MD=$(cat <<'MD'
+# acme/adopted
+
+## KPIs
+
+(none yet)
+
+## Metadata
+
+```
+type: infra
+landed-kind: context-cache
+```
+MD
+)
 
 forgejo_repo_get_file_status() {
   local repo="$1" path="$2"
   [ "$repo" = "$BLIP_REPO" ] && { printf 'error\t'; return 0; }   # transport failure, both files
-  [ "$path" = "AGENTS.md" ] && { printf 'missing\t'; return 0; }  # no fixture repo has adopted the dossier
+  if [ "$path" = "AGENTS.md" ]; then
+    [ "$repo" = "$DOSSIER_REPO" ] && { printf 'found\t%s' "$DOSSIER_AGENTS_MD"; return 0; }
+    printf 'missing\t'; return 0   # every other fixture repo is still un-adopted
+  fi
   case "$repo" in
     "$SELF_REPO")   printf 'found\t%s' '{"landed":{"kind":"self-pull"}}' ;;
     "$CACHE_REPO"|"$ZZ_CACHE_REPO") printf 'found\t%s' '{"landed":{"kind":"context-cache"}}' ;;
     "$WEIRD_REPO")  printf 'found\t%s' '{"landed":{"kind":"quantum-tunnel"}}' ;;
+    "$DOSSIER_REPO") printf 'found\t%s' '{"landed":{"kind":"self-pull"}}' ;;
     *)              printf 'missing\t' ;;
   esac
 }
@@ -93,6 +125,28 @@ ok "applies: self-pull repo"              landed_applies "$SELF_REPO"
 ok "applies: context-cache repo"          landed_applies "$CACHE_REPO"
 no "applies: undeclared repo"             landed_applies "$PLAIN_REPO"
 
+echo "== landed_kind: the ADOPTED path -- an AGENTS.md '## Metadata' landed-kind row =="
+# The path this genericization exists to establish (and the one distillery#7
+# adds). The fixture's legacy agent.json says `self-pull`; the Metadata block
+# says `context-cache`. Reading back `context-cache` is what proves the
+# Metadata row answered, rather than the block being ignored and the legacy
+# fallback quietly carrying the test.
+eq "kind: adopted repo reads landed-kind out of the Metadata block, not the legacy agent.json" \
+  "context-cache" "$(landed_kind "$DOSSIER_REPO")"
+ok "applies: adopted repo"  landed_applies "$DOSSIER_REPO"
+landed_record "$DOSSIER_REPO" 7 dsha7
+eq "record: the adopted repo's kind is resolved and persisted" \
+  "context-cache" "$(jq -r '.kind' <<<"$(landed_pending_entry "$DOSSIER_REPO")")"
+export CONTEXT_CACHE_DIR="$TMP/adopted-cache"
+mkdir -p "$CONTEXT_CACHE_DIR/current"; printf 'dsha7' > "$CONTEXT_CACHE_DIR/current/HEAD"
+do_landed_tick
+eq "do_landed_tick dispatches the adopted repo's kind and confirms the landing" \
+  "{}" "$(landed_pending_entry "$DOSSIER_REPO")"
+has "the adopted repo's note names its kind's check" \
+  "$(jq -r '.landed_notes[0].detail' "$STATE")" "context-cache"
+unset CONTEXT_CACHE_DIR
+echo '{}' > "$STATE"
+
 echo "== landed_kind: an unreadable dossier is rc2 (unknown), NOT rc1 (absent) =="
 eq "kind: undeclared repo is rc1 -- a real answer" "1" "$(rc landed_kind "$PLAIN_REPO")"
 eq "kind: unrecognized value is rc1 -- also a real answer" "1" "$(rc landed_kind "$WEIRD_REPO")"
@@ -107,8 +161,19 @@ eq "kind: unrecognized value echoes nothing" "" "$(landed_kind "$WEIRD_REPO" 2>/
 LOUD=$(landed_kind "$WEIRD_REPO" 2>&1 1>/dev/null)
 has "kind: unrecognized value logs loudly, names the repo and the bad value" \
   "$LOUD" "$WEIRD_REPO declares unrecognized landed-kind 'quantum-tunnel'"
+# landed_applies is the wrapper the production dispatch path actually calls,
+# and it discards landed_kind's stdout. It must NOT discard its stderr too, or
+# the loud line dies before the journal ever sees it. (Asserted end to end
+# through do_automerge_tick in the wiring section at the bottom of this file --
+# this is the unit-level half.)
+APPLIES_LOUD=$(landed_applies "$WEIRD_REPO" 2>&1 1>/dev/null)
+has "applies: the unrecognized-kind line SURVIVES the wrapper's redirection" \
+  "$APPLIES_LOUD" "declares unrecognized landed-kind 'quantum-tunnel'"
 QUIET=$(landed_kind "$PLAIN_REPO" 2>&1 1>/dev/null)
 eq "kind: undeclared repo logs nothing -- quiet, same as any other unwatched repo" "" "$QUIET"
+APPLIES_QUIET=$(landed_applies "$PLAIN_REPO" 2>&1 1>/dev/null)
+eq "applies: an undeclared repo stays silent through the wrapper too (no per-tick noise)" \
+  "" "$APPLIES_QUIET"
 
 echo "== landed_kind: a missing lib/dossier.sh dependency fails CLOSED and logs =="
 BARE=$(bash -c '. "$1/../lib/landed.sh"; landed_kind acme/site' _ "$HERE" 2>&1)
@@ -278,6 +343,34 @@ ok "do_automerge_tick merges the url-less undeclared repo" do_automerge_tick
 eq "no .deploy stamped"   "" "$(jq -r '.deploy.repo // ""' "$STATE")"
 eq "no .landed entry created (undeclared -- same as before this repo ever opted in)" \
   "" "$(jq -r '.landed // {} | keys | join(",")' "$STATE")"
+PLAIN_MERGE_LOG=$(do_automerge_tick 2>&1 1>/dev/null)
+case "$PLAIN_MERGE_LOG" in
+  *"landed-kind"*) printf '  x undeclared repo merge stays quiet about landed-kind\n'; FAIL=$((FAIL + 1)) ;;
+  *) pass "undeclared repo merge stays quiet about landed-kind (no per-merge noise)" ;;
+esac
+
+echo "== do_automerge_tick wiring: an unrecognized landed-kind reaches the OPERATOR on the merge path =="
+# The production dispatch path is do_automerge_tick -> landed_applies. Asserting
+# the loud line only against a direct landed_kind call proves nothing about the
+# path that runs: landed_applies discards stdout, and if it discarded stderr the
+# operator would get no watch AND no notice -- a silent default inside the module
+# whose entire job (igor#512) is catching silent failures.
+echo '{}' > "$STATE"
+export VALIDATED_REPOS_JSON="{\"full_name\":\"${WEIRD_REPO}\"}"
+WEIRD_MERGE_LOG=$(do_automerge_tick 2>&1 1>/dev/null)
+has "the merge logs the unrecognized kind, naming the repo and the bad value" \
+  "$WEIRD_MERGE_LOG" "$WEIRD_REPO declares unrecognized landed-kind 'quantum-tunnel'"
+eq "no .landed entry created (unrecognized -- loud, but still no watch)" \
+  "" "$(jq -r '.landed // {} | keys | join(",")' "$STATE")"
+
+echo "== do_automerge_tick wiring: an ADOPTED-dossier repo's merge stamps a watch carrying its kind =="
+echo '{}' > "$STATE"
+export VALIDATED_REPOS_JSON="{\"full_name\":\"${DOSSIER_REPO}\"}"
+ok "do_automerge_tick merges the url-less adopted repo" do_automerge_tick
+eq ".landed stamped for the adopted repo" \
+  "mergedsha521" "$(jq -r --arg r "$DOSSIER_REPO" '.landed[$r].sha // ""' "$STATE")"
+eq "the stamped kind came from the AGENTS.md Metadata block" \
+  "context-cache" "$(jq -r --arg r "$DOSSIER_REPO" '.landed[$r].kind // ""' "$STATE")"
 
 echo "== do_automerge_tick wiring: a url-less merge whose dossier read FAILS still stamps a watch =="
 # Merge-time half of the same regression: an unreadable dossier must not merge
