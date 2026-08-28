@@ -21,6 +21,16 @@
 # nobody watching. Only a NEVER-seeded cache is fatal (see
 # context_seeded / context_bootstrap_alert) -- igor does not run
 # prompt-consuming work on missing brain.
+#
+# Shape validation alone doesn't prove a skill is the one `still build`
+# actually produced -- it only proves the extracted file LOOKS like a
+# skill. The integrity check for that is dist/manifest.json, which
+# `still build` writes with a sha256 per skill. context_refresh reads it
+# at origin/master and verifies every extracted SKILL.md's raw bytes
+# against its recorded hash before the generation is eligible to swap in
+# (igor#545) -- same all-or-nothing posture: a missing manifest, an
+# unparseable one, a skill absent from it, or a hash mismatch all refuse
+# the whole swap, not just the one skill.
 
 # Fallback stubs so this module is sourceable standalone (tests, or any
 # caller that hasn't sourced tick.sh's full library set).
@@ -140,23 +150,72 @@ _context_warn_once() {
   printf '%s' "$key" > "$marker"
 }
 
+# _context_manifest_raw <distillery-path>
+#
+# Reads dist/manifest.json at origin/master and echoes it, but ONLY
+# after confirming it's parseable JSON -- a missing file or a broken
+# parse both fail loudly (distinct stderr reasons) rather than letting
+# a caller silently treat "no manifest" as "nothing to verify".
+_context_manifest_raw() {
+  local dpath="$1" raw
+  raw=$(git -C "$dpath" show "origin/master:dist/manifest.json" 2>/dev/null) || raw=""
+  if [ -z "$raw" ]; then
+    printf 'manifest missing -- no dist/manifest.json on origin/master\n' >&2
+    return 1
+  fi
+  if ! printf '%s' "$raw" | jq empty >/dev/null 2>&1; then
+    printf 'manifest unparseable -- dist/manifest.json is not valid JSON\n' >&2
+    return 1
+  fi
+  printf '%s' "$raw"
+}
+
+# _context_verify_skill_sha256 <skill> <manifest-json>
+#
+# Hashes the skill's raw SKILL.md bytes at origin/master (the whole
+# file, exactly as `still build` would have hashed it -- not the
+# frontmatter-stripped body context_skill_body returns) and compares
+# against the manifest's recorded sha256 for that skill, keyed by name
+# under .skills. A skill absent from the manifest is a failure, same as
+# a mismatch -- otherwise the check is bypassed by just deleting the
+# manifest entry. Broken out as its own function (rather than inlined
+# in context_refresh's loop) so a test can stub it to prove the gate,
+# not some unrelated validation, is what rejects a mutated skill.
+_context_verify_skill_sha256() {
+  local skill="$1" manifest="$2" dpath expected computed
+  dpath="$(_context_distillery_path)"
+  expected=$(printf '%s' "$manifest" | jq -r --arg s "$skill" '.skills[$s] // empty' 2>/dev/null)
+  if [ -z "$expected" ]; then
+    printf 'missing from manifest\n' >&2
+    return 1
+  fi
+  computed=$(git -C "$dpath" show "origin/master:skills/${skill}/SKILL.md" 2>/dev/null | sha256sum | cut -d' ' -f1)
+  if [ "$expected" != "$computed" ]; then
+    printf 'sha256 mismatch (manifest %s != computed %s)\n' "$expected" "$computed" >&2
+    return 1
+  fi
+}
+
 # context_refresh
 #
 # Called once per tick (bin/tick.sh, near the self-pull). Reads the
 # distillery clone's origin/master HEAD; a no-op if it matches the
-# cache's stamp. Otherwise extracts + validates every CONTEXT_SKILLS
-# entry (frontmatter present, body >= CONTEXT_MIN_LINES lines) into a
+# cache's stamp. Otherwise reads dist/manifest.json and extracts +
+# validates every CONTEXT_SKILLS entry -- shape (frontmatter present,
+# body >= CONTEXT_MIN_LINES lines) AND integrity (raw SKILL.md bytes
+# hash to the sha256 the manifest recorded for that skill) -- into a
 # fresh generation dir and, ONLY if every one is valid, atomically
 # swaps it in as `current` (a symlink rename -- readers via
 # context_surface always see either the whole old generation or the
 # whole new one, never a partial write).
 #
-# On any problem -- clone missing/unreadable, HEAD unresolvable, or any
-# one skill invalid -- the existing cache is left untouched and one
-# warn is logged (deduped by _context_warn_once). Returns nonzero in
-# that case; callers treat this as "coasting on last-good", not a
-# crash -- see context_seeded for the one case that actually matters
-# (never seeded at all).
+# On any problem -- clone missing/unreadable, HEAD unresolvable, a
+# missing/unparseable manifest, a skill absent from the manifest, a
+# sha256 mismatch, or any shape failure -- the existing cache is left
+# untouched and one warn is logged (deduped by _context_warn_once).
+# Returns nonzero in that case; callers treat this as "coasting on
+# last-good", not a crash -- see context_seeded for the one case that
+# actually matters (never seeded at all).
 context_refresh() {
   local path cache_root current head stamp
   path="$(_context_distillery_path)"
@@ -181,24 +240,38 @@ context_refresh() {
     return 0   # already current -- no re-extract
   fi
 
-  local gen errfile skill body line_count ok=1 bad_reason=""
-  gen=$(mktemp -d "$cache_root/.gen-XXXXXX")
+  local gen errfile skill body line_count ok=1 bad_reason="" manifest_raw
   errfile=$(mktemp)
-  for skill in "${CONTEXT_SKILLS[@]}"; do
-    if body=$(context_skill_body "$skill" 2>"$errfile"); then
-      line_count=$(printf '%s\n' "$body" | wc -l)
-      if [ "$line_count" -lt "$CONTEXT_MIN_LINES" ]; then
+  if manifest_raw=$(_context_manifest_raw "$path" 2>"$errfile"); then
+    :
+  else
+    ok=0
+    bad_reason="$(cat "$errfile" 2>/dev/null)"
+  fi
+
+  gen=$(mktemp -d "$cache_root/.gen-XXXXXX")
+  if [ "$ok" -eq 1 ]; then
+    for skill in "${CONTEXT_SKILLS[@]}"; do
+      if body=$(context_skill_body "$skill" 2>"$errfile"); then
+        line_count=$(printf '%s\n' "$body" | wc -l)
+        if [ "$line_count" -lt "$CONTEXT_MIN_LINES" ]; then
+          ok=0
+          bad_reason="skill '${skill}' too short (${line_count} line(s), need >= ${CONTEXT_MIN_LINES})"
+          break
+        fi
+        if ! _context_verify_skill_sha256 "$skill" "$manifest_raw" 2>"$errfile"; then
+          ok=0
+          bad_reason="skill '${skill}' failed manifest sha256 verification -- $(cat "$errfile" 2>/dev/null)"
+          break
+        fi
+        printf '%s\n' "$body" > "$gen/${skill}.md"
+      else
         ok=0
-        bad_reason="skill '${skill}' too short (${line_count} line(s), need >= ${CONTEXT_MIN_LINES})"
+        bad_reason="skill '${skill}' invalid -- $(cat "$errfile" 2>/dev/null)"
         break
       fi
-      printf '%s\n' "$body" > "$gen/${skill}.md"
-    else
-      ok=0
-      bad_reason="skill '${skill}' invalid -- $(cat "$errfile" 2>/dev/null)"
-      break
-    fi
-  done
+    done
+  fi
   rm -f "$errfile"
 
   if [ "$ok" -ne 1 ]; then
