@@ -36,10 +36,10 @@
 #               (e.g. "blocked on X landing").
 #   pr-behind   HOLDS while ref (a PR) is behind its base branch; CLEARS
 #               once it is not (e.g. "blocked on PR #147 catching up").
-#   operator    Not a mechanical condition -- a human decision ("Josh needs
-#               to choose an approach"). Never evaluated, never auto-
-#               requeued; this is the "who" vs "what" split the issue asks
-#               for.
+#   operator    Not a mechanical condition -- a human decision ("the
+#               operator needs to choose an approach"). Never evaluated,
+#               never auto-requeued; this is the "who" vs "what" split
+#               the issue asks for.
 #
 # do_blockprobe_tick sweeps every Status/Blocked issue in the analysis set
 # once per tick (non-model, API-only, so it runs even during a Claude health

@@ -69,7 +69,7 @@ checkpoint_hit_turn_cap() {
 #   discard    anything else -- a real crash; or a turn-cap cut-off left with a
 #              `git stash` that is NOT reconciled (untouched, or the pop
 #              conflicted) -> the existing ship-safety discard.
-# The stash guard preserves the porksicle#114 invariant: never auto-commit over
+# The stash guard preserves the ship-safety invariant: never auto-commit over
 # an unrestored `git stash` (committing -A would silently drop its contents).
 # igor#411: that guard used to veto EVERY turn-cap checkpoint the instant any
 # stash existed, discarding real green work over a stash that could simply be

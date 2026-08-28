@@ -162,7 +162,7 @@ export BODY_PATCH_CAP="$TMP/body-patch-operator.json"
   unset FORGEJO_REVIEWER
   export ISSUE_NUMBER=42 FORGEJO_REPO=acme/x AGENT_HOME="$AGENT_HOME" \
          FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
-  bash "$SCRIPT" "Josh needs to pick an approach" operator >/dev/null 2>&1
+  bash "$SCRIPT" "the operator needs to pick an approach" operator >/dev/null 2>&1
 )
 OP_BODY=$(jq -r '.body // empty' "$BODY_PATCH_CAP" 2>/dev/null)
 has "operator probe: body carries kind: operator" "$OP_BODY" "kind: operator"

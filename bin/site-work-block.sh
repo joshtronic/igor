@@ -34,9 +34,9 @@
 #                          [--website-path PATH] [--live]
 #
 # Required env:
-#   FORGEJO_URL        -- e.g. https://git.sherver.org
+#   FORGEJO_URL        -- e.g. https://git.example.com (your forge host)
 #   FORGEJO_TOKEN      -- for PR open
-#   FORGEJO_HOST       -- e.g. git.sherver.org
+#   FORGEJO_HOST       -- e.g. git.example.com (your forge host)
 #   BOT_USER           -- e.g. igor (resolved from token in tick.sh)
 #
 # Optional env:

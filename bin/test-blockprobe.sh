@@ -49,7 +49,7 @@ eq "no probe block -> empty kind" "" "$(blockprobe_parse_kind "just a normal blo
 OPBODY='---
 ## Blocked (2026-08-20 01:26Z)
 
-Josh needs to pick an approach before this can continue.
+The operator needs to pick an approach before this can continue.
 
 <!-- probe
 kind: operator

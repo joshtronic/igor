@@ -114,6 +114,16 @@ if [ ! -f "$AGENT_HOME/.env" ]; then
   exit 1
 fi
 
+# tick.sh hard-requires DISTILLERY_REPO at the top of EVERY tick, so this
+# has to fail before the timer is enabled below: validating after the
+# `systemctl enable --now` would leave a live timer firing ticks that all
+# die at that same check. Read in a subshell so .env stays scoped to the
+# seeding block further down, which is the only part that needs it.
+if [ -z "$(set -a; . "$AGENT_HOME/.env" 2>/dev/null; printf '%s' "${DISTILLERY_REPO:-}")" ]; then
+  echo "DISTILLERY_REPO must be set in $AGENT_HOME/.env -- see .env.example" >&2
+  exit 1
+fi
+
 mkdir -p "$UNIT_DIR"
 ln -sf "$AGENT_HOME/systemd/agent.service" "$UNIT_DIR/agent.service"
 ln -sf "$AGENT_HOME/systemd/agent.timer"   "$UNIT_DIR/agent.timer"
@@ -123,16 +133,16 @@ systemctl --user enable --now agent.timer
 systemctl --user list-timers agent.timer --no-pager || true
 
 # One initial successful pull of igor's prompt surfaces from the
-# Distillery (joshtronic/distillery) is mandatory -- there's no in-repo
+# Distillery (DISTILLERY_REPO) is mandatory -- there's no in-repo
 # fallback, only the last-good cache (lib/context-source.sh, igor#485).
 # Seed it here rather than waiting for the first tick, so a broken or
 # unreachable distillery is caught during install, not silently on the
 # first minute after the timer fires.
 echo
-echo "-> seeding prompt-surface cache from the Distillery (joshtronic/distillery)"
+echo "-> seeding prompt-surface cache from the Distillery"
 
-# FORGEJO_HOST (used by ssh_clone_url below) comes from .env -- only
-# this seeding block needs it, so keep the sourcing scoped here.
+# FORGEJO_HOST and DISTILLERY_REPO (used below) come from .env -- only
+# this seeding block needs them, so keep the sourcing scoped here.
 set -a
 # shellcheck source=/dev/null
 . "$AGENT_HOME/.env"
@@ -154,11 +164,11 @@ ssh_clone_url() {
 
 if [ ! -d "$DISTILLERY_PATH/.git" ]; then
   mkdir -p "$AGENT_REPO_ROOT"
-  git clone --quiet "$(ssh_clone_url joshtronic/distillery)" "$DISTILLERY_PATH" 2>/dev/null \
-    || echo "warning: could not clone joshtronic/distillery" >&2
+  git clone --quiet "$(ssh_clone_url "$DISTILLERY_REPO")" "$DISTILLERY_PATH" 2>/dev/null \
+    || echo "warning: could not clone $DISTILLERY_REPO" >&2
 else
   git -C "$DISTILLERY_PATH" fetch --prune --quiet origin 2>/dev/null \
-    || echo "warning: could not fetch joshtronic/distillery" >&2
+    || echo "warning: could not fetch $DISTILLERY_REPO" >&2
 fi
 
 # shellcheck source=lib/context-source.sh

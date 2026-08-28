@@ -9,7 +9,7 @@
 # we use only Forgejo's built-in labels + the `Agent` greenlight). Once per ISO day
 # this pass fetches the gate's data source and asks (tool-free) whether its
 # condition is now met. On MET it does NOT hand the ticket to the grind -- the gate
-# check can false-positive (it did on vps-showdown#20), so it removes `Status/Blocked`
+# check has false-positived in practice, so it removes `Status/Blocked`
 # AND the `Agent` greenlight and ASSIGNS the ticket to FORGEJO_REVIEWER for
 # confirmation. The human re-adds `Agent` once they've confirmed the gate really
 # cleared, and only then does the grind claim it. On UNMET the ticket stays
@@ -107,7 +107,7 @@ deferred_parse_evidence() {
 
 # deferred_release_to_reviewer <repo> <num> <reviewer> <evidence> -- gate cleared:
 # hand the ticket to the HUMAN for confirmation, not straight to the grind. The
-# auto gate-check can false-positive (it did on vps-showdown#20), so a machine MET
+# auto gate-check has false-positived in practice, so a machine MET
 # is NOT trusted to auto-work: drop the `Status/Blocked` hold AND the `Agent`
 # greenlight, assign the reviewer, and comment how to release it. The human re-adds
 # `Agent` once they've confirmed. Impure (label/assign/comment via _fj).

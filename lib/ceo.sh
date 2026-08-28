@@ -973,7 +973,7 @@ ceo_parse_reconsider() {
 
 # ---- Phase 4 follow-up: code-check gate (vet a proposal against the real code) ----
 # The CEO drafts proposals BLIND to the code (mandate + metrics + tracker activity,
-# never the repo), so it can pitch already-done work (porksicle #101: per-game SEO
+# never the repo), so it can pitch already-done work (e.g. per-page SEO
 # meta that already existed). Before filing, vet each proposal against the repo's
 # CURRENT code and DROP what's already implemented -- the sharp dev going "you know
 # we already do that, right?"
@@ -1051,7 +1051,7 @@ ceo_revise_refile() {
 # decision-guidance entry, and opens a PR appending it to a "## Decision guidance"
 # section in CEO.md. APPEND-ONLY: it adds what it's learned, never rewrites or
 # erases existing guidance (a bad entry is at worst a bullet the board declines).
-# Josh prunes on merge. Throttled to one open PR so redlines never stack.
+# The operator prunes on merge. Throttled to one open PR so redlines never stack.
 CEO_GUIDANCE_MARKER="<!-- ceo-guidance -->"
 
 # ceo_proposal_outcomes <repo> -- markdown summary of the board's verdicts on the

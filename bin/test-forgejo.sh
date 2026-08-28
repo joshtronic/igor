@@ -19,7 +19,7 @@ eq() {  # <desc> <expected> <actual>
   else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi
 }
 
-# _fj must pass fail-fast timeouts so a brief git.sherver.org blip can't wedge a
+# _fj must pass fail-fast timeouts so a brief git.example.com blip can't wedge a
 # tick (igor#395): a --max-time 30 with no --connect-timeout once hung a tick
 # ~30s and tripped the task-fail healthcheck. Shim curl to capture the args the
 # REAL _fj builds (run before the fixtures below stub _fj out).

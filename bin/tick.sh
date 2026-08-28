@@ -74,6 +74,7 @@ env_file_hint="$AGENT_HOME/.env"
 : "${FORGEJO_REVIEWER:?must be set in $env_file_hint}"
 : "${TICK_TIMEOUT:?must be set in $env_file_hint}"
 : "${AGENT_RECALL_DAYS:?must be set in $env_file_hint}"
+: "${DISTILLERY_REPO:?must be set in $env_file_hint}"
 unset env_file_hint
 
 # -- Library ----------------------------------------------------
@@ -602,7 +603,7 @@ Rules:
 # Claude shouldn't be modifying CI from inside a tick. Callers should
 # abandon (don't push) when this returns non-empty.
 list_offlimits_violations() {
-  # WORKFLOW BAN LIFTED (2026-07-01, Josh's call). The agent may now touch
+  # WORKFLOW BAN LIFTED (2026-07-01, the operator's call). The agent may now touch
   # `.forgejo/workflows/` -- so the agent can maintain CI workflows instead
   # of bouncing every workflow change to a human ticket. What still guards
   # it: the security_gate reviews every diff before
@@ -1092,9 +1093,10 @@ review_reset_rework() {
 # bar the worker can converge on (a reviewer that got pickier every round
 # would move the goalposts and the PR would never land) -- then "max" for the
 # LAST look before the human takes over (the "final boss": rare, and the
-# alternative is Josh's time, so max effort is the cheap bet). Escalation to
-# the human fires at rounds >= 3 (see the REQUEST_CHANGES handler), so the
-# review at rounds>=3 is the one that maxes. Hardcoded, not a knob.
+# alternative is the operator's time, so max effort is the cheap bet).
+# Escalation to the human fires at rounds >= 3 (see the REQUEST_CHANGES
+# handler), so the review at rounds>=3 is the one that maxes. Hardcoded,
+# not a knob.
 reviewer_effort() {
   local rounds="${1:-0}"
   if [ "${rounds:-0}" -ge 3 ]; then printf 'max'; else printf 'high'; fi
@@ -3244,7 +3246,7 @@ do_deploy_barrier && exit 0
 #
 # igor's prompt surfaces (voice, worker contract, review/feedback/
 # site-work/now/sports-digest directives) are sourced live from the
-# Distillery (joshtronic/distillery) at origin/master -- no pins, no
+# Distillery (DISTILLERY_REPO) at origin/master -- no pins, no
 # submodules, no in-repo fallback (lib/context-source.sh, igor#485).
 # This is igor's OWN "keep it fetched" step for that clone, run near
 # the top of the cascade the same way the harness pulls its own code
@@ -3261,13 +3263,13 @@ do_deploy_barrier && exit 0
 # fatal, and that's the bootstrap gate below, not here.
 DISTILLERY_PATH="$AGENT_REPO_ROOT/distillery"
 if [ ! -d "$DISTILLERY_PATH/.git" ]; then
-  log "context-source: cloning joshtronic/distillery to $DISTILLERY_PATH"
+  log "context-source: cloning $DISTILLERY_REPO to $DISTILLERY_PATH"
   mkdir -p "$AGENT_REPO_ROOT"
-  git clone --quiet "$(ssh_clone_url joshtronic/distillery)" "$DISTILLERY_PATH" 2>/dev/null \
-    || log "warning: clone of joshtronic/distillery failed; context cache serves last-good"
+  git clone --quiet "$(ssh_clone_url "$DISTILLERY_REPO")" "$DISTILLERY_PATH" 2>/dev/null \
+    || log "warning: clone of $DISTILLERY_REPO failed; context cache serves last-good"
 else
   (cd "$DISTILLERY_PATH" && git fetch --prune --quiet origin 2>/dev/null) \
-    || log "warning: fetch of joshtronic/distillery failed; context cache serves last-good"
+    || log "warning: fetch of $DISTILLERY_REPO failed; context cache serves last-good"
 fi
 context_refresh || true
 
@@ -3370,9 +3372,9 @@ while IFS= read -r repo_line; do
     # Genuinely not ready (a real gap in the clone). No ticket -- onboarding
     # is a manual operator step. But blocked work must NOT vanish silently: if
     # the repo has open Agent-labeled tickets, they can't be picked up until
-    # it's onboarded, so say so plainly (a bare "skipping" line is how
-    # knowthetable/snail's audio tickets rotted unnoticed until a human caught
-    # the missing feature). Best-effort API read; never aborts the sweep.
+    # it's onboarded, so say so plainly (a bare "skipping" line is how a
+    # repo's tickets rotted unnoticed until a human caught the missing
+    # feature). Best-effort API read; never aborts the sweep.
     NA_BLOCKED=$(forgejo_find_claimable "$R_NAME" "${FORGEJO_REVIEWER:-}" 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
     if [ "${NA_BLOCKED:-0}" -gt 0 ]; then
       log "validation: $R_NAME not ready for agentic work but has $NA_BLOCKED open Agent-labeled issue(s) that CANNOT be picked up until it's onboarded (run bin/validate-repo.sh $R_NAME for the checklist)"
@@ -4825,7 +4827,7 @@ cd "$WORKTREE"
 #                 reconciled below: snapshot the WIP and resume next tick
 #   discard    -- a real crash; or a turn-cap cut-off left with a `git stash`
 #                 that could not be safely reconciled -> ship-safety discard
-# The stash guard preserves the porksicle#114 invariant: a nonzero exit can mean
+# The stash guard preserves the ship-safety invariant: a nonzero exit can mean
 # the run died mid-workflow before restoring a `git stash` it took, so committing
 # -A would ship a scratch tree OVER the stashed real edits. igor#411: that guard
 # used to veto EVERY turn-cap checkpoint the instant a stash existed, discarding

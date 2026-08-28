@@ -372,11 +372,12 @@ pick_for() {
 # -- personal-source discovery ---------------------------------
 #
 # The personal pickers read only from the unread pool in seen_urls, and
-# nothing else fills it -- so without this, a new josh or jen post would
-# never be discovered (the pickers would forever surface only the frozen
-# legacy backlog). Each cycle, fetch each personal source's feed via
-# autodiscovery and insert any post URL not already seen, as unread. Feeds
-# return only recent entries, so this stays bounded to recent + new.
+# nothing else fills it -- so without this, a new post from a followed
+# personal blog would never be discovered (the pickers would forever
+# surface only the frozen legacy backlog). Each cycle, fetch each
+# personal source's feed via autodiscovery and insert any post URL not
+# already seen, as unread. Feeds return only recent entries, so this
+# stays bounded to recent + new.
 # Knowing the people around Igor is the point of these sources; this keeps
 # that connection live instead of freezing when the backlog drains.
 
