@@ -331,21 +331,23 @@ respective tools on the host; install or skip.
   so does a COMMENT that carries findings: `review_parse_response` reads
   an optional `FINDINGS:` header line (`NONE` vs anything else, including
   absent) and a COMMENT defaults to `PRESENT` unless the directive says
-  otherwise, so every COMMENT the model produces is routed into the exact
-  same rework mechanism REQUEST_CHANGES uses (`review_route_into_rework`)
-  rather than reaching the operator unadjudicated. Only a COMMENT
-  carrying `FINDINGS: NONE` (a clean read with nothing to flag) still
-  requests the human immediately, same as before. Inside that loop the
-  rework agent may DISMISS a finding
-  instead of complying: it writes the reasoning to `.agent/dismissed.md`
+  otherwise, so every COMMENT that does not declare `FINDINGS: NONE` is
+  routed into the exact same rework mechanism REQUEST_CHANGES uses
+  (`review_route_into_rework`) rather than reaching the operator
+  unadjudicated. A COMMENT carrying `FINDINGS: NONE` (a clean read with
+  nothing to flag) requests the human immediately, same as before.
+  Inside that loop the rework agent may DISMISS a finding instead of
+  complying: it writes the reasoning to `.agent/dismissed.md`
   (gitignored scratch, truncated before each run, so it can never reach
   the diff nor survive into a later round) and the harness posts that to
   the PR (`lib/adjudication.sh`). No commits AND dismissals present is
   the CONVERGED terminal state -- handed to the human with the argument
   attached; no commits and no dismissals is still STUCK, escalated as
-  before. The comment is for the human thread only: the review prompt
-  carries no PR comments, so a dismissed finding can be re-raised.
-  The requested-changes text rides in
+  before. That terminus reads the pending findings alone and never which
+  verdict opened the round, so a COMMENT-opened round ends exactly like a
+  REQUEST_CHANGES-opened one. The comment is for the human thread only:
+  the review prompt carries no PR comments, so a dismissed finding can be
+  re-raised. The requested-changes text rides in
   `.review.pending_rc_body`; the PR-pickup filter reads it because
   assignment is the turn marker (issue-type recovery and pull-type
   pickup don't collide). Patch-id dedup: a head that is only a

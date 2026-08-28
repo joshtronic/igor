@@ -3018,7 +3018,7 @@ review_route_into_rework() {
     log "review: ${key} ${verdict} rework_rounds=${rc_rounds} >= 3 -- escalating to human"
     if [ -n "${FORGEJO_REVIEWER:-}" ]; then
       forgejo_comment "$repo" "$number" \
-        "Igor requested changes ${rc_rounds} times without converging -- handing this to you." 2>/dev/null \
+        "Igor's ${verdict} review did not converge after ${rc_rounds} rework rounds -- handing this to you." 2>/dev/null \
         || log "warning: review: escalation comment failed on ${key}"
       review_request_human "$repo" "$number" "escalation after ${rc_rounds} rework rounds"
     fi
