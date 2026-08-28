@@ -28,15 +28,72 @@ is_test_path() {
     '(^|/)test[s]?/|(^|/)bin/test-[^/]+$|\.(test|spec)\.[a-z]+$|_test\.(go|py|rb|ex|exs)$|(^|/)spec/'
 }
 
-# scope_gate_sum_numstat -- reads `git diff --numstat` lines on stdin, sums
-# added+deleted for every path that is neither a test path nor a generated/
-# lockfile path (the pre-existing exclusions the shortstat-based counter
-# this replaced already carried). Binary files (numstat prints "-\t-\tpath")
-# count as 0, same as before.
+# scope_gate_is_generated_data <path> <globs> -- true if path matches one of
+# <globs>, a comma-separated list of shell glob patterns from a repo's
+# dossier-declared `generated-data` key (docs/agents-md-spec.md). Empty
+# globs never matches -- a repo that declares nothing behaves exactly as
+# before (igor#544). Whitespace around each comma-separated entry is
+# trimmed, so `a/*.json, b/*.json` reads the same as `a/*.json,b/*.json`.
+scope_gate_is_generated_data() {
+  local path="$1" globs="$2" glob parts
+  [ -n "$globs" ] || return 1
+  # `read -ra` splits on IFS WITHOUT pathname expansion. An unquoted `for glob
+  # in $globs` would expand each pattern against the CWD first, replacing the
+  # declaration with whatever files happen to be on disk -- so a path the
+  # branch deleted would stop matching and be counted as branch work.
+  IFS=, read -ra parts <<<"$globs" || true
+  for glob in "${parts[@]}"; do
+    glob="${glob#"${glob%%[![:space:]]*}"}"
+    glob="${glob%"${glob##*[![:space:]]}"}"
+    [ -n "$glob" ] || continue
+    # shellcheck disable=SC2053,SC2254  # intentional glob match, not literal compare
+    case "$path" in
+      $glob) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# scope_gate_base_generated_globs <base-ref> -- echoes the `generated-data`
+# declaration from <base-ref>'s dossier, or empty when the repo declares none.
+# Requires lib/dossier.sh sourced (bin/tick.sh sources it first).
+#
+# The ref is the BASE branch, never the branch under judgment: reading HEAD
+# would let a branch add its own exclusion mid-branch and duck this guard,
+# the same self-privilege-escalation the automerge maintenance-tier carve-out
+# guards against. stderr from the lookup is deliberately NOT suppressed -- an
+# absent key is an ordinary rc1, so anything that does print (a missing
+# dossier reader, say) is a real fault worth having in the journal rather
+# than a silent degrade to the old behavior.
+scope_gate_base_generated_globs() {
+  local base_ref="$1" agents cfg
+  agents=$(git show "${base_ref}:AGENTS.md" 2>/dev/null) || agents=""
+  cfg=$(git show "${base_ref}:agent.json" 2>/dev/null) || cfg=""
+  dossier_get_content "$agents" "$cfg" generated-data || true
+}
+
+# scope_gate_sum_numstat [generated-data-globs] -- reads `git diff --numstat`
+# lines on stdin, sums added+deleted for every path that is neither a test
+# path, a hardcoded lockfile/dist/build path (the pre-existing exclusions
+# the shortstat-based counter this replaced already carried), nor a declared
+# generated-data path (igor#544 -- a repo-owned file like a nightly data
+# refresh that a stale base can make a live branch look like it rewrote).
+# Binary files (numstat prints "-\t-\tpath") count as 0, same as before.
+#
+# Echoes three tab-separated fields so a caller can report not just the
+# count but what was excluded and why (igor#544 deliverable #3):
+#   <counted-total>  <generated-data-excluded-lines>  <generated-data-excluded-files>
 scope_gate_sum_numstat() {
-  local added deleted path total=0
+  local globs="${1:-}" added deleted path total=0 gen_lines=0 gen_files=0
   while IFS=$'\t' read -r added deleted path; do
     [ -z "$path" ] && continue
+    [ "$added" = "-" ] && added=0
+    [ "$deleted" = "-" ] && deleted=0
+    if scope_gate_is_generated_data "$path" "$globs"; then
+      gen_lines=$((gen_lines + added + deleted))
+      gen_files=$((gen_files + 1))
+      continue
+    fi
     case "$path" in
       package-lock.json|*/package-lock.json) continue ;;
       yarn.lock|*/yarn.lock) continue ;;
@@ -46,9 +103,7 @@ scope_gate_sum_numstat() {
       build/*|*/build/*) continue ;;
     esac
     is_test_path "$path" && continue
-    [ "$added" = "-" ] && added=0
-    [ "$deleted" = "-" ] && deleted=0
     total=$((total + added + deleted))
   done
-  printf '%s\n' "$total"
+  printf '%s\t%s\t%s\n' "$total" "$gen_lines" "$gen_files"
 }
