@@ -87,7 +87,7 @@ MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 
 # -- constants --------------------------------------------------
 
-MAX_READS_PER_TICK=5   # one read per READING_SLATE source
+MAX_READS_PER_TICK=5   # hard cap on reads per tick, independent of slate length
 SEED_RECENT_MAX=25     # cap on posts seeded per personal feed per cycle
 HTML_TRUNCATE_BYTES=200000
 FETCH_TIMEOUT=30
@@ -326,6 +326,13 @@ parse_reading_slate() {
   read -ra entries <<<"$slate"
   for entry in "${entries[@]}"; do
     [ -z "$entry" ] && continue
+    case "$entry" in
+      *'|'*) ;;
+      *)
+        log "READING_SLATE: entry '$entry' has no 'url|picker' separator -- refusing to run"
+        exit 2
+        ;;
+    esac
     picker="${entry##*|}"
     case " $READING_SLATE_PICKERS " in
       *" $picker "*) ;;

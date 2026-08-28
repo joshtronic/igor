@@ -56,6 +56,11 @@ declare -a SLATE_URLS=()
 ( parse_reading_slate "https://example.com|not_a_real_picker" ) >/dev/null 2>&1
 eq "exit status 2 on unrecognized picker" "2" "$?"
 
+echo "== an entry with no '|' separator fails loudly, not read as a bare URL =="
+declare -a SLATE_URLS=()
+( parse_reading_slate "hn_top" ) >/dev/null 2>&1
+eq "exit status 2 on separator-less entry" "2" "$?"
+
 echo "== all four documented pickers are individually recognized =="
 for picker in personal_newest hn_top kagi_redirect wiki_random; do
   declare -a SLATE_URLS=()
