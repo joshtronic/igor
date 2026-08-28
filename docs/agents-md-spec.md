@@ -82,6 +82,7 @@ the harness can simply take the first one after the literal heading
 | `verify` | no | Command for end-to-end/visual verification (e.g. a Playwright script) |
 | `feedback-csv` | no | Published CSV of user feedback for the triage pass (was `agent.json` `.feedback.csv`) |
 | `landed-kind` | no | Host-state landed-verification kind for a url-less auto-merge (`lib/landed.sh`); one of `self-pull` or `context-cache` (was `agent.json` `.landed.kind`) |
+| `generated-data` | no | Comma-separated glob(s) of generated data files excluded from the finalize-time scope-gate line count (`lib/scope-gate.sh`) |
 
 Note on `test`: validation's existing test-signal rules apply
 unchanged -- a repo needs a test signal (a `test:` command or a live
@@ -92,6 +93,16 @@ at all (the common case -- most url-less repos have nothing for
 `lib/landed.sh` to check). A declared value outside the closed list
 is a hard fail-fast: `lib/landed.sh` logs it loudly and still records
 no watch, rather than guessing.
+
+Note on `generated-data`: globs are matched against paths relative to
+the repo root (shell glob syntax, e.g. `src/_data/*.json`), comma
+separated for more than one. Undeclared means no exclusion beyond the
+gate's existing test/lockfile/`dist/`/`build/` carve-outs -- a repo
+that names nothing behaves exactly as before. This exists so a
+repo-owned generated file (a nightly data refresh, a build cache
+committed to the branch) doesn't get counted as branch work by the
+scope gate when a stale base makes the diff look like the branch
+rewrote it.
 
 `type` closed list: `arcade`, `game`, `content`, `tool`, `api`,
 `personal`, `infra`. Of these, the **site types** -- the ones that

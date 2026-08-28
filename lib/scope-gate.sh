@@ -28,15 +28,50 @@ is_test_path() {
     '(^|/)test[s]?/|(^|/)bin/test-[^/]+$|\.(test|spec)\.[a-z]+$|_test\.(go|py|rb|ex|exs)$|(^|/)spec/'
 }
 
-# scope_gate_sum_numstat -- reads `git diff --numstat` lines on stdin, sums
-# added+deleted for every path that is neither a test path nor a generated/
-# lockfile path (the pre-existing exclusions the shortstat-based counter
-# this replaced already carried). Binary files (numstat prints "-\t-\tpath")
-# count as 0, same as before.
+# scope_gate_is_generated_data <path> <globs> -- true if path matches one of
+# <globs>, a comma-separated list of shell glob patterns from a repo's
+# dossier-declared `generated-data` key (docs/agents-md-spec.md). Empty
+# globs never matches -- a repo that declares nothing behaves exactly as
+# before (igor#544). Whitespace around each comma-separated entry is
+# trimmed, so `a/*.json, b/*.json` reads the same as `a/*.json,b/*.json`.
+scope_gate_is_generated_data() {
+  local path="$1" globs="$2" glob
+  [ -n "$globs" ] || return 1
+  local IFS=,
+  for glob in $globs; do
+    glob="${glob#"${glob%%[![:space:]]*}"}"
+    glob="${glob%"${glob##*[![:space:]]}"}"
+    [ -n "$glob" ] || continue
+    # shellcheck disable=SC2053,SC2254  # intentional glob match, not literal compare
+    case "$path" in
+      $glob) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# scope_gate_sum_numstat [generated-data-globs] -- reads `git diff --numstat`
+# lines on stdin, sums added+deleted for every path that is neither a test
+# path, a hardcoded lockfile/dist/build path (the pre-existing exclusions
+# the shortstat-based counter this replaced already carried), nor a declared
+# generated-data path (igor#544 -- a repo-owned file like a nightly data
+# refresh that a stale base can make a live branch look like it rewrote).
+# Binary files (numstat prints "-\t-\tpath") count as 0, same as before.
+#
+# Echoes three tab-separated fields so a caller can report not just the
+# count but what was excluded and why (igor#544 deliverable #3):
+#   <counted-total>  <generated-data-excluded-lines>  <generated-data-excluded-files>
 scope_gate_sum_numstat() {
-  local added deleted path total=0
+  local globs="${1:-}" added deleted path total=0 gen_lines=0 gen_files=0
   while IFS=$'\t' read -r added deleted path; do
     [ -z "$path" ] && continue
+    [ "$added" = "-" ] && added=0
+    [ "$deleted" = "-" ] && deleted=0
+    if scope_gate_is_generated_data "$path" "$globs"; then
+      gen_lines=$((gen_lines + added + deleted))
+      gen_files=$((gen_files + 1))
+      continue
+    fi
     case "$path" in
       package-lock.json|*/package-lock.json) continue ;;
       yarn.lock|*/yarn.lock) continue ;;
@@ -46,9 +81,7 @@ scope_gate_sum_numstat() {
       build/*|*/build/*) continue ;;
     esac
     is_test_path "$path" && continue
-    [ "$added" = "-" ] && added=0
-    [ "$deleted" = "-" ] && deleted=0
     total=$((total + added + deleted))
   done
-  printf '%s\n' "$total"
+  printf '%s\t%s\t%s\n' "$total" "$gen_lines" "$gen_files"
 }

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # test-scope-gate.sh -- unit tests for lib/scope-gate.sh: the finalize-time
-# runaway-diff guard's test-path classifier (is_test_path) and its numstat
-# line-summer (igor#467). Pure logic -- no network, no git, no state.
+# runaway-diff guard's test-path classifier (is_test_path), its declared
+# generated-data glob matcher (scope_gate_is_generated_data, igor#544), and
+# its numstat line-summer (igor#467). Pure logic -- no network, no git, no
+# state.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -12,6 +14,11 @@ FAIL=0
 ok() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  + %s\n' "$d"; else printf '  x %s (expected rc0)\n' "$d"; FAIL=$((FAIL + 1)); fi; }
 no() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (expected rc!=0)\n' "$d"; FAIL=$((FAIL + 1)); else printf '  + %s\n' "$d"; fi; }
 eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
+# total_of/gen_lines_of/gen_files_of -- pull one field out of
+# scope_gate_sum_numstat's "<total>\t<gen-lines>\t<gen-files>" output.
+total_of() { cut -f1; }
+gen_lines_of() { cut -f2; }
+gen_files_of() { cut -f3; }
 
 echo "== SCOPE_GATE_MAX_LINES: the runaway threshold =="
 eq "threshold is 1000, not the old 400" "1000" "$SCOPE_GATE_MAX_LINES"
@@ -50,15 +57,65 @@ NUMSTAT=$(cat <<'EOF'
 EOF
 )
 eq "sums only non-test, non-lockfile, non-dist lines (10+5 + 3+1 = 19)" "19" \
-  "$(printf '%s\n' "$NUMSTAT" | scope_gate_sum_numstat)"
+  "$(printf '%s\n' "$NUMSTAT" | scope_gate_sum_numstat | total_of)"
+eq "no generated-data globs declared -> 0 excluded lines" "0" \
+  "$(printf '%s\n' "$NUMSTAT" | scope_gate_sum_numstat | gen_lines_of)"
+eq "no generated-data globs declared -> 0 excluded files" "0" \
+  "$(printf '%s\n' "$NUMSTAT" | scope_gate_sum_numstat | gen_files_of)"
 
 echo "== scope_gate_sum_numstat: binary files count as 0 =="
 BIN_NUMSTAT=$(printf '%s\t%s\t%s\n' '-' '-' 'assets/logo.png')
 eq "binary numstat line ('-\t-\tpath') contributes 0" "0" \
-  "$(printf '%s\n' "$BIN_NUMSTAT" | scope_gate_sum_numstat)"
+  "$(printf '%s\n' "$BIN_NUMSTAT" | scope_gate_sum_numstat | total_of)"
 
 echo "== scope_gate_sum_numstat: empty input sums to 0 =="
-eq "no lines -> 0" "0" "$(printf '' | scope_gate_sum_numstat)"
+eq "no lines -> 0" "0" "$(printf '' | scope_gate_sum_numstat | total_of)"
+
+echo "== scope_gate_is_generated_data: glob matching =="
+ok "matches a single declared glob"        scope_gate_is_generated_data "src/_data/jobs.json" "src/_data/*.json"
+ok "matches one of several comma-separated globs" \
+  scope_gate_is_generated_data "atsjobs.json" "src/_data/*.json, atsjobs.json"
+no "declaring nothing never matches"       scope_gate_is_generated_data "src/_data/jobs.json" ""
+no "a path outside the declared glob"      scope_gate_is_generated_data "src/app.js" "src/_data/*.json"
+no "prefix collision without a glob"       scope_gate_is_generated_data "src/_data/jobs.json.bak" "src/_data/*.json"
+
+echo "== scope_gate_sum_numstat: declared generated-data is excluded, and the exclusion is reported (igor#544) =="
+# ctj#127-shaped scenario: real branch work is small (662 lines across 15
+# files in the real incident); a nightly refresh rewrote a multi-MB data
+# file underneath the branch, which a stale-base diff attributes to the
+# branch. Modeled here at a scale that would trip the 1000-line cap on its
+# own if miscounted as branch work.
+GEN_NUMSTAT=$(cat <<'EOF'
+200	100	src/pages/jobs.astro
+150	50	src/lib/search.js
+50000	50000	src/_data/jobs.json
+20000	20000	atsjobs.json
+EOF
+)
+GLOBS="src/_data/*.json,atsjobs.json"
+
+eq "declared globs present: real branch work only (200+100+150+50=500)" "500" \
+  "$(printf '%s\n' "$GEN_NUMSTAT" | scope_gate_sum_numstat "$GLOBS" | total_of)"
+eq "declared globs present: passes the gate (500 <= 1000)" "true" \
+  "$([ "$(printf '%s\n' "$GEN_NUMSTAT" | scope_gate_sum_numstat "$GLOBS" | total_of)" -le "$SCOPE_GATE_MAX_LINES" ] && echo true || echo false)"
+eq "declared globs present: reports 140000 excluded generated-data lines" "140000" \
+  "$(printf '%s\n' "$GEN_NUMSTAT" | scope_gate_sum_numstat "$GLOBS" | gen_lines_of)"
+eq "declared globs present: reports 2 excluded generated-data files" "2" \
+  "$(printf '%s\n' "$GEN_NUMSTAT" | scope_gate_sum_numstat "$GLOBS" | gen_files_of)"
+
+eq "declaration ABSENT: the same branch still blocks (500+140000 > 1000) -- proves the exclusion, not coincidence, does the work" "true" \
+  "$([ "$(printf '%s\n' "$GEN_NUMSTAT" | scope_gate_sum_numstat "" | total_of)" -gt "$SCOPE_GATE_MAX_LINES" ] && echo true || echo false)"
+
+echo "== scope_gate_sum_numstat: the exclusion never becomes a bypass for real oversized work (igor#544) =="
+OVERSIZED_NUMSTAT=$(cat <<'EOF'
+2000	0	src/lib/big-refactor.js
+50000	50000	src/_data/jobs.json
+EOF
+)
+eq "a genuinely oversized branch still blocks even with the declaration present (2000 > 1000)" "true" \
+  "$([ "$(printf '%s\n' "$OVERSIZED_NUMSTAT" | scope_gate_sum_numstat "$GLOBS" | total_of)" -gt "$SCOPE_GATE_MAX_LINES" ] && echo true || echo false)"
+eq "oversized case still narrows correctly: counted total is just the real work (2000)" "2000" \
+  "$(printf '%s\n' "$OVERSIZED_NUMSTAT" | scope_gate_sum_numstat "$GLOBS" | total_of)"
 
 if [ "$FAIL" -gt 0 ]; then
   printf '\n%d assertion(s) failed\n' "$FAIL"

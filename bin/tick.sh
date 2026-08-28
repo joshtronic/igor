@@ -4972,10 +4972,26 @@ elif [ "$COMMITS" -gt 0 ]; then
   # Generated/lockfiles AND test files (lib/scope-gate.sh's is_test_path)
   # are excluded from the line count: lockfiles aren't human-reviewed code,
   # and excluding tests makes "delete tests to shrink the diff" structurally
-  # impossible (igor#411) and stops taxing coverage (igor#465).
-  CHANGED=$(git diff --numstat "origin/${PR_BASE}..HEAD" -- . 2>/dev/null \
-    | scope_gate_sum_numstat)
+  # impossible (igor#411) and stops taxing coverage (igor#465). A repo's own
+  # dossier-declared `generated-data` globs (docs/agents-md-spec.md) are
+  # excluded too (igor#544) -- a nightly data refresh landing on master
+  # while a branch is alive otherwise makes a stale-base diff look like the
+  # branch rewrote the generated file, which the old counter would falsely
+  # tally as branch work. Read the declaration from the BASE branch, never
+  # the branch's own HEAD -- the same self-privilege-escalation concern the
+  # automerge maintenance-tier carve-out guards against (a branch must not
+  # be able to grant itself a new exclusion mid-branch to dodge this guard).
+  BASE_AGENTS=$(git show "origin/${PR_BASE}:AGENTS.md" 2>/dev/null) || BASE_AGENTS=""
+  BASE_CFG=$(git show "origin/${PR_BASE}:agent.json" 2>/dev/null) || BASE_CFG=""
+  GENERATED_GLOBS=$(dossier_get_content "$BASE_AGENTS" "$BASE_CFG" generated-data 2>/dev/null) || GENERATED_GLOBS=""
+  SCOPE_SUM=$(git diff --numstat "origin/${PR_BASE}..HEAD" -- . 2>/dev/null \
+    | scope_gate_sum_numstat "$GENERATED_GLOBS")
+  CHANGED=$(cut -f1 <<<"$SCOPE_SUM")
+  GEN_LINES=$(cut -f2 <<<"$SCOPE_SUM")
+  GEN_FILES=$(cut -f3 <<<"$SCOPE_SUM")
   CHANGED=${CHANGED:-0}
+  GEN_LINES=${GEN_LINES:-0}
+  GEN_FILES=${GEN_FILES:-0}
   # For the commit-count cap, exclude the harness's own WIP-checkpoint commits:
   # they're resume artifacts, not history sprawl, and would otherwise block a
   # legitimately completed task that simply took several turn-cap checkpoints to
@@ -4989,9 +5005,14 @@ elif [ "$COMMITS" -gt 0 ]; then
   REVIEW_COMMITS=${REVIEW_COMMITS:-0}
   if [ "$REVIEW_COMMITS" -gt 10 ] || [ "$CHANGED" -gt "$SCOPE_GATE_MAX_LINES" ]; then
     # OUTCOME: blocked
-    log "outcome: blocked (scope: $REVIEW_COMMITS non-checkpoint commits / $COMMITS total, $CHANGED non-test lines)"
+    log "outcome: blocked (scope: $REVIEW_COMMITS non-checkpoint commits / $COMMITS total, $CHANGED non-test lines, $GEN_LINES generated-data lines across $GEN_FILES files excluded)"
     FILES=$(git diff --name-only "origin/${PR_BASE}..HEAD" | head -30 | sed 's/^/  - /')
-    agent-block.sh "Scope exceeded: this branch reached **${REVIEW_COMMITS} commits / ${CHANGED} non-test changed lines**, over the per-issue runaway guard (10 commits / ${SCOPE_GATE_MAX_LINES} lines, excluding test files).
+    if [ -n "$GENERATED_GLOBS" ]; then
+      GEN_NOTE=" Declared generated-data globs (\`${GENERATED_GLOBS}\`) excluded ${GEN_LINES} lines across ${GEN_FILES} file(s) from that count."
+    else
+      GEN_NOTE=" No \`generated-data\` globs are declared in this repo's dossier, so nothing beyond tests/lockfiles/\`dist\`/\`build\` was excluded -- if a generated file inflated this count, declare it (docs/agents-md-spec.md)."
+    fi
+    agent-block.sh "Scope exceeded: this branch reached **${REVIEW_COMMITS} commits / ${CHANGED} non-test changed lines**, over the per-issue runaway guard (10 commits / ${SCOPE_GATE_MAX_LINES} lines, excluding test files, lockfiles, and \`dist\`/\`build\`).${GEN_NOTE}
 
 Files touched (first 30):
 ${FILES}
