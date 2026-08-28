@@ -9,9 +9,13 @@
 #
 # Fix: bin/agent-block.sh can now record a machine-checkable PROBE alongside
 # the human reason, appended to the issue BODY (never just a comment -- the
-# issue-work prompt is built from the body alone). One probe block, first
-# match... no, LATEST match wins (a ticket can block more than once; only
-# the most recent block's probe describes the CURRENT hold):
+# issue-work prompt is built from the body alone). Only the LATEST
+# "## Blocked (...)" section is read, probe and reason alike: a ticket can
+# block more than once, and only the most recent block describes the current
+# hold. Since the probe args are OPTIONAL, a latest section carrying no probe
+# reads as UNPROBED even when an earlier section has one -- reading the probe
+# from anywhere in the body would clear a ticket on a condition nobody
+# currently means.
 #
 #   <!-- probe
 #   kind: issue-open | pr-behind | operator
@@ -79,12 +83,27 @@ _blockprobe_trim() {
   printf '%s' "$s"
 }
 
-# _blockprobe_last_probe_block <body> -- the content between the LAST
-# "<!-- probe" marker and its closing "-->", or empty if there is none.
-_blockprobe_last_probe_block() {
+# _blockprobe_last_block <body> -- the body from the LAST "## Blocked (...)"
+# heading onward (past its closing paren), or empty when the body records no
+# block at all. Every other reader works from this slice, so the probe and the
+# reason can never come from different blocks.
+_blockprobe_last_block() {
   local body="$1" tail
   case "$body" in
-    *"$BLOCKPROBE_OPEN"*) tail="${body##*"$BLOCKPROBE_OPEN"}" ;;
+    *"$BLOCKPROBE_BLOCKED_HEADING"*) tail="${body##*"$BLOCKPROBE_BLOCKED_HEADING"}" ;;
+    *) return 0 ;;
+  esac
+  printf '%s' "${tail#*)}"
+}
+
+# _blockprobe_last_probe_block <body> -- the content between the LATEST
+# block's "<!-- probe" marker and its closing "-->", or empty if that block
+# records none.
+_blockprobe_last_probe_block() {
+  local tail
+  tail=$(_blockprobe_last_block "$1")
+  case "$tail" in
+    *"$BLOCKPROBE_OPEN"*) tail="${tail##*"$BLOCKPROBE_OPEN"}" ;;
     *) return 0 ;;
   esac
   case "$tail" in
@@ -112,12 +131,9 @@ blockprobe_parse_ref() {
 # "## Blocked (...)" section, with any trailing probe block and surrounding
 # whitespace stripped.
 blockprobe_last_reason() {
-  local body="$1" tail
-  case "$body" in
-    *"$BLOCKPROBE_BLOCKED_HEADING"*) tail="${body##*"$BLOCKPROBE_BLOCKED_HEADING"}" ;;
-    *) return 0 ;;
-  esac
-  tail="${tail#*)}"   # drop through the timestamp's closing paren
+  local tail
+  tail=$(_blockprobe_last_block "$1")
+  [ -n "$tail" ] || return 0
   case "$tail" in
     *"$BLOCKPROBE_OPEN"*) tail="${tail%%"$BLOCKPROBE_OPEN"*}" ;;
   esac
@@ -163,21 +179,30 @@ blockprobe_eval_pr_behind() {
   local repo="$1" num="$2" behind
   if [ -z "$repo" ] || [ -z "$num" ]; then printf 'UNKNOWN'; return 0; fi
   behind=$(automerge_behind_count "$repo" "$num" 2>/dev/null)
+  # Anything non-numeric is UNKNOWN, and so is ANY negative: -1 is the
+  # documented "couldn't tell" sentinel, but a different negative is no more
+  # evidence of being behind than -1 is, and must not fall through to HOLDS.
   case "$behind" in
     0) printf 'CLEARED' ;;
-    ''|*[!0-9-]*|-1) printf 'UNKNOWN' ;;
+    ''|*[!0-9]*) printf 'UNKNOWN' ;;
     *) printf 'HOLDS' ;;
   esac
 }
 
-# blockprobe_evaluate <kind> <ref> -- HOLDS / CLEARED / UNKNOWN. ref is
-# "<owner>/<repo>#<number>"; a malformed ref or unrecognized kind is UNKNOWN.
+# blockprobe_evaluate <kind> <ref> -- HOLDS / CLEARED / UNKNOWN. ref must be
+# exactly "<owner>/<repo>#<number>"; anything else, or an unrecognized kind,
+# is UNKNOWN.
+#
+# The shape is CHECKED rather than assumed because repo and num are
+# interpolated straight into an API path. Collaborator rights and GET-only
+# requests already bound the damage, but a checked shape makes "a crafted ref
+# reaches no request" structurally true instead of incidentally true.
 blockprobe_evaluate() {
   local kind="$1" ref="$2" repo num
-  case "$ref" in
-    *#*) repo="${ref%#*}"; num="${ref##*#}" ;;
-    *) printf 'UNKNOWN'; return 0 ;;
-  esac
+  if [[ ! "$ref" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\#[0-9]+$ ]] || [ "${ref#*..}" != "$ref" ]; then
+    printf 'UNKNOWN'; return 0
+  fi
+  repo="${ref%#*}"; num="${ref##*#}"
   case "$kind" in
     issue-open) blockprobe_eval_issue_open "$repo" "$num" ;;
     pr-behind)  blockprobe_eval_pr_behind "$repo" "$num" ;;
@@ -206,14 +231,22 @@ blockprobe_requeue() {
 # guard tripped: leave Status/Blocked in place, comment once (deduped via
 # BLOCKPROBE_ESCALATED_MARKER), and assign the reviewer.
 blockprobe_escalate() {
-  local repo="$1" num="$2" reviewer="$4" bot="${BOT_USER:-}" cnt
+  local repo="$1" num="$2" reason="$3" reviewer="$4" bot="${BOT_USER:-}" cnt
   cnt=$(forgejo_pr_has_comment_containing "$repo" "$num" "$bot" "$BLOCKPROBE_ESCALATED_MARKER" 2>/dev/null)
   case "$cnt" in ''|*[!0-9]*) cnt=0 ;; esac
   if [ "$cnt" -gt 0 ]; then
     return 0
   fi
+  # The reason is quoted verbatim in a fence: it's what the human has to judge,
+  # and it may be several lines of the agent's own words.
   forgejo_comment "$repo" "$num" \
     "This ticket has blocked with the identical reason more than twice -- clearing and re-blocking looks like a loop, not a resolved condition. Leaving \`Status/Blocked\` in place and escalating for a human decision instead of auto-requeuing again.
+
+The repeated reason:
+
+\`\`\`
+${reason}
+\`\`\`
 
 ${BLOCKPROBE_ESCALATED_MARKER}" \
     2>/dev/null || true

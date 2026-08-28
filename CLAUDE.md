@@ -511,11 +511,22 @@ respective tools on the host; install or skip.
   (reuses `automerge_behind_count`) and clears once it isn't; `operator`
   takes no ref and is never evaluated -- it marks a block on a human
   decision ("Josh needs to pick an approach"), the "who" vs "what" split the
-  issue asked for. Only the LATEST `<!-- probe -->` block in the body
-  counts, since a ticket can block more than once and only the most recent
-  block describes the current hold. No probe recorded at all -> logged as
-  UNPROBED and left alone -- an honest "don't know" beats guessing. The
-  sweep is non-model (API + the same compare call `automerge_behind_count`
+  issue asked for. Everything is read from the LATEST `## Blocked (...)`
+  section only, probe and reason alike (`_blockprobe_last_block` is the one
+  slice both go through): a ticket can block more than once, and only the most
+  recent block describes the current hold. Since the probe args are OPTIONAL,
+  a latest section carrying no probe reads as UNPROBED even when an earlier
+  section has one -- scanning the whole body for a probe would clear a ticket
+  on a condition nobody currently means. No probe recorded at all -> logged as
+  UNPROBED and left alone -- an honest "don't know" beats guessing. Two
+  producers exist: `bin/agent-block.sh` (the worker's own blocks, all three
+  kinds) and the claim guard's rejected-PR strike in `bin/tick.sh`, which
+  records `operator` because "the agent opened N PRs and all were closed" is a
+  human judgement call, not a mechanical condition. Teaching the ISSUE-WORK
+  agent to pass the probe args is a distillery-side change -- that prompt is
+  the Distillery's `worker-contract` skill, not this repo's `AGENTS.md` (which
+  is only `bin/check-sync.sh`'s CI-mode fallback), so it rides its own ticket.
+  The sweep is non-model (API + the same compare call `automerge_behind_count`
   already makes), so it runs near `do_automerge_tick`/`do_landed_tick`,
   above the Claude health gate, and just skips a ticket also carrying
   `lib/deferred.sh`'s own `<!-- gate -->` block -- that's a different

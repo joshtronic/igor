@@ -81,6 +81,31 @@ eq "latest probe kind wins" "pr-behind" "$(blockprobe_parse_kind "$TWOBLOCK")"
 eq "latest probe ref wins"  "joshtronic/repo#147" "$(blockprobe_parse_ref "$TWOBLOCK")"
 eq "latest reason wins"     "second reason" "$(blockprobe_last_reason "$TWOBLOCK")"
 
+# Probe args are OPTIONAL, so "earlier block probed, latest one not" is the
+# EXPECTED shape, not an exotic edge case. Reading the probe from anywhere in
+# the body while reading the reason from the latest section makes the two
+# disagree, and the sweep would then clear a ticket on a condition nobody
+# currently means -- exactly the "probe that tests a condition nobody meant"
+# failure igor#546 exists to avoid.
+MIXED='---
+## Blocked (2026-08-19 10:00Z)
+
+first reason
+
+<!-- probe
+kind: issue-open
+ref: joshtronic/igor#500
+-->
+
+---
+## Blocked (2026-08-20 01:26Z)
+
+second reason, recorded with no probe at all'
+eq "latest block unprobed -> no kind" "" "$(blockprobe_parse_kind "$MIXED")"
+eq "latest block unprobed -> no ref"  "" "$(blockprobe_parse_ref "$MIXED")"
+eq "latest block unprobed -> latest reason" \
+   "second reason, recorded with no probe at all" "$(blockprobe_last_reason "$MIXED")"
+
 echo "== repeat-block guard: exact-reason occurrence counting =="
 REPEATED='---
 ## Blocked (2026-08-20 01:26Z)
@@ -110,12 +135,26 @@ eq "issue-open, fetch fails -> UNKNOWN" "UNKNOWN" "$(blockprobe_evaluate issue-o
 eq "malformed ref (no #) -> UNKNOWN" "UNKNOWN" "$(blockprobe_evaluate issue-open "not-a-ref")"
 eq "unrecognized kind -> UNKNOWN" "UNKNOWN" "$(blockprobe_evaluate made-up-kind joshtronic/igor#537)"
 
+# The ref is interpolated straight into an API path, so its shape is checked
+# rather than merely assumed: anything that isn't <owner>/<repo>#<digits> is
+# UNKNOWN and never reaches a request.
+forgejo_get_issue() { printf '{"state":"closed"}'; }
+eq "ref with no owner -> UNKNOWN"     "UNKNOWN" "$(blockprobe_evaluate issue-open "igor#537")"
+eq "ref with extra path -> UNKNOWN"   "UNKNOWN" "$(blockprobe_evaluate issue-open "a/b/c#537")"
+eq "ref with traversal -> UNKNOWN"    "UNKNOWN" "$(blockprobe_evaluate issue-open "../evil#537")"
+eq "ref with non-numeric num -> UNKNOWN" "UNKNOWN" "$(blockprobe_evaluate issue-open "acme/x#537?foo=1")"
+eq "well-formed ref still evaluates"  "CLEARED" "$(blockprobe_evaluate issue-open "acme/x#537")"
+
 automerge_behind_count() { printf '0'; }
 eq "pr-behind, 0 behind -> CLEARED" "CLEARED" "$(blockprobe_evaluate pr-behind joshtronic/repo#147)"
 automerge_behind_count() { printf '3'; }
 eq "pr-behind, 3 behind -> HOLDS" "HOLDS" "$(blockprobe_evaluate pr-behind joshtronic/repo#147)"
 automerge_behind_count() { printf -- '-1'; }
 eq "pr-behind, undetermined -> UNKNOWN" "UNKNOWN" "$(blockprobe_evaluate pr-behind joshtronic/repo#147)"
+# Any negative count is "couldn't tell", not "behind": -1 is the documented
+# sentinel, but a different negative must not fall through to HOLDS.
+automerge_behind_count() { printf -- '-5'; }
+eq "pr-behind, other negative -> UNKNOWN" "UNKNOWN" "$(blockprobe_evaluate pr-behind joshtronic/repo#147)"
 
 echo "== do_blockprobe_tick: end-to-end sweep over stubbed Forgejo =="
 
@@ -192,6 +231,24 @@ do_blockprobe_tick
 eq "unprobed: reported via log"  "1" "$UNPROBED_SEEN"
 eq "unprobed: label untouched"   "" "$REMOVED"
 eq "unprobed: no comment"        "" "$COMMENTS"
+log() { :; }
+
+echo "-- scenario: earlier block probed, latest one not -> UNPROBED, not cleared --"
+_reset_capture
+_fj() {
+  if [ "$1 $2" = "GET /repos/acme/x/issues?state=open&type=issues&labels=Status/Blocked&limit=50" ]; then
+    _issues_payload 17 "$MIXED"
+  else
+    _no_issues
+  fi
+}
+forgejo_get_issue() { printf '{"state":"closed"}'; }   # the STALE probe's ref did close
+UNPROBED_SEEN=0
+log() { case "$*" in *"UNPROBED"*) UNPROBED_SEEN=1 ;; esac; }
+do_blockprobe_tick
+eq "mixed body: reported UNPROBED" "1" "$UNPROBED_SEEN"
+eq "mixed body: label untouched"   "" "$REMOVED"
+eq "mixed body: no comment"        "" "$COMMENTS"
 log() { :; }
 
 echo "-- scenario: operator-decision block -> never auto-requeued --"
@@ -295,6 +352,18 @@ _fj() {
 }
 do_blockprobe_tick
 eq "gate-block ticket: untouched by blockprobe" "" "$REMOVED"
+
+echo "== the analysis set really is newline-delimited objects =="
+# do_blockprobe_tick reads ANALYSIS_REPOS_JSON line by line, which the stubs
+# above supply themselves -- so if tick.sh ever built an ARRAY instead, each
+# line would be "[" / "  {" and never a repo, the sweep would go blind
+# fleet-wide, and this suite would stay green. Assert the real construction.
+if grep -qF "ANALYSIS_REPOS_JSON=\$(jq -c '.[]' <<<\"\$ALL_REPOS\")" "$HERE/bin/tick.sh"; then
+  printf '  + %s\n' "tick.sh builds ANALYSIS_REPOS_JSON as newline-delimited objects"
+else
+  printf '  x %s\n' "tick.sh no longer builds ANALYSIS_REPOS_JSON as \`jq -c '.[]'\` -- do_blockprobe_tick's line-by-line read is broken"
+  FAIL=$((FAIL + 1))
+fi
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-blockprobe: all checks passed"
