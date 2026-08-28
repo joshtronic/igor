@@ -518,11 +518,19 @@ respective tools on the host; install or skip.
   a latest section carrying no probe reads as UNPROBED even when an earlier
   section has one -- scanning the whole body for a probe would clear a ticket
   on a condition nobody currently means. No probe recorded at all -> logged as
-  UNPROBED and left alone -- an honest "don't know" beats guessing. Two
+  UNPROBED and left alone -- an honest "don't know" beats guessing. A probe
+  that still HOLDS gets `confirmed: <YYYY-MM-DD>` stamped into its probe block
+  (`blockprobe_record_confirmation`), so the ticket itself records when the
+  hold was last re-checked instead of that living only in an ephemeral tick
+  log; the stamp is REPLACED not appended (a month-long block would otherwise
+  grow 30 lines) and date-gated against the body already in hand, so a held
+  block costs one extra API call per day rather than one per tick. Two
   producers exist: `bin/agent-block.sh` (the worker's own blocks, all three
   kinds) and the claim guard's rejected-PR strike in `bin/tick.sh`, which
-  records `operator` because "the agent opened N PRs and all were closed" is a
-  human judgement call, not a mechanical condition. Teaching the ISSUE-WORK
+  records the reason in the issue BODY (not just a comment -- igor#434: a
+  re-queued run is prompted from the body alone) with an `operator` probe,
+  because "the agent opened N PRs and all were closed" is a human judgement
+  call, not a mechanical condition. Teaching the ISSUE-WORK
   agent to pass the probe args is a distillery-side change -- that prompt is
   the Distillery's `worker-contract` skill, not this repo's `AGENTS.md` (which
   is only `bin/check-sync.sh`'s CI-mode fallback), so it rides its own ticket.

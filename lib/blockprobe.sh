@@ -20,6 +20,7 @@
 #   <!-- probe
 #   kind: issue-open | pr-behind | operator
 #   ref: <owner>/<repo>#<number>   (omitted for kind: operator)
+#   confirmed: <YYYY-MM-DD>        (written by the sweep, not the producer)
 #   -->
 #
 #   issue-open  HOLDS while ref is an OPEN issue/PR; CLEARS once it closes
@@ -38,7 +39,12 @@
 #                                         honest "don't know" beats guessing)
 #   - kind: operator                  -> log, leave alone, never requeue
 #   - kind unrecognized               -> log loudly, treat as UNPROBED
-#   - probe evaluates HOLDS           -> log confirmation, leave alone
+#   - probe evaluates HOLDS           -> leave alone, and stamp `confirmed:
+#                                         <date>` into the probe block so the
+#                                         ticket itself says when the hold was
+#                                         last re-checked (the tick log is
+#                                         ephemeral). Date-gated: at most one
+#                                         body PATCH per ticket per day.
 #   - probe evaluates UNKNOWN         -> fails CLOSED: leave alone (a
 #                                         transport blip must never look
 #                                         like a resolved cause)
@@ -125,6 +131,71 @@ blockprobe_parse_ref() {
   local blk; blk=$(_blockprobe_last_probe_block "$1")
   [ -n "$blk" ] || return 0
   printf '%s\n' "$blk" | sed -n 's/^[[:space:]]*ref:[[:space:]]*//p' | head -1 | tr -d '[:space:]'
+}
+
+# blockprobe_parse_confirmed <body> -- the LATEST probe block's confirmed:
+# date (YYYY-MM-DD), or empty if the probe has never been re-confirmed.
+blockprobe_parse_confirmed() {
+  local blk; blk=$(_blockprobe_last_probe_block "$1")
+  [ -n "$blk" ] || return 0
+  printf '%s\n' "$blk" | sed -n 's/^[[:space:]]*confirmed:[[:space:]]*//p' | head -1 | tr -d '[:space:]'
+}
+
+# blockprobe_body_with_confirmation <body> <date> -- <body> with the LATEST
+# probe block carrying `confirmed: <date>`, echoed to stdout. Pure string
+# work, no I/O. rc 1 (echoing <body> unchanged) when there is no probe block
+# to stamp.
+#
+# The stamp REPLACES any existing one rather than appending: a block held for
+# a month would otherwise grow 30 confirmed: lines in the issue description.
+# It lives INSIDE the probe comment for two reasons -- it is invisible in
+# rendered markdown, and it can never be mistaken for part of the human reason
+# text that blockprobe_reason_repeat_count counts.
+blockprobe_body_with_confirmation() {
+  local body="$1" date="$2" pre rest inner suffix kept
+  case "$body" in
+    *"$BLOCKPROBE_OPEN"*) ;;
+    *) printf '%s' "$body"; return 1 ;;
+  esac
+  # `%` (not `%%`) is what makes this the LAST probe block: shortest matching
+  # suffix, so `pre` ends just before the final marker.
+  pre="${body%"$BLOCKPROBE_OPEN"*}"
+  rest="${body#"$pre""$BLOCKPROBE_OPEN"}"
+  case "$rest" in
+    *"-->"*) inner="${rest%%-->*}"; suffix="${rest#*-->}" ;;
+    *) printf '%s' "$body"; return 1 ;;
+  esac
+  kept=$(printf '%s' "$inner" | sed '/^[[:space:]]*confirmed:[[:space:]]*/d')
+  printf '%s%s%s\nconfirmed: %s\n-->%s' "$pre" "$BLOCKPROBE_OPEN" "$kept" "$date" "$suffix"
+}
+
+# blockprobe_record_confirmation <repo> <num> <date> -- stamp the ticket's
+# LATEST probe with <date>. rc 0 when written or already current, 1 when the
+# ticket can't be read or has no probe to stamp.
+#
+# Re-fetches rather than reusing the sweep's list body, and validates the
+# payload looks like an issue before writing, for the reason spelled out at
+# length on forgejo_append_issue_body: the failure mode of a read-modify-write
+# on an unvalidated fetch is DESTRUCTIVE -- it PATCHes a near-empty body over
+# the issue description this whole mechanism exists to preserve.
+blockprobe_record_confirmation() {
+  local repo="$1" num="$2" date="$3" raw current new
+  raw=$(forgejo_get_issue "$repo" "$num") || return 1
+  current=$(jq -er '
+      if (type == "object") and has("number") and has("body")
+      then (.body // "") else empty end
+    ' <<<"$raw") || return 1
+  [ "$(blockprobe_parse_confirmed "$current")" != "$date" ] || return 0
+  # The caller's HOLDS verdict was reached from the LIST body; this is the
+  # RE-FETCHED one. If a write landed in between and the latest block no
+  # longer carries a probe, blockprobe_body_with_confirmation would stamp an
+  # earlier block's probe -- a date against a condition nobody currently
+  # means. Re-check here so "the stamp lands on the latest block" holds by
+  # construction rather than by argument about the two reads agreeing.
+  [ -n "$(blockprobe_parse_kind "$current")" ] || return 1
+  new=$(blockprobe_body_with_confirmation "$current" "$date") || return 1
+  _fj PATCH "/repos/${repo}/issues/${num}" \
+    "$(jq -n --arg b "$new" '{body: $b}')" >/dev/null
 }
 
 # blockprobe_last_reason <body> -- the human reason text of the LATEST
@@ -219,6 +290,12 @@ blockprobe_requeue() {
   local repo="$1" num="$2" kind="$3" ref="$4"
   forgejo_remove_label "$repo" "$num" "Status/Blocked" 2>/dev/null \
     || log "blockprobe: warning -- could not drop Status/Blocked on ${repo}#${num}"
+  # Clearing ALL assignees is right rather than surgical: both producers of a
+  # blocked ticket leave it assigned to FORGEJO_REVIEWER as the "a human owes
+  # this a decision" marker (bin/agent-block.sh, and the rejected-PR strike in
+  # bin/tick.sh), so the assignee being dropped here is the harness's own
+  # escalation flag -- and that flag is exactly what stops being true once the
+  # probe's condition resolves.
   forgejo_unassign_all "$repo" "$num" 2>/dev/null \
     || log "blockprobe: warning -- could not unassign ${repo}#${num}"
   forgejo_comment "$repo" "$num" \
@@ -262,8 +339,9 @@ ${BLOCKPROBE_ESCALATED_MARKER}" \
 # rules above. Non-model (API-only): call as `do_blockprobe_tick || true`,
 # same as do_landed_tick.
 do_blockprobe_tick() {
-  local repo_line repo issues n body kind ref verdict reason repeat reviewer
+  local repo_line repo issues n body kind ref verdict reason repeat reviewer today
   reviewer="${FORGEJO_REVIEWER:-}"
+  today=$(date -u '+%Y-%m-%d')
 
   while IFS= read -r repo_line; do
     [ -n "$repo_line" ] || continue
@@ -302,6 +380,12 @@ do_blockprobe_tick() {
       case "$verdict" in
         HOLDS)
           log "blockprobe: ${repo}#${n} probe still holds (kind=${kind} ref=${ref})"
+          # Date-gated on the body we already have, so a held block costs one
+          # extra API call per DAY rather than one per tick.
+          if [ "$(blockprobe_parse_confirmed "$body")" != "$today" ]; then
+            blockprobe_record_confirmation "$repo" "$n" "$today" \
+              || log "blockprobe: warning -- could not stamp the confirmation date on ${repo}#${n}"
+          fi
           ;;
         UNKNOWN)
           log "blockprobe: ${repo}#${n} probe could not be evaluated this tick (kind=${kind} ref=${ref}) -- leaving Status/Blocked"

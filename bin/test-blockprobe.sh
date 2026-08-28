@@ -106,6 +106,42 @@ eq "latest block unprobed -> no ref"  "" "$(blockprobe_parse_ref "$MIXED")"
 eq "latest block unprobed -> latest reason" \
    "second reason, recorded with no probe at all" "$(blockprobe_last_reason "$MIXED")"
 
+echo "== last-confirmed stamp: parse + the pure body transform =="
+# igor#546 asks that a probe which still HOLDS record when it was last
+# confirmed. The tick log is ephemeral, so the stamp rides in the body next
+# to the probe it confirms -- a body PATCH, which (unlike a comment) notifies
+# nobody and stays exactly one line however long the block holds.
+
+eq "no stamp yet -> empty" "" "$(blockprobe_parse_confirmed "$BODY_MECH")"
+
+STAMPED=$(blockprobe_body_with_confirmation "$BODY_MECH" "2026-08-28")
+eq "stamped body parses the date back"      "2026-08-28" "$(blockprobe_parse_confirmed "$STAMPED")"
+eq "stamping preserves the probe kind"      "issue-open" "$(blockprobe_parse_kind "$STAMPED")"
+eq "stamping preserves the probe ref"       "joshtronic/igor#537" "$(blockprobe_parse_ref "$STAMPED")"
+eq "stamping preserves the human reason"    "Waiting on igor#537 to merge before this can proceed." \
+   "$(blockprobe_last_reason "$STAMPED")"
+
+# The stamp is REPLACED, never appended to: a block held for a month must not
+# accumulate 30 confirmed: lines in the issue description.
+RESTAMPED=$(blockprobe_body_with_confirmation "$STAMPED" "2026-09-04")
+eq "re-stamping replaces the old date"  "2026-09-04" "$(blockprobe_parse_confirmed "$RESTAMPED")"
+eq "re-stamping leaves exactly one stamp" "1" \
+   "$(grep -c 'confirmed:' <<<"$RESTAMPED")"
+
+# Only the LATEST block's probe is stamped -- same rule the rest of the file
+# follows, so an earlier block's stale probe can't collect a fresh date that
+# reads as "this is what we re-confirmed".
+TWO_STAMPED=$(blockprobe_body_with_confirmation "$TWOBLOCK" "2026-08-28")
+eq "two blocks: only one stamp written" "1" "$(grep -c 'confirmed:' <<<"$TWO_STAMPED")"
+eq "two blocks: the stamp lands on the LATEST probe" "2026-08-28" \
+   "$(blockprobe_parse_confirmed "$TWO_STAMPED")"
+eq "two blocks: the earlier probe is untouched" "issue-open
+ref: joshtronic/igor#500" \
+   "$(sed -n '/kind: issue-open/,/ref:/p' <<<"$TWO_STAMPED" | sed 's/^kind: //' | head -2)"
+
+eq "a body with no probe at all is refused (rc 1)" "1" \
+   "$(blockprobe_body_with_confirmation "no probe here" "2026-08-28" >/dev/null 2>&1; echo $?)"
+
 echo "== repeat-block guard: exact-reason occurrence counting =="
 REPEATED='---
 ## Blocked (2026-08-20 01:26Z)
@@ -160,7 +196,7 @@ echo "== do_blockprobe_tick: end-to-end sweep over stubbed Forgejo =="
 
 # Common stubs. Each scenario below overrides what it needs and resets captures.
 log() { :; }
-REMOVED=""; UNASSIGNED=""; COMMENTS=""; ASSIGNED=""
+REMOVED=""; UNASSIGNED=""; COMMENTS=""; ASSIGNED=""; PATCHED=""
 forgejo_remove_label() { REMOVED="$REMOVED $1#$2:$3"; }
 forgejo_unassign_all()  { UNASSIGNED="$UNASSIGNED $1#$2"; }
 forgejo_comment()       { COMMENTS="$COMMENTS|$1#$2:$3"; }
@@ -169,7 +205,7 @@ forgejo_pr_has_comment_containing() { printf '0'; }
 # shellcheck disable=SC2034  # read by do_blockprobe_tick (lib/blockprobe.sh)
 ANALYSIS_REPOS_JSON='{"full_name":"acme/x"}'
 
-_reset_capture() { REMOVED=""; UNASSIGNED=""; COMMENTS=""; ASSIGNED=""; }
+_reset_capture() { REMOVED=""; UNASSIGNED=""; COMMENTS=""; ASSIGNED=""; PATCHED=""; }
 _no_issues() { printf '[]'; }
 
 echo "-- scenario: probe fails (cause resolved) -> cleared, unassigned, commented --"
@@ -197,20 +233,78 @@ has  "cleared: unassigned"              "$UNASSIGNED" "acme/x#10"
 has  "cleared: comment posted"          "$COMMENTS" "acme/x#10"
 eq   "cleared: no escalation assignment" "" "$ASSIGNED"
 
-echo "-- scenario: probe still holds -> left untouched --"
+echo "-- scenario: probe still holds -> left untouched, confirmation stamped --"
 _reset_capture
-_fj() {
-  if [ "$1 $2" = "GET /repos/acme/x/issues?state=open&type=issues&labels=Status/Blocked&limit=50" ]; then
-    _issues_payload 11 "$MECH_BODY"
-  else
-    _no_issues
-  fi
+TODAY=$(date -u '+%Y-%m-%d')
+# One stub for two callers: blockprobe_eval_issue_open fetches the PROBE'S REF
+# (#537), blockprobe_record_confirmation re-fetches the BLOCKED TICKET itself
+# (#11) before rewriting its body -- so the ref answers with a state and the
+# ticket answers with a full issue object.
+_holds_get_issue() {
+  case "$1#$2" in
+    acme/x#11) jq -cn --arg b "$HOLDS_BODY" '{number:11, body:$b, state:"open"}' ;;
+    *)         printf '{"state":"open"}' ;;   # #537 still open -> probe holds
+  esac
 }
-forgejo_get_issue() { printf '{"state":"open"}'; }     # #537 still open -> probe holds
+_holds_fj() {
+  case "$1 $2" in
+    "GET /repos/acme/x/issues?state=open&type=issues&labels=Status/Blocked&limit=50")
+      _issues_payload 11 "$HOLDS_BODY" ;;
+    "PATCH /repos/acme/x/issues/11") PATCHED="$3" ;;
+    *) _no_issues ;;
+  esac
+}
+HOLDS_BODY="$MECH_BODY"
+_fj() { _holds_fj "$@"; }
+forgejo_get_issue() { _holds_get_issue "$@"; }
 do_blockprobe_tick
 eq "holds: label untouched"    "" "$REMOVED"
 eq "holds: not unassigned"     "" "$UNASSIGNED"
 eq "holds: no comment"         "" "$COMMENTS"
+eq "holds: today's confirmation stamped into the body" "$TODAY" \
+   "$(blockprobe_parse_confirmed "$(jq -r '.body' <<<"$PATCHED")")"
+
+echo "-- scenario: still holding, already confirmed today -> no repeat write --"
+# The sweep runs every tick; without this throttle a single held block would
+# PATCH its own body ~1440 times a day.
+_reset_capture
+HOLDS_BODY=$(blockprobe_body_with_confirmation "$MECH_BODY" "$TODAY")
+do_blockprobe_tick
+eq "holds: same-day re-confirmation writes nothing" "" "$PATCHED"
+
+echo "-- scenario: still holding, confirmed on an EARLIER day -> re-stamped --"
+_reset_capture
+HOLDS_BODY=$(blockprobe_body_with_confirmation "$MECH_BODY" "2001-01-01")
+do_blockprobe_tick
+eq "holds: a stale stamp is refreshed to today" "$TODAY" \
+   "$(blockprobe_parse_confirmed "$(jq -r '.body' <<<"$PATCHED")")"
+
+echo "-- scenario: the probe vanished between the list read and the re-fetch --"
+# The HOLDS verdict came from the LIST body; the stamp is written against the
+# RE-FETCHED one. If the latest block lost its probe in between, stamping
+# would land a fresh date on an EARLIER block's probe -- a confirmation of a
+# condition nobody currently means.
+_reset_capture
+HOLDS_BODY="$MECH_BODY"
+forgejo_get_issue() {
+  case "$1#$2" in
+    acme/x#11) jq -cn --arg b "$MIXED" '{number:11, body:$b, state:"open"}' ;;
+    *)         printf '{"state":"open"}' ;;
+  esac
+}
+do_blockprobe_tick
+eq "probe vanished mid-sweep: nothing stamped" "" "$PATCHED"
+eq "probe vanished mid-sweep: label untouched" "" "$REMOVED"
+
+echo "-- scenario: the confirmation write fails -> block still left alone --"
+# The stamp is bookkeeping, not a gate: a PATCH that can't land must never
+# turn into a cleared label or a lost block.
+_reset_capture
+HOLDS_BODY="$MECH_BODY"
+forgejo_get_issue() { case "$1#$2" in acme/x#11) return 1 ;; *) printf '{"state":"open"}' ;; esac; }
+do_blockprobe_tick
+eq "stamp write fails: label untouched" "" "$REMOVED"
+eq "stamp write fails: no comment"      "" "$COMMENTS"
 
 echo "-- scenario: no probe recorded -> UNPROBED, not cleared --"
 _reset_capture
@@ -364,6 +458,42 @@ else
   printf '  x %s\n' "tick.sh no longer builds ANALYSIS_REPOS_JSON as \`jq -c '.[]'\` -- do_blockprobe_tick's line-by-line read is broken"
   FAIL=$((FAIL + 1))
 fi
+
+echo "== the two cross-library helpers PRINT their result (not an exit status) =="
+# Every scenario above stubs forgejo_pr_has_comment_containing and
+# automerge_behind_count with `printf`, so the suite would stay green even if
+# the REAL helpers signalled through exit status -- which their predicate-ish
+# names invite. That is not cosmetic: blockprobe_escalate reads
+# `cnt=$(forgejo_pr_has_comment_containing ...)` and coerces a non-numeric to
+# 0, so a status-signalling helper would make the dedup fail OPEN and re-post
+# the escalation comment every tick, on exactly the tickets the repeat-block
+# guard exists to quiet. Exercise the real definitions against a stubbed
+# transport instead. Subshell: sourcing the real libs here would clobber the
+# stubs the scenarios above installed.
+_real_helper_contract() (
+  export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+  # shellcheck source=../lib/forgejo.sh
+  . "$HERE/lib/forgejo.sh"
+  # shellcheck source=../lib/automerge.sh
+  . "$HERE/lib/automerge.sh"
+  _fj() {
+    case "$1 $2" in
+      "GET /repos/acme/x/issues/7/comments")
+        jq -cn '[{user:{login:"igor"},body:"nope"},
+                 {user:{login:"igor"},body:"tail <!-- m --> end"},
+                 {user:{login:"igor"},body:"<!-- m -->"},
+                 {user:{login:"josh"},body:"<!-- m -->"}]' ;;
+      "GET /repos/acme/x/pulls/7")   printf '{"head":{"sha":"abc"},"base":{"ref":"master"}}' ;;
+      "GET /repos/acme/x/compare/abc...master") printf '{"total_commits":4}' ;;
+      *) printf '{}' ;;
+    esac
+  }
+  printf '%s|%s' \
+    "$(forgejo_pr_has_comment_containing acme/x 7 igor '<!-- m -->')" \
+    "$(automerge_behind_count acme/x 7)"
+)
+eq "both helpers echo a number on stdout, with the arity blockprobe.sh calls" \
+   "2|4" "$(_real_helper_contract)"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-blockprobe: all checks passed"
