@@ -389,7 +389,7 @@ respective tools on the host; install or skip.
   (`ceo_open_guidance_pr` -- contents-API + new_branch, no clone) for the board
   to merge. Append-only (it adds what it learned, never rewrites/erases),
   throttled to one open guidance PR (`ceo_guidance_pr_open`), so `CEO.md` learns
-  how Josh decides over time. The CEO still never commits to `master` or merges --
+  how the operator decides over time. The CEO still never commits to `master` or merges --
   it drafts (issues + redline PRs), the board ratifies; further agency
   (auto-Agent-label, daily steering) stays a deliberate, human-gated step per
   "start tight, loosen as trust earns it."
@@ -441,7 +441,7 @@ respective tools on the host; install or skip.
   exceeded). It clears + posts a **confirm comment on the merged PR** on success,
   or emails `ALERT_RECIPIENTS` (plus a failure comment) on a failed CI, a
   stale/unreachable build, or a broken sitemap page. The *build* emits the meta
-  itself (porksicle's `eleventy.config.js` stamps `git rev-parse HEAD`), so no CI
+  itself (a repo's own static-site build stamps `git rev-parse HEAD`), so no CI
   change is needed; correctness stays in CI (E2E pre-merge), the barrier owns
   propagation, monit owns liveness. The merge itself passes
   `delete_branch_after_merge` (the repo's "delete by default" is only a UI-form
@@ -510,7 +510,7 @@ respective tools on the host; install or skip.
   `pr-behind <owner/repo#N>` holds while that PR is behind its base branch
   (reuses `automerge_behind_count`) and clears once it isn't; `operator`
   takes no ref and is never evaluated -- it marks a block on a human
-  decision ("Josh needs to pick an approach"), the "who" vs "what" split the
+  decision ("the operator needs to pick an approach"), the "who" vs "what" split the
   issue asked for. Everything is read from the LATEST `## Blocked (...)`
   section only, probe and reason alike (`_blockprobe_last_block` is the one
   slice both go through): a ticket can block more than once, and only the most
@@ -581,7 +581,7 @@ respective tools on the host; install or skip.
   is stamped in a local seen-set (`.feedback.seen`, FIFO-capped) so it's triaged
   once; nothing is written back to the sheet (the issue tracker IS the status, so
   no status column). The human label gate bounds prompt-injection -- a poisoned
-  row at worst yields a ticket Josh rejects, never code; the model MAY silently
+  row at worst yields a ticket the operator rejects, never code; the model MAY silently
   drop confident spam/dupes (operator's call), so not every row becomes a ticket
   but the seen-set still records it. Model work, so it sits BELOW the Claude
   health gate. The verdict is a `DECISION:` line + `REASON:` (DROP) or

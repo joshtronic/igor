@@ -74,6 +74,7 @@ env_file_hint="$AGENT_HOME/.env"
 : "${FORGEJO_REVIEWER:?must be set in $env_file_hint}"
 : "${TICK_TIMEOUT:?must be set in $env_file_hint}"
 : "${AGENT_RECALL_DAYS:?must be set in $env_file_hint}"
+: "${DISTILLERY_REPO:?must be set in $env_file_hint}"
 unset env_file_hint
 
 # -- Library ----------------------------------------------------
@@ -3245,7 +3246,7 @@ do_deploy_barrier && exit 0
 #
 # igor's prompt surfaces (voice, worker contract, review/feedback/
 # site-work/now/sports-digest directives) are sourced live from the
-# Distillery (joshtronic/distillery) at origin/master -- no pins, no
+# Distillery (DISTILLERY_REPO) at origin/master -- no pins, no
 # submodules, no in-repo fallback (lib/context-source.sh, igor#485).
 # This is igor's OWN "keep it fetched" step for that clone, run near
 # the top of the cascade the same way the harness pulls its own code
@@ -3262,13 +3263,13 @@ do_deploy_barrier && exit 0
 # fatal, and that's the bootstrap gate below, not here.
 DISTILLERY_PATH="$AGENT_REPO_ROOT/distillery"
 if [ ! -d "$DISTILLERY_PATH/.git" ]; then
-  log "context-source: cloning joshtronic/distillery to $DISTILLERY_PATH"
+  log "context-source: cloning $DISTILLERY_REPO to $DISTILLERY_PATH"
   mkdir -p "$AGENT_REPO_ROOT"
-  git clone --quiet "$(ssh_clone_url joshtronic/distillery)" "$DISTILLERY_PATH" 2>/dev/null \
-    || log "warning: clone of joshtronic/distillery failed; context cache serves last-good"
+  git clone --quiet "$(ssh_clone_url "$DISTILLERY_REPO")" "$DISTILLERY_PATH" 2>/dev/null \
+    || log "warning: clone of $DISTILLERY_REPO failed; context cache serves last-good"
 else
   (cd "$DISTILLERY_PATH" && git fetch --prune --quiet origin 2>/dev/null) \
-    || log "warning: fetch of joshtronic/distillery failed; context cache serves last-good"
+    || log "warning: fetch of $DISTILLERY_REPO failed; context cache serves last-good"
 fi
 context_refresh || true
 

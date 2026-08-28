@@ -123,20 +123,22 @@ systemctl --user enable --now agent.timer
 systemctl --user list-timers agent.timer --no-pager || true
 
 # One initial successful pull of igor's prompt surfaces from the
-# Distillery (joshtronic/distillery) is mandatory -- there's no in-repo
+# Distillery (DISTILLERY_REPO) is mandatory -- there's no in-repo
 # fallback, only the last-good cache (lib/context-source.sh, igor#485).
 # Seed it here rather than waiting for the first tick, so a broken or
 # unreachable distillery is caught during install, not silently on the
 # first minute after the timer fires.
 echo
-echo "-> seeding prompt-surface cache from the Distillery (joshtronic/distillery)"
+echo "-> seeding prompt-surface cache from the Distillery"
 
-# FORGEJO_HOST (used by ssh_clone_url below) comes from .env -- only
-# this seeding block needs it, so keep the sourcing scoped here.
+# FORGEJO_HOST and DISTILLERY_REPO (used below) come from .env -- only
+# this seeding block needs them, so keep the sourcing scoped here.
 set -a
 # shellcheck source=/dev/null
 . "$AGENT_HOME/.env"
 set +a
+
+: "${DISTILLERY_REPO:?DISTILLERY_REPO must be set in .env}"
 
 AGENT_STATE_DIR="${AGENT_STATE_DIR:-$HOME/.local/state/agent}"
 AGENT_REPO_ROOT="$AGENT_STATE_DIR/repos"
@@ -154,11 +156,11 @@ ssh_clone_url() {
 
 if [ ! -d "$DISTILLERY_PATH/.git" ]; then
   mkdir -p "$AGENT_REPO_ROOT"
-  git clone --quiet "$(ssh_clone_url joshtronic/distillery)" "$DISTILLERY_PATH" 2>/dev/null \
-    || echo "warning: could not clone joshtronic/distillery" >&2
+  git clone --quiet "$(ssh_clone_url "$DISTILLERY_REPO")" "$DISTILLERY_PATH" 2>/dev/null \
+    || echo "warning: could not clone $DISTILLERY_REPO" >&2
 else
   git -C "$DISTILLERY_PATH" fetch --prune --quiet origin 2>/dev/null \
-    || echo "warning: could not fetch joshtronic/distillery" >&2
+    || echo "warning: could not fetch $DISTILLERY_REPO" >&2
 fi
 
 # shellcheck source=lib/context-source.sh

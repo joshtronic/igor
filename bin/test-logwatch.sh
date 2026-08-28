@@ -165,8 +165,8 @@ echo "== logwatch_timer_transitioned (igor#420) =="
 # gap to explain in the first place).
 
 STOPPED_STARTED="$(cat <<'EOF'
-Jul 24 19:42:14 igor.sherver.org systemd[805]: Stopped agent.timer - Agent tick timer -- fires the next tick.
-Jul 24 21:46:32 igor.sherver.org systemd[805]: Started agent.timer - Agent tick timer -- fires the next tick.
+Jul 24 19:42:14 igor.example.com systemd[805]: Stopped agent.timer - Agent tick timer -- fires the next tick.
+Jul 24 21:46:32 igor.example.com systemd[805]: Started agent.timer - Agent tick timer -- fires the next tick.
 EOF
 )"
 yes "window containing a Stopped/Started pair -> transitioned (gap explained, no finding filed)" \
@@ -178,13 +178,13 @@ no "empty timer journal (continuously active, no state change logged) -> not tra
 # -> service journal has normal per-minute ticks: nothing to explain, no finding filed.
 
 no "'Starting'/'Stopping' (in-progress, not completed) do not count as a transition" \
-  logwatch_timer_transitioned "Jul 24 19:42:10 igor.sherver.org systemd[805]: Stopping agent.timer - Agent tick timer -- fires the next tick..."
+  logwatch_timer_transitioned "Jul 24 19:42:10 igor.example.com systemd[805]: Stopping agent.timer - Agent tick timer -- fires the next tick..."
 
 no "a Started/Stopped line for a DIFFERENT unit does not count" \
-  logwatch_timer_transitioned "Jul 24 21:01:00 igor.sherver.org systemd[805]: Started agent.service - Agent tick."
+  logwatch_timer_transitioned "Jul 24 21:01:00 igor.example.com systemd[805]: Started agent.service - Agent tick."
 
 no "a transition for a DIFFERENT timer does not count when the unit is named" \
-  logwatch_timer_transitioned "Jul 24 21:01:00 igor.sherver.org systemd[805]: Stopped backup.timer - Backup." "agent.timer"
+  logwatch_timer_transitioned "Jul 24 21:01:00 igor.example.com systemd[805]: Stopped backup.timer - Backup." "agent.timer"
 
 yes "a transition for the NAMED timer counts" \
   logwatch_timer_transitioned "$STOPPED_STARTED" "agent.timer"
@@ -198,8 +198,8 @@ echo "== logwatch_timer_verdict (igor#421 review) =="
 # -- and only says "active" (the one verdict that lets an empty service
 # journal file a finding) on positive evidence of continuous activity.
 
-STARTED_ONLY="Jul 24 21:46:32 igor.sherver.org systemd[805]: Started agent.timer - Agent tick timer."
-STOPPED_ONLY="Jul 24 19:42:14 igor.sherver.org systemd[805]: Stopped agent.timer - Agent tick timer."
+STARTED_ONLY="Jul 24 21:46:32 igor.example.com systemd[805]: Started agent.timer - Agent tick timer."
+STOPPED_ONLY="Jul 24 19:42:14 igor.example.com systemd[805]: Stopped agent.timer - Agent tick timer."
 
 eq "transition inside the window -> paused (the #420 case)" \
   "paused" "$(logwatch_timer_verdict "$STOPPED_STARTED" "" "active" "agent.timer")"
@@ -276,8 +276,8 @@ echo "== logwatch_normalize_line: a signature stable across occurrences (igor#43
 # The same failure recurring all day differs only in timestamp, pid and the
 # volatile numbers inside it. If those don't collapse, 700 occurrences of one
 # condition count as 700 distinct things and nothing ever meets the bar.
-N1=$(logwatch_normalize_line 'Jul 25 00:32:37 igor.sherver.org systemd[805]: agent.service: Main process exited, code=exited, status=28/n/a')
-N2=$(logwatch_normalize_line 'Jul 26 11:54:35 igor.sherver.org systemd[991]: agent.service: Main process exited, code=exited, status=28/n/a')
+N1=$(logwatch_normalize_line 'Jul 25 00:32:37 igor.example.com systemd[805]: agent.service: Main process exited, code=exited, status=28/n/a')
+N2=$(logwatch_normalize_line 'Jul 26 11:54:35 igor.example.com systemd[991]: agent.service: Main process exited, code=exited, status=28/n/a')
 eq "same failure on different days/pids -> identical signature" "$N1" "$N2"
 eq "signature drops the syslog prefix" "agent.service: Main process exited, code=exited, status=N/n/a" "$N1"
 

@@ -16,7 +16,7 @@ if ! declare -F log >/dev/null; then
   log() { printf '[agent] %s\n' "$*" >&2; }
 fi
 
-# Fail-fast timeouts so a brief git.sherver.org blip can't wedge a tick.
+# Fail-fast timeouts so a brief forge-host blip can't wedge a tick.
 # --connect-timeout bounds the connect phase: a few-second server hiccup
 # either rides through or fails fast, instead of stalling. --max-time bounds
 # a connected-but-unresponsive server. Tightened from a bare --max-time 30
@@ -38,7 +38,7 @@ FORGEJO_MAX_TIME=15
 #
 # The worst case this buys is 3 x FORGEJO_MAX_TIME + 2 x FORGEJO_RETRY_DELAY
 # ~= 47s for a single read, and the PR-review scan does a read per PR per
-# repo -- so a genuinely unreachable git.sherver.org makes a tick slow.
+# repo -- so a genuinely unreachable forge host makes a tick slow.
 # Accepted rather than capped by a global deadline: it costs 3x only when the
 # instance is down, in which case the tick has no work it can do anyway, and
 # the price of the alternative is paid on the healthy path. Ticks are
