@@ -21,6 +21,11 @@ command -v jq >/dev/null 2>&1 || { echo "test-agent-block: jq absent -- skipping
 HERE="$(cd "$(dirname "$0")" && pwd)"
 AGENT_HOME="$(cd "$HERE/.." && pwd)"
 SCRIPT="$HERE/agent-block.sh"
+# The consumer half of the probe round trip below (igor#546). Sourced up here,
+# before the first subshell, so shellcheck doesn't read $AGENT_HOME as the one
+# a subshell re-exported.
+# shellcheck source=../lib/blockprobe.sh
+. "$AGENT_HOME/lib/blockprobe.sh"
 
 FAIL=0
 eq()  { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
@@ -135,6 +140,20 @@ PROBE_BODY=$(jq -r '.body // empty' "$BODY_PATCH_CAP" 2>/dev/null)
 has "probe: body carries the probe block"        "$PROBE_BODY" "<!-- probe"
 has "probe: body carries the recorded kind"       "$PROBE_BODY" "kind: issue-open"
 has "probe: body carries the recorded ref"        "$PROBE_BODY" "ref: joshtronic/igor#537"
+
+# Close the producer -> consumer loop on the body the PRODUCER actually
+# PATCHes. The substring checks above pass on a body the sweep can't read:
+# blockprobe's parsers work from the LAST "## Blocked (" heading onward, so
+# they also depend on forgejo_append_issue_body emitting that heading exactly
+# -- something no substring assertion here covers. Run the real consumer.
+eq "probe round trip: the sweep parses the kind back" "issue-open" \
+   "$(blockprobe_parse_kind "$PROBE_BODY")"
+eq "probe round trip: the sweep parses the ref back"  "joshtronic/igor#537" \
+   "$(blockprobe_parse_ref "$PROBE_BODY")"
+eq "probe round trip: the sweep parses the reason back" "waiting on igor#537 to land" \
+   "$(blockprobe_last_reason "$PROBE_BODY")"
+eq "probe round trip: a fresh probe is not already spent" "" \
+   "$(blockprobe_parse_cleared "$PROBE_BODY")"
 
 echo "== agent-block.sh: an operator-kind probe needs no ref (igor#546) =="
 export BODY_PATCH_CAP="$TMP/body-patch-operator.json"

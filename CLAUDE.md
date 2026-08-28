@@ -540,10 +540,18 @@ respective tools on the host; install or skip.
   `lib/deferred.sh`'s own `<!-- gate -->` block -- that's a different
   mechanism (an LLM read of an external page, released to the human for
   confirmation) and must not be double-processed here. On a CLEARED verdict
-  it removes `Status/Blocked`, unassigns, and comments why -- deliberately
-  NOT through a human-confirmation step like `deferred_release_to_reviewer`,
-  since this is a direct check of a declared condition rather than an LLM
-  judgment call. **Repeat-block guard** (ctj#127): before clearing, it
+  it stamps `cleared: <YYYY-MM-DD>` into the probe block, then removes
+  `Status/Blocked`, unassigns, and comments why -- deliberately NOT through a
+  human-confirmation step like `deferred_release_to_reviewer`, since this is a
+  direct check of a declared condition rather than an LLM judgment call. That
+  stamp marks the probe SPENT and GATES the clear (a failed stamp leaves the
+  ticket blocked and retries next tick), because a probe outlives the block
+  episode it describes: it evaluates CLEARED forever, so the next
+  `Status/Blocked` applied WITHOUT appending a new `## Blocked (...)` section
+  -- a human labelling the ticket by hand -- would be stripped on the next
+  tick, citing a condition from an episode that is over. A spent probe reads
+  as UNPROBED, same as a latest block carrying no probe at all. **Repeat-block
+  guard** (ctj#127): before clearing, it
   counts how many times the identical reason text already appears in the
   body (`blockprobe_reason_repeat_count`, a plain substring count across
   every `## Blocked (...)` section) -- past two occurrences it stops

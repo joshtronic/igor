@@ -21,7 +21,16 @@
 #   kind: issue-open | pr-behind | operator
 #   ref: <owner>/<repo>#<number>   (omitted for kind: operator)
 #   confirmed: <YYYY-MM-DD>        (written by the sweep, not the producer)
+#   cleared: <YYYY-MM-DD>          (written by the sweep, not the producer)
 #   -->
+#
+# `cleared:` marks the probe SPENT -- the sweep already acted on it once and
+# dropped Status/Blocked. A probe left live outlives the episode it describes:
+# the next thing to re-apply Status/Blocked WITHOUT appending a new
+# "## Blocked (...)" section (a human, by hand) would be undone on the very
+# next tick, citing a condition from an episode nobody currently means. So a
+# spent probe reads as UNPROBED, exactly like the mixed-body case below, and
+# the label is left alone until a new block section records a new probe.
 #
 #   issue-open  HOLDS while ref is an OPEN issue/PR; CLEARS once it closes
 #               (e.g. "blocked on X landing").
@@ -37,6 +46,7 @@
 # cooldown -- same rationale as do_landed_tick/do_automerge_tick):
 #   - no probe block at all           -> log UNPROBED, leave alone (an
 #                                         honest "don't know" beats guessing)
+#   - probe carries `cleared:`        -> SPENT; log UNPROBED, leave alone
 #   - kind: operator                  -> log, leave alone, never requeue
 #   - kind unrecognized               -> log loudly, treat as UNPROBED
 #   - probe evaluates HOLDS           -> leave alone, and stamp `confirmed:
@@ -49,8 +59,14 @@
 #                                         transport blip must never look
 #                                         like a resolved cause)
 #   - probe evaluates CLEARED         -> repeat-block guard first (below);
-#                                         then remove Status/Blocked,
-#                                         unassign, and comment why.
+#                                         then stamp `cleared: <date>` into
+#                                         the probe (so it can never fire
+#                                         again), remove Status/Blocked,
+#                                         unassign, and comment why. The stamp
+#                                         goes FIRST and gates the rest: a
+#                                         ticket left blocked one more tick is
+#                                         recoverable, a label cleared by a
+#                                         still-live probe is the bug above.
 #
 # Repeat-block guard (ctj#127): a block that regenerates with the IDENTICAL
 # reason text more than twice smells like a requeue loop, not a resolved
@@ -118,41 +134,45 @@ _blockprobe_last_probe_block() {
   printf '%s' "$tail"
 }
 
-# blockprobe_parse_kind <body> -- the LATEST probe block's kind: value, or
-# empty if the body records no probe at all.
-blockprobe_parse_kind() {
+# _blockprobe_probe_field <body> <field> -- the LATEST probe block's <field>:
+# value, or empty if the body records no probe at all. <field> is always one of
+# this file's own literals, never anything read off a ticket, so interpolating
+# it into the sed expression can't be steered from outside.
+_blockprobe_probe_field() {
   local blk; blk=$(_blockprobe_last_probe_block "$1")
   [ -n "$blk" ] || return 0
-  printf '%s\n' "$blk" | sed -n 's/^[[:space:]]*kind:[[:space:]]*//p' | head -1 | tr -d '[:space:]'
+  printf '%s\n' "$blk" | sed -n "s/^[[:space:]]*${2}:[[:space:]]*//p" | head -1 | tr -d '[:space:]'
 }
 
+# blockprobe_parse_kind <body> -- the LATEST probe block's kind: value.
+blockprobe_parse_kind() { _blockprobe_probe_field "$1" kind; }
+
 # blockprobe_parse_ref <body> -- the LATEST probe block's ref: value.
-blockprobe_parse_ref() {
-  local blk; blk=$(_blockprobe_last_probe_block "$1")
-  [ -n "$blk" ] || return 0
-  printf '%s\n' "$blk" | sed -n 's/^[[:space:]]*ref:[[:space:]]*//p' | head -1 | tr -d '[:space:]'
-}
+blockprobe_parse_ref() { _blockprobe_probe_field "$1" ref; }
 
 # blockprobe_parse_confirmed <body> -- the LATEST probe block's confirmed:
 # date (YYYY-MM-DD), or empty if the probe has never been re-confirmed.
-blockprobe_parse_confirmed() {
-  local blk; blk=$(_blockprobe_last_probe_block "$1")
-  [ -n "$blk" ] || return 0
-  printf '%s\n' "$blk" | sed -n 's/^[[:space:]]*confirmed:[[:space:]]*//p' | head -1 | tr -d '[:space:]'
-}
+blockprobe_parse_confirmed() { _blockprobe_probe_field "$1" confirmed; }
 
-# blockprobe_body_with_confirmation <body> <date> -- <body> with the LATEST
-# probe block carrying `confirmed: <date>`, echoed to stdout. Pure string
-# work, no I/O. rc 1 (echoing <body> unchanged) when there is no probe block
-# to stamp.
+# blockprobe_parse_cleared <body> -- the LATEST probe block's cleared: date,
+# or empty while the probe is still live. Non-empty means SPENT: the sweep
+# already acted on this probe, so it describes a block episode that is over.
+blockprobe_parse_cleared() { _blockprobe_probe_field "$1" cleared; }
+
+# _blockprobe_body_with_field <body> <field> <date> -- <body> with the LATEST
+# probe block carrying `<field>: <date>`, echoed to stdout. Pure string work,
+# no I/O. rc 1 (echoing <body> unchanged) when there is no probe block to
+# stamp.
 #
-# The stamp REPLACES any existing one rather than appending: a block held for
-# a month would otherwise grow 30 confirmed: lines in the issue description.
-# It lives INSIDE the probe comment for two reasons -- it is invisible in
-# rendered markdown, and it can never be mistaken for part of the human reason
-# text that blockprobe_reason_repeat_count counts.
-blockprobe_body_with_confirmation() {
-  local body="$1" date="$2" pre rest inner suffix kept
+# The stamp REPLACES any existing one of the SAME field rather than appending:
+# a block held for a month would otherwise grow 30 confirmed: lines in the
+# issue description. Other fields are left alone, so a probe that held for
+# weeks and then cleared carries both dates. It lives INSIDE the probe comment
+# for two reasons -- it is invisible in rendered markdown, and it can never be
+# mistaken for part of the human reason text that
+# blockprobe_reason_repeat_count counts.
+_blockprobe_body_with_field() {
+  local body="$1" field="$2" date="$3" pre rest inner suffix kept
   case "$body" in
     *"$BLOCKPROBE_OPEN"*) ;;
     *) printf '%s' "$body"; return 1 ;;
@@ -165,38 +185,55 @@ blockprobe_body_with_confirmation() {
     *"-->"*) inner="${rest%%-->*}"; suffix="${rest#*-->}" ;;
     *) printf '%s' "$body"; return 1 ;;
   esac
-  kept=$(printf '%s' "$inner" | sed '/^[[:space:]]*confirmed:[[:space:]]*/d')
-  printf '%s%s%s\nconfirmed: %s\n-->%s' "$pre" "$BLOCKPROBE_OPEN" "$kept" "$date" "$suffix"
+  kept=$(printf '%s' "$inner" | sed "/^[[:space:]]*${field}:[[:space:]]*/d")
+  printf '%s%s%s\n%s: %s\n-->%s' "$pre" "$BLOCKPROBE_OPEN" "$kept" "$field" "$date" "$suffix"
 }
 
-# blockprobe_record_confirmation <repo> <num> <date> -- stamp the ticket's
-# LATEST probe with <date>. rc 0 when written or already current, 1 when the
-# ticket can't be read or has no probe to stamp.
+# blockprobe_body_with_confirmation <body> <date> -- the probe was re-checked
+# on <date> and still holds.
+blockprobe_body_with_confirmation() { _blockprobe_body_with_field "$1" confirmed "$2"; }
+
+# blockprobe_body_with_cleared <body> <date> -- the probe's condition resolved
+# on <date> and the sweep acted on it. Marks the probe SPENT, so it can never
+# clear a later block episode that nobody recorded it for.
+blockprobe_body_with_cleared() { _blockprobe_body_with_field "$1" cleared "$2"; }
+
+# _blockprobe_record_stamp <repo> <num> <field> <date> -- stamp the ticket's
+# LATEST probe with `<field>: <date>`. rc 0 when written or already current, 1
+# when the ticket can't be read or has no probe to stamp.
 #
 # Re-fetches rather than reusing the sweep's list body, and validates the
 # payload looks like an issue before writing, for the reason spelled out at
 # length on forgejo_append_issue_body: the failure mode of a read-modify-write
 # on an unvalidated fetch is DESTRUCTIVE -- it PATCHes a near-empty body over
 # the issue description this whole mechanism exists to preserve.
-blockprobe_record_confirmation() {
-  local repo="$1" num="$2" date="$3" raw current new
+_blockprobe_record_stamp() {
+  local repo="$1" num="$2" field="$3" date="$4" raw current new
   raw=$(forgejo_get_issue "$repo" "$num") || return 1
   current=$(jq -er '
       if (type == "object") and has("number") and has("body")
       then (.body // "") else empty end
     ' <<<"$raw") || return 1
-  [ "$(blockprobe_parse_confirmed "$current")" != "$date" ] || return 0
-  # The caller's HOLDS verdict was reached from the LIST body; this is the
-  # RE-FETCHED one. If a write landed in between and the latest block no
-  # longer carries a probe, blockprobe_body_with_confirmation would stamp an
-  # earlier block's probe -- a date against a condition nobody currently
-  # means. Re-check here so "the stamp lands on the latest block" holds by
-  # construction rather than by argument about the two reads agreeing.
+  [ "$(_blockprobe_probe_field "$current" "$field")" != "$date" ] || return 0
+  # The caller's verdict was reached from the LIST body; this is the RE-FETCHED
+  # one. If a write landed in between and the latest block no longer carries a
+  # probe, _blockprobe_body_with_field would stamp an earlier block's probe --
+  # a date against a condition nobody currently means. Re-check here so "the
+  # stamp lands on the latest block" holds by construction rather than by
+  # argument about the two reads agreeing.
   [ -n "$(blockprobe_parse_kind "$current")" ] || return 1
-  new=$(blockprobe_body_with_confirmation "$current" "$date") || return 1
+  new=$(_blockprobe_body_with_field "$current" "$field" "$date") || return 1
   _fj PATCH "/repos/${repo}/issues/${num}" \
     "$(jq -n --arg b "$new" '{body: $b}')" >/dev/null
 }
+
+# blockprobe_record_confirmation <repo> <num> <date> -- record that the probe
+# was re-checked on <date> and still holds.
+blockprobe_record_confirmation() { _blockprobe_record_stamp "$1" "$2" confirmed "$3"; }
+
+# blockprobe_record_cleared <repo> <num> <date> -- mark the probe SPENT. This
+# is what stops it outliving the block episode it was recorded for.
+blockprobe_record_cleared() { _blockprobe_record_stamp "$1" "$2" cleared "$3"; }
 
 # blockprobe_last_reason <body> -- the human reason text of the LATEST
 # "## Blocked (...)" section, with any trailing probe block and surrounding
@@ -281,13 +318,31 @@ blockprobe_evaluate() {
   esac
 }
 
-# blockprobe_requeue <repo> <num> <kind> <ref> -- the cause is gone: drop
-# Status/Blocked, unassign, and comment why. Deliberately does NOT touch the
-# `Agent` label -- unlike lib/deferred.sh's LLM-judged release, this is a
-# direct machine check of a declared condition, so the ticket goes straight
-# back to claimable rather than through a human confirmation step.
+# blockprobe_requeue <repo> <num> <kind> <ref> <date> -- the cause is gone:
+# mark the probe spent, then drop Status/Blocked, unassign, and comment why.
+# Deliberately does NOT touch the `Agent` label -- unlike lib/deferred.sh's
+# LLM-judged release, this is a direct machine check of a declared condition,
+# so the ticket goes straight back to claimable rather than through a human
+# confirmation step. rc 1 without touching anything if the probe can't be
+# marked spent.
 blockprobe_requeue() {
-  local repo="$1" num="$2" kind="$3" ref="$4"
+  local repo="$1" num="$2" kind="$3" ref="$4" date="$5"
+  # The spent-stamp GATES the clear, and deliberately fails closed. An
+  # un-spent probe evaluates CLEARED forever, so the next Status/Blocked
+  # applied without a new "## Blocked (...)" section -- a human labelling the
+  # ticket by hand -- would be stripped again on the next tick, justified by a
+  # condition from an episode that is over. A ticket left blocked one more
+  # tick is recoverable and self-heals on the retry; a label cleared out from
+  # under the human who set it is not.
+  if ! blockprobe_record_cleared "$repo" "$num" "$date"; then
+    log "blockprobe: ${repo}#${num} probe cleared but the spent-stamp could not be written -- leaving Status/Blocked, will retry next tick"
+    return 1
+  fi
+  # A failure HERE, after the stamp landed, is the one case the sweep does not
+  # retry: next tick reads a spent probe and leaves the ticket alone. That is
+  # the accepted cost of ordering the stamp first -- the label survives, the
+  # warning names the ticket, and the probe itself says `cleared:`, so the
+  # state is self-describing rather than silently wrong.
   forgejo_remove_label "$repo" "$num" "Status/Blocked" 2>/dev/null \
     || log "blockprobe: warning -- could not drop Status/Blocked on ${repo}#${num}"
   # Clearing ALL assignees is right rather than surgical: both producers of a
@@ -307,6 +362,13 @@ blockprobe_requeue() {
 # blockprobe_escalate <repo> <num> <reason> <reviewer> -- the repeat-block
 # guard tripped: leave Status/Blocked in place, comment once (deduped via
 # BLOCKPROBE_ESCALATED_MARKER), and assign the reviewer.
+#
+# The dedup filters by comment AUTHOR, so an empty $BOT_USER would match no
+# comment and re-post the escalation every tick -- spam on exactly the tickets
+# this guard exists to quiet. tick.sh resolves BOT_USER or exits 3 long before
+# any sweep runs (bin/tick.sh, `[ -n "$BOT_USER" ] || { ... exit 3; }`, asserted
+# by bin/test-blockprobe.sh), so `${BOT_USER:-}` here is only about surviving
+# `set -u` in a lib sourced from a test or a helper script.
 blockprobe_escalate() {
   local repo="$1" num="$2" reason="$3" reviewer="$4" bot="${BOT_USER:-}" cnt
   cnt=$(forgejo_pr_has_comment_containing "$repo" "$num" "$bot" "$BLOCKPROBE_ESCALATED_MARKER" 2>/dev/null)
@@ -339,7 +401,7 @@ ${BLOCKPROBE_ESCALATED_MARKER}" \
 # rules above. Non-model (API-only): call as `do_blockprobe_tick || true`,
 # same as do_landed_tick.
 do_blockprobe_tick() {
-  local repo_line repo issues n body kind ref verdict reason repeat reviewer today
+  local repo_line repo issues n body kind ref verdict reason repeat reviewer today spent
   reviewer="${FORGEJO_REVIEWER:-}"
   today=$(date -u '+%Y-%m-%d')
 
@@ -361,6 +423,15 @@ do_blockprobe_tick() {
       kind=$(blockprobe_parse_kind "$body")
       if [ -z "$kind" ]; then
         log "blockprobe: ${repo}#${n} UNPROBED -- no machine-checkable probe recorded, leaving Status/Blocked"
+        continue
+      fi
+      # A spent probe belongs to a block episode this sweep already ended.
+      # Whatever re-applied Status/Blocked since means something else by it,
+      # and never said what -- so this reads as UNPROBED, same as a latest
+      # block that carries no probe at all.
+      spent=$(blockprobe_parse_cleared "$body")
+      if [ -n "$spent" ]; then
+        log "blockprobe: ${repo}#${n} UNPROBED -- the recorded probe was already spent (cleared ${spent}), leaving Status/Blocked"
         continue
       fi
       case " $BLOCKPROBE_KINDS " in
@@ -396,7 +467,7 @@ do_blockprobe_tick() {
           if [ "$repeat" -gt 2 ]; then
             blockprobe_escalate "$repo" "$n" "$reason" "$reviewer"
           else
-            blockprobe_requeue "$repo" "$n" "$kind" "$ref"
+            blockprobe_requeue "$repo" "$n" "$kind" "$ref" "$today" || true
           fi
           ;;
       esac

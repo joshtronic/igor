@@ -142,6 +142,27 @@ ref: joshtronic/igor#500" \
 eq "a body with no probe at all is refused (rc 1)" "1" \
    "$(blockprobe_body_with_confirmation "no probe here" "2026-08-28" >/dev/null 2>&1; echo $?)"
 
+echo "== spent stamp: a probe the sweep acted on can never fire again =="
+# Without this the probe outlives the episode it describes: it evaluates
+# CLEARED forever, so the next Status/Blocked applied WITHOUT a new
+# "## Blocked (...)" section -- a human labelling the ticket by hand -- gets
+# stripped on the next tick on a condition from an episode that is over.
+
+eq "live probe -> no cleared stamp" "" "$(blockprobe_parse_cleared "$BODY_MECH")"
+
+SPENT=$(blockprobe_body_with_cleared "$BODY_MECH" "2026-08-28")
+eq "spent body parses the date back"   "2026-08-28" "$(blockprobe_parse_cleared "$SPENT")"
+eq "spending preserves the probe kind" "issue-open" "$(blockprobe_parse_kind "$SPENT")"
+eq "spending preserves the human reason" "Waiting on igor#537 to merge before this can proceed." \
+   "$(blockprobe_last_reason "$SPENT")"
+
+# The two stamps are independent fields: a probe that held for weeks and then
+# cleared keeps both dates, so the ticket records the whole hold, not just its
+# end.
+BOTH=$(blockprobe_body_with_cleared "$STAMPED" "2026-08-28")
+eq "spending leaves the confirmation stamp alone" "2026-08-28" "$(blockprobe_parse_confirmed "$BOTH")"
+eq "spending adds its own stamp beside it"        "2026-08-28" "$(blockprobe_parse_cleared "$BOTH")"
+
 echo "== repeat-block guard: exact-reason occurrence counting =="
 REPEATED='---
 ## Blocked (2026-08-20 01:26Z)
@@ -219,23 +240,65 @@ Waiting on igor#537 to merge.
 kind: issue-open
 ref: joshtronic/igor#537
 -->'
-_fj() {
-  if [ "$1 $2" = "GET /repos/acme/x/issues?state=open&type=issues&labels=Status/Blocked&limit=50" ]; then
-    _issues_payload 10 "$MECH_BODY"
-  else
-    _no_issues
-  fi
+TODAY=$(date -u '+%Y-%m-%d')
+# EPISODE_BODY is the ticket's live body: the fake PATCH writes back to it, so
+# a second sweep below sees what the first one actually left behind.
+EPISODE_BODY="$MECH_BODY"
+_episode_fj() {
+  case "$1 $2" in
+    "GET /repos/acme/x/issues?state=open&type=issues&labels=Status/Blocked&limit=50")
+      _issues_payload 10 "$EPISODE_BODY" ;;
+    "PATCH /repos/acme/x/issues/10")
+      PATCHED="$3"; EPISODE_BODY=$(jq -r '.body' <<<"$3") ;;
+    *) _no_issues ;;
+  esac
 }
-forgejo_get_issue() { printf '{"state":"closed"}'; }   # #537 landed -> probe fails
+# The blocked TICKET answers with a full issue object (the spent-stamp does a
+# read-modify-write on its body); the probe's REF (#537) answers with a state.
+_episode_get_issue() {
+  case "$1#$2" in
+    acme/x#10) jq -cn --arg b "$EPISODE_BODY" '{number:10, body:$b, state:"open"}' ;;
+    *)         printf '{"state":"closed"}' ;;   # #537 landed -> probe fails
+  esac
+}
+_fj() { _episode_fj "$@"; }
+forgejo_get_issue() { _episode_get_issue "$@"; }
 do_blockprobe_tick
 has  "cleared: Status/Blocked removed"  "$REMOVED" "acme/x#10:Status/Blocked"
 has  "cleared: unassigned"              "$UNASSIGNED" "acme/x#10"
 has  "cleared: comment posted"          "$COMMENTS" "acme/x#10"
 eq   "cleared: no escalation assignment" "" "$ASSIGNED"
+eq   "cleared: the probe is stamped spent" "$TODAY" "$(blockprobe_parse_cleared "$EPISODE_BODY")"
+
+echo "-- scenario: a SPENT probe cannot clear a later, unrelated block --"
+# Second episode, same ticket: something re-applies Status/Blocked and writes
+# NOTHING to the body (a human labelling it by hand). The old probe is still
+# there and still evaluates CLEARED. Before the spent stamp, this sweep undid
+# the human's label within a tick and cited a condition from the episode above.
+_reset_capture
+UNPROBED_SEEN=0
+log() { case "$*" in *"UNPROBED"*) UNPROBED_SEEN=1 ;; esac; }
+do_blockprobe_tick
+log() { :; }
+eq "spent probe: reported UNPROBED"        "1" "$UNPROBED_SEEN"
+eq "spent probe: label untouched"          "" "$REMOVED"
+eq "spent probe: not unassigned"           "" "$UNASSIGNED"
+eq "spent probe: no comment"               "" "$COMMENTS"
+eq "spent probe: nothing written back"     "" "$PATCHED"
+
+echo "-- scenario: the spent-stamp write fails -> the label is NOT cleared --"
+# Fail closed. Clearing the label while the probe stays live is exactly the bug
+# above, so a stamp that cannot land keeps the ticket blocked and retries.
+_reset_capture
+EPISODE_BODY="$MECH_BODY"
+forgejo_get_issue() { case "$1#$2" in acme/x#10) return 1 ;; *) printf '{"state":"closed"}' ;; esac; }
+do_blockprobe_tick
+eq "spent-stamp write fails: label untouched" "" "$REMOVED"
+eq "spent-stamp write fails: not unassigned"  "" "$UNASSIGNED"
+eq "spent-stamp write fails: no comment"      "" "$COMMENTS"
 
 echo "-- scenario: probe still holds -> left untouched, confirmation stamped --"
 _reset_capture
-TODAY=$(date -u '+%Y-%m-%d')
 # One stub for two callers: blockprobe_eval_issue_open fetches the PROBE'S REF
 # (#537), blockprobe_record_confirmation re-fetches the BLOCKED TICKET itself
 # (#11) before rewriting its body -- so the ref answers with a state and the
@@ -456,6 +519,20 @@ if grep -qF "ANALYSIS_REPOS_JSON=\$(jq -c '.[]' <<<\"\$ALL_REPOS\")" "$HERE/bin/
   printf '  + %s\n' "tick.sh builds ANALYSIS_REPOS_JSON as newline-delimited objects"
 else
   printf '  x %s\n' "tick.sh no longer builds ANALYSIS_REPOS_JSON as \`jq -c '.[]'\` -- do_blockprobe_tick's line-by-line read is broken"
+  FAIL=$((FAIL + 1))
+fi
+
+echo "== BOT_USER is guaranteed by tick.sh, not hoped for =="
+# blockprobe_escalate dedups by comment AUTHOR. Every scenario above stubs
+# forgejo_pr_has_comment_containing, so an unset BOT_USER would match nothing,
+# re-post the escalation comment every tick, and leave this suite green --
+# spam on exactly the tickets the repeat-block guard exists to quiet. The
+# guarantee lives in tick.sh; assert it there, like ANALYSIS_REPOS_JSON above.
+if grep -qF 'BOT_USER=$(forgejo_resolve_bot_user) || BOT_USER=""' "$HERE/bin/tick.sh" \
+   && grep -qF '[ -n "$BOT_USER" ] || {' "$HERE/bin/tick.sh"; then
+  printf '  + %s\n' "tick.sh resolves BOT_USER and hard-exits when it is empty"
+else
+  printf '  x %s\n' "tick.sh no longer guarantees a non-empty BOT_USER -- blockprobe_escalate's dedup fails OPEN"
   FAIL=$((FAIL + 1))
 fi
 
