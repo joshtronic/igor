@@ -110,9 +110,18 @@ needsyou_removed() {
 #   ""/none        the review has not happened yet   -> reviewer
 #   APPROVE        auto-merge takes it               -> nobody, unless the repo
 #                                                       pins itself to a human
-#   COMMENT        auto-merge will not take it       -> human
+#   COMMENT        no findings (hands over at once)  -> human
+#                  findings, rework rounds 1..3       -> Igor
+#                  escalated (>=3)                    -> human
 #   REQUEST_CHANGES  rework rounds 1..3              -> Igor
 #                    escalated (>=3) or unverifiable -> human
+#
+# COMMENT and REQUEST_CHANGES share one rework mechanism as of igor#552
+# (review_route_into_rework in bin/tick.sh), so a COMMENT with rounds >= 1 is
+# Igor's turn exactly like a REQUEST_CHANGES at the same round count -- the
+# `rounds` argument alone is what tells them apart from a COMMENT that had no
+# findings and handed over immediately (rounds stays 0 in that case, same as a
+# fresh unreviewed PR never entering the loop).
 needsyou_pr_why() {
   local verdict="${1:-}" require_human="${2:-false}" rounds="${3:-0}" validated="${4:-true}"
   case "$rounds" in ''|*[!0-9]*) rounds=0 ;; esac
@@ -122,7 +131,13 @@ needsyou_pr_why() {
       printf 'Igor approved it and this repo is pinned to your review'
       ;;
     COMMENT)
-      printf 'Igor reviewed it as COMMENT -- auto-merge will not take that, so it is your call'
+      if [ "$rounds" -ge 3 ]; then
+        printf 'Igor treated this COMMENT as needing changes %s times without converging -- escalated to you' "$rounds"
+      elif [ "$rounds" -ge 1 ]; then
+        : # findings still being adjudicated -- Igor's turn, same as REQUEST_CHANGES 1..2
+      else
+        printf 'Igor reviewed it as COMMENT -- auto-merge will not take that, so it is your call'
+      fi
       ;;
     REQUEST_CHANGES)
       if [ "$validated" != "true" ]; then
