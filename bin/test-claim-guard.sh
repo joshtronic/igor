@@ -303,6 +303,38 @@ eq "the ship path does not unassign FORGEJO_REPO/ISSUE_NUMBER after a successful
 eq "...while the noop (0-commit) outcome still unassigns to return the issue to the pool" "true" \
   "$(sed -n "${NOOP_ELSE_LINE},\$p" "$TICK" | grep -q 'forgejo_unassign_all "\$FORGEJO_REPO" "\$ISSUE_NUMBER"' && echo true || echo false)"
 
+echo "== rejected-PR strike: records the block in the BODY with an operator probe (igor#546) =="
+# The strike used to comment the reason and nothing else. Two problems that
+# fix together: a re-queued run is prompted from the issue BODY alone
+# (igor#434), and lib/blockprobe.sh's sweep reads its probe from the body too
+# -- so a comment-only strike is both invisible to the next run and
+# permanently UNPROBED. `operator` is the right kind here and not a
+# formality: "the agent opened N PRs and all were closed" is a human
+# judgement call, so the sweep must never auto-requeue it.
+# shellcheck source=../lib/blockprobe.sh
+. "$HERE/../lib/blockprobe.sh"
+STRIKE_START=$(grep -n 'rejected bot PRs, applying Status/Blocked' "$TICK" | head -1 | cut -d: -f1)
+STRIKE_END=$(awk -v start="$STRIKE_START" 'NR>start && /^ *continue$/ {print NR; exit}' "$TICK")
+STRIKE_BLOCK=$(sed -n "${STRIKE_START},${STRIKE_END}p" "$TICK")
+eq "the strike writes the reason to the issue body, not only a comment" "true" \
+  "$(printf '%s\n' "$STRIKE_BLOCK" | grep -q 'forgejo_append_issue_body "\$R_NAME" "\$C_NUM"' && echo true || echo false)"
+eq "...and still comments it (the body append is best-effort, not a swap)" "true" \
+  "$(printf '%s\n' "$STRIKE_BLOCK" | grep -q 'forgejo_comment "\$R_NAME" "\$C_NUM" "\$C_BLOCK_REASON"' && echo true || echo false)"
+eq "body and comment carry the SAME reason text" "1" \
+  "$(printf '%s\n' "$STRIKE_BLOCK" | grep -c 'C_BLOCK_REASON=')"
+eq "a failed body append warns instead of aborting the strike" "true" \
+  "$(printf '%s\n' "$STRIKE_BLOCK" | grep -q 'could not append the block reason' && echo true || echo false)"
+
+# Cross-boundary check: run the probe literal tick.sh embeds through the
+# consumer that has to read it back. A typo'd kind would silently degrade
+# every strike to UNPROBED, and no structural grep would notice.
+STRIKE_PROBE=$(printf '%s\n' "$STRIKE_BLOCK" | sed -n '/<!-- probe/,/-->/p' | sed 's/".*$//')
+STRIKE_BODY=$(printf '## Blocked (2026-08-28 00:00Z)\n\nsome reason\n\n%s\n' "$STRIKE_PROBE")
+eq "blockprobe parses the strike's probe as a recognized kind" "operator" \
+  "$(blockprobe_parse_kind "$STRIKE_BODY")"
+eq "...which is in the sweep's closed vocabulary" "true" \
+  "$(case " $BLOCKPROBE_KINDS " in *" operator "*) echo true ;; *) echo false ;; esac)"
+
 if [ "$FAIL" -eq 0 ]; then echo "test-claim-guard: all checks passed"; exit 0; fi
 echo "test-claim-guard: $FAIL check(s) FAILED"
 exit 1

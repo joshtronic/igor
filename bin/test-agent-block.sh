@@ -21,6 +21,11 @@ command -v jq >/dev/null 2>&1 || { echo "test-agent-block: jq absent -- skipping
 HERE="$(cd "$(dirname "$0")" && pwd)"
 AGENT_HOME="$(cd "$HERE/.." && pwd)"
 SCRIPT="$HERE/agent-block.sh"
+# The consumer half of the probe round trip below (igor#546). Sourced up here,
+# before the first subshell, so shellcheck doesn't read $AGENT_HOME as the one
+# a subshell re-exported.
+# shellcheck source=../lib/blockprobe.sh
+. "$AGENT_HOME/lib/blockprobe.sh"
 
 FAIL=0
 eq()  { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
@@ -115,6 +120,84 @@ Body:
 ${ISSUE_BODY}"
 has "the rebuilt USER_MSG the next tick would send contains the findings" \
   "$USER_MSG" "SEC-FINDING-XYZ: unauthorized access"
+
+# igor#546: a mechanical probe recorded alongside the reason rides in the
+# issue BODY (never just the comment), same rationale as igor#434 above --
+# lib/blockprobe.sh's sweep reads only the body.
+echo "== agent-block.sh: a mechanical probe is recorded in the issue body (igor#546) =="
+export COMMENT_CAP="$TMP/comment-probe.json"
+export BODY_PATCH_CAP="$TMP/body-patch-probe.json"
+export ASSIGN_CAP="$TMP/assign-probe.json"
+export LABEL_CAP="$TMP/label-probe.json"
+# shellcheck disable=SC2030,SC2031
+(
+  unset FORGEJO_REVIEWER
+  export ISSUE_NUMBER=42 FORGEJO_REPO=acme/x AGENT_HOME="$AGENT_HOME" \
+         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+  bash "$SCRIPT" "waiting on igor#537 to land" issue-open "joshtronic/igor#537" >/dev/null 2>&1
+)
+PROBE_BODY=$(jq -r '.body // empty' "$BODY_PATCH_CAP" 2>/dev/null)
+has "probe: body carries the probe block"        "$PROBE_BODY" "<!-- probe"
+has "probe: body carries the recorded kind"       "$PROBE_BODY" "kind: issue-open"
+has "probe: body carries the recorded ref"        "$PROBE_BODY" "ref: joshtronic/igor#537"
+
+# Close the producer -> consumer loop on the body the PRODUCER actually
+# PATCHes. The substring checks above pass on a body the sweep can't read:
+# blockprobe's parsers work from the LAST "## Blocked (" heading onward, so
+# they also depend on forgejo_append_issue_body emitting that heading exactly
+# -- something no substring assertion here covers. Run the real consumer.
+eq "probe round trip: the sweep parses the kind back" "issue-open" \
+   "$(blockprobe_parse_kind "$PROBE_BODY")"
+eq "probe round trip: the sweep parses the ref back"  "joshtronic/igor#537" \
+   "$(blockprobe_parse_ref "$PROBE_BODY")"
+eq "probe round trip: the sweep parses the reason back" "waiting on igor#537 to land" \
+   "$(blockprobe_last_reason "$PROBE_BODY")"
+eq "probe round trip: a fresh probe is not already spent" "" \
+   "$(blockprobe_parse_cleared "$PROBE_BODY")"
+
+echo "== agent-block.sh: an operator-kind probe needs no ref (igor#546) =="
+export BODY_PATCH_CAP="$TMP/body-patch-operator.json"
+# shellcheck disable=SC2030,SC2031
+(
+  unset FORGEJO_REVIEWER
+  export ISSUE_NUMBER=42 FORGEJO_REPO=acme/x AGENT_HOME="$AGENT_HOME" \
+         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+  bash "$SCRIPT" "Josh needs to pick an approach" operator >/dev/null 2>&1
+)
+OP_BODY=$(jq -r '.body // empty' "$BODY_PATCH_CAP" 2>/dev/null)
+has "operator probe: body carries kind: operator" "$OP_BODY" "kind: operator"
+
+echo "== agent-block.sh: an unrecognized probe kind is dropped, not fatal, still blocks (igor#546) =="
+export BODY_PATCH_CAP="$TMP/body-patch-badkind.json"
+BADKIND_ERR="$TMP/badkind-stderr.txt"
+# shellcheck disable=SC2030,SC2031
+(
+  unset FORGEJO_REVIEWER
+  export ISSUE_NUMBER=42 FORGEJO_REPO=acme/x AGENT_HOME="$AGENT_HOME" \
+         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+  bash "$SCRIPT" "some reason" made-up-kind "joshtronic/igor#537" >/dev/null 2>"$BADKIND_ERR"
+)
+RC_BADKIND=$?
+eq "bad kind: still exits 0 (block still lands)" "0" "$RC_BADKIND"
+BADKIND_BODY=$(jq -r '.body // empty' "$BODY_PATCH_CAP" 2>/dev/null)
+lacks_probe=$(case "$BADKIND_BODY" in *"<!-- probe"*) echo present ;; *) echo absent ;; esac)
+eq "bad kind: no probe block recorded" "absent" "$lacks_probe"
+has "bad kind: warns on stderr" "$(cat "$BADKIND_ERR")" "unrecognized probe kind"
+
+echo "== agent-block.sh: a mechanical kind missing its ref is dropped, not fatal (igor#546) =="
+export BODY_PATCH_CAP="$TMP/body-patch-noref.json"
+NOREF_ERR="$TMP/noref-stderr.txt"
+# shellcheck disable=SC2030,SC2031
+(
+  unset FORGEJO_REVIEWER
+  export ISSUE_NUMBER=42 FORGEJO_REPO=acme/x AGENT_HOME="$AGENT_HOME" \
+         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+  bash "$SCRIPT" "some reason" issue-open >/dev/null 2>"$NOREF_ERR"
+)
+NOREF_BODY=$(jq -r '.body // empty' "$BODY_PATCH_CAP" 2>/dev/null)
+lacks_probe2=$(case "$NOREF_BODY" in *"<!-- probe"*) echo present ;; *) echo absent ;; esac)
+eq "no ref: no probe block recorded" "absent" "$lacks_probe2"
+has "no ref: warns on stderr" "$(cat "$NOREF_ERR")" "needs a ref"
 
 # The other branch, end-to-end: the body append fails (a token blip, a
 # renumbered issue) and the block itself must still land. The append is

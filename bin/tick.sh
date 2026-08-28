@@ -137,6 +137,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/landed.sh"
 # shellcheck source=lib/automerge.sh
 . "$AGENT_HOME/lib/automerge.sh"
+# shellcheck source=lib/blockprobe.sh
+. "$AGENT_HOME/lib/blockprobe.sh"
 . "$AGENT_HOME/lib/ship-report.sh"
 # shellcheck source=lib/feedback.sh
 . "$AGENT_HOME/lib/feedback.sh"
@@ -3389,6 +3391,14 @@ log "validation: ${VAL_PASS} pass, ${VAL_CACHED} cached, ${VAL_NOTREADY} not-rea
 # claude_health_blocked gate below -- see the validation-sweep comment above.
 do_automerge_tick && exit 0
 
+# -- Block-probe sweep (igor#546; needs ANALYSIS_REPOS_JSON, just built
+# above). Re-evaluates every Status/Blocked issue's recorded probe (see
+# lib/blockprobe.sh) and clears the label once its condition resolves, so a
+# block doesn't sit as unchecked prose after its cause is gone. Non-model
+# (API + the same compare call automerge_behind_count already uses), so it
+# runs even during a Claude health cooldown; never ends the tick.
+do_blockprobe_tick || true
+
 if claude_health_blocked; then
   log "claude health: backoff active (kind=$(claude_health_kind)) -- skipping all model work this tick"
   do_seo_tick || true
@@ -4543,14 +4553,26 @@ while IFS= read -r repo_line; do
     C_REJECTED=$(jq '[.[] | select(.state == "closed" and .merged == false)] | length' <<<"$C_HISTORY")
     if [ "$C_REJECTED" -ge 2 ]; then
       log "skipping ${R_NAME}#${C_NUM} -- ${C_REJECTED} rejected bot PRs, applying Status/Blocked"
+      C_BLOCK_REASON="The agent opened ${C_REJECTED} PRs for this issue, all closed without merging. Probably needs a different approach or more context. Status/Blocked applied; investigate and remove the label to re-queue."
+      # Body first, with an `operator` probe (igor#546): this hold is a human
+      # judgement call, not a mechanical condition, so the block-probe sweep
+      # should name it as one rather than report the ticket UNPROBED forever.
+      # Body, not just the comment, for the igor#434 reason -- a re-queued run
+      # is prompted from the body alone.
+      forgejo_append_issue_body "$R_NAME" "$C_NUM" "Blocked ($(date -u '+%Y-%m-%d %H:%MZ'))" \
+        "${C_BLOCK_REASON}
+
+<!-- probe
+kind: operator
+-->" 2>/dev/null \
+        || log "warning: could not append the block reason to ${R_NAME}#${C_NUM}'s body"
       forgejo_add_label "$R_NAME" "$C_NUM" "Status/Blocked" 2>/dev/null \
         || log "warning: could not apply Status/Blocked on ${R_NAME}#${C_NUM}"
       if [ -n "${FORGEJO_REVIEWER:-}" ]; then
         forgejo_assign "$R_NAME" "$C_NUM" "$FORGEJO_REVIEWER" 2>/dev/null \
           || log "warning: could not assign ${R_NAME}#${C_NUM} to $FORGEJO_REVIEWER"
       fi
-      forgejo_comment "$R_NAME" "$C_NUM" \
-        "The agent opened ${C_REJECTED} PRs for this issue, all closed without merging. Probably needs a different approach or more context. Status/Blocked applied; investigate and remove the label to re-queue." 2>/dev/null \
+      forgejo_comment "$R_NAME" "$C_NUM" "$C_BLOCK_REASON" 2>/dev/null \
         || log "warning: could not comment on ${R_NAME}#${C_NUM}"
       continue
     fi

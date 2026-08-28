@@ -496,6 +496,73 @@ respective tools on the host; install or skip.
   (unchanged behavior), a repo without that convention just doesn't get the
   extra belt. Base branch (`master`) also stays hardcoded -- a fleet-wide
   convention, not a per-repo fact.
+- The block-probe sweep (`do_blockprobe_tick`, `lib/blockprobe.sh`, igor#546)
+  re-evaluates WHY a ticket is `Status/Blocked` so the label can go red when
+  its cause resolves -- without it, a block just sits as prose forever
+  (joshing.you#220 stayed `Status/Blocked` for a week after the PR it named
+  had already merged). `bin/agent-block.sh` now takes optional trailing
+  args -- `agent-block.sh "<reason>" [<probe-kind> [<probe-ref>]]` -- and
+  appends a machine-checkable probe to the issue BODY alongside the reason
+  (never just a comment, same rationale as igor#434: the issue-work prompt
+  is built from the body alone). Three kinds, a closed vocabulary
+  (`BLOCKPROBE_KINDS`): `issue-open <owner/repo#N>` holds while that
+  issue/PR is open and clears once it closes (e.g. "blocked on X landing");
+  `pr-behind <owner/repo#N>` holds while that PR is behind its base branch
+  (reuses `automerge_behind_count`) and clears once it isn't; `operator`
+  takes no ref and is never evaluated -- it marks a block on a human
+  decision ("Josh needs to pick an approach"), the "who" vs "what" split the
+  issue asked for. Everything is read from the LATEST `## Blocked (...)`
+  section only, probe and reason alike (`_blockprobe_last_block` is the one
+  slice both go through): a ticket can block more than once, and only the most
+  recent block describes the current hold. Since the probe args are OPTIONAL,
+  a latest section carrying no probe reads as UNPROBED even when an earlier
+  section has one -- scanning the whole body for a probe would clear a ticket
+  on a condition nobody currently means. No probe recorded at all -> logged as
+  UNPROBED and left alone -- an honest "don't know" beats guessing. A probe
+  that still HOLDS gets `confirmed: <YYYY-MM-DD>` stamped into its probe block
+  (`blockprobe_record_confirmation`), so the ticket itself records when the
+  hold was last re-checked instead of that living only in an ephemeral tick
+  log; the stamp is REPLACED not appended (a month-long block would otherwise
+  grow 30 lines) and date-gated against the body already in hand, so a held
+  block costs one extra API call per day rather than one per tick. Two
+  producers exist: `bin/agent-block.sh` (the worker's own blocks, all three
+  kinds) and the claim guard's rejected-PR strike in `bin/tick.sh`, which
+  records the reason in the issue BODY (not just a comment -- igor#434: a
+  re-queued run is prompted from the body alone) with an `operator` probe,
+  because "the agent opened N PRs and all were closed" is a human judgement
+  call, not a mechanical condition. Teaching the ISSUE-WORK
+  agent to pass the probe args is a distillery-side change -- that prompt is
+  the Distillery's `worker-contract` skill, not this repo's `AGENTS.md` (which
+  is only `bin/check-sync.sh`'s CI-mode fallback), so it rides its own ticket.
+  The sweep is non-model (API + the same compare call `automerge_behind_count`
+  already makes), so it runs near `do_automerge_tick`/`do_landed_tick`,
+  above the Claude health gate, and just skips a ticket also carrying
+  `lib/deferred.sh`'s own `<!-- gate -->` block -- that's a different
+  mechanism (an LLM read of an external page, released to the human for
+  confirmation) and must not be double-processed here. On a CLEARED verdict
+  it stamps `cleared: <YYYY-MM-DD>` into the probe block, then removes
+  `Status/Blocked`, unassigns, and comments why -- deliberately NOT through a
+  human-confirmation step like `deferred_release_to_reviewer`, since this is a
+  direct check of a declared condition rather than an LLM judgment call. That
+  stamp marks the probe SPENT and GATES the clear (a failed stamp leaves the
+  ticket blocked and retries next tick), because a probe outlives the block
+  episode it describes: it evaluates CLEARED forever, so the next
+  `Status/Blocked` applied WITHOUT appending a new `## Blocked (...)` section
+  -- a human labelling the ticket by hand -- would be stripped on the next
+  tick, citing a condition from an episode that is over. A spent probe reads
+  as UNPROBED, same as a latest block carrying no probe at all. **Repeat-block
+  guard** (ctj#127): before clearing, it
+  counts how many times the identical reason text already appears in the
+  body (`blockprobe_reason_repeat_count`, a plain substring count across
+  every `## Blocked (...)` section) -- past two occurrences it stops
+  auto-requeuing and escalates instead (one deduped comment, keyed off a
+  `<!-- blockprobe-escalated -->` marker via `forgejo_pr_has_comment_containing`,
+  plus a `FORGEJO_REVIEWER` assignment), because a block that keeps
+  regenerating identically is a loop, not a resolved condition, and
+  auto-requeuing it again just burns a tick every cycle looking like
+  progress. Any evaluation failure (an unreachable API, an unparseable
+  payload) reads UNKNOWN and fails closed -- the ticket stays blocked rather
+  than a transport blip being mistaken for a resolved cause.
 - The feedback-triage pass (`do_feedback_tick`, `lib/feedback.sh`) is
   convention-driven via `agent.json` `.feedback.csv` -- the published Google-Form
   CSV of player feedback (the second `agent.json` consumer after auto-merge).
