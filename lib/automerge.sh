@@ -128,9 +128,10 @@ automerge_url_status() {
 # review gate (`agent.json` `.automerge.require_human == true`); exit 1 otherwise
 # (the default -- the shadow review's APPROVE gates the merge). The carve-out for
 # repos whose real defect class a diff review can't judge (joshing.you, igor.bot,
-# porksicle.com). A url-less repo (including igor itself) is ALREADY
-# human-gated upstream, unconditionally, regardless of this flag -- see
-# do_automerge_tick's use of automerge_url_status.
+# a game whose bugs are visual/interaction, not diffable). A url-less repo
+# (including igor itself) is ALREADY human-gated upstream, unconditionally,
+# regardless of this flag -- see do_automerge_tick's use of
+# automerge_url_status.
 automerge_require_human() {
   local repo="$1"
   [ "$(forgejo_repo_get_file "$repo" "$AGENT_CONFIG_FILE" 2>/dev/null \
@@ -655,7 +656,7 @@ automerge_behind_count() {
 
 # automerge_update_branch <repo> <pr> -- merge the base branch into the PR head
 # (Forgejo "update branch") so a behind PR satisfies require-up-to-date. The
-# human's APPROVAL survives this base-merge (verified live on porksicle#81), and
+# human's APPROVAL survives this base-merge (verified live on a real repo), and
 # the shadow review's patch-id dedup treats the base-merge as an already-seen net
 # diff, so it isn't re-reviewed. rc 0 on success.
 automerge_update_branch() {

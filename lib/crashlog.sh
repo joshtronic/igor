@@ -46,9 +46,10 @@ crashlog_preserve() {
 # scans worktrees for a lingering in-flight marker. But when claude exits
 # nonzero, claude_run_with_cost returns CLEANLY (marker cleared), so that path
 # never runs and the worktree (with the stream) is torn down by the caller --
-# losing any post-mortem for WHY claude exited nonzero (the vps-showdown#41/#46
-# blind spot). This is called by claude_run_with_cost itself, with the scratch
-# dir it already has. Best-effort throughout; must never break the caller.
+# losing any post-mortem for WHY claude exited nonzero (a blind spot seen
+# live on a real repo). This is called by claude_run_with_cost itself,
+# with the scratch dir it already has. Best-effort throughout; must
+# never break the caller.
 crashlog_preserve_scratch() {
   local rc="$1" state_dir="$2" call_site="$3" scratch="$4" dest stamp safe
   [ -n "$scratch" ] && [ -d "$scratch" ] || return 0

@@ -118,17 +118,17 @@ check_test_signal() {
 }
 
 # check_deploy_smoke_signal -- an alternate test-signal path for static sites
-# with no unit-test suite (e.g. snail.io). Per Josh: "games are still websites
-# -- the smoke test is the site deploying and passing that bundle-hash
-# validation." A repo qualifies when its dossier declares a live `url` (root
-# AGENTS.md, falling back to legacy agent.json `.smoke.url` -- the same
-# source lib/automerge.sh reads to gate auto-merge, via lib/dossier.sh's
-# dossier_get_content) AND the build stamps a `deploy-sha` marker into the
-# page (the live propagation check lib/automerge.sh's automerge_live_sha
-# performs post-deploy). The actual pre-merge correctness bar -- CI building
-# the site on the PR -- is check_ci_workflow, run separately by
-# validate_repo_local; this only substitutes for the unit-test requirement,
-# it doesn't relax CI.
+# with no unit-test suite (e.g. a browser game). Per the operator: "games
+# are still websites -- the smoke test is the site deploying and passing
+# that bundle-hash validation." A repo qualifies when its dossier declares
+# a live `url` (root AGENTS.md, falling back to legacy agent.json
+# `.smoke.url` -- the same source lib/automerge.sh reads to gate
+# auto-merge, via lib/dossier.sh's dossier_get_content) AND the build
+# stamps a `deploy-sha` marker into the page (the live propagation check
+# lib/automerge.sh's automerge_live_sha performs post-deploy). The actual
+# pre-merge correctness bar -- CI building the site on the PR -- is
+# check_ci_workflow, run separately by validate_repo_local; this only
+# substitutes for the unit-test requirement, it doesn't relax CI.
 check_deploy_smoke_signal() {
   local agents cfg url
   agents=$(rc_file_read AGENTS.md)
@@ -276,8 +276,7 @@ check_ci_workflow() {
 # but no longer gating: docs aren't safety-relevant, and check_lint_signal is a
 # pure existence check (a lint config no CI runs) that both gave false
 # confidence AND false-negatived repos with a real tsc/vitest CI gate but no
-# lint dotfile (snail.io, knowthetable). Mirrors the `Agent`-label demotion in
-# #375/#376.
+# lint dotfile. Mirrors the `Agent`-label demotion in #375/#376.
 #
 # <repo-label> keeps the call signature self-documenting -- callers already
 # print it in their own header (bin/validate-repo.sh, tick.sh) and the

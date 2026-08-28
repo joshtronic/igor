@@ -602,7 +602,7 @@ Rules:
 # Claude shouldn't be modifying CI from inside a tick. Callers should
 # abandon (don't push) when this returns non-empty.
 list_offlimits_violations() {
-  # WORKFLOW BAN LIFTED (2026-07-01, Josh's call). The agent may now touch
+  # WORKFLOW BAN LIFTED (2026-07-01, the operator's call). The agent may now touch
   # `.forgejo/workflows/` -- so the agent can maintain CI workflows instead
   # of bouncing every workflow change to a human ticket. What still guards
   # it: the security_gate reviews every diff before
@@ -1092,9 +1092,10 @@ review_reset_rework() {
 # bar the worker can converge on (a reviewer that got pickier every round
 # would move the goalposts and the PR would never land) -- then "max" for the
 # LAST look before the human takes over (the "final boss": rare, and the
-# alternative is Josh's time, so max effort is the cheap bet). Escalation to
-# the human fires at rounds >= 3 (see the REQUEST_CHANGES handler), so the
-# review at rounds>=3 is the one that maxes. Hardcoded, not a knob.
+# alternative is the operator's time, so max effort is the cheap bet).
+# Escalation to the human fires at rounds >= 3 (see the REQUEST_CHANGES
+# handler), so the review at rounds>=3 is the one that maxes. Hardcoded,
+# not a knob.
 reviewer_effort() {
   local rounds="${1:-0}"
   if [ "${rounds:-0}" -ge 3 ]; then printf 'max'; else printf 'high'; fi
@@ -3370,9 +3371,9 @@ while IFS= read -r repo_line; do
     # Genuinely not ready (a real gap in the clone). No ticket -- onboarding
     # is a manual operator step. But blocked work must NOT vanish silently: if
     # the repo has open Agent-labeled tickets, they can't be picked up until
-    # it's onboarded, so say so plainly (a bare "skipping" line is how
-    # knowthetable/snail's audio tickets rotted unnoticed until a human caught
-    # the missing feature). Best-effort API read; never aborts the sweep.
+    # it's onboarded, so say so plainly (a bare "skipping" line is how a
+    # repo's tickets rotted unnoticed until a human caught the missing
+    # feature). Best-effort API read; never aborts the sweep.
     NA_BLOCKED=$(forgejo_find_claimable "$R_NAME" "${FORGEJO_REVIEWER:-}" 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
     if [ "${NA_BLOCKED:-0}" -gt 0 ]; then
       log "validation: $R_NAME not ready for agentic work but has $NA_BLOCKED open Agent-labeled issue(s) that CANNOT be picked up until it's onboarded (run bin/validate-repo.sh $R_NAME for the checklist)"
@@ -4825,7 +4826,7 @@ cd "$WORKTREE"
 #                 reconciled below: snapshot the WIP and resume next tick
 #   discard    -- a real crash; or a turn-cap cut-off left with a `git stash`
 #                 that could not be safely reconciled -> ship-safety discard
-# The stash guard preserves the porksicle#114 invariant: a nonzero exit can mean
+# The stash guard preserves the ship-safety invariant: a nonzero exit can mean
 # the run died mid-workflow before restoring a `git stash` it took, so committing
 # -A would ship a scratch tree OVER the stashed real edits. igor#411: that guard
 # used to veto EVERY turn-cap checkpoint the instant a stash existed, discarding

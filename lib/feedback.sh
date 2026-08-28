@@ -15,9 +15,10 @@
 # Every processed row is stamped in a local seen-set (.feedback.seen) so it is
 # triaged once; nothing is written back to the sheet (the issue tracker IS the
 # status). The human label gate bounds prompt-injection: a poisoned row can at
-# worst produce a ticket Josh rejects -- it never reaches code. The model may
-# silently DROP confident spam/dupes (operator's call), so not every row becomes
-# a ticket; the seen-set still records it so it isn't re-triaged.
+# worst produce a ticket the operator rejects -- it never reaches code. The
+# model may silently DROP confident spam/dupes (operator's call), so not
+# every row becomes a ticket; the seen-set still records it so it isn't
+# re-triaged.
 
 FEEDBACK_MAX_SEEN=500                       # ring-cap on the seen-set
 FEEDBACK_MAX_ATTEMPTS=3                      # give up on a row after N failed ticks (anti-livelock)

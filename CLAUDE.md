@@ -105,7 +105,7 @@ respective tools on the host; install or skip.
   (a clean `max_turns` result event with no stash, or one cleanly reconciled
   via `git stash pop` first -> snapshot the WIP), or `discard` (a real crash,
   or a turn cap left with a stash that pop couldn't reconcile -> the
-  porksicle#114 ship-safety discard, relaxed per igor#411 so a stash alone no
+  ship-safety discard, relaxed per igor#411 so a stash alone no
   longer vetoes an otherwise-recoverable checkpoint). A
   `checkpoint` commits the in-progress work and publishes it as a **draft
   (`WIP:` title) PR** that the review + merge loops SKIP and the discovery/claim

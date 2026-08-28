@@ -975,7 +975,7 @@ EOF
 # Haiku pass: list specific named people/companies/products/publications in
 # the DRAFT that don't appear in the SOURCE MATERIAL the writer saw --
 # likely fabrications a human should verify or cut (the "who is Sean"
-# catch). Excludes Igor/Josh and generic tech. Fails open (emits nothing)
+# catch). Excludes Igor/the operator and generic tech. Fails open (emits nothing)
 # on any error. Echoes one name per line, or nothing when all is grounded.
 ground_named_entities() {
   local body="$1" sources="$2" system user raw

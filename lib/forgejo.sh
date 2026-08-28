@@ -2,7 +2,7 @@
 # Forgejo API helpers. Sourced by bin/tick.sh and bin/agent-*.sh.
 #
 # Requires in environment:
-#   FORGEJO_URL    -- e.g., https://git.sherver.org
+#   FORGEJO_URL    -- e.g., https://git.example.com (your forge host)
 #   FORGEJO_TOKEN  -- bot's API token (loaded from $AGENT_HOME/.env)
 #
 # Requires on PATH: curl, jq.
