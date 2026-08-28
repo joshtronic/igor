@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test-context-source.sh -- unit tests for lib/context-source.sh: igor's
 # last-good-cache sourcing of its prompt surfaces from the Distillery
-# (joshtronic/distillery) at origin/master. No in-repo fallback -- the
+# (DISTILLERY_REPO) at origin/master. No in-repo fallback -- the
 # fallback IS the previously cached copy (igor#485).
 #   context_skill_body -- reads skills/<skill>/SKILL.md at origin/master via
 #                          `git show`, strips YAML frontmatter, echoes the body.

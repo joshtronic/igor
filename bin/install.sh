@@ -114,6 +114,16 @@ if [ ! -f "$AGENT_HOME/.env" ]; then
   exit 1
 fi
 
+# tick.sh hard-requires DISTILLERY_REPO at the top of EVERY tick, so this
+# has to fail before the timer is enabled below: validating after the
+# `systemctl enable --now` would leave a live timer firing ticks that all
+# die at that same check. Read in a subshell so .env stays scoped to the
+# seeding block further down, which is the only part that needs it.
+if [ -z "$(set -a; . "$AGENT_HOME/.env" 2>/dev/null; printf '%s' "${DISTILLERY_REPO:-}")" ]; then
+  echo "DISTILLERY_REPO must be set in $AGENT_HOME/.env -- see .env.example" >&2
+  exit 1
+fi
+
 mkdir -p "$UNIT_DIR"
 ln -sf "$AGENT_HOME/systemd/agent.service" "$UNIT_DIR/agent.service"
 ln -sf "$AGENT_HOME/systemd/agent.timer"   "$UNIT_DIR/agent.timer"
@@ -137,8 +147,6 @@ set -a
 # shellcheck source=/dev/null
 . "$AGENT_HOME/.env"
 set +a
-
-: "${DISTILLERY_REPO:?DISTILLERY_REPO must be set in .env}"
 
 AGENT_STATE_DIR="${AGENT_STATE_DIR:-$HOME/.local/state/agent}"
 AGENT_REPO_ROOT="$AGENT_STATE_DIR/repos"

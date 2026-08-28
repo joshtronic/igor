@@ -105,11 +105,11 @@ respective tools on the host; install or skip.
   (a clean `max_turns` result event with no stash, or one cleanly reconciled
   via `git stash pop` first -> snapshot the WIP), or `discard` (a real crash,
   or a turn cap left with a stash that pop couldn't reconcile -> the
-  ship-safety discard, relaxed per igor#411 so a stash alone no
-  longer vetoes an otherwise-recoverable checkpoint). A
-  `checkpoint` commits the in-progress work and publishes it as a **draft
-  (`WIP:` title) PR** that the review + merge loops SKIP and the discovery/claim
-  gate RESUMES (carving the next worktree from that branch, with a "continue,
+  ship-safety discard, relaxed per igor#411 so a stash alone no longer vetoes
+  an otherwise-recoverable checkpoint). A `checkpoint` commits the in-progress
+  work and publishes it as a **draft (`WIP:` title) PR** that the review +
+  merge loops SKIP and the discovery/claim gate RESUMES (carving the next
+  worktree from that branch, with a "continue,
   don't restart" directive to Claude) -- so the issue stays claimable and picks
   up where it left off. Natural completion (`exit 0`) drops the `WIP:` prefix,
   marking the PR ready -> shadow review. Guardrails: a **resume budget**
@@ -389,10 +389,10 @@ respective tools on the host; install or skip.
   (`ceo_open_guidance_pr` -- contents-API + new_branch, no clone) for the board
   to merge. Append-only (it adds what it learned, never rewrites/erases),
   throttled to one open guidance PR (`ceo_guidance_pr_open`), so `CEO.md` learns
-  how the operator decides over time. The CEO still never commits to `master` or merges --
-  it drafts (issues + redline PRs), the board ratifies; further agency
-  (auto-Agent-label, daily steering) stays a deliberate, human-gated step per
-  "start tight, loosen as trust earns it."
+  how the operator decides over time. The CEO still never commits to `master`
+  or merges -- it drafts (issues + redline PRs), the board ratifies; further
+  agency (auto-Agent-label, daily steering) stays a deliberate, human-gated
+  step per "start tight, loosen as trust earns it."
 - The auto-merge + deploy barrier (`lib/automerge.sh`, Phase 1) is the "after you
   approve, your job ends" step -- convention opt-in like the CEO/logwatch, but
   now with TWO merge paths keyed on `automerge_url_status` (dossier root
@@ -510,10 +510,11 @@ respective tools on the host; install or skip.
   `pr-behind <owner/repo#N>` holds while that PR is behind its base branch
   (reuses `automerge_behind_count`) and clears once it isn't; `operator`
   takes no ref and is never evaluated -- it marks a block on a human
-  decision ("the operator needs to pick an approach"), the "who" vs "what" split the
-  issue asked for. Everything is read from the LATEST `## Blocked (...)`
-  section only, probe and reason alike (`_blockprobe_last_block` is the one
-  slice both go through): a ticket can block more than once, and only the most
+  decision ("the operator needs to pick an approach"), the "who" vs "what"
+  split the issue asked for. Everything is read from the LATEST
+  `## Blocked (...)` section only, probe and reason alike
+  (`_blockprobe_last_block` is the one slice both go through): a ticket can
+  block more than once, and only the most
   recent block describes the current hold. Since the probe args are OPTIONAL,
   a latest section carrying no probe reads as UNPROBED even when an earlier
   section has one -- scanning the whole body for a probe would clear a ticket
@@ -581,10 +582,11 @@ respective tools on the host; install or skip.
   is stamped in a local seen-set (`.feedback.seen`, FIFO-capped) so it's triaged
   once; nothing is written back to the sheet (the issue tracker IS the status, so
   no status column). The human label gate bounds prompt-injection -- a poisoned
-  row at worst yields a ticket the operator rejects, never code; the model MAY silently
-  drop confident spam/dupes (operator's call), so not every row becomes a ticket
-  but the seen-set still records it. Model work, so it sits BELOW the Claude
-  health gate. The verdict is a `DECISION:` line + `REASON:` (DROP) or
+  row at worst yields a ticket the operator rejects, never code; the model MAY
+  silently drop confident spam/dupes (operator's call), so not every row
+  becomes a ticket but the seen-set still records it. Model work, so it sits
+  BELOW the Claude health gate. The verdict is a `DECISION:` line + `REASON:`
+  (DROP) or
   `TITLE:`/`===BODY===` (FILE), parsed harness-side (`feedback_parse_response`),
   never model-written JSON. Needs `python3` (robust quoted-CSV parsing). On FILE
   the model may also emit an optional `LABELS:` line for **loose classification**,

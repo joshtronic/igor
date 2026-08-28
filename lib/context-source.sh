@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # context-source.sh -- sources igor's prompt surfaces from the Distillery
-# (joshtronic/distillery) at origin/master, LIVE: no pins, no submodules,
+# (DISTILLERY_REPO) at origin/master, LIVE: no pins, no submodules,
 # and -- per the revised igor#485 spec -- NO in-repo fallback. A change
 # merged to distillery master is live on igor's next tick, exactly like
 # igor's own self-pull. The "fallback" is the PREVIOUSLY SOURCED copy: a
@@ -353,7 +353,7 @@ context_bootstrap_alert() {
 
   subject="[Agent] prompt cache never seeded on $(hostname -s 2>/dev/null || echo agent)"
   body="igor's prompt-surface cache (lib/context-source.sh) has never
-completed a successful pull from the Distillery (joshtronic/distillery).
+completed a successful pull from the Distillery (${DISTILLERY_REPO:-DISTILLERY_REPO unset}).
 All prompt-consuming work (issue work, PR review, feedback triage,
 site-work, sports digest) is BLOCKED until one succeeds -- there is no
 in-repo fallback by design (igor#485).
