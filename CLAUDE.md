@@ -496,6 +496,46 @@ respective tools on the host; install or skip.
   (unchanged behavior), a repo without that convention just doesn't get the
   extra belt. Base branch (`master`) also stays hardcoded -- a fleet-wide
   convention, not a per-repo fact.
+- The block-probe sweep (`do_blockprobe_tick`, `lib/blockprobe.sh`, igor#546)
+  re-evaluates WHY a ticket is `Status/Blocked` so the label can go red when
+  its cause resolves -- without it, a block just sits as prose forever
+  (joshing.you#220 stayed `Status/Blocked` for a week after the PR it named
+  had already merged). `bin/agent-block.sh` now takes optional trailing
+  args -- `agent-block.sh "<reason>" [<probe-kind> [<probe-ref>]]` -- and
+  appends a machine-checkable probe to the issue BODY alongside the reason
+  (never just a comment, same rationale as igor#434: the issue-work prompt
+  is built from the body alone). Three kinds, a closed vocabulary
+  (`BLOCKPROBE_KINDS`): `issue-open <owner/repo#N>` holds while that
+  issue/PR is open and clears once it closes (e.g. "blocked on X landing");
+  `pr-behind <owner/repo#N>` holds while that PR is behind its base branch
+  (reuses `automerge_behind_count`) and clears once it isn't; `operator`
+  takes no ref and is never evaluated -- it marks a block on a human
+  decision ("Josh needs to pick an approach"), the "who" vs "what" split the
+  issue asked for. Only the LATEST `<!-- probe -->` block in the body
+  counts, since a ticket can block more than once and only the most recent
+  block describes the current hold. No probe recorded at all -> logged as
+  UNPROBED and left alone -- an honest "don't know" beats guessing. The
+  sweep is non-model (API + the same compare call `automerge_behind_count`
+  already makes), so it runs near `do_automerge_tick`/`do_landed_tick`,
+  above the Claude health gate, and just skips a ticket also carrying
+  `lib/deferred.sh`'s own `<!-- gate -->` block -- that's a different
+  mechanism (an LLM read of an external page, released to the human for
+  confirmation) and must not be double-processed here. On a CLEARED verdict
+  it removes `Status/Blocked`, unassigns, and comments why -- deliberately
+  NOT through a human-confirmation step like `deferred_release_to_reviewer`,
+  since this is a direct check of a declared condition rather than an LLM
+  judgment call. **Repeat-block guard** (ctj#127): before clearing, it
+  counts how many times the identical reason text already appears in the
+  body (`blockprobe_reason_repeat_count`, a plain substring count across
+  every `## Blocked (...)` section) -- past two occurrences it stops
+  auto-requeuing and escalates instead (one deduped comment, keyed off a
+  `<!-- blockprobe-escalated -->` marker via `forgejo_pr_has_comment_containing`,
+  plus a `FORGEJO_REVIEWER` assignment), because a block that keeps
+  regenerating identically is a loop, not a resolved condition, and
+  auto-requeuing it again just burns a tick every cycle looking like
+  progress. Any evaluation failure (an unreachable API, an unparseable
+  payload) reads UNKNOWN and fails closed -- the ticket stays blocked rather
+  than a transport blip being mistaken for a resolved cause.
 - The feedback-triage pass (`do_feedback_tick`, `lib/feedback.sh`) is
   convention-driven via `agent.json` `.feedback.csv` -- the published Google-Form
   CSV of player feedback (the second `agent.json` consumer after auto-merge).

@@ -137,6 +137,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/landed.sh"
 # shellcheck source=lib/automerge.sh
 . "$AGENT_HOME/lib/automerge.sh"
+# shellcheck source=lib/blockprobe.sh
+. "$AGENT_HOME/lib/blockprobe.sh"
 . "$AGENT_HOME/lib/ship-report.sh"
 # shellcheck source=lib/feedback.sh
 . "$AGENT_HOME/lib/feedback.sh"
@@ -3388,6 +3390,14 @@ log "validation: ${VAL_PASS} pass, ${VAL_CACHED} cached, ${VAL_NOTREADY} not-rea
 # One-thing-then-exit, like the rest of the cascade. Deliberately above the
 # claude_health_blocked gate below -- see the validation-sweep comment above.
 do_automerge_tick && exit 0
+
+# -- Block-probe sweep (igor#546; needs ANALYSIS_REPOS_JSON, just built
+# above). Re-evaluates every Status/Blocked issue's recorded probe (see
+# lib/blockprobe.sh) and clears the label once its condition resolves, so a
+# block doesn't sit as unchecked prose after its cause is gone. Non-model
+# (API + the same compare call automerge_behind_count already uses), so it
+# runs even during a Claude health cooldown; never ends the tick.
+do_blockprobe_tick || true
 
 if claude_health_blocked; then
   log "claude health: backoff active (kind=$(claude_health_kind)) -- skipping all model work this tick"
