@@ -21,7 +21,7 @@
 # are the table in "The Metadata block"; DOSSIER_TYPES and DOSSIER_SITE_TYPES
 # are the `type` closed list in the paragraph directly under that table
 # (site types serve a live domain and therefore require `url`).
-DOSSIER_KEYS="type url test lint verify feedback-csv landed-kind"
+DOSSIER_KEYS="type url test lint verify feedback-csv landed-kind generated-data"
 DOSSIER_TYPES="arcade game content tool api personal infra"
 DOSSIER_SITE_TYPES="arcade game content api personal"
 
