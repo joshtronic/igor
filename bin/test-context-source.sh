@@ -11,10 +11,13 @@
 #   context_surface     -- echoes a skill's cached body; nonzero only when
 #                          the cache has never been seeded.
 #   context_seeded / context_bootstrap_alert -- the bootstrap gate.
-# Skip-safe: needs git; exits 0 with a notice if absent.
+# Skip-safe: needs git, jq, sha256sum; exits 0 with a notice if any is absent.
 set -uo pipefail
 
-command -v git >/dev/null 2>&1 || { echo "test-context-source: git absent -- skipping"; exit 0; }
+for _tool in git jq sha256sum; do
+  command -v "$_tool" >/dev/null 2>&1 || { echo "test-context-source: $_tool absent -- skipping"; exit 0; }
+done
+unset _tool
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../lib/context-source.sh
@@ -75,6 +78,31 @@ seed_all_good() {
   for skill in "${CONTEXT_SKILLS[@]}"; do write_good_skill "$skill"; done
 }
 
+# write_manifest [exclude-skill] -- (re)generates dist/manifest.json from
+# whatever's currently on disk under $SEED/skills, the same way `still
+# build` records a sha256 per skill at build time. Pass a skill name to
+# simulate that skill never having been built into the manifest at all
+# (present on disk, absent from the recorded hashes). A test that wants a
+# STALE manifest (mismatched hash) simply mutates a skill's file AFTER
+# calling write_manifest, without calling it again.
+write_manifest() {
+  local exclude="${1:-}"
+  mkdir -p "$SEED/dist"
+  {
+    printf '{\n  "skills": {\n'
+    local skill first=1 sha
+    for skill in "${CONTEXT_SKILLS[@]}"; do
+      [ -n "$exclude" ] && [ "$skill" = "$exclude" ] && continue
+      [ -f "$SEED/skills/$skill/SKILL.md" ] || continue
+      sha=$(sha256sum "$SEED/skills/$skill/SKILL.md" | cut -d' ' -f1)
+      [ "$first" -eq 1 ] || printf ',\n'
+      first=0
+      printf '    "%s": "%s"' "$skill" "$sha"
+    done
+    printf '\n  }\n}\n'
+  } > "$SEED/dist/manifest.json"
+}
+
 commit_and_push() {
   git -C "$SEED" add -A
   git -C "$SEED" commit -q -m "fixture $(git -C "$SEED" rev-list --count HEAD 2>/dev/null || echo 0)"
@@ -83,6 +111,7 @@ commit_and_push() {
 
 DISTILLERY_CLONE="$TMPROOT/distillery-clone"
 seed_all_good
+write_manifest
 commit_and_push
 git clone -q "$DISTILLERY_BARE" "$DISTILLERY_CLONE"
 
@@ -163,6 +192,91 @@ if printf '%s' "$SHORT_WARN" | grep -q 'too short'; then
 else
   ok "  warns naming the too-short skill" false
 fi
+
+echo "== context_refresh: a skill body mutated after 'still build' (manifest now stale) -> pour fails, current stays put =="
+write_good_skill now-directive        # restore from the too-short test above
+write_good_skill worker-contract "worker-contract-mutated"   # content changes; dist/manifest.json is NOT regenerated
+commit_and_push
+fetch_clone
+MUT_WARN=$(context_refresh 2>&1 1>/dev/null); MUT_RC=$?
+if [ "$MUT_RC" -ne 0 ]; then
+  printf '  + %s\n' "refresh returns nonzero when a skill's sha256 no longer matches the manifest"
+else
+  printf '  x %s\n' "refresh returns nonzero when a skill's sha256 no longer matches the manifest"; FAIL=$((FAIL + 1))
+fi
+eq "cache stamp still the OLD (good) HEAD after a sha256 mismatch" "$FIRST_HEAD" "$(cat "$CACHE/current/HEAD")"
+eq "current still serves the OLD worker-contract body, not the mutated one" "$WANT" "$(context_surface worker-contract)"
+if printf '%s' "$MUT_WARN" | grep -q 'context-source:.*sha256'; then
+  ok "  warns naming the sha256 mismatch" true
+else
+  ok "  warns naming the sha256 mismatch" false
+fi
+
+echo "== context_refresh: NEGATIVE -- with sha256 verification severed, the SAME mutated-body commit now PASSES (proves the gate causes the rejection above) =="
+_context_verify_skill_sha256() { return 0; }
+NEG_CACHE="$TMPROOT/neg-cache"
+export CONTEXT_CACHE_DIR="$NEG_CACHE"
+ok "with the gate stubbed out, the mutated commit swaps in cleanly" context_refresh
+MUT_HEAD=$(git -C "$DISTILLERY_CLONE" rev-parse origin/master)
+eq "the severed-gate cache advances to the mutated HEAD" "$MUT_HEAD" "$(cat "$NEG_CACHE/current/HEAD" 2>/dev/null)"
+unset -f _context_verify_skill_sha256
+. "$HERE/../lib/context-source.sh"   # restore the real sha256 gate
+export CONTEXT_CACHE_DIR="$CACHE"
+
+echo "== context_refresh: a skill present on disk but ABSENT from the manifest -> pour fails, not a pass =="
+write_good_skill worker-contract      # restore worker-contract's original good content
+write_manifest site-work-directive    # regenerate the manifest, omitting site-work-directive's entry
+commit_and_push
+fetch_clone
+ABSENT_WARN=$(context_refresh 2>&1 1>/dev/null); ABSENT_RC=$?
+if [ "$ABSENT_RC" -ne 0 ]; then
+  printf '  + %s\n' "refresh returns nonzero when a skill on disk has no manifest entry"
+else
+  printf '  x %s\n' "refresh returns nonzero when a skill on disk has no manifest entry"; FAIL=$((FAIL + 1))
+fi
+eq "cache stamp still the OLD (good) HEAD" "$FIRST_HEAD" "$(cat "$CACHE/current/HEAD")"
+if printf '%s' "$ABSENT_WARN" | grep -q 'missing from manifest'; then
+  ok "  warns naming the manifest-absent skill" true
+else
+  ok "  warns naming the manifest-absent skill" false
+fi
+
+echo "== context_refresh: manifest missing entirely -> fails loudly, distinct log line =="
+rm -f "$SEED/dist/manifest.json"
+commit_and_push
+fetch_clone
+NOMANIFEST_WARN=$(context_refresh 2>&1 1>/dev/null); NOMANIFEST_RC=$?
+if [ "$NOMANIFEST_RC" -ne 0 ]; then
+  printf '  + %s\n' "refresh returns nonzero when dist/manifest.json is absent"
+else
+  printf '  x %s\n' "refresh returns nonzero when dist/manifest.json is absent"; FAIL=$((FAIL + 1))
+fi
+eq "cache stamp still the OLD (good) HEAD" "$FIRST_HEAD" "$(cat "$CACHE/current/HEAD")"
+if printf '%s' "$NOMANIFEST_WARN" | grep -q 'context-source:.*manifest'; then
+  ok "  warns loudly naming the missing manifest" true
+else
+  ok "  warns loudly naming the missing manifest" false
+fi
+
+echo "== context_refresh: manifest present but not valid JSON -> fails loudly =="
+mkdir -p "$SEED/dist"
+printf 'not { valid json at all\n' > "$SEED/dist/manifest.json"
+commit_and_push
+fetch_clone
+BADJSON_WARN=$(context_refresh 2>&1 1>/dev/null); BADJSON_RC=$?
+if [ "$BADJSON_RC" -ne 0 ]; then
+  printf '  + %s\n' "refresh returns nonzero when dist/manifest.json is not valid JSON"
+else
+  printf '  x %s\n' "refresh returns nonzero when dist/manifest.json is not valid JSON"; FAIL=$((FAIL + 1))
+fi
+eq "cache stamp still the OLD (good) HEAD" "$FIRST_HEAD" "$(cat "$CACHE/current/HEAD")"
+if printf '%s' "$BADJSON_WARN" | grep -q 'context-source:.*manifest'; then
+  ok "  warns loudly naming the unparseable manifest" true
+else
+  ok "  warns loudly naming the unparseable manifest" false
+fi
+write_manifest   # restore a full, valid manifest for the tests below
+
 echo "== context_refresh: clone missing -> fails open, last-good cache still serves =="
 export CONTEXT_DISTILLERY_PATH="$TMPROOT/no-such-clone"
 no "refresh fails when the clone is gone" context_refresh
