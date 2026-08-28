@@ -36,8 +36,9 @@
 #   bin/ideation-pipeline.sh [--brain-db PATH] [--website-path PATH] \
 #     [--live]
 #
-# Required env:
+# Required env (only enforced once WEBSITE_REPO opts this pipeline in):
 #   FORGEJO_URL  FORGEJO_TOKEN  FORGEJO_HOST  BOT_USER
+#   OPERATOR_NAME  OPERATOR_HANDLE
 # Optional env:
 #   WEBSITE_REPO (opt-in gate)  AGENT_MODEL
 #   AGENT_STATE_DIR  AGENT_HOME  FORGEJO_REVIEWER
@@ -86,6 +87,8 @@ fi
 : "${FORGEJO_TOKEN:?FORGEJO_TOKEN must be set}"
 : "${FORGEJO_HOST:?FORGEJO_HOST must be set}"
 : "${BOT_USER:?BOT_USER must be set (export it before calling)}"
+: "${OPERATOR_NAME:?OPERATOR_NAME must be set (see .env.example)}"
+: "${OPERATOR_HANDLE:?OPERATOR_HANDLE must be set (see .env.example)}"
 
 MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 WEBSITE_PATH="${WEBSITE_PATH:-$AGENT_STATE_DIR/repos/${WEBSITE_REPO}}"
@@ -977,6 +980,9 @@ EOF
 ground_named_entities() {
   local body="$1" sources="$2" system user raw
   [ -z "$body" ] && return 0
+  # Quoted heredoc + placeholder swap, not an unquoted heredoc: the prompt
+  # body must stay literal, so a stray $, backtick, or backslash in it can
+  # never expand into (or eat) an instruction the model is meant to read.
   system=$(cat <<'EOF'
 You are checking a draft blog post for fabricated references. You get the
 DRAFT and the SOURCE MATERIAL the writer actually worked from.
@@ -987,7 +993,7 @@ could not have gotten from the sources and may have invented.
 
 Never list:
 - The writer's own identity: Igor, the agent, igor.bot.
-- The author: Josh, joshtronic.
+- The author: __OPERATOR_NAME__, __OPERATOR_HANDLE__.
 - Generic technologies or tools used in passing (Linux, git, RSS, HTTP,
   and the like) and plain place names.
 
@@ -996,6 +1002,8 @@ reference is supported by the source material, output exactly:
 NONE
 EOF
 )
+  system="${system//__OPERATOR_NAME__/$OPERATOR_NAME}"
+  system="${system//__OPERATOR_HANDLE__/$OPERATOR_HANDLE}"
   user=$(cat <<EOF
 DRAFT:
 ${body}

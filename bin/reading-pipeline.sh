@@ -9,15 +9,12 @@
 #
 # Per invocation:
 #
-#   Read cycle. Hardcoded source slate, in order:
-#     - https://joshtronic.com         -> newest unread (date in URL)
-#     - https://thatgirljen.com        -> random unread
-#     - https://news.ycombinator.com   -> top unread (via /rss)
-#     - https://kagi.com/smallweb      -> follow redirect
-#   Up to MAX_READS_PER_TICK reads. Per source: pick a URL the agent
-#   hasn't read, fetch it, ask the model for {title, journal}, INSERT a
-#   reflection (kind='reading'), mark seen_urls.read_at. Empty slot?
-#   Skip -- a 3-read tick (or fewer) is fine.
+#   Read cycle over the READING_SLATE source list (operator config, see
+#   .env.example; "url|picker" pairs, semicolon-separated). Up to
+#   MAX_READS_PER_TICK reads. Per source: pick a URL the agent hasn't
+#   read (per its picker function), fetch it, ask the model for {title,
+#   journal}, INSERT a reflection (kind='reading'), mark
+#   seen_urls.read_at. Empty slot? Skip -- a partial-slate tick is fine.
 #
 # Reads are non-destructive, so there is no dry-run gate; --live is
 # accepted and ignored for call-site symmetry with ideation-pipeline.
@@ -27,6 +24,9 @@
 #
 # Model calls go through claude_call (the `claude` CLI on the host's
 # subscription login) -- no API key needed or wanted in the env.
+#
+# Required env (only enforced once WEBSITE_REPO opts this pipeline in):
+#   READING_SLATE      -- "url|picker;url|picker;..." source slate
 #
 # Optional env:
 #   WEBSITE_REPO       -- opt-in gate; unset -> no-op clean
@@ -70,6 +70,8 @@ if [ -z "${WEBSITE_REPO:-}" ]; then
   exit 0
 fi
 
+: "${READING_SLATE:?READING_SLATE must be set (see .env.example)}"
+
 MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 
 # -- libs -------------------------------------------------------
@@ -85,7 +87,7 @@ MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 
 # -- constants --------------------------------------------------
 
-MAX_READS_PER_TICK=5   # one read per slate source (josh/jen/HN/kagi/wiki)
+MAX_READS_PER_TICK=5   # hard cap on reads per tick, independent of slate length
 SEED_RECENT_MAX=25     # cap on posts seeded per personal feed per cycle
 HTML_TRUNCATE_BYTES=200000
 FETCH_TIMEOUT=30
@@ -308,13 +310,43 @@ EOF
 
 # -- read cycle -------------------------------------------------
 
-declare -a SLATE_URLS=(
-  "https://joshtronic.com|personal_newest"
-  "https://thatgirljen.com|personal_newest"
-  "https://news.ycombinator.com|hn_top"
-  "https://kagi.com/smallweb|kagi_redirect"
-  "https://en.wikipedia.org/wiki/Special:Random|wiki_random"
-)
+# The closed vocabulary of picker names a READING_SLATE entry may name --
+# parsing mechanism, not identity (CLAUDE.md; igor#540). Same posture as
+# LANDED_KINDS: an entry naming anything outside this set fails loudly
+# rather than being silently skipped.
+READING_SLATE_PICKERS="personal_newest hn_top kagi_redirect wiki_random"
+
+# Parses READING_SLATE ("url|picker;url|picker;...") into SLATE_URLS,
+# validating each picker against READING_SLATE_PICKERS.
+parse_reading_slate() {
+  local slate="$1" entry picker
+  SLATE_URLS=()
+  local IFS=';'
+  local -a entries
+  read -ra entries <<<"$slate"
+  for entry in "${entries[@]}"; do
+    [ -z "$entry" ] && continue
+    case "$entry" in
+      *'|'*) ;;
+      *)
+        log "READING_SLATE: entry '$entry' has no 'url|picker' separator -- refusing to run"
+        exit 2
+        ;;
+    esac
+    picker="${entry##*|}"
+    case " $READING_SLATE_PICKERS " in
+      *" $picker "*) ;;
+      *)
+        log "READING_SLATE: unrecognized picker '$picker' in entry '$entry' -- refusing to run"
+        exit 2
+        ;;
+    esac
+    SLATE_URLS+=("$entry")
+  done
+}
+
+declare -a SLATE_URLS=()
+parse_reading_slate "$READING_SLATE"
 
 successful_reads=0
 
