@@ -35,10 +35,14 @@ is_test_path() {
 # before (igor#544). Whitespace around each comma-separated entry is
 # trimmed, so `a/*.json, b/*.json` reads the same as `a/*.json,b/*.json`.
 scope_gate_is_generated_data() {
-  local path="$1" globs="$2" glob
+  local path="$1" globs="$2" glob parts
   [ -n "$globs" ] || return 1
-  local IFS=,
-  for glob in $globs; do
+  # `read -ra` splits on IFS WITHOUT pathname expansion. An unquoted `for glob
+  # in $globs` would expand each pattern against the CWD first, replacing the
+  # declaration with whatever files happen to be on disk -- so a path the
+  # branch deleted would stop matching and be counted as branch work.
+  IFS=, read -ra parts <<<"$globs" || true
+  for glob in "${parts[@]}"; do
     glob="${glob#"${glob%%[![:space:]]*}"}"
     glob="${glob%"${glob##*[![:space:]]}"}"
     [ -n "$glob" ] || continue
@@ -48,6 +52,24 @@ scope_gate_is_generated_data() {
     esac
   done
   return 1
+}
+
+# scope_gate_base_generated_globs <base-ref> -- echoes the `generated-data`
+# declaration from <base-ref>'s dossier, or empty when the repo declares none.
+# Requires lib/dossier.sh sourced (bin/tick.sh sources it first).
+#
+# The ref is the BASE branch, never the branch under judgment: reading HEAD
+# would let a branch add its own exclusion mid-branch and duck this guard,
+# the same self-privilege-escalation the automerge maintenance-tier carve-out
+# guards against. stderr from the lookup is deliberately NOT suppressed -- an
+# absent key is an ordinary rc1, so anything that does print (a missing
+# dossier reader, say) is a real fault worth having in the journal rather
+# than a silent degrade to the old behavior.
+scope_gate_base_generated_globs() {
+  local base_ref="$1" agents cfg
+  agents=$(git show "${base_ref}:AGENTS.md" 2>/dev/null) || agents=""
+  cfg=$(git show "${base_ref}:agent.json" 2>/dev/null) || cfg=""
+  dossier_get_content "$agents" "$cfg" generated-data || true
 }
 
 # scope_gate_sum_numstat [generated-data-globs] -- reads `git diff --numstat`

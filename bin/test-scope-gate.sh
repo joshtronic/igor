@@ -79,6 +79,26 @@ no "declaring nothing never matches"       scope_gate_is_generated_data "src/_da
 no "a path outside the declared glob"      scope_gate_is_generated_data "src/app.js" "src/_data/*.json"
 no "prefix collision without a glob"       scope_gate_is_generated_data "src/_data/jobs.json.bak" "src/_data/*.json"
 
+echo "== scope_gate_is_generated_data: declarations are patterns, never a listing of the CWD =="
+# Splitting the comma-separated declaration must not pathname-expand it. If it
+# did, a pattern like `*.json` would be replaced by whatever files happen to
+# sit in the process's CWD before it is ever used as a match pattern -- so a
+# path the branch DELETED (and which therefore isn't on disk) would stop
+# matching and get counted as branch work, the exact false block this exists
+# to prevent. Run from a directory where the pattern DOES expand, against a
+# path that isn't there.
+GEN_CWD_TMP=$(mktemp -d)
+trap 'rm -rf "$GEN_CWD_TMP"' EXIT
+touch "$GEN_CWD_TMP/present.json"
+in_cwd() { local d="$1"; shift; (cd "$d" && "$@"); }
+
+ok "a path absent from the CWD still matches its glob" \
+  in_cwd "$GEN_CWD_TMP" scope_gate_is_generated_data "deleted.json" "*.json"
+eq "a deleted generated-data file is still excluded from the count" "0" \
+  "$(printf '9\t9\tdeleted.json\n' | in_cwd "$GEN_CWD_TMP" scope_gate_sum_numstat "*.json" | total_of)"
+no "expansion can't smuggle in a non-matching path either" \
+  in_cwd "$GEN_CWD_TMP" scope_gate_is_generated_data "present.json" "*.yaml"
+
 echo "== scope_gate_sum_numstat: declared generated-data is excluded, and the exclusion is reported (igor#544) =="
 # ctj#127-shaped scenario: real branch work is small (662 lines across 15
 # files in the real incident); a nightly refresh rewrote a multi-MB data
@@ -116,6 +136,40 @@ eq "a genuinely oversized branch still blocks even with the declaration present 
   "$([ "$(printf '%s\n' "$OVERSIZED_NUMSTAT" | scope_gate_sum_numstat "$GLOBS" | total_of)" -gt "$SCOPE_GATE_MAX_LINES" ] && echo true || echo false)"
 eq "oversized case still narrows correctly: counted total is just the real work (2000)" "2000" \
   "$(printf '%s\n' "$OVERSIZED_NUMSTAT" | scope_gate_sum_numstat "$GLOBS" | total_of)"
+
+echo "== scope_gate_sum_numstat: a binary generated-data file reports as a file, 0 lines =="
+BIN_GEN=$(printf '%s\t%s\t%s\n' '-' '-' 'src/_data/cache.bin')
+eq "binary generated-data contributes 0 excluded lines" "0" \
+  "$(printf '%s\n' "$BIN_GEN" | scope_gate_sum_numstat "src/_data/*" | gen_lines_of)"
+eq "binary generated-data still counts as 1 excluded file" "1" \
+  "$(printf '%s\n' "$BIN_GEN" | scope_gate_sum_numstat "src/_data/*" | gen_files_of)"
+
+echo "== scope_gate_base_generated_globs: reads the BASE branch, never the branch's own HEAD =="
+# The anti-self-escalation property: a branch must not be able to grant
+# itself a new exclusion mid-branch to duck the guard. Exercised against a
+# real throwaway repo, since it is a git-ref read, not string logic.
+if ! command -v git >/dev/null 2>&1 || ! . "$HERE/../lib/dossier.sh" 2>/dev/null; then
+  echo "  ~ skipped (git or lib/dossier.sh unavailable)"
+else
+  BASE_TMP=$(mktemp -d)
+  trap 'rm -rf "$GEN_CWD_TMP" "$BASE_TMP"' EXIT
+  (
+    cd "$BASE_TMP" || exit 1
+    git init -q -b main . && git config user.email t@t && git config user.name t
+    printf '## Metadata\n\n```\ntype: tool\ngenerated-data: base/*.json\n```\n' > AGENTS.md
+    git add -A && git commit -qm base
+    git checkout -qb branch
+    printf '## Metadata\n\n```\ntype: tool\ngenerated-data: base/*.json,sneaky/*\n```\n' > AGENTS.md
+    git add -A && git commit -qm escalate
+  ) >/dev/null 2>&1
+
+  eq "the base ref's declaration wins over the branch's own edit" "base/*.json" \
+    "$(in_cwd "$BASE_TMP" scope_gate_base_generated_globs main)"
+  no "the branch's self-granted glob does not match when read from base" \
+    scope_gate_is_generated_data "sneaky/huge.json" "$(in_cwd "$BASE_TMP" scope_gate_base_generated_globs main)"
+  eq "a ref with no dossier declares nothing" "" \
+    "$(in_cwd "$BASE_TMP" scope_gate_base_generated_globs main:nope 2>/dev/null)"
+fi
 
 if [ "$FAIL" -gt 0 ]; then
   printf '\n%d assertion(s) failed\n' "$FAIL"

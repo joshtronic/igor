@@ -4977,13 +4977,10 @@ elif [ "$COMMITS" -gt 0 ]; then
   # excluded too (igor#544) -- a nightly data refresh landing on master
   # while a branch is alive otherwise makes a stale-base diff look like the
   # branch rewrote the generated file, which the old counter would falsely
-  # tally as branch work. Read the declaration from the BASE branch, never
-  # the branch's own HEAD -- the same self-privilege-escalation concern the
-  # automerge maintenance-tier carve-out guards against (a branch must not
-  # be able to grant itself a new exclusion mid-branch to dodge this guard).
-  BASE_AGENTS=$(git show "origin/${PR_BASE}:AGENTS.md" 2>/dev/null) || BASE_AGENTS=""
-  BASE_CFG=$(git show "origin/${PR_BASE}:agent.json" 2>/dev/null) || BASE_CFG=""
-  GENERATED_GLOBS=$(dossier_get_content "$BASE_AGENTS" "$BASE_CFG" generated-data 2>/dev/null) || GENERATED_GLOBS=""
+  # tally as branch work. scope_gate_base_generated_globs reads that
+  # declaration from the BASE branch, never the branch's own HEAD -- see its
+  # header for why.
+  GENERATED_GLOBS=$(scope_gate_base_generated_globs "origin/${PR_BASE}")
   SCOPE_SUM=$(git diff --numstat "origin/${PR_BASE}..HEAD" -- . 2>/dev/null \
     | scope_gate_sum_numstat "$GENERATED_GLOBS")
   CHANGED=$(cut -f1 <<<"$SCOPE_SUM")
