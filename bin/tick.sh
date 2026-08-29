@@ -75,6 +75,7 @@ env_file_hint="$AGENT_HOME/.env"
 : "${TICK_TIMEOUT:?must be set in $env_file_hint}"
 : "${AGENT_RECALL_DAYS:?must be set in $env_file_hint}"
 : "${DISTILLERY_REPO:?must be set in $env_file_hint}"
+: "${AUTOMERGE_SELF_REPO:?must be set in $env_file_hint}"
 unset env_file_hint
 
 # -- Library ----------------------------------------------------

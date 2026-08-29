@@ -463,7 +463,8 @@ respective tools on the host; install or skip.
   cooldown silently starved auto-merge fleet-wide for the cooldown's whole
   duration even though the merge itself needs no model call).
   **Phase 1 is alert-only -- NO auto-revert.** The harness's own repo
-  (`AUTOMERGE_SELF_REPO`) never declares a url and is hard-excluded from the
+  (`AUTOMERGE_SELF_REPO`, REQUIRED env -- no default, igor#558) never
+  declares a url and is hard-excluded from the
   SHADOW-gated path and from deploy-watching -- a watcher can't reliably watch
   itself (a broken self-deploy could crash the very tick meant to smoke-test
   it) -- but it DOES take the url-less human-approval path like any other
@@ -474,9 +475,10 @@ respective tools on the host; install or skip.
   **Maintenance-tier carve-out (igor#516, agnostic per igor#537):** a narrow,
   deterministic exception to a `require_human` pin. The repo pin is now "any
   repo whose OWN `agent.json` declares a complete `automerge.maintenance`"
-  (`{branch, allowlist: [paths...], data_file}`) -- REQUIRED-AND-EXPLICIT,
+  (`{branch, allowlist: [paths...], data_file, rejected_category?}`) -- REQUIRED-AND-EXPLICIT,
   read via `automerge_maintenance_declaration`: missing or partial (any of
-  the three fields absent/empty) reads as "the tier does not exist for this
+  the three required fields absent/empty, or the conditional fourth present
+  but not a non-empty string) reads as "the tier does not exist for this
   repo," no defaults, with one loud log line on a partial declaration. The
   declared branch's own `<branch>`->`master` PR merges WITHOUT the human gate
   when ALL hold: same-repo `<branch>`->`master` (never a fork of the same
@@ -499,14 +501,29 @@ respective tools on the host; install or skip.
   privileges from its dossier but never CHANGE them unattended (reinforced
   by `forgejo_repo_get_file` reading the DEFAULT BRANCH, never the PR head
   under classification -- a maintenance-tier PR editing its own `agent.json`
-  can't retarget what's read until AFTER it merges). One check has no field
-  in the declared shape and stays hardcoded: the rejected.json
-  "guard-rejection belt" (no net GAIN of `no-josh-visible` entries,
-  `AUTOMERGE_MAINTENANCE_REJECTED_FILE`) applies only when a declaring
-  repo's own allowlist opts that literal path in -- joshing.you's does
-  (unchanged behavior), a repo without that convention just doesn't get the
-  extra belt. Base branch (`master`) also stays hardcoded -- a fleet-wide
-  convention, not a per-repo fact.
+  can't retarget what's read until AFTER it merges). The rejected.json
+  "guard-rejection belt" (no net GAIN of a declared rejection category)
+  applies only when a declaring repo's own allowlist opts that literal FILE
+  PATH (`AUTOMERGE_MAINTENANCE_REJECTED_FILE`) in -- that path stays
+  hardcoded, a fleet-wide convention, same footing as the base branch below;
+  a repo without that convention just doesn't get the extra belt. The
+  CATEGORY it guards is NOT hardcoded (igor#558, was: joshing.you's
+  `no-josh-visible` baked into the harness): it comes from the repo's own
+  declared `rejected_category`, read alongside branch/allowlist/data_file.
+  Two refusals keep the belt from silently no-op'ing, and only the first is
+  conditional on the allowlist: a repo whose allowlist MATCHES that path --
+  the check is glob-aware, so a `src/_data/*` entry opts the file in just as
+  a literal one does -- WITHOUT declaring a category refuses the WHOLE
+  declaration (`automerge_maintenance_declaration`); and a
+  `rejected_category` that is present but not a non-empty string is refused
+  UNCONDITIONALLY, allowlisted or not, because `jq -r` renders an array or a
+  number to a non-empty string matching nothing in rejected.json, so the belt
+  would pass trivially -- the one field of the four that fails OPEN when
+  unchecked (the mechanics sit on the check itself in `lib/automerge.sh`).
+  The tier has no declaring repo yet: joshing.you's declaration is the
+  pending follow-up, and must carry `"rejected_category": "no-josh-visible"`
+  to keep the behavior igor#516 shipped. Base branch (`master`)
+  also stays hardcoded -- a fleet-wide convention, not a per-repo fact.
 - The block-probe sweep (`do_blockprobe_tick`, `lib/blockprobe.sh`, igor#546)
   re-evaluates WHY a ticket is `Status/Blocked` so the label can go red when
   its cause resolves -- without it, a block just sits as prose forever

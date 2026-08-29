@@ -39,7 +39,13 @@
 AGENT_CONFIG_FILE="agent.json"                               # repo root; per-repo machine-config dossier (jq-parsed)
 AUTOMERGE_SMOKE_MAX_ATTEMPTS=5                                # propagation grace before a smoke alert
 AUTOMERGE_CI_MAX_ATTEMPTS=30                                  # ~30 ticks before a never-reporting deploy CI self-heals
-AUTOMERGE_SELF_REPO="${AUTOMERGE_SELF_REPO:-joshtronic/igor}" # url-less: human-approval merge, but never shadow-gated or deploy-watched
+# REQUIRED-AND-EXPLICIT (igor#558) -- no default. Self-identity must never be
+# a defaulted knob: an unset var fails the tick loudly instead of every
+# install silently running against joshtronic/igor. bin/tick.sh also carries
+# a `:?` check beside the other required env (same posture as DISTILLERY_REPO,
+# igor#551); this one covers every OTHER caller that sources this file
+# directly (bin/test-automerge.sh, bin/test-landed.sh, bin/test-blockprobe.sh).
+: "${AUTOMERGE_SELF_REPO:?AUTOMERGE_SELF_REPO must be set -- no default, see .env.example}"
 AUTOMERGE_BLOCK_COOLDOWN_SECS=3600                            # after a rejected merge, back off ~1h before re-trying the same head
 
 # -- Maintenance-tier carve-out (igor#516, agnostic per igor#537) ----------
@@ -72,15 +78,18 @@ AUTOMERGE_MAINTENANCE_TIER_BASE_BRANCH="master"
 # all, on any PR.
 AUTOMERGE_MAINTENANCE_DOSSIER_FILES="agent.json AGENTS.md"
 
-# The one piece of igor#516's checks the declared shape ({branch, allowlist,
-# data_file}, igor#537) has no field for: the rejected.json "guard-rejection
-# belt" (no net GAIN of "no-josh-visible" entries) is joshing.you-specific
-# vocabulary, not a general dossier fact. It stays hardcoded here and
-# applies ONLY when a declaring repo's own allowlist opts this literal path
-# in -- joshing.you's declaration does, so its behavior is unchanged; a
-# different repo's maintenance tier simply doesn't get this extra belt. A
-# future ticket can parameterize it fully if a second repo needs an
-# equivalent guard.
+# The rejected.json "guard-rejection belt" (no net GAIN of a declared
+# rejection category) applies ONLY when a declaring repo's own allowlist
+# opts this literal FILE PATH in. The path itself stays hardcoded -- a
+# fleet-wide convention for where a maintenance-tier repo's rejection log
+# lives, same footing as AUTOMERGE_MAINTENANCE_TIER_BASE_BRANCH below. The
+# CATEGORY NAME is not hardcoded (igor#558, was: joshing.you's
+# "no-josh-visible" baked in here): it comes from the repo's own declared
+# `rejected_category`, read alongside branch/allowlist/data_file
+# (automerge_maintenance_declaration). A repo that opts this file into its
+# allowlist but declares no category fails the WHOLE declaration closed --
+# see automerge_maintenance_declaration -- so the belt can never be
+# silently skipped by omission.
 AUTOMERGE_MAINTENANCE_REJECTED_FILE="src/_data/rejected.json"
 
 # Fallback logger so this module is sourceable standalone (tests).
@@ -283,7 +292,7 @@ _automerge_maintenance_path_allowed() {
 
 # automerge_maintenance_declaration <repo> -- echoes the repo's agent.json
 # `.automerge.maintenance` declaration as a compact single-line JSON object
-# {branch, allowlist, data_file} and returns 0 IFF it is
+# {branch, allowlist, data_file, rejected_category?} and returns 0 IFF it is
 # REQUIRED-AND-EXPLICIT: branch and data_file are non-empty strings,
 # allowlist is a non-empty array of non-empty strings, and neither the
 # allowlist nor data_file can ever match a dossier file
@@ -292,6 +301,17 @@ _automerge_maintenance_path_allowed() {
 # exist for this repo" -- no defaults; a partial one logs ONE loud line so
 # the gap is visible instead of silently no-op'ing.
 #
+# rejected_category is OPTIONAL at this level -- most repos never opt
+# AUTOMERGE_MAINTENANCE_REJECTED_FILE into their allowlist at all, and the
+# tier doesn't require the guard-rejection belt to function. But a repo that
+# DOES opt that file in must also declare the category it wants guarded
+# (igor#558): silently skipping the belt on a missing category would turn a
+# safety check into a no-op by omission, which is worse than the file simply
+# not being in the tier at all. That combination refuses the WHOLE
+# declaration, same posture as the dossier-file check below; so does a
+# category that is present but malformed, unconditionally -- see the type
+# check in the body.
+#
 # Reads agent.json off forgejo_repo_get_file, which -- passed no `ref` --
 # resolves against the repo's DEFAULT BRANCH (see lib/review.sh's
 # trust-model note), never a PR head under classification. That is what
@@ -299,7 +319,7 @@ _automerge_maintenance_path_allowed() {
 # its OWN classification: the edit can only take effect for a LATER PR,
 # after this one already merged (or didn't) through today's rules.
 automerge_maintenance_declaration() {
-  local repo="$1" cfg decl branch data_file allowlist allowlist_len
+  local repo="$1" cfg decl branch data_file allowlist allowlist_len rejected_category
 
   cfg=$(forgejo_repo_get_file "$repo" "$AGENT_CONFIG_FILE" 2>/dev/null) || return 1
   [ -n "$cfg" ] || return 1
@@ -310,6 +330,7 @@ automerge_maintenance_declaration() {
   data_file=$(jq -r '.data_file // empty' <<<"$decl" 2>/dev/null)
   allowlist=$(jq -c '.allowlist // empty' <<<"$decl" 2>/dev/null)
   allowlist_len=$(jq -r 'if type == "array" then length else empty end' <<<"$allowlist" 2>/dev/null)
+  rejected_category=$(jq -r '.rejected_category // empty' <<<"$decl" 2>/dev/null)
 
   if [ -z "$branch" ] || [ -z "$data_file" ] || [ -z "$allowlist_len" ] || [ "$allowlist_len" -eq 0 ] \
      || ! jq -e 'all(.[]; type == "string" and length > 0)' <<<"$allowlist" >/dev/null 2>&1; then
@@ -319,6 +340,25 @@ automerge_maintenance_declaration() {
 
   if _automerge_maintenance_declares_dossier_file "$allowlist" "$data_file"; then
     log "automerge: ${repo} automerge.maintenance allowlist/data_file would match its own dossier (${AUTOMERGE_MAINTENANCE_DOSSIER_FILES}) -- refusing the declaration (a repo can read its privileges, never change them unattended)"
+    return 1
+  fi
+
+  # A DECLARED category must be a non-empty STRING. `jq -r` renders an array,
+  # number or object to a non-empty string, so a mistyped category would sail
+  # past the emptiness check below and then match nothing in rejected.json --
+  # zero rejections counted on both sides, belt passes trivially. Same silent
+  # no-op the missing-category refusal exists to prevent, reached by mistyping
+  # instead of by omission, and unlike branch/data_file (which fail closed at
+  # the branch check and at `git show`) this one fails OPEN. Refused
+  # regardless of whether the allowlist opts the file in: the field is inert
+  # there, but a malformed declaration is still malformed.
+  if ! jq -e '.rejected_category == null or (.rejected_category | type == "string" and length > 0)' <<<"$decl" >/dev/null 2>&1; then
+    log "automerge: ${repo} declares a non-string (or empty) automerge.maintenance rejected_category -- refusing the declaration (a category that matches nothing would silently no-op the guard-rejection belt)"
+    return 1
+  fi
+
+  if _automerge_maintenance_path_allowed "$AUTOMERGE_MAINTENANCE_REJECTED_FILE" "$allowlist" && [ -z "$rejected_category" ]; then
+    log "automerge: ${repo} opts ${AUTOMERGE_MAINTENANCE_REJECTED_FILE} into its allowlist but declares no rejected_category -- refusing the declaration (the guard-rejection belt must never silently no-op)"
     return 1
   fi
 
@@ -381,12 +421,18 @@ automerge_maintenance_tier_files_ok() {
 }
 
 # automerge_maintenance_tier_data_ok <clone-path> <base-sha> <head-sha>
-# <data_file> <allowlist-json-array> -- exit 0 if <data_file> changed only
-# in ways the maintenance tier trusts unattended: no listing added or
-# removed. Additionally applies the rejected.json "guard-rejection belt"
-# (no net GAIN of "no-josh-visible" entries) IF the repo's own allowlist
-# opts AUTOMERGE_MAINTENANCE_REJECTED_FILE in (see that constant's comment
-# -- this half stays hardcoded, unlike data_file).
+# <data_file> <allowlist-json-array> <rejected_category> -- exit 0 if
+# <data_file> changed only in ways the maintenance tier trusts unattended:
+# no listing added or removed. Additionally applies the rejected.json
+# "guard-rejection belt" (no net GAIN of <rejected_category> entries) IF the
+# repo's own allowlist opts AUTOMERGE_MAINTENANCE_REJECTED_FILE in (see that
+# constant's comment -- the FILE PATH stays hardcoded; the category is the
+# caller-supplied <rejected_category>, sourced from the repo's own
+# declaration). Fails closed if the file is allowlisted but
+# <rejected_category> is empty OR omitted -- the caller
+# (automerge_maintenance_tier_ok) only reaches here with a declaration
+# automerge_maintenance_declaration already validated, so this is a
+# defensive second line, not the primary gate.
 #
 # <data_file> is compared by CORE IDENTITY, not a line-level diff or a bare
 # element count: each entry with the fields the issue itself names as
@@ -410,7 +456,11 @@ automerge_maintenance_tier_files_ok() {
 # the PR read and the classification (same review). Fails CLOSED on any
 # unreadable blob or unparseable JSON.
 automerge_maintenance_tier_data_ok() {
-  local path="$1" base="$2" head="$3" data_file="$4" allowlist="$5"
+  # `${6:-}` not `$6`: under `set -u` a 5-arg caller would abort the calling
+  # shell -- i.e. kill the tick -- instead of returning 1. An omitted category
+  # reads as "not declared" and falls through to the belt's fail-closed check
+  # below, so the failure mode stays "refuse the merge", never "crash".
+  local path="$1" base="$2" head="$3" data_file="$4" allowlist="$5" rejected_category="${6:-}"
   local old_sites new_sites old_core new_core old_rej new_rej old_rn new_rn
 
   old_sites=$(git -C "$path" show "${base}:${data_file}" 2>/dev/null) || return 1
@@ -423,10 +473,11 @@ automerge_maintenance_tier_data_ok() {
   [ "$old_core" = "$new_core" ] || return 1
 
   if _automerge_maintenance_path_allowed "$AUTOMERGE_MAINTENANCE_REJECTED_FILE" "$allowlist"; then
+    [ -n "$rejected_category" ] || return 1
     old_rej=$(git -C "$path" show "${base}:${AUTOMERGE_MAINTENANCE_REJECTED_FILE}" 2>/dev/null) || return 1
     new_rej=$(git -C "$path" show "${head}:${AUTOMERGE_MAINTENANCE_REJECTED_FILE}" 2>/dev/null) || return 1
-    old_rn=$(jq -r '[.. | strings | select(. == "no-josh-visible")] | length' <<<"$old_rej" 2>/dev/null)
-    new_rn=$(jq -r '[.. | strings | select(. == "no-josh-visible")] | length' <<<"$new_rej" 2>/dev/null)
+    old_rn=$(jq -r --arg c "$rejected_category" '[.. | strings | select(. == $c)] | length' <<<"$old_rej" 2>/dev/null)
+    new_rn=$(jq -r --arg c "$rejected_category" '[.. | strings | select(. == $c)] | length' <<<"$new_rej" 2>/dev/null)
     [ -n "$old_rn" ] && [ -n "$new_rn" ] || return 1
     [ "$new_rn" -le "$old_rn" ] 2>/dev/null || return 1
   fi
@@ -456,7 +507,7 @@ automerge_maintenance_tier_data_ok() {
 # classified and what gets merged.
 automerge_maintenance_tier_ok() {
   local repo="$1" pr="$2" pr_json="$3" head="$4" verdict="$5" reviewed_sha="$6"
-  local decl branch data_file allowlist base_sha nfiles clone_path
+  local decl branch data_file allowlist rejected_category base_sha nfiles clone_path
 
   [ "$verdict" = "APPROVE" ] && [ "$reviewed_sha" = "$head" ] || return 1
   automerge_reviewer_blocks "$repo" "$pr" "${FORGEJO_REVIEWER:-}" && return 1
@@ -465,6 +516,7 @@ automerge_maintenance_tier_ok() {
   branch=$(jq -r '.branch' <<<"$decl" 2>/dev/null)
   data_file=$(jq -r '.data_file' <<<"$decl" 2>/dev/null)
   allowlist=$(jq -c '.allowlist' <<<"$decl" 2>/dev/null)
+  rejected_category=$(jq -r '.rejected_category // empty' <<<"$decl" 2>/dev/null)
 
   automerge_maintenance_tier_branch_ok "$pr_json" "$branch" || return 1
   base_sha=$(jq -r '.base.sha // ""' <<<"$pr_json" 2>/dev/null)
@@ -474,7 +526,7 @@ automerge_maintenance_tier_ok() {
 
   ensure_repo_local "$repo"
   clone_path=$(repo_path_for "$repo")
-  automerge_maintenance_tier_data_ok "$clone_path" "$base_sha" "$head" "$data_file" "$allowlist" || return 1
+  automerge_maintenance_tier_data_ok "$clone_path" "$base_sha" "$head" "$data_file" "$allowlist" "$rejected_category" || return 1
 
   printf 'files=%s, +0 sites, -0 sites' "$nfiles"
 }
