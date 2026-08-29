@@ -63,13 +63,14 @@ _I don't monitor these services or accept pull/merge requests on them._
 - **Commands on `PATH`:** `jq`, `curl`, `git`, `flock` (`util-linux`),
   `timeout` (`coreutils`), `sqlite3`, `openssl`, and the `claude` CLI.
   `install.sh` checks for all of these and refuses to proceed if any
-  are missing; the Debian package name matches the command name for
-  every one except those two. `doctor.sh` additionally uses `fuser` and `journalctl`
-  for diagnostics -- useful, not required; it degrades gracefully
-  without them.
+  are missing. Among the apt-installable ones, the Debian package name
+  matches the command name except for the two noted above; `claude`
+  has no apt package at all and comes from Anthropic's own installer.
+  `doctor.sh` additionally uses `fuser` and `journalctl` for
+  diagnostics -- useful, not required; it degrades gracefully without
+  them.
 - **Init system:** systemd **user** units, with lingering enabled so
-  the timer survives logout. `install.sh` checks for this and prints
-  the exact fix if it isn't.
+  the timer survives logout (see [Operator setup](#operator-setup)).
 - **The `claude` CLI**, authenticated with a Claude subscription login
   (OAuth) -- not an API key. Every model call goes through it, and the
   harness strips `ANTHROPIC_API_KEY` from every child process on
@@ -117,7 +118,7 @@ just know that's a different scheduling model, not a config flag.
 | Forge | Status | Notes |
 | --- | --- | --- |
 | **Forgejo** | Supported | The full unattended loop -- the harness reviews its own PRs and auto-merges where a repo opts in. |
-| **Codeberg** | **Do not point this at Codeberg.** | Codeberg runs Forgejo, so this would work there with zero code changes -- which is exactly the problem. Codeberg's [Terms of Use](https://codeberg.org/Codeberg/org/src/branch/main/TermsOfUse.md) prohibit sharing projects that mostly consist of code written by generative-AI tools, so pointing an unattended AI agent at it is a policy violation, not a technical limitation. |
+| **Codeberg** | Not supported (policy) | **Do not point this at Codeberg.** Codeberg runs Forgejo, so this would work there with zero code changes -- which is exactly the problem. Codeberg's [Terms of Use](https://codeberg.org/Codeberg/org/src/branch/main/TermsOfUse.md) prohibit sharing projects that mostly consist of code written by generative-AI tools, so pointing an unattended AI agent at it is a policy violation, not a technical limitation. |
 | **GitLab** | Coming soon | Not implemented yet. GitLab only lets a merge request be approved by its own author when a project enables `merge_requests_author_approval` -- without that, the unattended loop can't close on its own. |
 | **GitHub** | Coming soon | Not implemented yet. GitHub blocks `APPROVE` and `REQUEST_CHANGES` on your own pull request; the harness could still post its independent review as a `COMMENT`, but every merge would need a human click. Review works, unattended merge doesn't -- self-host Forgejo for the full loop. |
 
