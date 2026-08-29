@@ -156,6 +156,21 @@ has "says why (re-queue, not a confirmed vuln)" "$OUT" "no verdict from the revi
 has "points at the preserved artifacts" "$OUT" "security-gate-logs"
 eq "all three undiagnosable responses were preserved" "3" "$(log_count)"
 
+echo "== security_gate: three consecutive HARD call failures -> also the error code =="
+# The other way the gate fails to reach a verdict: claude_call itself erroring
+# on every attempt, so there is no response text to parse OR preserve. It must
+# land on the same transient code as a no-verdict response -- the only `return
+# 1` in security_gate is a parsed BLOCK verdict, and a caller that reads 1 as
+# "a human owes this a decision" must never see it for a gate that never ran.
+rm -rf "$(logs_dir)"
+N4="$TMP/n4"; printf '0' > "$N4"
+claude_call() { n=$(($(cat "$N4") + 1)); printf '%s' "$n" > "$N4"; return 1; }
+OUT=$(security_gate "$WT" "master" "security-gate-issue"); RC=$?
+eq "a gate whose every call failed returns 2, not 1" "2" "$RC"
+eq "all three attempts were made" "3" "$(cat "$N4")"
+eq "nothing preserved -- there was no response to keep" "0" "$(log_count)"
+has "still explains itself as a re-queue" "$OUT" "no verdict from the reviewer after 3 attempts"
+
 echo "== security_gate: a material BLOCK and a no-verdict error are distinguishable return codes =="
 rm -rf "$(logs_dir)"
 claude_call() { printf -- '- hardcoded API key\nSECURITY_VERDICT: BLOCK\n'; }

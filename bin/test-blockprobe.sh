@@ -220,6 +220,34 @@ eq "a different kind is not counted" "0" "$(blockprobe_kind_repeat_count "$TRANS
 eq "empty kind -> 0" "0" "$(blockprobe_kind_repeat_count "$TRANSIENT_VARYING" "")"
 eq "a body with no probes -> 0" "0" "$(blockprobe_kind_repeat_count "$REPEATED" transient)"
 
+# TRANSIENT_VARYING above is hand-written, and no real body ever looks like
+# that: every episode but the last has been through blockprobe_record_cleared,
+# which REWRITES its probe block before the next episode is appended. The count
+# reads those rewritten blocks, so build the body the way the sweep actually
+# leaves it. If the stamp writer ever stopped preserving the kind: line, the
+# bound would silently never fire again -- the exact loop it exists to stop.
+_append_transient_episode() {
+  printf '%s\n\n---\n## Blocked (%s)\n\n%s\n\n<!-- probe\nkind: transient\n-->' "$1" "$2" "$3"
+}
+STAMPED_EPISODES=$(blockprobe_body_with_cleared '---
+## Blocked (2026-08-28 01:00Z)
+
+gate error at 01:00
+
+<!-- probe
+kind: transient
+-->' "2026-08-28")
+STAMPED_EPISODES=$(blockprobe_body_with_cleared \
+  "$(_append_transient_episode "$STAMPED_EPISODES" "2026-08-28 01:05Z" "gate error at 01:05")" "2026-08-28")
+STAMPED_EPISODES=$(_append_transient_episode "$STAMPED_EPISODES" "2026-08-28 01:10Z" "gate error at 01:10")
+eq "two spent probes + one live one still count 3 episodes" "3" \
+   "$(blockprobe_kind_repeat_count "$STAMPED_EPISODES" transient)"
+eq "the stamped blocks kept their kind: line" "2" \
+   "$(grep -c 'cleared: 2026-08-28' <<<"$STAMPED_EPISODES")"
+eq "and the LATEST probe is the live, unstamped one" "" \
+   "$(blockprobe_parse_cleared "$STAMPED_EPISODES")"
+eq "which still parses as transient" "transient" "$(blockprobe_parse_kind "$STAMPED_EPISODES")"
+
 echo "== blockprobe_evaluate: dispatch + malformed ref =="
 forgejo_get_issue() { printf '{"state":"open"}'; }
 eq "issue-open, ref open -> HOLDS" "HOLDS" "$(blockprobe_evaluate issue-open joshtronic/igor#537)"
@@ -491,20 +519,32 @@ The harness security review could not produce a verdict, so this change was NOT 
 <!-- probe
 kind: transient
 -->'
+# TRANSIENT_LIVE is the ticket's mutable body -- the fake PATCH writes back to
+# it, so the assertions below read what the sweep actually left behind rather
+# than the literal above (which the next scenario still needs pristine).
+TRANSIENT_LIVE="$TRANSIENT_BODY"
 _fj() {
   case "$1 $2" in
     "GET /repos/acme/x/issues?state=open&type=issues&labels=Status/Blocked&limit=50")
-      _issues_payload 18 "$TRANSIENT_BODY" ;;
-    "PATCH /repos/acme/x/issues/18") : ;;
+      _issues_payload 18 "$TRANSIENT_LIVE" ;;
+    "PATCH /repos/acme/x/issues/18") PATCHED="$3"; TRANSIENT_LIVE=$(jq -r '.body' <<<"$3") ;;
     *) _no_issues ;;
   esac
 }
-forgejo_get_issue() { jq -cn --arg b "$TRANSIENT_BODY" '{number:18, body:$b, state:"open"}'; }
+forgejo_get_issue() { jq -cn --arg b "$TRANSIENT_LIVE" '{number:18, body:$b, state:"open"}'; }
 do_blockprobe_tick
 has "transient: Status/Blocked removed"  "$REMOVED" "acme/x#18:Status/Blocked"
 has "transient: unassigned"              "$UNASSIGNED" "acme/x#18"
 has "transient: comment posted"          "$COMMENTS" "acme/x#18"
 eq  "transient: no escalation assignment" "" "$ASSIGNED"
+# transient is the first refless kind to reach the stamp writer at all
+# (operator is skipped before evaluation), and the body it leaves behind is
+# what the NEXT episode's bound is counted from -- so assert the shape, not
+# just the label/assignment effects.
+eq  "transient: probe stamped spent"     "$TODAY" "$(blockprobe_parse_cleared "$TRANSIENT_LIVE")"
+eq  "transient: the stamp preserved kind" "transient" "$(blockprobe_parse_kind "$TRANSIENT_LIVE")"
+eq  "transient: the spent episode still counts toward the bound" "1" \
+    "$(blockprobe_kind_repeat_count "$TRANSIENT_LIVE" transient)"
 
 echo "-- scenario: the same security-gate block WITHOUT the probe -> UNPROBED, not cleared --"
 # The paired negative for the scenario above, and the pre-igor#555 behaviour:

@@ -276,9 +276,16 @@ blockprobe_reason_repeat_count() {
   printf '%s' "$count"
 }
 
-# blockprobe_kind_repeat_count <body> <kind> -- how many probe blocks in <body>
-# declare <kind>, spent ones included (a spent probe still marks an episode
-# that happened). Empty or non-vocabulary kind -> 0.
+# blockprobe_kind_repeat_count <body> <kind> -- how many `kind: <kind>` lines
+# <body> carries, spent probes included (a spent probe still marks an episode
+# that happened, and the stamp writer leaves the kind: line in place). Empty or
+# non-vocabulary kind -> 0.
+#
+# A whole-body line count rather than section-aware parsing, same scope as
+# blockprobe_reason_repeat_count above and for the same reason: what it has to
+# catch is episodes spread ACROSS separate "## Blocked (...)" sections. A
+# probe-shaped line elsewhere in a body would over-count, which errs toward
+# escalating to a human instead of requeuing -- the safe direction here.
 blockprobe_kind_repeat_count() {
   local body="$1" kind="$2" count
   [ -n "$kind" ] || { printf '0'; return 0; }
