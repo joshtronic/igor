@@ -251,6 +251,15 @@ forgejo_repo_get_file_status() { printf 'found\t%s' '{"automerge":{}}'; }
 ok "require_human: readable config, key absent -> human gate"     automerge_require_human acme/site
 forgejo_repo_get_file_status() { printf 'found\t%s' '{"automerge":{"require_human":"false"}}'; }
 ok "require_human: the STRING \"false\" is not the boolean -> human gate" automerge_require_human acme/site
+# A maintenance-tier declaration is not an opt-out. The carve-out does not
+# short-circuit this reader -- do_automerge_tick computes req_human from it
+# FIRST and only consults automerge_maintenance_tier_ok inside the req_human=1
+# branch -- so a repo that declares the tier and nothing else stays human-gated
+# for every PR outside its declared maintenance branch.
+forgejo_repo_get_file_status() {
+  printf 'found\t%s' '{"automerge":{"maintenance":{"branch":"review","allowlist":["d.json"],"data_file":"d.json"}}}'
+}
+ok "require_human: automerge.maintenance declared but no require_human -> human gate" automerge_require_human acme/site
 forgejo_repo_get_file_status() { printf 'missing\t'; }
 ok "require_human: no agent.json at all (404) -> human gate"      automerge_require_human acme/site
 forgejo_repo_get_file_status() { printf 'found\t%s' '{"automerge":{bad json'; }

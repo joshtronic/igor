@@ -165,7 +165,13 @@ human-gated upstream, unconditionally.)
 treats an unreadable file the same as an absent declaration, and
 absence is already the safe default for that opt-in tier -- no
 declaration just means the carve-out doesn't apply, leaving the
-ordinary (human-gated, absent a `false` pin) path in force.
+ordinary (human-gated, absent a `false` pin) path in force. The two
+compose rather than compete: `do_automerge_tick` computes
+`req_human` from `automerge_require_human` first and consults the
+carve-out only inside the `req_human = 1` branch, so declaring
+`automerge.maintenance` is never itself an opt-out -- such a repo
+stays human-gated for every PR outside its declared maintenance
+branch.
 
 ## Validation contract
 
