@@ -308,9 +308,9 @@ _automerge_maintenance_path_allowed() {
 # (igor#558): silently skipping the belt on a missing category would turn a
 # safety check into a no-op by omission, which is worse than the file simply
 # not being in the tier at all. That combination refuses the WHOLE
-# declaration, same posture as the dossier-file check below -- as does a
-# category that is present but isn't a non-empty string, which would no-op
-# the same belt by matching nothing.
+# declaration, same posture as the dossier-file check below; so does a
+# category that is present but malformed, unconditionally -- see the type
+# check in the body.
 #
 # Reads agent.json off forgejo_repo_get_file, which -- passed no `ref` --
 # resolves against the repo's DEFAULT BRANCH (see lib/review.sh's

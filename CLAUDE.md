@@ -510,18 +510,19 @@ respective tools on the host; install or skip.
   CATEGORY it guards is NOT hardcoded (igor#558, was: joshing.you's
   `no-josh-visible` baked into the harness): it comes from the repo's own
   declared `rejected_category`, read alongside branch/allowlist/data_file.
-  joshing.you declares `rejected_category: no-josh-visible` (unchanged
-  behavior); a repo whose allowlist MATCHES that path -- the check is
-  glob-aware, so a `src/_data/*` entry opts the file in just as a literal one
-  does -- WITHOUT declaring a category refuses the WHOLE declaration
-  (`automerge_maintenance_declaration`), and so does a `rejected_category`
-  that is present but not a non-empty string: `jq -r` renders an array or a
-  number to a non-empty string that matches nothing in rejected.json, which
-  would count zero rejections on both sides and pass the belt trivially --
-  the same no-op by mistyping rather than by omission, and the only one of
-  the four fields that fails OPEN if unchecked (a bad `branch` fails the
-  branch pin, a bad `data_file` fails `git show`). Fail closed, never a
-  silent no-op of the belt. Base branch (`master`)
+  Two refusals keep the belt from silently no-op'ing, and only the first is
+  conditional on the allowlist: a repo whose allowlist MATCHES that path --
+  the check is glob-aware, so a `src/_data/*` entry opts the file in just as
+  a literal one does -- WITHOUT declaring a category refuses the WHOLE
+  declaration (`automerge_maintenance_declaration`); and a
+  `rejected_category` that is present but not a non-empty string is refused
+  UNCONDITIONALLY, allowlisted or not, because `jq -r` renders an array or a
+  number to a non-empty string matching nothing in rejected.json, so the belt
+  would pass trivially -- the one field of the four that fails OPEN when
+  unchecked (the mechanics sit on the check itself in `lib/automerge.sh`).
+  The tier has no declaring repo yet: joshing.you's declaration is the
+  pending follow-up, and must carry `"rejected_category": "no-josh-visible"`
+  to keep the behavior igor#516 shipped. Base branch (`master`)
   also stays hardcoded -- a fleet-wide convention, not a per-repo fact.
 - The block-probe sweep (`do_blockprobe_tick`, `lib/blockprobe.sh`, igor#546)
   re-evaluates WHY a ticket is `Status/Blocked` so the label can go red when
