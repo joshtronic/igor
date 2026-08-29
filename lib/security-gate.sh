@@ -69,9 +69,21 @@ security_gate_preserve_response() {
 # agent's work by the time this runs on every surface).
 #
 #   return 0  PASS  -- safe to ship; nothing on stdout
-#   return 1  BLOCK -- material finding, OR the gate could not complete
-#                      (fail closed). Findings are printed to stdout for
-#                      the caller to surface (block comment / log line).
+#   return 1  BLOCK -- a completed review found a material issue. A human
+#                      owes this a decision; findings are printed to stdout
+#                      for the caller to surface (block comment / log line).
+#   return 2  ERROR -- the gate could not complete: no parseable verdict
+#                      after retries (fail closed, igor#491). This is the
+#                      transient case -- most likely an API/model hiccup,
+#                      not a confirmed finding -- and callers that apply
+#                      Status/Blocked should record a probe that can clear
+#                      itself rather than treating it like a real BLOCK
+#                      (igor#555). An explanation is printed to stdout.
+#
+# Callers that only check truthiness (`if security_gate ...; then`) don't
+# need to change: both 1 and 2 land in the `else` branch. Distinguishing
+# the two return codes only matters to a caller that wants to react
+# differently to "a human must decide" vs "this is probably transient".
 security_gate() {
   local worktree="$1" base="$2" call_site="$3"
   local model diff note="" system system_final user raw verdict findings attempt
@@ -197,7 +209,10 @@ ${diff}${note}"
   done
 
   # Fail closed: no verdict after retries. Block, but say why so the
-  # human reads it as a re-queue, not a confirmed vulnerability.
+  # human reads it as a re-queue, not a confirmed vulnerability. Distinct
+  # return code (2, not 1): this is the transient case, not a material
+  # BLOCK verdict -- a caller that applies Status/Blocked should treat it
+  # differently (igor#555).
   printf '%s\n' "The security gate could not complete -- no verdict from the reviewer after 3 attempts (the last at escalated effort with a stricter format contract). This is most likely a transient model/API error rather than a real finding; the raw responses were preserved under ${AGENT_STATE_DIR:-$HOME/.local/state/agent}/security-gate-logs for diagnosis -- re-queue to retry."
-  return 1
+  return 2
 }
