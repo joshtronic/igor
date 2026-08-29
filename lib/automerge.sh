@@ -133,34 +133,35 @@ automerge_url_status() {
   dossier_get_repo_status "$repo" url
 }
 
-# automerge_require_human <repo> -- exit 0 if the repo pins itself to a HUMAN
-# review gate (`agent.json` `.automerge.require_human == true`); exit 1 otherwise
-# (the default -- the shadow review's APPROVE gates the merge). The carve-out for
-# repos whose real defect class a diff review can't judge (joshing.you, igor.bot,
-# a game whose bugs are visual/interaction, not diffable). A url-less repo
-# (including igor itself) is ALREADY human-gated upstream, unconditionally,
-# regardless of this flag -- see do_automerge_tick's use of
-# automerge_url_status.
+# automerge_require_human <repo> -- exit 0 if the merge is gated on a HUMAN
+# review; exit 1 only when the repo has explicitly opted out by declaring
+# `agent.json` `.automerge.require_human: false`. A url-less repo (including
+# igor itself) is ALREADY human-gated upstream, unconditionally, regardless
+# of this flag -- see do_automerge_tick's use of automerge_url_status.
 #
-# Fails closed on UNKNOWN, not on unstated (igor#561): a readable agent.json
-# that simply omits `.automerge.require_human` (or the whole `.automerge`
-# object) is an expressed, unchanged intent -- read as false, same as
-# master's behavior before this fix. Only a state the harness cannot
-# actually read -- the file deleted (404, e.g. mid dossier-conversion), a
-# fetch/transport failure, or malformed JSON -- requires a human, because
-# that is precisely the silent-loss failure mode this function exists to
-# close: nothing errors, the pin just stops being readable. Uses
-# forgejo_repo_get_file_status (found/missing/error), not the plain
-# forgejo_repo_get_file, specifically to keep "absent" and "unreadable"
-# distinguishable from "read cleanly, says nothing."
+# The human gate is the DEFAULT and opting out must be explicit (igor#561).
+# Everything else gates: no `agent.json`, an `agent.json` that never mentions
+# the key, malformed JSON, an unreachable fetch. The failure this closes is
+# silent loss -- an `agent.json` deleted mid dossier-conversion used to read
+# as "never wanted the gate" and start self-merging -- and a repo that has
+# simply never declared is exactly as un-consented as one whose declaration
+# vanished, so the two cannot be told apart safely. FLEET CONSEQUENCE: every
+# url-bearing repo without an explicit `false` moves from shadow-gated
+# auto-merge to human-gated until it declares one.
+#
+# Reads via forgejo_repo_get_file_status (found/missing/error) rather than
+# the plain forgejo_repo_get_file so a 403 or 5xx can't masquerade as a
+# clean read; `jq -e '... == false'` is type-aware, so the JSON string
+# "false" doesn't opt out and a parse failure (jq exit 2) gates like any
+# other unreadable state.
 automerge_require_human() {
-  local repo="$1" out status body val
+  local repo="$1" out status body
   out=$(forgejo_repo_get_file_status "$repo" "$AGENT_CONFIG_FILE" 2>/dev/null)
   status=${out%%$'\t'*}
   [ "$status" = "found" ] || return 0
   body=${out#*$'\t'}
-  val=$(jq -r '.automerge.require_human' <<<"$body" 2>/dev/null) || return 0
-  [ "$val" = "true" ]
+  jq -e '.automerge.require_human == false' <<<"$body" >/dev/null 2>&1 && return 1
+  return 0
 }
 
 # automerge_will_take <repo> <verdict> -- exit 0 if the auto-merge tick will merge

@@ -236,26 +236,31 @@ no "mergeable: conflict"                   automerge_mergeable acme/x 1
 FJ='{"state":"closed","mergeable":true}'
 no "mergeable: closed"                     automerge_mergeable acme/x 1
 
-echo "== automerge_require_human (review-gate flag; fail closed on UNKNOWN, not on unstated -- igor#561) =="
+echo "== automerge_require_human (review-gate flag; only an explicit false disables it -- igor#561) =="
 # Uses forgejo_repo_get_file_status (found/missing/error), not the plain
-# forgejo_repo_get_file -- the whole point is distinguishing a readable
-# config that simply doesn't mention the key (an expressed, unchanged
-# intent -> no gate) from a config the harness genuinely couldn't read
-# (unknown -> human gate, fail closed).
+# forgejo_repo_get_file, so an unreadable agent.json is distinguishable from
+# one that reads cleanly. Every state except a literal `false` gates on the
+# human: an undeclared repo is as un-consented as an unreadable one.
 forgejo_repo_get_file_status() { printf 'found\t%s' '{"automerge":{"require_human":true}}'; }
 ok "require_human: flagged true -> human gate"                    automerge_require_human acme/site
 forgejo_repo_get_file_status() { printf 'found\t%s' '{"automerge":{"require_human":false}}'; }
 no "require_human: explicit false -> shadow gate"                 automerge_require_human acme/site
 forgejo_repo_get_file_status() { printf 'found\t%s' '{"smoke":{"url":"x"}}'; }
-no "require_human: readable config, no automerge object -> shadow gate (unchanged)" automerge_require_human acme/site
+ok "require_human: readable config, no automerge object -> human gate" automerge_require_human acme/site
 forgejo_repo_get_file_status() { printf 'found\t%s' '{"automerge":{}}'; }
-no "require_human: readable config, key absent -> shadow gate (unchanged)" automerge_require_human acme/site
+ok "require_human: readable config, key absent -> human gate"     automerge_require_human acme/site
+forgejo_repo_get_file_status() { printf 'found\t%s' '{"automerge":{"require_human":"false"}}'; }
+ok "require_human: the STRING \"false\" is not the boolean -> human gate" automerge_require_human acme/site
 forgejo_repo_get_file_status() { printf 'missing\t'; }
-ok "require_human: agent.json deleted (404) -> human gate (fail closed)" automerge_require_human acme/site
+ok "require_human: no agent.json at all (404) -> human gate"      automerge_require_human acme/site
 forgejo_repo_get_file_status() { printf 'found\t%s' '{"automerge":{bad json'; }
-ok "require_human: malformed JSON -> human gate (fail closed)"    automerge_require_human acme/site
+ok "require_human: malformed JSON -> human gate"                  automerge_require_human acme/site
+# A 200 whose payload has no decodable `.content` -- found with an empty body.
+# jq -e exits 4 on empty input, so this gates like any other unreadable state.
+forgejo_repo_get_file_status() { printf 'found\t'; }
+ok "require_human: 200 with an empty body -> human gate"          automerge_require_human acme/site
 forgejo_repo_get_file_status() { printf 'error\t'; }
-ok "require_human: fetch/transport error -> human gate (fail closed)" automerge_require_human acme/site
+ok "require_human: fetch/transport error -> human gate"           automerge_require_human acme/site
 
 echo "== automerge_will_take (do_review_tick suppresses the human request) =="
 automerge_url_status() { printf 'ok\thttps://x'; }   # url-bearing repo throughout this section

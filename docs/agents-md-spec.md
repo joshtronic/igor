@@ -141,17 +141,28 @@ Decided split, operator ruling 2026-08-29 (igor#561):
 A repo may carry both files at once: `AGENTS.md` for the dossier,
 `agent.json` for whatever structured config it needs. Converting a
 repo to this spec never touches `agent.json`; only `CLAUDE.md` and
-`CEO.md` are deleted (see "Migration order" below). A repo with
-nothing structured to declare simply has no `agent.json`, same as
-today.
+`CEO.md` are deleted (see "Migration order" below).
 
-`automerge_require_human` (`lib/automerge.sh`) fails closed when
-`agent.json` cannot be read -- missing, unreachable, or malformed all
-require a human, since an unreadable config and a config that reads
-cleanly and simply says nothing are different facts (a repo's
-`agent.json` disappearing must not silently read as "never wanted the
-gate"). `automerge_maintenance_declaration` needs no equivalent fix:
-it treats an unreadable file the same as an absent declaration, and
+`automerge_require_human` (`lib/automerge.sh`) treats the human merge
+gate as the DEFAULT: only an explicit `"automerge": {"require_human":
+false}` disables it. No `agent.json`, an `agent.json` that never
+mentions the key, malformed JSON, and an unreachable fetch all gate on
+a human. A repo's `agent.json` disappearing (mid dossier-conversion,
+say) must not silently read as "never wanted the gate" -- and a repo
+that has never declared is exactly as un-consented as one whose
+declaration vanished, so the two are not told apart.
+
+**Fleet consequence, and it is not "same as today":** a url-bearing
+repo that carries no `agent.json`, or one whose `agent.json` says
+nothing about `automerge`, moves from shadow-gated auto-merge to
+always-human-gated. It stays there until it declares
+`"automerge": {"require_human": false}`. Fail-closed, so nothing
+merges that shouldn't -- but shadow-gated auto-merge is now opt-in per
+repo, one line each. (Url-less repos are unaffected: they were already
+human-gated upstream, unconditionally.)
+
+`automerge_maintenance_declaration` needs no equivalent rule: it
+treats an unreadable file the same as an absent declaration, and
 absence is already the safe default for that opt-in tier -- no
 declaration just means the carve-out doesn't apply, leaving the
 ordinary (human-gated, absent a `false` pin) path in force.

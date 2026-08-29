@@ -408,8 +408,12 @@ respective tools on the host; install or skip.
   approve, your job ends" step -- convention opt-in like the CEO/logwatch, but
   now with TWO merge paths keyed on `automerge_url_status` (dossier root
   AGENTS.md `url`, falling back to legacy `agent.json` `.smoke.url` via
-  `dossier_get_repo_status`): a repo that declares a live URL gets the
-  SHADOW-gated default path (below); a repo that genuinely declares NO url
+  `dossier_get_repo_status`): a repo that declares a live URL AND opts out of
+  the human gate with an explicit `agent.json` `automerge.require_human:
+  false` gets the SHADOW-gated path (below) -- that literal `false` is the
+  ONLY thing that disables the gate (igor#561), so no `agent.json`, no key,
+  malformed JSON, and an unreadable fetch all keep the human; a repo that
+  genuinely declares NO url
   (igor, distillery -- igor#520) gets an implicitly HUMAN-gated path instead,
   same posture as `automerge.require_human` -- the shadow verdict alone can
   never merge it. `automerge_url_status` distinguishes that genuine "no url"
