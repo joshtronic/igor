@@ -73,13 +73,19 @@ echo "== igor#556 phase 1: ceo is gone from CASCADE_STAGES =="
 # quoted list ("ceo review ..." / "... deferred ceo") has no space on one
 # side, so substring-matching the whole line would miss the likeliest case.
 stages_line=$(grep '^CASCADE_STAGES=' bin/tick.sh | head -1)
-stages_value="${stages_line#*=}"
-stages_value="${stages_value#[\"\']}"
-stages_value="${stages_value%[\"\']}"
-case " ${stages_value} " in
-  *' ceo '*) bad "ceo is still listed in CASCADE_STAGES: ${stages_line}" ;;
-  *) ok "ceo is gone from CASCADE_STAGES" ;;
-esac
+if [ -z "$stages_line" ]; then
+  # Without this the check fails OPEN: an empty stages_value falls to the *)
+  # arm below and reports "gone" having read nothing at all.
+  bad "no CASCADE_STAGES= assignment found in bin/tick.sh -- the ceo check could not run"
+else
+  stages_value="${stages_line#*=}"
+  stages_value="${stages_value#[\"\']}"
+  stages_value="${stages_value%[\"\']}"
+  case " ${stages_value} " in
+    *' ceo '*) bad "ceo is still listed in CASCADE_STAGES: ${stages_line}" ;;
+    *) ok "ceo is gone from CASCADE_STAGES" ;;
+  esac
+fi
 
 echo "== and nothing outside a comment in tick.sh mentions the CEO stage at all =="
 # Case-insensitive bare `ceo` rather than the specific retired symbols: the
@@ -96,6 +102,34 @@ while IFS=: read -r _file _lineno content; do
 done < <(grep -inH ceo bin/tick.sh 2>/dev/null || true)
 
 [ "$CEO_SYMBOL_HITS" -eq 0 ] && ok "bin/tick.sh has no reference to the retired CEO wiring"
+
+echo "== and no other script sources lib/ceo.sh or calls into it =="
+# The check above is scoped to one file, which leaves "is tick.sh really the
+# only caller?" resting on a grep someone ran once. This is the repo-side half:
+# lib/ceo.sh and bin/lib/ceo-digest-directive.md stay on disk ORPHANED until
+# phase 2, so a non-comment line in any other shell script that sources the
+# library, calls a ceo_* helper, or reads the directive is a reader growing
+# back. Scoped to *.sh so the directive's own prose isn't matched, and
+# lib/ceo.sh's internals are excluded -- it may of course call itself.
+CEO_READER_HITS=0
+while IFS=: read -r _file _lineno content; do
+  [ -n "${content+set}" ] || continue
+  case "$_file" in
+    lib/ceo.sh|bin/test-retired-directives.sh) continue ;;
+  esac
+  trimmed="${content#"${content%%[![:space:]]*}"}"
+  case "$trimmed" in
+    '#'*) continue ;;   # a comment naming the retired machinery isn't a reader
+  esac
+  case "${content,,}" in
+    *ceo.sh*|*ceo_*|*ceo-digest-directive*)
+      bad "${_file}:${_lineno} still reaches into the orphaned CEO machinery: ${content}"
+      CEO_READER_HITS=$((CEO_READER_HITS + 1))
+      ;;
+  esac
+done < <(grep -rniH --include='*.sh' ceo bin/ lib/ 2>/dev/null || true)
+
+[ "$CEO_READER_HITS" -eq 0 ] && ok "lib/ceo.sh is orphaned -- no script outside it reads it"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-retired-directives: all checks passed"
