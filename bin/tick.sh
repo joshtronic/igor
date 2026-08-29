@@ -5148,7 +5148,7 @@ Revert those changes (or do them yourself outside the agent) and remove \`Status
 
 ${SEC_FINDINGS}
 
-This is a transient gate error, not a confirmed finding -- the block records a \`transient\` probe and will clear itself on the next sweep. If it keeps recurring with the same reason, it will escalate to a human instead of requeuing forever." transient
+This is a transient gate error, not a confirmed finding -- the block records a \`transient\` probe and will clear itself on the next sweep. If this ticket keeps blocking transiently, it will escalate to a human instead of requeuing forever." transient
     else
       log "outcome: blocked (security review flagged the diff)"
       agent-block.sh "The harness security review flagged a material issue in this change, so it was NOT pushed:

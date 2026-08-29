@@ -579,10 +579,8 @@ has  "transient escalate: reviewer assigned" "$ASSIGNED" "acme/x#19->josh"
 unset FORGEJO_REVIEWER
 
 echo "-- scenario: 3 transient blocks with DIFFERING reasons -> still escalate --"
-# The reviewer's escape hatch on PR #568: transient is a self-service
-# auto-requeue primitive whose only bound was text equality, so a producer
-# whose reason varies (a timestamp, a findings excerpt) could requeue itself
-# indefinitely. The episode count closes it without a second retry counter.
+# End-to-end proof of the episode bound: the reason text differs every
+# episode, so the probe count is the only thing stopping the requeue loop.
 _reset_capture
 _fj() {
   if [ "$1 $2" = "GET /repos/acme/x/issues?state=open&type=issues&labels=Status/Blocked&limit=50" ]; then

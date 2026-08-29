@@ -546,13 +546,7 @@ respective tools on the host; install or skip.
   fail-closed case, igor#491: neither `issue-open`/`pr-behind` had a ref to
   point at, and it isn't a human call either). Boundedness for `transient`
   comes from the existing repeat-block guard below, not a second retry
-  counter -- an identical reason recurring three times escalates instead of
-  requeuing forever, and because `transient` is the one kind that requeues
-  with no external condition to satisfy, that guard counts its EPISODES
-  (`blockprobe_kind_repeat_count`) as well as its reason text: a producer
-  whose wording varies per attempt (a timestamp, a findings excerpt) would
-  otherwise slip past text equality and requeue itself indefinitely.
-  Everything is read from the LATEST
+  counter. Everything is read from the LATEST
   `## Blocked (...)` section only, probe and reason alike
   (`_blockprobe_last_block` is the one slice both go through): a ticket can
   block more than once, and only the most
@@ -610,7 +604,11 @@ respective tools on the host; install or skip.
   episode count as well (`blockprobe_kind_repeat_count`, counting `kind:
   transient` probe blocks, spent ones included), since that kind clears
   itself unconditionally and text equality is the only other thing bounding
-  it. Any evaluation failure (an unreachable API, an unparseable
+  it -- a producer whose wording varies per attempt (a timestamp, a findings
+  excerpt) would otherwise requeue itself indefinitely. Note the count is
+  LIFETIME-scoped, matching the reason guard beside it: three transient
+  blocks over a ticket's whole life escalate the third, even if each was
+  genuinely unrelated. Any evaluation failure (an unreachable API, an unparseable
   payload) reads UNKNOWN and fails closed -- the ticket stays blocked rather
   than a transport blip being mistaken for a resolved cause.
 - The feedback-triage pass (`do_feedback_tick`, `lib/feedback.sh`) is

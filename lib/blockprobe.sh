@@ -45,14 +45,7 @@
 #               ALWAYS evaluates CLEARED, so it requeues on the very next
 #               sweep -- "presumed resolved, try again" rather than "prove
 #               it resolved". Boundedness comes from the repeat-block guard
-#               below, not a second retry counter: the identical reason
-#               re-accumulates across requeue cycles and escalates on the
-#               third occurrence. Since transient is the one kind that
-#               requeues with no external condition to satisfy, the guard
-#               ALSO counts transient episodes (blockprobe_kind_repeat_count)
-#               -- a producer whose reason wording varies between attempts
-#               would otherwise slip past text equality and requeue itself
-#               indefinitely.
+#               below, not a second retry counter.
 #
 # do_blockprobe_tick sweeps every Status/Blocked issue in the analysis set
 # once per tick (non-model, API-only, so it runs even during a Claude health
@@ -285,9 +278,7 @@ blockprobe_reason_repeat_count() {
 
 # blockprobe_kind_repeat_count <body> <kind> -- how many probe blocks in <body>
 # declare <kind>, spent ones included (a spent probe still marks an episode
-# that happened). The reason guard above is text equality, so a producer whose
-# wording varies between attempts slips past it; counting episodes bounds a
-# self-clearing kind structurally instead. Empty or non-vocabulary kind -> 0.
+# that happened). Empty or non-vocabulary kind -> 0.
 blockprobe_kind_repeat_count() {
   local body="$1" kind="$2" count
   [ -n "$kind" ] || { printf '0'; return 0; }
@@ -502,9 +493,7 @@ do_blockprobe_tick() {
           reason=$(blockprobe_last_reason "$body")
           repeat=$(blockprobe_reason_repeat_count "$body" "$reason")
           # transient clears unconditionally, so it is the one kind whose bound
-          # is entirely in this guard. Text equality alone is too weak for it:
-          # a producer whose reason carries a timestamp or a findings excerpt
-          # would requeue itself indefinitely. Count the episodes too.
+          # is entirely in this guard -- count episodes as well as reason text.
           episodes=0
           if [ "$kind" = "transient" ]; then
             episodes=$(blockprobe_kind_repeat_count "$body" "$kind")

@@ -35,17 +35,24 @@ START=$(grep -n 'security_gate "\$WORKTREE" "\$PR_BASE" "security-gate-issue"' "
 if [ -z "$START" ]; then
   bad "could not find the issue-work security_gate call site in bin/tick.sh"
 else
-  REL_END=$(tail -n "+$START" "$TICK" | grep -n '^\s*exit 0\s*$' | head -1 | cut -d: -f1)
+  REL_END=$(tail -n "+$START" "$TICK" | grep -n '^[[:space:]]*exit 0[[:space:]]*$' | head -1 | cut -d: -f1)
   if [ -z "$REL_END" ]; then
     bad "could not find the closing 'exit 0' for the issue-work security-gate block"
   else
     END=$((START + REL_END - 1))
     BLOCK=$(sed -n "${START},${END}p" "$TICK")
 
-    if printf '%s\n' "$BLOCK" | grep -qF 'SEC_RC=$?'; then
-      ok "captures the security_gate exit code (SEC_RC)"
+    # `$?` is clobbered by the next command that runs, so SEC_RC must be the
+    # FIRST statement in the else branch -- a `log` line slipped above it
+    # would make every gate error read as rc 0 and take the material-finding
+    # branch, silently. Comments and blank lines don't clobber $?.
+    OUTER_ELSE=$(printf '%s\n' "$BLOCK" | grep -nE '^[[:space:]]*else[[:space:]]*$' | head -1 | cut -d: -f1)
+    FIRST_STMT=$(printf '%s\n' "$BLOCK" | tail -n "+$((${OUTER_ELSE:-0} + 1))" \
+      | grep -vE '^[[:space:]]*(#.*)?$' | head -1 | sed 's/^[[:space:]]*//')
+    if [ -n "$OUTER_ELSE" ] && [ "$FIRST_STMT" = 'SEC_RC=$?' ]; then
+      ok "captures security_gate's exit code as the first statement of the else branch"
     else
-      bad "does not capture security_gate's exit code -- can't distinguish material BLOCK from a gate error"
+      bad "SEC_RC=\$? is not the first statement after 'else' (found: ${FIRST_STMT:-<none>}) -- \$? is clobbered, so every gate error would misread as a material finding"
     fi
 
     if printf '%s\n' "$BLOCK" | grep -qE '\[ "\$SEC_RC" -eq 2 \]'; then
