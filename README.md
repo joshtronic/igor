@@ -63,7 +63,8 @@ _I don't monitor these services or accept pull/merge requests on them._
 - **Commands on `PATH`:** `jq`, `curl`, `git`, `flock` (`util-linux`),
   `timeout` (`coreutils`), `sqlite3`, `openssl`, and the `claude` CLI.
   `install.sh` checks for all of these and refuses to proceed if any
-  are missing. `doctor.sh` additionally uses `fuser` and `journalctl`
+  are missing; the Debian package name matches the command name for
+  every one except those two. `doctor.sh` additionally uses `fuser` and `journalctl`
   for diagnostics -- useful, not required; it degrades gracefully
   without them.
 - **Init system:** systemd **user** units, with lingering enabled so
@@ -102,7 +103,7 @@ cron job can fire before the network is up.
 
 Overrun protection is `Type=oneshot` plus systemd's own refusal to
 double-start an active unit, alongside the global `flock` the tick
-also takes (`bin/tick.sh:303`) -- belt-and-braces, not the only
+takes on its own state dir -- belt-and-braces, not the only
 defence. journald gives per-unit, time-filterable logs, which the
 logwatch pass reads directly.
 
