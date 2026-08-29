@@ -18,8 +18,8 @@
 # currently means.
 #
 #   <!-- probe
-#   kind: issue-open | pr-behind | operator
-#   ref: <owner>/<repo>#<number>   (omitted for kind: operator)
+#   kind: issue-open | pr-behind | operator | transient
+#   ref: <owner>/<repo>#<number>   (omitted for kind: operator, transient)
 #   confirmed: <YYYY-MM-DD>        (written by the sweep, not the producer)
 #   cleared: <YYYY-MM-DD>          (written by the sweep, not the producer)
 #   -->
@@ -40,6 +40,12 @@
 #               operator needs to choose an approach"). Never evaluated,
 #               never auto-requeued; this is the "who" vs "what" split
 #               the issue asks for.
+#   transient   No ref -- there is no external state to poll (e.g. a gate
+#               that failed to produce a verdict at all: igor#491/igor#555).
+#               ALWAYS evaluates CLEARED, so it requeues on the very next
+#               sweep -- "presumed resolved, try again" rather than "prove
+#               it resolved". Boundedness comes from the repeat-block guard
+#               below, not a second retry counter.
 #
 # do_blockprobe_tick sweeps every Status/Blocked issue in the analysis set
 # once per tick (non-model, API-only, so it runs even during a Claude health
@@ -80,6 +86,10 @@
 # occurrence the sweep escalates instead: it comments once (deduped via a
 # `<!-- blockprobe-escalated -->` marker, like the shadow reviewer's per-sha
 # marker) and assigns FORGEJO_REVIEWER, but leaves Status/Blocked in place.
+# For kind: transient the same third-occurrence rule also applies to the
+# EPISODE count (blockprobe_kind_repeat_count), since text equality alone is
+# an escape hatch for a producer whose reason wording varies per attempt and
+# transient is the only kind that requeues without satisfying anything.
 #
 # Deliberately does NOT touch tickets gated by lib/deferred.sh's own
 # `<!-- gate ... -->` block -- that's a different mechanism (an LLM read of
@@ -92,7 +102,7 @@
 # (lib/automerge.sh), log (tick.sh), jq.
 
 BLOCKPROBE_OPEN="<!-- probe"
-BLOCKPROBE_KINDS="issue-open pr-behind operator"
+BLOCKPROBE_KINDS="issue-open pr-behind operator transient"
 BLOCKPROBE_BLOCKED_HEADING="## Blocked ("
 BLOCKPROBE_ESCALATED_MARKER="<!-- blockprobe-escalated -->"
 
@@ -266,6 +276,24 @@ blockprobe_reason_repeat_count() {
   printf '%s' "$count"
 }
 
+# blockprobe_kind_repeat_count <body> <kind> -- how many `kind: <kind>` lines
+# <body> carries, spent probes included (a spent probe still marks an episode
+# that happened, and the stamp writer leaves the kind: line in place). Empty or
+# non-vocabulary kind -> 0.
+#
+# A whole-body line count rather than section-aware parsing, same scope as
+# blockprobe_reason_repeat_count above and for the same reason: what it has to
+# catch is episodes spread ACROSS separate "## Blocked (...)" sections. A
+# probe-shaped line elsewhere in a body would over-count, which errs toward
+# escalating to a human instead of requeuing -- the safe direction here.
+blockprobe_kind_repeat_count() {
+  local body="$1" kind="$2" count
+  [ -n "$kind" ] || { printf '0'; return 0; }
+  case "$kind" in *[!a-z-]*) printf '0'; return 0 ;; esac
+  count=$(printf '%s\n' "$body" | grep -cE "^[[:space:]]*kind:[[:space:]]*${kind}[[:space:]]*$" || true)
+  printf '%s' "${count:-0}"
+}
+
 # blockprobe_eval_issue_open <repo> <num> -- HOLDS while open, CLEARED once
 # closed, UNKNOWN if the fetch fails or the payload is unreadable (fail
 # closed -- a transport blip must never read as "cause resolved").
@@ -305,8 +333,15 @@ blockprobe_eval_pr_behind() {
 # interpolated straight into an API path. Collaborator rights and GET-only
 # requests already bound the damage, but a checked shape makes "a crafted ref
 # reaches no request" structurally true instead of incidentally true.
+#
+# kind: transient takes no ref and needs no request at all -- it always
+# evaluates CLEARED, so it must be dispatched before the ref-shape check
+# below (an empty ref would otherwise read as UNKNOWN and never requeue).
 blockprobe_evaluate() {
   local kind="$1" ref="$2" repo num
+  if [ "$kind" = "transient" ]; then
+    printf 'CLEARED'; return 0
+  fi
   if [[ ! "$ref" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\#[0-9]+$ ]] || [ "${ref#*..}" != "$ref" ]; then
     printf 'UNKNOWN'; return 0
   fi
@@ -379,9 +414,9 @@ blockprobe_escalate() {
   # The reason is quoted verbatim in a fence: it's what the human has to judge,
   # and it may be several lines of the agent's own words.
   forgejo_comment "$repo" "$num" \
-    "This ticket has blocked with the identical reason more than twice -- clearing and re-blocking looks like a loop, not a resolved condition. Leaving \`Status/Blocked\` in place and escalating for a human decision instead of auto-requeuing again.
+    "This ticket has blocked and re-blocked more than twice -- with the identical reason, or on a probe kind that clears itself. Either way it looks like a loop, not a resolved condition. Leaving \`Status/Blocked\` in place and escalating for a human decision instead of auto-requeuing again.
 
-The repeated reason:
+The most recent reason:
 
 \`\`\`
 ${reason}
@@ -401,7 +436,7 @@ ${BLOCKPROBE_ESCALATED_MARKER}" \
 # rules above. Non-model (API-only): call as `do_blockprobe_tick || true`,
 # same as do_landed_tick.
 do_blockprobe_tick() {
-  local repo_line repo issues n body kind ref verdict reason repeat reviewer today spent
+  local repo_line repo issues n body kind ref verdict reason repeat episodes reviewer today spent
   reviewer="${FORGEJO_REVIEWER:-}"
   today=$(date -u '+%Y-%m-%d')
 
@@ -464,7 +499,13 @@ do_blockprobe_tick() {
         CLEARED)
           reason=$(blockprobe_last_reason "$body")
           repeat=$(blockprobe_reason_repeat_count "$body" "$reason")
-          if [ "$repeat" -gt 2 ]; then
+          # transient clears unconditionally, so it is the one kind whose bound
+          # is entirely in this guard -- count episodes as well as reason text.
+          episodes=0
+          if [ "$kind" = "transient" ]; then
+            episodes=$(blockprobe_kind_repeat_count "$body" "$kind")
+          fi
+          if [ "$repeat" -gt 2 ] || [ "$episodes" -gt 2 ]; then
             blockprobe_escalate "$repo" "$n" "$reason" "$reviewer"
           else
             blockprobe_requeue "$repo" "$n" "$kind" "$ref" "$today" || true

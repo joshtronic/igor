@@ -167,6 +167,23 @@ export BODY_PATCH_CAP="$TMP/body-patch-operator.json"
 OP_BODY=$(jq -r '.body // empty' "$BODY_PATCH_CAP" 2>/dev/null)
 has "operator probe: body carries kind: operator" "$OP_BODY" "kind: operator"
 
+# igor#555: the security gate's no-verdict/gate-error path has no external
+# condition to check either, so it records a probe the same way operator
+# does -- no ref -- but with different (self-clearing) sweep semantics.
+echo "== agent-block.sh: a transient-kind probe needs no ref (igor#555) =="
+export BODY_PATCH_CAP="$TMP/body-patch-transient.json"
+# shellcheck disable=SC2030,SC2031
+(
+  unset FORGEJO_REVIEWER
+  export ISSUE_NUMBER=42 FORGEJO_REPO=acme/x AGENT_HOME="$AGENT_HOME" \
+         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+  bash "$SCRIPT" "the security gate produced no verdict" transient >/dev/null 2>&1
+)
+TRANSIENT_BODY=$(jq -r '.body // empty' "$BODY_PATCH_CAP" 2>/dev/null)
+has "transient probe: body carries kind: transient" "$TRANSIENT_BODY" "kind: transient"
+eq "transient probe: parses back as kind transient" "transient" \
+   "$(blockprobe_parse_kind "$TRANSIENT_BODY")"
+
 echo "== agent-block.sh: an unrecognized probe kind is dropped, not fatal, still blocks (igor#546) =="
 export BODY_PATCH_CAP="$TMP/body-patch-badkind.json"
 BADKIND_ERR="$TMP/badkind-stderr.txt"

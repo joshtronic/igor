@@ -182,6 +182,72 @@ eq "reason seen 3 times" "3" "$(blockprobe_reason_repeat_count "$REPEATED" "scop
 eq "unrelated reason seen 0 times" "0" "$(blockprobe_reason_repeat_count "$REPEATED" "a totally different reason")"
 eq "empty reason -> 0" "0" "$(blockprobe_reason_repeat_count "$REPEATED" "")"
 
+echo "== transient episode counting: a bound that does not depend on reason text =="
+# The identical-reason guard is text equality, so a producer whose reason
+# varies between attempts (a timestamp, a findings excerpt) would slip past it
+# and auto-requeue itself forever. Counting the transient PROBES in the body
+# bounds that structurally, whatever the prose says.
+TRANSIENT_VARYING='---
+## Blocked (2026-08-28 01:00Z)
+
+gate error at 01:00
+
+<!-- probe
+kind: transient
+-->
+
+---
+## Blocked (2026-08-28 01:05Z)
+
+gate error at 01:05
+
+<!-- probe
+kind: transient
+-->
+
+---
+## Blocked (2026-08-28 01:10Z)
+
+gate error at 01:10
+
+<!-- probe
+kind: transient
+-->'
+eq "three transient episodes counted" "3" "$(blockprobe_kind_repeat_count "$TRANSIENT_VARYING" transient)"
+eq "varying reasons defeat the reason guard" "1" \
+   "$(blockprobe_reason_repeat_count "$TRANSIENT_VARYING" "gate error at 01:10")"
+eq "a different kind is not counted" "0" "$(blockprobe_kind_repeat_count "$TRANSIENT_VARYING" operator)"
+eq "empty kind -> 0" "0" "$(blockprobe_kind_repeat_count "$TRANSIENT_VARYING" "")"
+eq "a body with no probes -> 0" "0" "$(blockprobe_kind_repeat_count "$REPEATED" transient)"
+
+# TRANSIENT_VARYING above is hand-written, and no real body ever looks like
+# that: every episode but the last has been through blockprobe_record_cleared,
+# which REWRITES its probe block before the next episode is appended. The count
+# reads those rewritten blocks, so build the body the way the sweep actually
+# leaves it. If the stamp writer ever stopped preserving the kind: line, the
+# bound would silently never fire again -- the exact loop it exists to stop.
+_append_transient_episode() {
+  printf '%s\n\n---\n## Blocked (%s)\n\n%s\n\n<!-- probe\nkind: transient\n-->' "$1" "$2" "$3"
+}
+STAMPED_EPISODES=$(blockprobe_body_with_cleared '---
+## Blocked (2026-08-28 01:00Z)
+
+gate error at 01:00
+
+<!-- probe
+kind: transient
+-->' "2026-08-28")
+STAMPED_EPISODES=$(blockprobe_body_with_cleared \
+  "$(_append_transient_episode "$STAMPED_EPISODES" "2026-08-28 01:05Z" "gate error at 01:05")" "2026-08-28")
+STAMPED_EPISODES=$(_append_transient_episode "$STAMPED_EPISODES" "2026-08-28 01:10Z" "gate error at 01:10")
+eq "two spent probes + one live one still count 3 episodes" "3" \
+   "$(blockprobe_kind_repeat_count "$STAMPED_EPISODES" transient)"
+eq "the stamped blocks kept their kind: line" "2" \
+   "$(grep -c 'cleared: 2026-08-28' <<<"$STAMPED_EPISODES")"
+eq "and the LATEST probe is the live, unstamped one" "" \
+   "$(blockprobe_parse_cleared "$STAMPED_EPISODES")"
+eq "which still parses as transient" "transient" "$(blockprobe_parse_kind "$STAMPED_EPISODES")"
+
 echo "== blockprobe_evaluate: dispatch + malformed ref =="
 forgejo_get_issue() { printf '{"state":"open"}'; }
 eq "issue-open, ref open -> HOLDS" "HOLDS" "$(blockprobe_evaluate issue-open joshtronic/igor#537)"
@@ -212,6 +278,19 @@ eq "pr-behind, undetermined -> UNKNOWN" "UNKNOWN" "$(blockprobe_evaluate pr-behi
 # sentinel, but a different negative must not fall through to HOLDS.
 automerge_behind_count() { printf -- '-5'; }
 eq "pr-behind, other negative -> UNKNOWN" "UNKNOWN" "$(blockprobe_evaluate pr-behind joshtronic/repo#147)"
+
+echo "== blockprobe_evaluate: kind transient (igor#555) -- always CLEARED, no ref needed =="
+# transient has no external condition to poll (e.g. a security gate that
+# never produced a verdict): it always evaluates CLEARED so a block records
+# with it requeues on the very next sweep, with no ref at all.
+eq "transient, no ref -> CLEARED" "CLEARED" "$(blockprobe_evaluate transient "")"
+eq "transient, a ref present anyway -> still CLEARED (ref is ignored)" "CLEARED" \
+   "$(blockprobe_evaluate transient joshtronic/igor#537)"
+# And it never touches the network to get there.
+forgejo_get_issue() { echo "forgejo_get_issue should not be called for kind transient" >&2; return 1; }
+automerge_behind_count() { echo "automerge_behind_count should not be called for kind transient" >&2; return 1; }
+NOCALL_ERR=$(blockprobe_evaluate transient "" 2>&1 1>/dev/null)
+eq "transient never calls forgejo_get_issue or automerge_behind_count" "" "$NOCALL_ERR"
 
 echo "== do_blockprobe_tick: end-to-end sweep over stubbed Forgejo =="
 
@@ -420,6 +499,164 @@ _fj() {
 do_blockprobe_tick
 eq "operator: label untouched" "" "$REMOVED"
 eq "operator: no comment"      "" "$COMMENTS"
+
+echo "-- scenario: transient block (igor#555) -- self-clears on the very next sweep --"
+# The motivating case: a security gate that produced no verdict at all
+# (fail-closed) has no external condition to poll, so the probe always
+# evaluates CLEARED and the ticket is requeued unconditionally.
+#
+# blockprobe_evaluate itself never calls forgejo_get_issue for kind
+# transient (asserted directly above), but do_blockprobe_tick's CLEARED
+# path still re-fetches the TICKET's own body to stamp the probe spent
+# (_blockprobe_record_stamp) -- so forgejo_get_issue must answer for the
+# ticket number, same shape as the "probe fails (cause resolved)" scenario.
+_reset_capture
+TRANSIENT_BODY='---
+## Blocked (2026-08-28 01:26Z)
+
+The harness security review could not produce a verdict, so this change was NOT pushed.
+
+<!-- probe
+kind: transient
+-->'
+# TRANSIENT_LIVE is the ticket's mutable body -- the fake PATCH writes back to
+# it, so the assertions below read what the sweep actually left behind rather
+# than the literal above (which the next scenario still needs pristine).
+TRANSIENT_LIVE="$TRANSIENT_BODY"
+_fj() {
+  case "$1 $2" in
+    "GET /repos/acme/x/issues?state=open&type=issues&labels=Status/Blocked&limit=50")
+      _issues_payload 18 "$TRANSIENT_LIVE" ;;
+    "PATCH /repos/acme/x/issues/18") PATCHED="$3"; TRANSIENT_LIVE=$(jq -r '.body' <<<"$3") ;;
+    *) _no_issues ;;
+  esac
+}
+forgejo_get_issue() { jq -cn --arg b "$TRANSIENT_LIVE" '{number:18, body:$b, state:"open"}'; }
+do_blockprobe_tick
+has "transient: Status/Blocked removed"  "$REMOVED" "acme/x#18:Status/Blocked"
+has "transient: unassigned"              "$UNASSIGNED" "acme/x#18"
+has "transient: comment posted"          "$COMMENTS" "acme/x#18"
+eq  "transient: no escalation assignment" "" "$ASSIGNED"
+# transient is the first refless kind to reach the stamp writer at all
+# (operator is skipped before evaluation), and the body it leaves behind is
+# what the NEXT episode's bound is counted from -- so assert the shape, not
+# just the label/assignment effects.
+eq  "transient: probe stamped spent"     "$TODAY" "$(blockprobe_parse_cleared "$TRANSIENT_LIVE")"
+eq  "transient: the stamp preserved kind" "transient" "$(blockprobe_parse_kind "$TRANSIENT_LIVE")"
+eq  "transient: the spent episode still counts toward the bound" "1" \
+    "$(blockprobe_kind_repeat_count "$TRANSIENT_LIVE" transient)"
+
+echo "-- scenario: the same security-gate block WITHOUT the probe -> UNPROBED, not cleared --"
+# The paired negative for the scenario above, and the pre-igor#555 behaviour:
+# with the probe recording severed, the identical reason text is inert -- the
+# sweep reports UNPROBED and the ticket stays blocked until a human acts. It is
+# the RECORDING at the tick.sh call site, not the reason wording, that makes a
+# no-verdict gate error self-clearing.
+_reset_capture
+UNPROBED_SEC_BODY=${TRANSIENT_BODY%%$'\n\n<!-- probe'*}
+_fj() {
+  if [ "$1 $2" = "GET /repos/acme/x/issues?state=open&type=issues&labels=Status/Blocked&limit=50" ]; then
+    _issues_payload 20 "$UNPROBED_SEC_BODY"
+  else
+    _no_issues
+  fi
+}
+UNPROBED_SEEN=0
+log() { case "$*" in *"UNPROBED"*) UNPROBED_SEEN=1 ;; esac; }
+do_blockprobe_tick
+eq "unprobed security-gate block: reported UNPROBED" "1" "$UNPROBED_SEEN"
+eq "unprobed security-gate block: label untouched"   "" "$REMOVED"
+eq "unprobed security-gate block: not unassigned"    "" "$UNASSIGNED"
+eq "unprobed security-gate block: no comment"        "" "$COMMENTS"
+log() { :; }
+
+echo "-- scenario: same TRANSIENT reason blocking 3x -> escalate, not requeue forever --"
+# Boundedness comes from the existing repeat-block guard, not a second retry
+# counter: a security gate that keeps failing the same way must not requeue
+# indefinitely, so the identical reason accumulating across requeue cycles
+# trips the same escalation a mechanical probe would.
+_reset_capture
+TRANSIENT_REPEAT_BODY='---
+## Blocked (2026-08-28 01:00Z)
+
+The harness security review could not produce a verdict, so this change was NOT pushed.
+
+<!-- probe
+kind: transient
+-->
+
+---
+## Blocked (2026-08-28 01:05Z)
+
+The harness security review could not produce a verdict, so this change was NOT pushed.
+
+<!-- probe
+kind: transient
+-->
+
+---
+## Blocked (2026-08-28 01:10Z)
+
+The harness security review could not produce a verdict, so this change was NOT pushed.
+
+<!-- probe
+kind: transient
+-->'
+_fj() {
+  if [ "$1 $2" = "GET /repos/acme/x/issues?state=open&type=issues&labels=Status/Blocked&limit=50" ]; then
+    _issues_payload 19 "$TRANSIENT_REPEAT_BODY"
+  else
+    _no_issues
+  fi
+}
+# shellcheck disable=SC2034  # read by do_blockprobe_tick (lib/blockprobe.sh)
+FORGEJO_REVIEWER="josh"
+do_blockprobe_tick
+eq   "transient escalate: label NOT removed" "" "$REMOVED"
+eq   "transient escalate: not unassigned"    "" "$UNASSIGNED"
+has  "transient escalate: comment posted"    "$COMMENTS" "acme/x#19"
+has  "transient escalate: reviewer assigned" "$ASSIGNED" "acme/x#19->josh"
+unset FORGEJO_REVIEWER
+
+echo "-- scenario: 3 transient blocks with DIFFERING reasons -> still escalate --"
+# End-to-end proof of the episode bound: the reason text differs every
+# episode, so the probe count is the only thing stopping the requeue loop.
+_reset_capture
+_fj() {
+  if [ "$1 $2" = "GET /repos/acme/x/issues?state=open&type=issues&labels=Status/Blocked&limit=50" ]; then
+    _issues_payload 21 "$TRANSIENT_VARYING"
+  else
+    _no_issues
+  fi
+}
+# shellcheck disable=SC2034  # read by do_blockprobe_tick (lib/blockprobe.sh)
+FORGEJO_REVIEWER="josh"
+do_blockprobe_tick
+eq  "varying transient: label NOT removed" "" "$REMOVED"
+eq  "varying transient: not unassigned"    "" "$UNASSIGNED"
+has "varying transient: comment posted"    "$COMMENTS" "acme/x#21"
+has "varying transient: reviewer assigned" "$ASSIGNED" "acme/x#21->josh"
+unset FORGEJO_REVIEWER
+
+echo "-- scenario: two transient blocks (still under the bound) -> requeued --"
+# The bound must not fire early: the third episode escalates, the second does
+# not. Same shape as the CLEARED path above, so the stamp re-fetch is stubbed.
+_reset_capture
+TRANSIENT_TWICE=${TRANSIENT_VARYING%%---$'\n'## Blocked (2026-08-28 01:10Z)*}
+_fj() {
+  case "$1 $2" in
+    "GET /repos/acme/x/issues?state=open&type=issues&labels=Status/Blocked&limit=50")
+      _issues_payload 22 "$TRANSIENT_TWICE" ;;
+    "PATCH /repos/acme/x/issues/22") : ;;
+    *) _no_issues ;;
+  esac
+}
+forgejo_get_issue() { jq -cn --arg b "$TRANSIENT_TWICE" '{number:22, body:$b, state:"open"}'; }
+do_blockprobe_tick
+eq  "two transient episodes counted"     "2" "$(blockprobe_kind_repeat_count "$TRANSIENT_TWICE" transient)"
+has "under the bound: Status/Blocked removed" "$REMOVED" "acme/x#22:Status/Blocked"
+has "under the bound: unassigned"             "$UNASSIGNED" "acme/x#22"
+eq  "under the bound: no escalation assignment" "" "$ASSIGNED"
 
 echo "-- scenario: same reason blocking 3x -> escalate, not requeue --"
 _reset_capture

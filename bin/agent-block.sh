@@ -15,6 +15,10 @@
 #   pr-behind  <owner/repo#N>  -- holds while that PR is behind its base
 #   operator                   -- a human decision, not a mechanical
 #                                  condition; never auto-requeued (no ref)
+#   transient                  -- no external condition to check; presumed
+#                                  resolved by the next look, so it always
+#                                  clears (bounded by the repeat-block guard,
+#                                  on reason text and episode count, no ref)
 # Omit both to leave the block UNPROBED -- the sweep reports that honestly
 # rather than guessing, but never clears it.
 #
@@ -39,6 +43,8 @@ cause resolves instead of it sitting blocked forever:
   issue-open <owner/repo#N>   block holds while that issue/PR is open
   pr-behind  <owner/repo#N>   block holds while that PR is behind its base
   operator                    a human decision -- never auto-requeued
+  transient                   no condition to check -- always clears, bounded
+                               by the repeat-block guard (reason + episodes)
 Omit both probe args to leave the block UNPROBED (reported, never cleared).
 USAGE
 }
@@ -74,8 +80,8 @@ PROBE_TEXT=""
 if [ -n "$PROBE_KIND" ]; then
   case " $BLOCKPROBE_KINDS " in
     *" $PROBE_KIND "*)
-      if [ "$PROBE_KIND" = "operator" ]; then
-        PROBE_TEXT=$'\n\n<!-- probe\nkind: operator\n-->'
+      if [ "$PROBE_KIND" = "operator" ] || [ "$PROBE_KIND" = "transient" ]; then
+        PROBE_TEXT=$'\n\n<!-- probe\nkind: '"${PROBE_KIND}"$'\n-->'
       elif [ -n "$PROBE_REF" ]; then
         PROBE_TEXT=$'\n\n<!-- probe\nkind: '"${PROBE_KIND}"$'\nref: '"${PROBE_REF}"$'\n-->'
       else
