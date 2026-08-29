@@ -24,10 +24,9 @@
 # Security: the check is a tool-free claude_call that sees ONLY the public page
 # (no repo/private data), so there is no lethal-trifecta surface; the only
 # hardening needed is on the outbound fetch (https-only + a size cap). The
-# verdict FAILS CLOSED -- any error, ambiguity, or
-# unparseable response leaves the ticket deferred (UNMET), so a flaky check can
-# never wrongly activate work; the cost of a false UNMET is just "re-check
-# tomorrow."
+# verdict FAILS CLOSED -- any error, ambiguity, or unparseable response leaves
+# the ticket deferred (UNMET), so a flaky check can never wrongly activate
+# work; the cost of a false UNMET is just "re-check tomorrow."
 #
 # Sourced by tick.sh; depends on _fj + forgejo_remove_label (lib/forgejo.sh),
 # claude_call (lib/claude.sh), log (tick.sh), jq, curl. do_deferred_tick lives
