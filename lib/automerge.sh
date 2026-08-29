@@ -413,10 +413,10 @@ automerge_maintenance_tier_files_ok() {
 # constant's comment -- the FILE PATH stays hardcoded; the category is the
 # caller-supplied <rejected_category>, sourced from the repo's own
 # declaration). Fails closed if the file is allowlisted but
-# <rejected_category> is empty -- the caller (automerge_maintenance_tier_ok)
-# only reaches here with a declaration automerge_maintenance_declaration
-# already validated, so this is a defensive second line, not the primary
-# gate.
+# <rejected_category> is empty OR omitted -- the caller
+# (automerge_maintenance_tier_ok) only reaches here with a declaration
+# automerge_maintenance_declaration already validated, so this is a
+# defensive second line, not the primary gate.
 #
 # <data_file> is compared by CORE IDENTITY, not a line-level diff or a bare
 # element count: each entry with the fields the issue itself names as
@@ -440,7 +440,11 @@ automerge_maintenance_tier_files_ok() {
 # the PR read and the classification (same review). Fails CLOSED on any
 # unreadable blob or unparseable JSON.
 automerge_maintenance_tier_data_ok() {
-  local path="$1" base="$2" head="$3" data_file="$4" allowlist="$5" rejected_category="$6"
+  # `${6:-}` not `$6`: under `set -u` a 5-arg caller would abort the calling
+  # shell -- i.e. kill the tick -- instead of returning 1. An omitted category
+  # reads as "not declared" and falls through to the belt's fail-closed check
+  # below, so the failure mode stays "refuse the merge", never "crash".
+  local path="$1" base="$2" head="$3" data_file="$4" allowlist="$5" rejected_category="${6:-}"
   local old_sites new_sites old_core new_core old_rej new_rej old_rn new_rn
 
   old_sites=$(git -C "$path" show "${base}:${data_file}" 2>/dev/null) || return 1

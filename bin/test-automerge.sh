@@ -1127,6 +1127,17 @@ ok "data_ok: the SAME diff is a no-op against a category it doesn't touch (no-jo
   automerge_maintenance_tier_data_ok "$DP" "$OTHERCAT_BASE" "$OTHERCAT_HEAD" "src/_data/sites.json" "$MTALLOW" "no-josh-visible"
 no "data_ok: rejected.json allowlisted but rejected_category empty -> fails closed (defensive)" \
   automerge_maintenance_tier_data_ok "$DP" "$OTHERCAT_BASE" "$OTHERCAT_HEAD" "src/_data/sites.json" "$MTALLOW" ""
+# A 5-arg caller must REFUSE, not abort: `local x="$6"` under `set -u` kills
+# the calling shell (the tick), turning a fail-closed gate into a crash. Run
+# it in a subshell so a regression reads as a failed assertion here rather
+# than taking this whole suite down with it -- and check stderr, since an
+# unbound-variable abort exits nonzero too and rc alone can't tell them apart.
+FIVEARG_RC=0
+( automerge_maintenance_tier_data_ok "$DP" "$OTHERCAT_BASE" "$OTHERCAT_HEAD" "src/_data/sites.json" "$MTALLOW" ) \
+  2>"$TMP/5arg.err" >/dev/null || FIVEARG_RC=$?
+eq "data_ok: a 5-arg caller returns rc1" "1" "$FIVEARG_RC"
+no "data_ok: a 5-arg caller fails closed, not an unbound-variable abort" \
+  grep -q "unbound variable" "$TMP/5arg.err"
 
 echo "== negative test: sever the belt trigger -> the net-gain case now merges (igor#558) =="
 # Proves the belt is what refuses the classic net-gain fixture: with
