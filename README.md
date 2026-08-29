@@ -108,10 +108,8 @@ takes on its own state dir -- belt-and-braces, not the only
 defence. journald gives per-unit, time-filterable logs, which the
 logwatch pass reads directly.
 
-This targets a modern Linux running systemd and we're not apologizing
-for it. The pieces are all visible, `doctor.sh` degrades gracefully
-when `journalctl` is absent, and nothing stops you from porting it --
-just know that's a different scheduling model, not a config flag.
+Nothing stops you from porting this to another init -- just know
+that's a different scheduling model, not a config flag.
 
 ## Forge support
 
@@ -150,8 +148,8 @@ credentials on the forge first -- currently manual, one-time work.
   wherever you clone the repo (`~/.local/share/agent` below); state
   (per-repo clones, worktrees, the reading-pipeline database) lives at
   `~/.local/state/agent` (`AGENT_STATE_DIR`). Neither is a `.env`
-  variable -- both are fixed conventions the scripts derive from their
-  own location and `$HOME`.
+  variable -- `tick.sh` derives them from its own location and `$HOME`
+  on every run; `doctor.sh` alone accepts an override, for convenience.
 
 See [docs/setup.md](docs/setup.md) for the full walkthrough and
 `.env.example` for the complete variable list -- documented there
