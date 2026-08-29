@@ -532,14 +532,22 @@ respective tools on the host; install or skip.
   args -- `agent-block.sh "<reason>" [<probe-kind> [<probe-ref>]]` -- and
   appends a machine-checkable probe to the issue BODY alongside the reason
   (never just a comment, same rationale as igor#434: the issue-work prompt
-  is built from the body alone). Three kinds, a closed vocabulary
+  is built from the body alone). Four kinds, a closed vocabulary
   (`BLOCKPROBE_KINDS`): `issue-open <owner/repo#N>` holds while that
   issue/PR is open and clears once it closes (e.g. "blocked on X landing");
   `pr-behind <owner/repo#N>` holds while that PR is behind its base branch
   (reuses `automerge_behind_count`) and clears once it isn't; `operator`
   takes no ref and is never evaluated -- it marks a block on a human
   decision ("the operator needs to pick an approach"), the "who" vs "what"
-  split the issue asked for. Everything is read from the LATEST
+  split the issue asked for; `transient` also takes no ref but, unlike
+  `operator`, always evaluates CLEARED -- for a block with no external
+  condition to poll and no human decision pending, just "presumed resolved,
+  try again" (igor#555, motivated by the security gate's no-verdict/
+  fail-closed case, igor#491: neither `issue-open`/`pr-behind` had a ref to
+  point at, and it isn't a human call either). Boundedness for `transient`
+  comes from the existing repeat-block guard below, not a second retry
+  counter -- an identical reason recurring three times escalates instead of
+  requeuing forever. Everything is read from the LATEST
   `## Blocked (...)` section only, probe and reason alike
   (`_blockprobe_last_block` is the one slice both go through): a ticket can
   block more than once, and only the most
@@ -553,13 +561,17 @@ respective tools on the host; install or skip.
   hold was last re-checked instead of that living only in an ephemeral tick
   log; the stamp is REPLACED not appended (a month-long block would otherwise
   grow 30 lines) and date-gated against the body already in hand, so a held
-  block costs one extra API call per day rather than one per tick. Two
-  producers exist: `bin/agent-block.sh` (the worker's own blocks, all three
-  kinds) and the claim guard's rejected-PR strike in `bin/tick.sh`, which
+  block costs one extra API call per day rather than one per tick. Three
+  producers exist: `bin/agent-block.sh` (the worker's own blocks, all four
+  kinds), the claim guard's rejected-PR strike in `bin/tick.sh`, which
   records the reason in the issue BODY (not just a comment -- igor#434: a
   re-queued run is prompted from the body alone) with an `operator` probe,
   because "the agent opened N PRs and all were closed" is a human judgement
-  call, not a mechanical condition. Teaching the ISSUE-WORK
+  call, not a mechanical condition; and the issue-work security-gate block
+  site (also `bin/tick.sh`), which calls `agent-block.sh` itself with
+  `operator` for a completed review's material finding vs. `transient` for
+  a no-verdict gate error (igor#555) -- the harness's own call, not the
+  worker's, same footing as the claim guard. Teaching the ISSUE-WORK
   agent to pass the probe args is a distillery-side change -- that prompt is
   the Distillery's `worker-contract` skill, not this repo's `AGENTS.md` (which
   is only `bin/check-sync.sh`'s CI-mode fallback), so it rides its own ticket.
