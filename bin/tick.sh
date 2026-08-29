@@ -690,6 +690,18 @@ maintenance_mark_done() {
   mv "$tmp" "$state_file"
 }
 
+# maintenance_mark_attempted <repo>
+# Stamps the repo as processed for this ISO-week cycle even though the
+# pass errored. Leaving the timestamp unset on an error is what let a
+# persistently-broken repo (e.g. a stale origin/HEAD symref after an
+# upstream default-branch rename, igor#553) retrigger the SAME failure
+# every tick forever, starving every cascade stage below maintenance.
+# Same state key as a clean pass -- "attempted" and "succeeded" share one
+# cycle gate; only the log line at the call site distinguishes them.
+maintenance_mark_attempted() {
+  maintenance_mark_done "$1"
+}
+
 # -- Daily site-work slots --------------------------------------
 #
 # Four discretionary slots, at most one fired per tick, each at
@@ -1290,11 +1302,22 @@ do_maintenance_tick() {
   fi
 
   log "maintenance: ${#eligible[@]} repo(s) eligible this week"
-  local target
+  local target did_work=0
   for target in "${eligible[@]}"; do
-    do_maintenance_for_repo "$target" \
-      || log "warning: maintenance for $target returned non-zero (continuing)"
+    if do_maintenance_for_repo "$target"; then
+      did_work=1
+    else
+      log "warning: maintenance for $target returned non-zero (continuing)"
+    fi
   done
+
+  # An errored pass alone must not consume the cascade's one unit of work
+  # for this tick (igor#553). do_maintenance_for_repo stamps an errored
+  # repo so it isn't retried next tick, but if EVERY eligible repo this
+  # tick errored, nothing real happened here -- return non-zero so the
+  # cascade falls through to the stages below instead of exiting the tick
+  # on a repo that's just going to error again next week too.
+  [ "$did_work" -eq 1 ] || return 1
   return 0
 }
 
@@ -1396,6 +1419,43 @@ ${fpmarker}"
   log "maintenance: filed #$num on $repo (${marker})"
 }
 
+# maintenance_resolve_base <target_path> <repo_name>
+# Resolves the repo's actual default branch name for the read-only
+# worktree below. `git symbolic-ref refs/remotes/origin/HEAD` is a local
+# pointer -- an upstream default-branch rename (e.g. main -> master)
+# leaves it silently pointing at a now-deleted branch until something
+# repairs it (igor#553: a repo's origin/HEAD stayed "main" for months
+# after the remote moved to "master", failing `git worktree add` every
+# single tick with the maintenance stage never falling through). Validate
+# the symref actually resolves to a real ref; if not, ask the remote
+# directly (`git remote set-head --auto`, works against any URL including
+# a local path -- no extra network dependency beyond the fetch the caller
+# already did) and repair the local symref so future ticks skip this
+# whole step. Echoes the branch name on success; on failure logs loudly
+# naming the repo and returns 1 rather than silently guessing a branch
+# that may not exist.
+maintenance_resolve_base() {
+  local target_path="$1" repo_name="$2" base
+
+  base=$(cd "$target_path" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+  if [ -n "$base" ] \
+    && (cd "$target_path" && git rev-parse --verify --quiet "refs/remotes/origin/${base}" >/dev/null 2>&1); then
+    echo "$base"
+    return 0
+  fi
+
+  (cd "$target_path" && git remote set-head origin --auto) >/dev/null 2>&1 || true
+  base=$(cd "$target_path" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+  if [ -n "$base" ] \
+    && (cd "$target_path" && git rev-parse --verify --quiet "refs/remotes/origin/${base}" >/dev/null 2>&1); then
+    echo "$base"
+    return 0
+  fi
+
+  log "maintenance: ERRORED pass on $repo_name -- could not resolve the default branch (origin/HEAD stale and repair failed)"
+  return 1
+}
+
 # Per-repo maintenance executor. Audits ONE repo via
 # lib/maintenance-checks.sh and routes the result. Worktree is created
 # here and cleaned via a RETURN trap so we don't leak when the function
@@ -1419,20 +1479,37 @@ do_maintenance_for_repo() {
   local target="$1"
 
   log "maintenance: pass on $target"
-  ensure_repo_local "$target"
+  if ! ensure_repo_local "$target"; then
+    log "maintenance: ERRORED pass on $target -- could not clone/fetch the repo locally"
+    maintenance_mark_attempted "$target"
+    return 1
+  fi
   local target_path target_base
   target_path=$(repo_path_for "$target")
 
-  # Detached-HEAD worktree on the repo's current default branch.
-  # No feature branch -- maintenance doesn't commit; it writes
-  # raw audit output to .agent/audit-output/ for either templated
-  # or LLM-triaged downstream handling.
-  target_base=$(cd "$target_path" && git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
-  target_base="${target_base:-master}"
+  (cd "$target_path" && git fetch --prune origin) || {
+    log "maintenance: ERRORED pass on $target -- git fetch failed"
+    maintenance_mark_attempted "$target"
+    return 1
+  }
+
+  # Detached-HEAD worktree on the repo's current default branch. No
+  # feature branch -- maintenance doesn't commit; it writes raw audit
+  # output to .agent/audit-output/ for either templated or LLM-triaged
+  # downstream handling. Base resolution happens after the fetch above so
+  # a branch pruned upstream (e.g. an upstream rename) is reflected
+  # before we trust it (igor#553).
+  target_base=$(maintenance_resolve_base "$target_path" "$target") || {
+    maintenance_mark_attempted "$target"
+    return 1
+  }
   local m_worktree="$AGENT_STATE_DIR/worktrees/maintenance-${target//\//_}-$$"
   mkdir -p "$AGENT_STATE_DIR/worktrees"
-  (cd "$target_path" && git fetch --prune origin) || return 1
-  (cd "$target_path" && git worktree add --detach "$m_worktree" "origin/${target_base}") || return 1
+  (cd "$target_path" && git worktree add --detach "$m_worktree" "origin/${target_base}") || {
+    log "maintenance: ERRORED pass on $target -- git worktree add on origin/${target_base} failed"
+    maintenance_mark_attempted "$target"
+    return 1
+  }
   init_igor_scratch "$m_worktree"
 
   # Cleanup on ANY return path. Restore cwd to a known-safe place
