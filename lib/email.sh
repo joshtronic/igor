@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # email.sh -- transactional email via the SMTP2GO HTTP API. Sourced by
-# bin/tick.sh for report delivery (SEO, sports, CEO, ...).
+# bin/tick.sh for report delivery (SEO, sports, ...).
 #
 # Email delivery is shared across opt-in subsystems; callers gate on
 # these being set:

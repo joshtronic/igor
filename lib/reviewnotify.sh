@@ -186,7 +186,7 @@ review_notify_human() {
   # silently turn it into copy-then-unlink.
   #
   # Read-modify-write AT WRITE TIME, like every other writer of this file
-  # (tick.sh's slot/weekly/seo/sports/review/cascade helpers, needsyou, ceo,
+  # (tick.sh's slot/weekly/seo/sports/review/cascade helpers, needsyou,
   # feedback, automerge, deferred, logwatch, claude): each re-reads the file
   # inside the jq that produces its replacement. Not one snapshots it in memory
   # early and rewrites it wholesale later, so a mid-tick record here cannot be
