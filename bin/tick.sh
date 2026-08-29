@@ -2921,11 +2921,11 @@ do_logwatch_tick() {
 
 # Parse the reviewer's response: a leading `VERDICT:` line and a
 # `===BODY===` sentinel before the markdown review. Echoes
-# {verdict, body} JSON; returns non-zero (unparseable -> retry) if the
-# sentinel is missing, the body is blank, or the verdict isn't one of
+# {verdict, body, findings} JSON; returns non-zero (unparseable -> retry) if
+# the sentinel is missing, the body is blank, or the verdict isn't one of
 # the three valid values. Mirrors sports_parse_response.
 review_parse_response() {
-  local raw="$1" head body verdict
+  local raw="$1" head body verdict findings
   case "$raw" in
     *'===BODY==='*) ;;
     *) return 1 ;;
@@ -2941,12 +2941,21 @@ review_parse_response() {
     APPROVE|REQUEST_CHANGES|COMMENT) ;;
     *) return 1 ;;
   esac
+  # igor#552: an optional FINDINGS: line lets a COMMENT declare a clean
+  # read/summary (FINDINGS: NONE) versus one carrying observations to
+  # adjudicate. Anything else -- including the line's absence -- defaults to
+  # PRESENT: a directive that has not been taught this line yet must not have
+  # every COMMENT it produces silently hand over unadjudicated, which is the
+  # bug igor#552 exists to fix. APPROVE/REQUEST_CHANGES never consult this.
+  findings=$(printf '%s' "$head" | sed -n 's/^[[:space:]]*FINDINGS:[[:space:]]*//p' | head -1)
+  findings=$(printf '%s' "$findings" | tr '[:lower:]' '[:upper:]' | tr -cd '[:upper:]')
+  [ "$findings" = "NONE" ] || findings="PRESENT"
   # Trim blank lines off both ends (interior blanks survive).
   body=$(printf '%s\n' "$body" | awk '
     NF { if (started) for (i = 0; i < blanks; i++) print ""
          blanks = 0; started = 1; print; next }
     started { blanks++ }')
-  jq -n --arg v "$verdict" --arg b "$body" '{verdict:$v, body:$b}'
+  jq -n --arg v "$verdict" --arg b "$body" --arg f "$findings" '{verdict:$v, body:$b, findings:$f}'
 }
 
 # Request the human reviewer on a PR and log the outcome TRUTHFULLY: a success
@@ -2962,6 +2971,93 @@ review_request_human() {
   else
     log "warning: review: review-request to ${FORGEJO_REVIEWER} failed on ${repo}#${number} (${ctx}): ${reason:-unknown}"
   fi
+}
+
+# review_comment_has_findings <findings-field>
+# True unless the parser recorded an explicit "FINDINGS: NONE" -- see
+# review_parse_response. Named so the routing decision below reads as intent,
+# not a string comparison repeated at each call site.
+review_comment_has_findings() {
+  [ "${1:-PRESENT}" != "NONE" ]
+}
+
+# review_handoff_now <repo> <number> <verdict>
+# Hand the PR to the human right now: nothing here is going to adjudicate
+# itself. Skips the request when auto-merge is already going to take an
+# APPROVE on this repo (requesting would just be noise for a PR that merges
+# itself -- awareness comes via the daily ship-report).
+review_handoff_now() {
+  local repo="$1" number="$2" verdict="$3"
+  [ -n "${FORGEJO_REVIEWER:-}" ] || return 0
+  if automerge_will_take "$repo" "$verdict"; then
+    log "review: ${repo}#${number} shadow ${verdict} on a shadow-gated repo -- auto-merge handles it, not requesting a human"
+  else
+    review_request_human "$repo" "$number" "verdict=${verdict}"
+  fi
+}
+
+# review_route_into_rework <repo> <number> <key> <rc_rounds> <review_body> <verdict>
+#
+# The one rework-entry mechanism, shared by REQUEST_CHANGES and a COMMENT
+# that carries findings (igor#552 -- no second mechanism, per the issue's
+# deliverable #2): same validated-repo gate, same round cap, same escalation
+# text. Only the log/comment wording names which verdict triggered it.
+review_route_into_rework() {
+  local repo="$1" number="$2" key="$3" rc_rounds="$4" review_body="$5" verdict="$6"
+  local repo_validated=false
+  maintenance_repo_validated "$repo" && repo_validated=true
+  if [ "$repo_validated" = "false" ]; then
+    log "review: ${key} ${verdict} on unvalidated repo -- requesting human instead of rework"
+    if [ -n "${FORGEJO_REVIEWER:-}" ]; then
+      forgejo_comment "$repo" "$number" \
+        "${repo} is not in the validated set (no CI / not validated), so autonomous rework cannot be CI-verified. Handing to you." 2>/dev/null \
+        || log "warning: review: unvalidated-repo comment failed on ${key}"
+      review_request_human "$repo" "$number" "unvalidated repo"
+    fi
+  elif [ "$rc_rounds" -ge 3 ]; then
+    log "review: ${key} ${verdict} rework_rounds=${rc_rounds} >= 3 -- escalating to human"
+    if [ -n "${FORGEJO_REVIEWER:-}" ]; then
+      forgejo_comment "$repo" "$number" \
+        "Igor's ${verdict} review did not converge after ${rc_rounds} rework rounds -- handing this to you." 2>/dev/null \
+        || log "warning: review: escalation comment failed on ${key}"
+      review_request_human "$repo" "$number" "escalation after ${rc_rounds} rework rounds"
+    fi
+  else
+    local new_rounds
+    new_rounds=$(( rc_rounds + 1 ))
+    review_set_rework_rounds "$key" "$new_rounds"
+    review_set_pending_rc_body "$key" "$review_body"
+    forgejo_assign "$repo" "$number" "$BOT_USER" 2>/dev/null \
+      || log "warning: review: bot assignment failed on ${key} (rework round ${new_rounds})"
+    log "review: ${key} ${verdict} -> rework round ${new_rounds}/3, bot assigned"
+  fi
+}
+
+# review_apply_verdict <repo> <number> <key> <verdict> <findings> <review_body> <rc_rounds>
+#
+# The routing decision for a just-posted verdict: hand over now, or enter the
+# rework loop. Split out of do_review_tick so it is testable without the
+# network calls that produce its inputs.
+review_apply_verdict() {
+  local repo="$1" number="$2" key="$3" verdict="$4" findings="$5" review_body="$6" rc_rounds="$7"
+  case "$verdict" in
+    APPROVE)
+      review_reset_rework "$key"
+      review_handoff_now "$repo" "$number" "$verdict"
+      ;;
+    COMMENT)
+      if review_comment_has_findings "$findings"; then
+        log "review: ${repo}#${number} COMMENT carries findings -- routing into the rework loop (igor#552)"
+        review_route_into_rework "$repo" "$number" "$key" "$rc_rounds" "$review_body" "$verdict"
+      else
+        review_reset_rework "$key"
+        review_handoff_now "$repo" "$number" "$verdict"
+      fi
+      ;;
+    REQUEST_CHANGES)
+      review_route_into_rework "$repo" "$number" "$key" "$rc_rounds" "$review_body" "$verdict"
+      ;;
+  esac
 }
 
 do_review_tick() {
@@ -3101,6 +3197,8 @@ do_review_tick() {
 
   verdict=$(jq -r '.verdict' <<<"$parsed")
   review_body=$(jq -r '.body' <<<"$parsed")
+  local findings
+  findings=$(jq -r '.findings' <<<"$parsed")
 
   local elapsed comment
   elapsed=$(( $(date +%s) - start ))
@@ -3121,52 +3219,7 @@ ${review_body}
     log "review: ${key} head ${target_sha:0:8} -> ${verdict} (ci=${ci}, ${elapsed}s)"
     local rc_rounds
     rc_rounds=$(review_rework_rounds "$key")
-    case "$verdict" in
-      APPROVE|COMMENT)
-        review_reset_rework "$key"
-        # Only request the human when the auto-merge won't handle it: a default
-        # (shadow-gated) repo with an APPROVE merges on this signal, so requesting
-        # the human is just noise for a PR that merges itself (awareness comes via
-        # the daily ship-report). A COMMENT (won't auto-merge) or a carve-out
-        # (human review IS the gate) still routes to the human.
-        if [ -n "${FORGEJO_REVIEWER:-}" ]; then
-          if automerge_will_take "$target_repo" "$verdict"; then
-            log "review: ${key} shadow APPROVE on a shadow-gated repo -- auto-merge handles it, not requesting a human"
-          else
-            review_request_human "$target_repo" "$target_num" "verdict=${verdict}"
-          fi
-        fi
-        ;;
-      REQUEST_CHANGES)
-        local repo_validated=false
-        maintenance_repo_validated "$target_repo" && repo_validated=true
-        if [ "$repo_validated" = "false" ]; then
-          log "review: ${key} REQUEST_CHANGES on unvalidated repo -- requesting human instead of rework"
-          if [ -n "${FORGEJO_REVIEWER:-}" ]; then
-            forgejo_comment "$target_repo" "$target_num" \
-              "${target_repo} is not in the validated set (no CI / not validated), so autonomous rework cannot be CI-verified. Handing to you." 2>/dev/null \
-              || log "warning: review: unvalidated-repo comment failed on ${key}"
-            review_request_human "$target_repo" "$target_num" "unvalidated repo"
-          fi
-        elif [ "$rc_rounds" -ge 3 ]; then
-          log "review: ${key} REQUEST_CHANGES rework_rounds=${rc_rounds} >= 3 -- escalating to human"
-          if [ -n "${FORGEJO_REVIEWER:-}" ]; then
-            forgejo_comment "$target_repo" "$target_num" \
-              "Igor requested changes ${rc_rounds} times without converging -- handing this to you." 2>/dev/null \
-              || log "warning: review: escalation comment failed on ${key}"
-            review_request_human "$target_repo" "$target_num" "escalation after ${rc_rounds} rework rounds"
-          fi
-        else
-          local new_rounds
-          new_rounds=$(( rc_rounds + 1 ))
-          review_set_rework_rounds "$key" "$new_rounds"
-          review_set_pending_rc_body "$key" "$review_body"
-          forgejo_assign "$target_repo" "$target_num" "$BOT_USER" 2>/dev/null \
-            || log "warning: review: bot assignment failed on ${key} (rework round ${new_rounds})"
-          log "review: ${key} REQUEST_CHANGES -> rework round ${new_rounds}/3, bot assigned"
-        fi
-        ;;
-    esac
+    review_apply_verdict "$target_repo" "$target_num" "$key" "$verdict" "$findings" "$review_body" "$rc_rounds"
     return 0
   fi
   log "warning: review: comment post failed on ${key} -- not recording (will retry next tick)"

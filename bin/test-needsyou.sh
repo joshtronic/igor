@@ -92,7 +92,13 @@ eq "an UNREVIEWED PR is the reviewer's turn, not yours" "" "$(needsyou_pr_why ""
 eq "so is a PR whose verdict never parsed" "" "$(needsyou_pr_why "none" false 0 true)"
 eq "an APPROVE on a shadow-gated repo merges itself" "" "$(needsyou_pr_why APPROVE false 0 true)"
 has "an APPROVE on a human-pinned repo IS yours" "$(needsyou_pr_why APPROVE true 0 true)" "pinned to your review"
-has "a COMMENT is yours -- auto-merge won't take it" "$(needsyou_pr_why COMMENT false 0 true)" "COMMENT"
+has "a COMMENT with no findings (rounds=0) is yours -- auto-merge won't take it" \
+  "$(needsyou_pr_why COMMENT false 0 true)" "COMMENT"
+eq "a COMMENT with findings, inside the rework loop, is IGOR's turn (igor#552)" \
+  "" "$(needsyou_pr_why COMMENT false 1 true)"
+eq "still Igor's on the last COMMENT round before escalation" "" "$(needsyou_pr_why COMMENT false 2 true)"
+has "but a COMMENT escalated after 3 rounds is yours" \
+  "$(needsyou_pr_why COMMENT false 3 true)" "without converging"
 eq "REQUEST_CHANGES inside the rework loop is IGOR's turn" "" "$(needsyou_pr_why REQUEST_CHANGES false 0 true)"
 eq "still Igor's on the last round before escalation" "" "$(needsyou_pr_why REQUEST_CHANGES false 2 true)"
 has "but an escalation after 3 rounds is yours" "$(needsyou_pr_why REQUEST_CHANGES false 3 true)" "without converging"

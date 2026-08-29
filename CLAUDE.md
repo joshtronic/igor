@@ -324,19 +324,30 @@ respective tools on the host; install or skip.
   open bot PR whose head hasn't been reviewed yet. ONE `claude_call` on
   `AGENT_MODEL_REVIEW` (the non-author tier -- the thing under review
   doesn't audit itself, honoring the supply-chain trust boundary)
-  produces a verdict (APPROVE/REQUEST_CHANGES/COMMENT). APPROVE or
-  COMMENT requests the human reviewer; REQUEST_CHANGES assigns the bot
-  and drives Igor's rework loop, capped at 3 rounds then escalates to
-  the human. Inside that loop the rework agent may DISMISS a finding
-  instead of complying: it writes the reasoning to `.agent/dismissed.md`
+  produces a verdict (APPROVE/REQUEST_CHANGES/COMMENT). APPROVE requests
+  the human reviewer (or, on a shadow-gated repo, lets auto-merge take
+  it). REQUEST_CHANGES assigns the bot and drives Igor's rework loop,
+  capped at 3 rounds then escalates to the human -- and, as of igor#552,
+  so does a COMMENT that carries findings: `review_parse_response` reads
+  an optional `FINDINGS:` header line (`NONE` vs anything else, including
+  absent) and a COMMENT defaults to `PRESENT` unless the directive says
+  otherwise, so every COMMENT that does not declare `FINDINGS: NONE` is
+  routed into the exact same rework mechanism REQUEST_CHANGES uses
+  (`review_route_into_rework`) rather than reaching the operator
+  unadjudicated. A COMMENT carrying `FINDINGS: NONE` (a clean read with
+  nothing to flag) requests the human immediately, same as before.
+  Inside that loop the rework agent may DISMISS a finding instead of
+  complying: it writes the reasoning to `.agent/dismissed.md`
   (gitignored scratch, truncated before each run, so it can never reach
   the diff nor survive into a later round) and the harness posts that to
   the PR (`lib/adjudication.sh`). No commits AND dismissals present is
   the CONVERGED terminal state -- handed to the human with the argument
   attached; no commits and no dismissals is still STUCK, escalated as
-  before. The comment is for the human thread only: the review prompt
-  carries no PR comments, so a dismissed finding can be re-raised.
-  The requested-changes text rides in
+  before. That terminus reads the pending findings alone and never which
+  verdict opened the round, so a COMMENT-opened round ends exactly like a
+  REQUEST_CHANGES-opened one. The comment is for the human thread only:
+  the review prompt carries no PR comments, so a dismissed finding can be
+  re-raised. The requested-changes text rides in
   `.review.pending_rc_body`; the PR-pickup filter reads it because
   assignment is the turn marker (issue-type recovery and pull-type
   pickup don't collide). Patch-id dedup: a head that is only a
