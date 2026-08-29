@@ -7,8 +7,7 @@ pickup, then Igor's own work (daily reading + blog post, weekly
 /now refresh + site-work pass -- opt-in via `WEBSITE_REPO`), then
 the code review, then
 scheduled maintenance, then the monthly GSC-driven SEO pass (opt-in),
-then the daily sports digest (opt-in), then the weekly CEO board digest
-(opt-in), then the daily logwatch self-report
+then the daily sports digest (opt-in), then the daily logwatch self-report
 (opt-in), then the claimable-issue grind. Igor's own
 work comes first and is throttled (daily/weekly slots), so tickets
 soak up whatever time is left and roll over to the next day. That
@@ -53,7 +52,7 @@ sync check enforces the `AGENTS.md` <-> `tick.sh` contract: every
 `<!-- OUTCOME: <label> -->` in AGENTS.md, and every `agent-*.sh`
 referenced in AGENTS.md must exist and be executable in `bin/`.
 It then runs every `bin/test-*.sh` (shell-function unit tests, e.g.
-`bin/test-ceo.sh`); each is skip-safe, exiting 0 with a notice if a
+`bin/test-cascade.sh`); each is skip-safe, exiting 0 with a notice if a
 tool like `jq` is absent, so the single CI step covers the contract
 plus the units without going red on a minimal image.
 
@@ -212,9 +211,8 @@ respective tools on the host; install or skip.
   (issues, maintenance, PR review) still runs.
 - The SEO pass (`do_seo_tick`) is opt-in via a Google service account
   (`GOOGLE_SERVICE_ACCOUNT` -- JWT-bearer auth via `lib/google-auth.sh`,
-  which replaced the old GSC OAuth refresh-token flow and is shared with the
-  CEO's GSC read) + SMTP2GO env, and is GSC-driven, NOT repo-driven -- it
-  enumerates Search Console
+  which replaced the old GSC OAuth refresh-token flow) + SMTP2GO env, and is
+  GSC-driven, NOT repo-driven -- it enumerates Search Console
   domain properties, not Forgejo repos. Monthly (once per calendar
   month per domain, self-healing -- not a hard day-of-month window),
   one domain per tick, fully scripted (no LLM). The 28-day analysis
@@ -229,7 +227,7 @@ respective tools on the host; install or skip.
   that site (otherwise a normal day). State (incl. SEO monthly stamps
   under `.seo`, now `YYYY-MM`) lives in
   `~/.local/state/agent/discretionary-state.json`; clear a domain's
-  stamp there to re-run it. The SEO, sports, CEO, and alert emails all
+  stamp there to re-run it. The SEO, sports, and alert emails all
   share `email.sh`, gating on `SMTP2GO_API_KEY` + `SMTP2GO_SENDER`
   (renamed from `SEO_SENDER_EMAIL`); change the code's email vars and the
   host `.env` must change in lockstep or those emails break.
@@ -368,44 +366,15 @@ respective tools on the host; install or skip.
   harness's own repo -- self-deploy +
   blast radius means it stays a human gate regardless of verdict. Clear
   a PR's `.review` entry to force a re-review.
-- The CEO board digest (`do_ceo_tick`) is convention-driven with NO env
-  knob -- like logwatch and the review tick, the convention IS the opt-in:
-  any analysis-set repo carrying a root `CEO.md` mandate is under
-  autonomous CEO management (the mandate's mere presence opts it in, and
-  the mandate itself -- mission, ranked priorities, the authority "rope,"
-  guardrails -- is the system prompt). WEEKLY, one repo per tick: read the
-  mandate + gather that repo's week (PRs merged, issues opened/closed, the
-  open `Agent` queue), ONE `claude_call` on `AGENT_MODEL` writes a board
-  digest assessing the week against the mandate's priorities, emailed to
-  `PRIMARY_RECIPIENTS` (plus any `CEO_RECIPIENTS` extras; needs SMTP2GO). A
-  model call, so it sits BELOW the health gate and goes dark in a Claude
-  cooldown. Per-repo ISO-week stamp under `.ceo` in
-  `discretionary-state.json` (self-healing; one digest per repo per week,
-  so several managed repos digest over successive ticks); clear a repo's
-  `.ceo` entry to force a re-send. The digest is a `SUBJECT:` label-line +
-  `===BODY===` sentinel parsed harness-side (`ceo_parse_response`), never
-  model-written JSON. **Phase 2 adds proposing-as-agency:** the same model call
-  may append `===ISSUE===` proposal blocks, which the harness files as
-  **UNLABELED issues assigned to `FORGEJO_REVIEWER`** (each stamped
-  `CEO_PROPOSAL_MARKER`). `_ceo_parse_issues` **caps the count at two
-  harness-side** -- the limit is enforced, never left to model restraint. They become real work only when the human greenlights
-  them -- add the `Agent` label (unassigning optional) -- so the human merge/label gate is
-  intact and a poisoned mandate can at worst mis-propose, never ship code.
-  Throttle: a fresh batch is filed only when no proposal is still open
-  (`ceo_open_proposals_count` == 0), so they never pile up. **Phase 3 adds
-  decision-guidance redlines:** the same call may end with a `===GUIDANCE===`
-  line distilled from the board's verdicts on prior proposals (greenlit /
-  declined / pending, via `ceo_proposal_outcomes`); the harness **opens a PR**
-  appending it to a `## Decision guidance` section in `CEO.md`
-  (`ceo_open_guidance_pr` -- contents-API + new_branch, no clone) for the board
-  to merge. Append-only (it adds what it learned, never rewrites/erases),
-  throttled to one open guidance PR (`ceo_guidance_pr_open`), so `CEO.md` learns
-  how the operator decides over time. The CEO still never commits to `master`
-  or merges -- it drafts (issues + redline PRs), the board ratifies; further
-  agency (auto-Agent-label, daily steering) stays a deliberate, human-gated
-  step per "start tight, loosen as trust earns it."
+- The CEO board digest cascade stage was retired (igor#556 phase 1): `ceo` is
+  gone from `CASCADE_STAGES`, `do_ceo_tick` and its `bin/tick.sh` gate are
+  removed, and `lib/ceo.sh` is no longer sourced. `lib/ceo.sh` and
+  `bin/lib/ceo-digest-directive.md` are deliberately left on disk, orphaned --
+  nothing reads them; full removal is a separate, operator-gated phase 2.
+  `bin/test-retired-directives.sh` holds the negative assertion that the
+  wiring stays gone.
 - The auto-merge + deploy barrier (`lib/automerge.sh`, Phase 1) is the "after you
-  approve, your job ends" step -- convention opt-in like the CEO/logwatch, but
+  approve, your job ends" step -- convention opt-in like logwatch, but
   now with TWO merge paths keyed on `automerge_url_status` (dossier root
   AGENTS.md `url`, falling back to legacy `agent.json` `.smoke.url` via
   `dossier_get_repo_status`): a repo that declares a live URL gets the

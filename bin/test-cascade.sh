@@ -21,7 +21,7 @@ ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
 eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
 
-STAGES="review maintenance seo shipreport sports ceo feedback logwatch deferred"
+STAGES="review maintenance seo shipreport sports feedback logwatch deferred"
 
 echo "== tick counter =="
 eq "empty state -> tick 0" "0" "$(cascade_tick_number '{}')"
@@ -42,9 +42,9 @@ eq "empty argument -> tick 0" "0" "$(cascade_tick_number '')"
 eq "no argument bumps to a real document" "1" "$(cascade_bump_tick | jq -r '.cascade.tick')"
 eq "empty argument bumps to a real document" "1" "$(cascade_bump_tick '' | jq -r '.cascade.tick')"
 eq "empty argument marks a real document" "7" \
-  "$(cascade_mark_reached '' ceo 7 | jq -r '.cascade.reached.ceo')"
+  "$(cascade_mark_reached '' feedback 7 | jq -r '.cascade.reached.feedback')"
 eq "empty argument starves nothing at tick 1" "" "$(cascade_starved_stage '' "$STAGES" 1)"
-eq "empty argument, stage age is the tick number" "9" "$(cascade_stage_age '' ceo 9)"
+eq "empty argument, stage age is the tick number" "9" "$(cascade_stage_age '' feedback 9)"
 
 echo "== nothing starves on a fresh state =="
 # Every stage reads as reached-at-0, so with the counter still low nothing is
@@ -56,44 +56,44 @@ eq "fresh state, tick == threshold -> still none" "" \
   "$(cascade_starved_stage '{}' "$STAGES" "$CASCADE_STARVE_TICKS")"
 
 echo "== a stage that goes unreached eventually jumps the queue =="
-# ceo last reached at tick 5; by tick 5+threshold+1 it is starved.
-ST=$(cascade_mark_reached '{}' ceo 5)
-for s in review maintenance seo shipreport sports feedback logwatch deferred; do
+# feedback last reached at tick 5; by tick 5+threshold+1 it is starved.
+ST=$(cascade_mark_reached '{}' feedback 5)
+for s in review maintenance seo shipreport sports logwatch deferred; do
   ST=$(cascade_mark_reached "$ST" "$s" 100)
 done
-eq "ceo starved at tick 100" "ceo" "$(cascade_starved_stage "$ST" "$STAGES" 100)"
-eq "and the age is reported" "95" "$(cascade_stage_age "$ST" ceo 100)"
+eq "feedback starved at tick 100" "feedback" "$(cascade_starved_stage "$ST" "$STAGES" 100)"
+eq "and the age is reported" "95" "$(cascade_stage_age "$ST" feedback 100)"
 # One tick after being reached it is no longer starved -- the rescue is one-shot.
-ST2=$(cascade_mark_reached "$ST" ceo 100)
-eq "once reached, ceo is no longer starved" "" "$(cascade_starved_stage "$ST2" "$STAGES" 100)"
+ST2=$(cascade_mark_reached "$ST" feedback 100)
+eq "once reached, feedback is no longer starved" "" "$(cascade_starved_stage "$ST2" "$STAGES" 100)"
 
 echo "== the MOST starved wins, ties break toward cascade order =="
-M=$(cascade_mark_reached '{}' ceo 90)
+M=$(cascade_mark_reached '{}' feedback 90)
 M=$(cascade_mark_reached "$M" seo 50)
-for s in review maintenance shipreport sports feedback logwatch deferred; do
+for s in review maintenance shipreport sports logwatch deferred; do
   M=$(cascade_mark_reached "$M" "$s" 100)
 done
-eq "seo (age 50) beats ceo (age 10)" "seo" "$(cascade_starved_stage "$M" "$STAGES" 100)"
+eq "seo (age 50) beats feedback (age 10)" "seo" "$(cascade_starved_stage "$M" "$STAGES" 100)"
 T=$(cascade_mark_reached '{}' seo 40)
-T=$(cascade_mark_reached "$T" ceo 40)
-for s in review maintenance shipreport sports feedback logwatch deferred; do
+T=$(cascade_mark_reached "$T" feedback 40)
+for s in review maintenance shipreport sports logwatch deferred; do
   T=$(cascade_mark_reached "$T" "$s" 100)
 done
 eq "equal ages -> the earlier stage in cascade order" "seo" "$(cascade_starved_stage "$T" "$STAGES" 100)"
 
 echo "== threshold is respected, not hardcoded into the caller =="
-B=$(cascade_mark_reached '{}' ceo 95)
-for s in review maintenance seo shipreport sports feedback logwatch deferred; do
+B=$(cascade_mark_reached '{}' feedback 95)
+for s in review maintenance seo shipreport sports logwatch deferred; do
   B=$(cascade_mark_reached "$B" "$s" 100)
 done
 eq "age 5 under the default threshold -> not starved" "" "$(cascade_starved_stage "$B" "$STAGES" 100)"
-eq "same state with threshold 3 -> starved" "ceo" "$(cascade_starved_stage "$B" "$STAGES" 100 3)"
+eq "same state with threshold 3 -> starved" "feedback" "$(cascade_starved_stage "$B" "$STAGES" 100 3)"
 eq "the shipped threshold is 20" "20" "$CASCADE_STARVE_TICKS"
 
 echo "== malformed state degrades to 'nothing starved', never to a crash =="
 eq "garbage state -> empty, no crash" "" "$(cascade_starved_stage 'not json' "$STAGES" 100 2>/dev/null)"
-eq "non-numeric reached value is treated as never-reached" "ceo" \
-  "$(cascade_starved_stage '{"cascade":{"reached":{"ceo":"banana"}}}' "ceo" 100)"
+eq "non-numeric reached value is treated as never-reached" "widget" \
+  "$(cascade_starved_stage '{"cascade":{"reached":{"widget":"banana"}}}' "widget" 100)"
 
 echo "== cascade_run dispatches, and a rescued stage does not run twice =="
 # cascade_run lives in bin/tick.sh (it needs the state file and log), so lift

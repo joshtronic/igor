@@ -219,7 +219,7 @@ lib/
 |-- repo-checks.sh           # repo-readiness checks (local-clone reads)
 |-- maintenance-checks.sh    # stack detection + audit tool dispatch
 |-- gsc.sh                   # Google Search Console API client (SEO, opt-in)
-|-- email.sh                 # SMTP2GO HTTP API sender (shared: SEO, sports, CEO)
+|-- email.sh                 # SMTP2GO HTTP API sender (shared: SEO, sports)
 `-- seo-analysis.sh          # scripted SEO analysis: score, grade, render (no LLM)
 
 systemd/                     # user units (no @ instance)

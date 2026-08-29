@@ -2,7 +2,7 @@
 # deferred.sh -- the deferred-ticket pass: work gated on an external data source
 # that auto-activates when a condition becomes true.
 #
-# Convention opt-in, NO env knob (like logwatch/CEO): an OPEN issue carrying a
+# Convention opt-in, NO env knob (like logwatch): an OPEN issue carrying a
 # `<!-- gate -->` block in its body AND the built-in `Status/Blocked` label is
 # deferred work. The claimable grind already skips `Status/Blocked`, so nothing
 # works it early -- no custom label needed (the old `Status/Deferred` is retired;
@@ -23,11 +23,10 @@
 #
 # Security: the check is a tool-free claude_call that sees ONLY the public page
 # (no repo/private data), so there is no lethal-trifecta surface; the only
-# hardening needed is on the outbound fetch (https-only + a size cap), mirroring
-# ceo_read_metrics. The verdict FAILS CLOSED -- any error, ambiguity, or
-# unparseable response leaves the ticket deferred (UNMET), so a flaky check can
-# never wrongly activate work; the cost of a false UNMET is just "re-check
-# tomorrow."
+# hardening needed is on the outbound fetch (https-only + a size cap). The
+# verdict FAILS CLOSED -- any error, ambiguity, or unparseable response leaves
+# the ticket deferred (UNMET), so a flaky check can never wrongly activate
+# work; the cost of a false UNMET is just "re-check tomorrow."
 #
 # Sourced by tick.sh; depends on _fj + forgejo_remove_label (lib/forgejo.sh),
 # claude_call (lib/claude.sh), log (tick.sh), jq, curl. do_deferred_tick lives
@@ -46,9 +45,10 @@ deferred_parse_gate_condition() {
 }
 
 # ---- per-ticket daily slot state (.deferred in discretionary-state.json) ----
-# Keyed by "<repo>#<num>" -> ISO date (YYYY-MM-DD), mirroring the .ceo weekly
-# stamp. One gate-check per ticket per day; stamped BEFORE the model call so a
-# down url or flaky parse can't spin a retry storm.
+# Keyed by "<repo>#<num>" -> ISO date (YYYY-MM-DD), matching the per-subsystem
+# daily/weekly stamp convention used elsewhere in discretionary-state.json. One
+# gate-check per ticket per day; stamped BEFORE the model call so a down url or
+# flaky parse can't spin a retry storm.
 deferred_state_file() {
   printf '%s/discretionary-state.json' "${AGENT_STATE_DIR:-$HOME/.local/state/agent}"
 }

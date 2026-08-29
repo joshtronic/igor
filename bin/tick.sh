@@ -134,7 +134,6 @@ unset env_file_hint
 . "$AGENT_HOME/lib/espn.sh"
 # shellcheck source=lib/sports-digest.sh
 . "$AGENT_HOME/lib/sports-digest.sh"
-. "$AGENT_HOME/lib/ceo.sh"
 # shellcheck source=lib/landed.sh
 . "$AGENT_HOME/lib/landed.sh"
 # shellcheck source=lib/automerge.sh
@@ -235,7 +234,7 @@ if [ -n "$WEBSITE_REPO" ]; then
 fi
 
 # Email delivery (SMTP2GO) -- shared by every opt-in report subsystem
-# (SEO, sports, CEO). All default to empty so referencing them under `set -u`
+# (SEO, sports). All default to empty so referencing them under `set -u`
 # is safe when nothing is configured; each report tick no-ops cleanly if
 # its required creds (incl. these) are unset.
 export SMTP2GO_API_KEY="${SMTP2GO_API_KEY:-}"
@@ -2169,280 +2168,6 @@ do_sports_tick() {
   else
     log "warning: sports email failed (failure ${failures}/${max_failures}) -- will retry after cooldown"
   fi
-  return 1
-}
-
-# -- CEO weekly board digest (weekly, per-repo, convention opt-in) ------
-#
-# For each analysis-set repo carrying a CEO.md mandate -- the
-# mandate's mere presence IS the opt-in, like logwatch's systemd/ dir --
-# once per ISO week: read the mandate + gather the week's activity, one
-# claude_call writes the board digest, emailed to PRIMARY_RECIPIENTS plus
-# any CEO_RECIPIENTS extras. Phase 1 is strictly read-only -- no issue-
-# filing/steering yet, per the mandate's "start tight, loosen as trust
-# earns it" rope.
-#
-# One repo per tick (return 0 exits the cascade), so several managed repos
-# digest over successive ticks; per-repo weekly stamp under .ceo. Uses
-# claude_call, so it's already below the tick's health gate. Returns 0 if a
-# digest was sent, 1 otherwise.
-# _ceo_file_outputs <repo> <parsed-json> <allow_questions:yes|no>
-# Shared by both do_ceo_tick paths: file the parsed proposals (and, when allowed,
-# the board questions) up to the CEO_MAX_OPEN open-item cap, then open the
-# decision-guidance redline PR if one was distilled. The cap (Phase 4) replaces
-# the old "no new work until zero open" throttle so the CEO can actually grind.
-_ceo_file_outputs() {
-  local repo="$1" parsed="$2" allow_questions="${3:-yes}"
-  [ -n "${FORGEJO_REVIEWER:-}" ] || return 0
-
-  local proposals nprop prop ptitle pbody filed open_items
-  proposals=$(jq -c '.issues // []' <<<"$parsed")
-  nprop=$(jq 'length' <<<"$proposals" 2>/dev/null || echo 0)
-  if [ "${nprop:-0}" -gt 0 ]; then
-    filed=0
-    while IFS= read -r prop; do
-      open_items=$(ceo_open_items_count "$repo")
-      if [ "${open_items:-0}" -ge "$CEO_MAX_OPEN" ]; then
-        log "ceo: open-item cap (${CEO_MAX_OPEN}) reached on ${repo} -- holding remaining proposals"
-        break
-      fi
-      ptitle=$(jq -r '.title' <<<"$prop"); pbody=$(jq -r '.body' <<<"$prop")
-      # Code-check gate: vet against the real code; DROP already-done work (the
-      # reason is logged locally inside the gate, never posted). Fail-open = KEEP.
-      if [ "$(ceo_codecheck_proposal "$repo" "$ptitle" "$pbody")" = "DROP" ]; then
-        continue
-      fi
-      if ceo_file_proposal "$repo" "$ptitle" "$pbody" "$FORGEJO_REVIEWER"; then
-        filed=$((filed + 1))
-      else
-        log "warning: ceo: failed to file a proposal on ${repo}"
-      fi
-    done < <(jq -c '.[]' <<<"$proposals")
-    [ "$filed" -gt 0 ] && log "ceo: filed ${filed} proposal(s) on ${repo} for ${FORGEJO_REVIEWER} to greenlight"
-  fi
-
-  if [ "$allow_questions" = "yes" ]; then
-    local questions nq q qtitle qbody qfiled
-    questions=$(jq -c '.questions // []' <<<"$parsed")
-    nq=$(jq 'length' <<<"$questions" 2>/dev/null || echo 0)
-    if [ "${nq:-0}" -gt 0 ]; then
-      qfiled=0
-      while IFS= read -r q; do
-        open_items=$(ceo_open_items_count "$repo")
-        if [ "${open_items:-0}" -ge "$CEO_MAX_OPEN" ]; then
-          log "ceo: open-item cap (${CEO_MAX_OPEN}) reached on ${repo} -- holding remaining questions"
-          break
-        fi
-        qtitle=$(jq -r '.title' <<<"$q"); qbody=$(jq -r '.body' <<<"$q")
-        if ceo_file_question "$repo" "$qtitle" "$qbody" "$FORGEJO_REVIEWER"; then
-          qfiled=$((qfiled + 1))
-        else
-          log "warning: ceo: failed to file a board question on ${repo}"
-        fi
-      done < <(jq -c '.[]' <<<"$questions")
-      [ "$qfiled" -gt 0 ] && log "ceo: asked ${qfiled} board question(s) on ${repo} for ${FORGEJO_REVIEWER}"
-    fi
-  fi
-
-  local guidance
-  guidance=$(jq -r '.guidance // ""' <<<"$parsed")
-  if [ -n "$guidance" ]; then
-    if ceo_guidance_pr_open "$repo"; then
-      log "ceo: held a guidance redline for ${repo} -- one already open"
-    elif ceo_open_guidance_pr "$repo" "$guidance" "$FORGEJO_REVIEWER"; then
-      log "ceo: opened a decision-guidance redline PR on ${repo} for ${FORGEJO_REVIEWER}"
-    else
-      log "warning: ceo: failed to open the guidance redline on ${repo}"
-    fi
-  fi
-  return 0
-}
-
-do_ceo_tick() {
-  # The weekly digest is now a respondable Forgejo issue, not email -- no SMTP2GO
-  # gate; opt-in is purely the CEO.md mandate (read per-repo below).
-  local since directive repo_line repo mandate activity prompt raw parsed subject body attempt pdnum
-  local answered qblock n closed
-  since=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)
-  directive=$(cat "$AGENT_HOME/bin/lib/ceo-digest-directive.md")
-
-  while IFS= read -r repo_line; do
-    [ -n "$repo_line" ] || continue
-    repo=$(jq -r '.full_name' <<<"$repo_line" 2>/dev/null)
-    [ -n "$repo" ] || continue
-
-    # Convention opt-in: the CEO.md mandate's mere presence. Reading it and
-    # testing non-empty IS the opt-in gate -- one GET, no separate probe. Both
-    # paths below need the mandate, so it's read before either.
-    mandate=$(ceo_read_mandate "$repo")
-    [ -n "$mandate" ] || continue
-
-    # --- Path 1 (Phase 4): act on ANSWERED questions -- EVERY tick, not
-    # week-gated. The board answered in a comment and unassigned themselves;
-    # turn each decision into the work it implies, then close the question.
-    if [ -n "${FORGEJO_REVIEWER:-}" ]; then
-      answered=$(ceo_answered_question_numbers "$repo" "$FORGEJO_REVIEWER")
-      if [ -n "$answered" ]; then
-        qblock=$(ceo_open_questions "$repo" "$FORGEJO_REVIEWER")
-        prompt=$(ceo_build_answer_prompt "$repo" "$mandate" "$qblock")
-        parsed=""
-        for attempt in 1 2; do
-          raw=$(claude_call "$AGENT_MODEL" "ceo-answer" 8000 "$directive" "$prompt" 0) \
-            || { log "ceo: answer call failed for ${repo} (attempt ${attempt})"; continue; }
-          if parsed=$(ceo_parse_response "$raw"); then break; fi
-          parsed=""
-        done
-        if [ -n "$parsed" ]; then
-          _ceo_file_outputs "$repo" "$parsed" "no"   # act path never asks NEW questions
-        else
-          log "ceo: unparseable answer-action for ${repo} -- closing answered questions anyway"
-        fi
-        # Input incorporated -- close the answered questions so they don't re-fire.
-        closed=0
-        while IFS= read -r n; do
-          [ -n "$n" ] || continue
-          _fj PATCH "/repos/${repo}/issues/${n}" '{"state":"closed"}' >/dev/null 2>&1 \
-            && closed=$((closed + 1))
-        done <<<"$answered"
-        log "ceo: acted on ${closed} answered board question(s) on ${repo}"
-        return 0   # one model-backed piece of work per tick
-      fi
-
-      # --- Path 1b (Phase 4 follow-up): reconsider a PROPOSAL the board commented
-      # on + handed back (unassigned, NOT Agent-labeled). Read the feedback and
-      # WITHDRAW / REVISE / HOLD -- distinct from doing the work (the Agent-label path).
-      local responded rnum rparsed rdecision rreply rissue
-      responded=$(ceo_responded_proposal_numbers "$repo" "$FORGEJO_REVIEWER")
-      if [ -n "$responded" ]; then
-        rnum=$(printf '%s\n' "$responded" | head -1)   # one per tick
-        prompt=$(ceo_build_reconsider_prompt "$repo" "$mandate" "$(ceo_proposal_thread "$repo" "$rnum")")
-        rparsed=""
-        for attempt in 1 2; do
-          raw=$(claude_call "$AGENT_MODEL" "ceo-reconsider" 8000 \
-            "You are the CEO reconsidering your own proposal after the board handed it back. Be a real partner -- concede when they are right, argue back with reasons when you are not. Conversational, in your own voice. Follow the output format in the prompt exactly." \
-            "$prompt" 0) \
-            || { log "ceo: reconsider call failed for ${repo}#${rnum} (attempt ${attempt})"; continue; }
-          if rparsed=$(ceo_parse_reconsider "$raw"); then break; fi
-          rparsed=""
-        done
-        if [ -z "$rparsed" ]; then
-          # Re-assign so it leaves the responded-set (no per-tick reconsider loop)
-          # and lands back in the reviewer's queue.
-          forgejo_assign "$repo" "$rnum" "$FORGEJO_REVIEWER" 2>/dev/null || true
-          log "ceo: unparseable reconsider for ${repo}#${rnum} -- handed back to the reviewer"
-          return 0
-        fi
-        rdecision=$(jq -r '.decision' <<<"$rparsed")
-        rreply=$(jq -r '.reply' <<<"$rparsed")
-        _fj POST "/repos/${repo}/issues/${rnum}/comments" \
-          "$(jq -n --arg b "$rreply" '{body:$b}')" >/dev/null 2>&1 || true
-        case "$rdecision" in
-          WITHDRAW)
-            _fj PATCH "/repos/${repo}/issues/${rnum}" '{"state":"closed"}' >/dev/null 2>&1 || true
-            log "ceo: withdrew proposal ${repo}#${rnum} after board feedback" ;;
-          REVISE)
-            _fj PATCH "/repos/${repo}/issues/${rnum}" '{"state":"closed"}' >/dev/null 2>&1 || true
-            rissue=$(jq -c '.issue // empty' <<<"$rparsed")
-            if [ -n "$rissue" ] && [ "$rissue" != "null" ] \
-               && [ "$(ceo_open_items_count "$repo")" -lt "$CEO_MAX_OPEN" ]; then
-              if ceo_revise_refile "$repo" "$rnum" "$rissue" "$FORGEJO_REVIEWER"; then
-                log "ceo: revised + re-filed proposal (was ${repo}#${rnum})"
-              else
-                log "ceo: REVISE on ${repo}#${rnum} -- code-check dropped revised proposal"
-              fi
-            else
-              log "ceo: REVISE on ${repo}#${rnum} -- closed the old; no re-file (no issue block or cap reached)"
-            fi ;;
-          *)
-            # HOLD: made the case, hand the call back to the board. Re-assigning
-            # also drops it out of the responded-set so it can't reconsider-loop;
-            # a fresh comment + unassign from the board re-opens the dialogue.
-            forgejo_assign "$repo" "$rnum" "$FORGEJO_REVIEWER" 2>/dev/null || true
-            log "ceo: holding proposal ${repo}#${rnum} -- replied + handed back to the board" ;;
-        esac
-        return 0   # one model-backed action per tick
-      fi
-
-      # --- Path 1c (igor#433): act on board STEERING left as a COMMENT on the
-      # OPEN weekly digest -- EVERY tick, not week-gated (requirement 2:
-      # composing next week's digest and responding to steering on THIS one are
-      # different actions). Watermark = the CEO's own last reply on the thread,
-      # so a comment already answered doesn't re-fire and needs no new state.
-      # Gated on comment AUTHOR == reviewer (never "not the bot" -- see the
-      # ceo_digest_pending_steering_number comment for why that distinction is
-      # the whole point). igor#440: once acted on, the steering is spent, so
-      # ceo_commit_digest_steering closes the digest itself rather than
-      # leaving it open for next week's digest to close (assignment is left
-      # as-is either way -- only state changes).
-      local dnum dthread dparsed
-      dnum=$(ceo_digest_pending_steering_number "$repo" "$FORGEJO_REVIEWER")
-      if [ -n "$dnum" ]; then
-        dthread=$(ceo_digest_thread "$repo" "$dnum" "$FORGEJO_REVIEWER")
-        prompt=$(ceo_build_digest_steering_prompt "$repo" "$mandate" "$dthread")
-        dparsed=""
-        for attempt in 1 2; do
-          raw=$(claude_call "$AGENT_MODEL" "ceo-digest-steer" 8000 \
-            "You are the CEO acting on board steering left as a comment on your OPEN weekly digest. This is a focused action, not a digest -- the board already gave you the direction, so act on your own judgment: file real work directly (Agent-labeled, ready for the grind) rather than re-proposing it for a second approval. Reply to the board naming what you did. Follow the output format in the prompt exactly." \
-            "$prompt" 0) \
-            || { log "ceo: digest-steering call failed for ${repo}#${dnum} (attempt ${attempt})"; continue; }
-          if dparsed=$(ceo_parse_digest_steering "$raw"); then break; fi
-          dparsed=""
-        done
-        if [ -z "$dparsed" ]; then
-          # No reply posted -- the watermark doesn't move, so this same board
-          # comment is retried next tick instead of silently dropped.
-          log "ceo: unparseable digest-steering response for ${repo}#${dnum} -- will retry next tick"
-          continue
-        fi
-        # Reply FIRST, work second -- the reply is the watermark, so a failed POST
-        # must leave nothing filed or the retry re-files the same Agent-labeled
-        # tickets into the autonomous queue (see ceo_commit_digest_steering).
-        if ceo_commit_digest_steering "$repo" "$dnum" "$dparsed"; then
-          log "ceo: replied to board steering on ${repo}#${dnum} and closed it"
-        else
-          log "warning: ceo: failed to post steering reply on ${repo}#${dnum} -- filed nothing; retrying next tick"
-        fi
-        return 0   # one model-backed action per tick
-      fi
-    fi
-
-    # --- Path 2: the weekly board digest (once per ISO week). ---
-    ceo_week_done "$repo" && continue
-    # The activity opens with live metrics, the week, the CEO's OPEN questions (so it
-    # won't re-ask a pending one), and last week's digest + the board's comments so the
-    # brief incorporates their steering. One open digest at a time.
-    pdnum=$(ceo_prior_digest_number "$repo")
-    activity=$(ceo_read_gsc "$repo"; ceo_read_ga "$repo"; ceo_read_metrics "$repo"; \
-               ceo_gather_week "$repo" "$since"; \
-               ceo_proposal_outcomes "$repo"; \
-               ceo_open_questions "$repo" "${FORGEJO_REVIEWER:-}"; \
-               ceo_prior_digest_steering "$repo")
-    prompt=$(ceo_build_prompt "$repo" "$mandate" "$activity" "$since")
-
-    parsed=""
-    for attempt in 1 2; do
-      raw=$(claude_call "$AGENT_MODEL" "ceo-digest" 8000 "$directive" "$prompt" 0) || {
-        log "ceo: digest call failed for ${repo} (attempt ${attempt})"; continue; }
-      if parsed=$(ceo_parse_response "$raw"); then break; fi
-      log "ceo: unparseable digest for ${repo} (attempt ${attempt})"
-      parsed=""
-    done
-    [ -n "$parsed" ] || { log "ceo: no usable digest for ${repo} this tick"; continue; }
-
-    subject=$(jq -r '.subject // ""' <<<"$parsed")
-    [ -n "$subject" ] && subject="[CEO] ${subject}" || subject="[CEO] ${repo} -- weekly board digest"
-    body=$(jq -r '.body' <<<"$parsed")
-    if ceo_file_digest "$repo" "$subject" "$body" "${FORGEJO_REVIEWER:-}"; then
-      ceo_mark_week_done "$repo"
-      # One open digest at a time: close last week's now its steering is incorporated.
-      [ -n "$pdnum" ] && _fj PATCH "/repos/${repo}/issues/${pdnum}" '{"state":"closed"}' >/dev/null 2>&1
-      log "ceo: filed weekly board digest issue for ${repo} (closed prior #${pdnum:-none})"
-      _ceo_file_outputs "$repo" "$parsed" "yes"   # proposals + questions + guidance
-      return 0
-    fi
-    log "warning: ceo: could not file the digest issue for ${repo} -- will retry next tick"
-  done <<<"$ANALYSIS_REPOS_JSON"
-
   return 1
 }
 
@@ -4461,7 +4186,7 @@ fi
 # passes in this same tick write their own keys, and a whole-file write from a
 # stale in-memory copy would silently drop them.
 
-CASCADE_STAGES="review maintenance seo shipreport sports ceo feedback logwatch deferred"
+CASCADE_STAGES="review maintenance seo shipreport sports feedback logwatch deferred"
 
 cascade_state_file_read() {
   local f; f=$(discretionary_state_file)
@@ -4502,7 +4227,7 @@ cascade_mark_reached_file() {
 # A stage rescued at the top of the cascade already ran this tick. Returning
 # non-zero for it here means the cascade falls straight through its normal gate
 # instead of invoking do_<stage>_tick a second time -- which for the model-call
-# stages (sports, ceo, feedback, deferred) would be a duplicated model call, and
+# stages (sports, feedback, deferred) would be a duplicated model call, and
 # for any stage with a side effect on its false path a duplicated side effect.
 cascade_run() {
   local stage="$1"
@@ -4578,16 +4303,6 @@ fi
 # one sits below the health gate and goes dark with the rest of the model
 # work during a cooldown.
 if cascade_run sports; then
-  exit 0
-fi
-
-# Weekly CEO board digest. Convention opt-in, no env knob: any
-# analysis-set repo carrying a CEO.md mandate is under CEO
-# management (the mandate's presence IS the opt-in). Once per ISO week
-# per repo, it reads the mandate + gathers the week and emails a board
-# digest to CEO_RECIPIENTS. A model call, so it's below the health gate;
-# Phase 1 is read-only (no issue-filing/steering yet).
-if cascade_run ceo; then
   exit 0
 fi
 
