@@ -10,6 +10,11 @@ command -v jq  >/dev/null 2>&1 || { echo "test-automerge: jq absent -- skipping"
 command -v git >/dev/null 2>&1 || { echo "test-automerge: git absent -- skipping"; exit 0; }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# AUTOMERGE_SELF_REPO is REQUIRED-AND-EXPLICIT, no default (igor#558) --
+# lib/automerge.sh fails fast at source time without it. Set it here the
+# same way the production .env would, so the rest of this suite's fixtures
+# (which assume "joshtronic/igor" is the self-repo) are unaffected.
+export AUTOMERGE_SELF_REPO="joshtronic/igor"
 # shellcheck source=../lib/dossier.sh
 . "$HERE/../lib/dossier.sh"
 # shellcheck source=../lib/automerge.sh
@@ -24,6 +29,10 @@ eval "$(declare -f automerge_url_status | sed '1s/^automerge_url_status/_real_ur
 # definition), so the maintenance-tier tests -- which need the REAL function
 # reading a live human REQUEST_CHANGES off _fj -- restore it from this copy.
 eval "$(declare -f automerge_reviewer_blocks | sed '1s/^automerge_reviewer_blocks/_real_reviewer_blocks/')"
+# Same deal for _automerge_maintenance_path_allowed: the igor#558 negative
+# test below severs it temporarily to prove the guard-rejection belt is what
+# refuses a net-gain diff, then restores it from this copy.
+eval "$(declare -f _automerge_maintenance_path_allowed | sed '1s/^_automerge_maintenance_path_allowed/_real_maintenance_path_allowed/')"
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 export AGENT_STATE_DIR="$TMP"
@@ -34,6 +43,20 @@ ok() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  + %s\n' "$d"
 no() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (expected rc!=0)\n' "$d"; FAIL=$((FAIL + 1)); else printf '  + %s\n' "$d"; fi; }
 eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
 has() { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
+
+echo "== AUTOMERGE_SELF_REPO: required-and-explicit, no default (igor#558) =="
+# A clean shell sourcing lib/automerge.sh without AUTOMERGE_SELF_REPO set must
+# fail fast and loudly -- the whole point of dropping the hardcoded
+# joshtronic/igor default. Runs in an isolated subshell (env -i) so it can't
+# inherit this suite's own export above.
+SELFREPO_OUT=$(env -i HOME="$HOME" PATH="$PATH" bash -c '
+  set -uo pipefail
+  . "'"$HERE"'/../lib/dossier.sh"
+  . "'"$HERE"'/../lib/automerge.sh"
+' 2>&1); SELFREPO_RC=$?
+if [ "$SELFREPO_RC" -ne 0 ]; then printf '  + %s\n' "self-repo: unset AUTOMERGE_SELF_REPO fails fast sourcing automerge.sh"
+else printf '  x %s\n' "self-repo: unset AUTOMERGE_SELF_REPO fails fast sourcing automerge.sh"; FAIL=$((FAIL + 1)); fi
+has "self-repo: failure names the var" "$SELFREPO_OUT" "AUTOMERGE_SELF_REPO"
 
 echo "== agent.json (.smoke.url) opt-in (legacy fallback -- no repo has adopted the dossier yet) =="
 forgejo_repo_get_file_status() { printf 'found\t%s' '{"smoke":{"url":"https://porksicle.com"}}'; }
@@ -892,7 +915,7 @@ has "flaky-dossier: logs the skip"      "$AUTOMERGE_OUT" "dossier fetch failed"
 automerge_url_status() { printf 'ok\thttps://x'; }   # reset
 
 echo "== automerge_maintenance_declaration: REQUIRED-AND-EXPLICIT dossier opt-in (igor#537) =="
-JY_DECL='{"branch":"review","allowlist":["src/_data/sites.json","src/_data/feeds.json","src/_data/rejected.json","src/images/screenshots/*"],"data_file":"src/_data/sites.json"}'
+JY_DECL='{"branch":"review","allowlist":["src/_data/sites.json","src/_data/feeds.json","src/_data/rejected.json","src/images/screenshots/*"],"data_file":"src/_data/sites.json","rejected_category":"no-josh-visible"}'
 forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$JY_DECL" '{automerge:{require_human:true,maintenance:$d}}')"; }
 eq "declaration: full valid declaration -> echoes it" \
   "$(jq -c . <<<"$JY_DECL")" "$(jq -c . <<<"$(automerge_maintenance_declaration joshtronic/joshing.you)")"
@@ -929,6 +952,32 @@ DATA_FILE_IS_DOSSIER='{"branch":"review","allowlist":["AGENTS.md"],"data_file":"
 forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$DATA_FILE_IS_DOSSIER" '{automerge:{maintenance:$d}}')"; }
 no "declaration: data_file itself is a dossier file -> refused" \
   automerge_maintenance_declaration acme/x
+
+echo "== automerge_maintenance_declaration: rejected_category opt-in belt (igor#558) =="
+# A repo opts AUTOMERGE_MAINTENANCE_REJECTED_FILE into its allowlist but
+# declares no category -- must refuse the WHOLE declaration, not silently
+# skip the belt.
+NOCAT_DECL='{"branch":"review","allowlist":["src/_data/sites.json","src/_data/rejected.json"],"data_file":"src/_data/sites.json"}'
+forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$NOCAT_DECL" '{automerge:{maintenance:$d}}')"; }
+DECL_OUT=$(automerge_maintenance_declaration acme/x 2>&1); DECL_RC=$?
+if [ "$DECL_RC" -ne 0 ]; then printf '  + %s\n' "declaration: rejected.json in allowlist without rejected_category -> refused"
+else printf '  x %s\n' "declaration: rejected.json in allowlist without rejected_category -> refused"; FAIL=$((FAIL + 1)); fi
+has "declaration: missing-category refusal names the reason" "$DECL_OUT" "rejected_category"
+
+# The same file/allowlist WITH a declared category -> the tier is on, and the
+# category rides along in the echoed declaration.
+WITHCAT_DECL='{"branch":"review","allowlist":["src/_data/sites.json","src/_data/rejected.json"],"data_file":"src/_data/sites.json","rejected_category":"off-brand"}'
+forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$WITHCAT_DECL" '{automerge:{maintenance:$d}}')"; }
+eq "declaration: rejected.json in allowlist WITH a declared category -> echoes it" \
+  "$(jq -c . <<<"$WITHCAT_DECL")" "$(jq -c . <<<"$(automerge_maintenance_declaration acme/x)")"
+
+# A repo that never opts rejected.json into its allowlist at all doesn't need
+# a category -- undeclared/unrelated repos behave exactly as before igor#558.
+NOFILE_DECL='{"branch":"review","allowlist":["src/_data/sites.json"],"data_file":"src/_data/sites.json"}'
+forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$NOFILE_DECL" '{automerge:{maintenance:$d}}')"; }
+ok "declaration: repo that never opts rejected.json in doesn't need a category" \
+  automerge_maintenance_declaration acme/x
+
 forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$JY_DECL" '{automerge:{require_human:true,maintenance:$d}}')"; }   # reset
 
 echo "== automerge_maintenance_tier_branch_ok: same-repo <branch>->master pin (igor#516/#537) =="
@@ -984,7 +1033,7 @@ BASE_SHA="$(git -C "$DP" rev-parse HEAD)"
 sed -i 's/"title":"A"/"title":"A2"/' "$DP/src/_data/sites.json"
 git -C "$DP" commit -qam metadata
 ok "data_ok: metadata-only churn -> ok" \
-  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW"
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW" "no-josh-visible"
 
 # Added listing (new addedDate line, count grows) -> rejected.
 git -C "$DP" reset -q --hard "$BASE_SHA"
@@ -997,7 +1046,7 @@ cat > "$DP/src/_data/sites.json" <<'JSON'
 JSON
 git -C "$DP" commit -qam added
 no "data_ok: added listing -> rejected" \
-  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW"
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW" "no-josh-visible"
 
 # Added listing that OMITS addedDate entirely -- the exact igor#516 security
 # review gap (a textual "did an addedDate line appear" check would miss this;
@@ -1012,14 +1061,14 @@ cat > "$DP/src/_data/sites.json" <<'JSON'
 JSON
 git -C "$DP" commit -qam added-no-addeddate
 no "data_ok: added listing with no addedDate field -> still rejected" \
-  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW"
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW" "no-josh-visible"
 
 # Removed listing -> rejected.
 git -C "$DP" reset -q --hard "$BASE_SHA"
 echo '[{"url":"https://a.example","addedDate":"2026-01-01","title":"A"}]' > "$DP/src/_data/sites.json"
 git -C "$DP" commit -qam removed
 no "data_ok: removed listing -> rejected" \
-  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW"
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW" "no-josh-visible"
 
 # Same-count swap (one removed, a different one added) -> the core-identity
 # set comparison catches this even though a bare element-count check would not.
@@ -1032,7 +1081,7 @@ cat > "$DP/src/_data/sites.json" <<'JSON'
 JSON
 git -C "$DP" commit -qam swap
 no "data_ok: same-count swap -> rejected" \
-  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW"
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW" "no-josh-visible"
 
 # Guard rejection gained (rejected.json) -> rejected, even reformatted onto
 # one line (jq-structural, not a line count -- igor#516 security review).
@@ -1040,26 +1089,54 @@ git -C "$DP" reset -q --hard "$BASE_SHA"
 printf '%s' '[{"url":"https://c.example","reason":"no-josh-visible"},{"url":"https://d.example","reason":"no-josh-visible"}]' > "$DP/src/_data/rejected.json"
 git -C "$DP" commit -qam guard
 no "data_ok: gained guard-rejection entry -> rejected" \
-  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW"
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW" "no-josh-visible"
 
 # A DROP in guard rejections is not itself suspicious (no listing implicated).
 git -C "$DP" reset -q --hard "$BASE_SHA"
 echo '[]' > "$DP/src/_data/rejected.json"
 git -C "$DP" commit -qam unguard
 ok "data_ok: fewer guard rejections -> ok" \
-  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW"
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$MTALLOW" "no-josh-visible"
 
-# igor#537: the guard-rejection belt has no field in the declared shape, so
-# it stays hardcoded to AUTOMERGE_MAINTENANCE_REJECTED_FILE and applies
-# ONLY when the repo's OWN allowlist opts that literal path in. A repo
-# whose allowlist doesn't mention it gets no belt -- a gained
-# guard-rejection entry is simply not evaluated.
+# igor#537/#558: the guard-rejection belt's FILE PATH stays hardcoded to
+# AUTOMERGE_MAINTENANCE_REJECTED_FILE and applies ONLY when the repo's OWN
+# allowlist opts that literal path in. A repo whose allowlist doesn't
+# mention it gets no belt -- a gained guard-rejection entry is simply not
+# evaluated, regardless of what rejected_category it passes (or doesn't).
 git -C "$DP" reset -q --hard "$BASE_SHA"
 printf '%s' '[{"url":"https://c.example","reason":"no-josh-visible"},{"url":"https://d.example","reason":"no-josh-visible"}]' > "$DP/src/_data/rejected.json"
 git -C "$DP" commit -qam guard-unwatched
 NOREJALLOW='["src/_data/sites.json"]'
 ok "data_ok: gained guard-rejection entry is a no-op when allowlist omits rejected.json (igor#537)" \
-  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$NOREJALLOW"
+  automerge_maintenance_tier_data_ok "$DP" "$BASE_SHA" "$(git -C "$DP" rev-parse HEAD)" "src/_data/sites.json" "$NOREJALLOW" ""
+
+echo "== automerge_maintenance_tier_data_ok: belt is scoped to the DECLARED category, not hardcoded (igor#558) =="
+# Same net-gain shape as above, but the fixture's rejected.json entries carry
+# a DIFFERENT category ("off-brand") than joshing.you's. Proves the belt
+# reads whatever category the caller passes, not a baked-in string.
+git -C "$DP" reset -q --hard "$BASE_SHA"
+echo '[{"url":"https://c.example","reason":"off-brand"}]' > "$DP/src/_data/rejected.json"
+git -C "$DP" commit -qam other-category-base
+OTHERCAT_BASE="$(git -C "$DP" rev-parse HEAD)"
+printf '%s' '[{"url":"https://c.example","reason":"off-brand"},{"url":"https://d.example","reason":"off-brand"}]' > "$DP/src/_data/rejected.json"
+git -C "$DP" commit -qam other-category-gain
+OTHERCAT_HEAD="$(git -C "$DP" rev-parse HEAD)"
+no "data_ok: net gain in the DECLARED category (off-brand) -> rejected" \
+  automerge_maintenance_tier_data_ok "$DP" "$OTHERCAT_BASE" "$OTHERCAT_HEAD" "src/_data/sites.json" "$MTALLOW" "off-brand"
+ok "data_ok: the SAME diff is a no-op against a category it doesn't touch (no-josh-visible)" \
+  automerge_maintenance_tier_data_ok "$DP" "$OTHERCAT_BASE" "$OTHERCAT_HEAD" "src/_data/sites.json" "$MTALLOW" "no-josh-visible"
+no "data_ok: rejected.json allowlisted but rejected_category empty -> fails closed (defensive)" \
+  automerge_maintenance_tier_data_ok "$DP" "$OTHERCAT_BASE" "$OTHERCAT_HEAD" "src/_data/sites.json" "$MTALLOW" ""
+
+echo "== negative test: sever the belt trigger -> the net-gain case now merges (igor#558) =="
+# Proves the belt is what refuses the classic net-gain fixture: with
+# _automerge_maintenance_path_allowed stubbed to never match, the
+# rejected.json branch is never entered, and the same diff that was refused
+# above (with the belt intact) now passes.
+_automerge_maintenance_path_allowed() { return 1; }
+ok "severed: identical net-gain fixture now merges once the belt-trigger is stubbed off" \
+  automerge_maintenance_tier_data_ok "$DP" "$OTHERCAT_BASE" "$OTHERCAT_HEAD" "src/_data/sites.json" "$MTALLOW" "off-brand"
+_automerge_maintenance_path_allowed() { _real_maintenance_path_allowed "$@"; }   # restore
 
 echo "== do_automerge_tick: joshing.you maintenance-tier carve-out end to end (igor#516) =="
 # Restore the REAL automerge_reviewer_blocks -- the review-gate section above
@@ -1176,6 +1253,18 @@ _fj() { echo '{"head":{"ref":"review","sha":"head9","repo":{"full_name":"acme/fl
 echo '{"review":{"acme/flagged#9":{"verdict":"APPROVE","sha":"head9"}}}' > "$STATE"
 no "maint-scope: declared repo, out-of-allowlist file -> still needs human approval" do_automerge_tick
 eq "maint-scope: out-of-allowlist diff recorded no deploy" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
+
+# The same repo, now WITH a complete declaration that opts rejected.json into
+# its allowlist but declares no rejected_category (igor#558). The tier must
+# refuse -- not silently skip the belt -- so this still needs human approval
+# even though the diff itself only touches the (allowlisted) sites file.
+NOCAT_OWNALLOW='{"branch":"review","allowlist":["src/_data/sites.json","src/_data/rejected.json"],"data_file":"src/_data/sites.json"}'
+forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$NOCAT_OWNALLOW" '{automerge:{require_human:true,maintenance:$d}}')"; }
+forgejo_pr_files() { printf '%s' '[{"filename":"src/_data/sites.json"}]'; }
+_fj() { echo '{"head":{"ref":"review","sha":"head9","repo":{"full_name":"acme/flagged"}},"base":{"ref":"master","sha":"base9","repo":{"full_name":"acme/flagged"}}}'; }
+echo '{"review":{"acme/flagged#9":{"verdict":"APPROVE","sha":"head9"}}}' > "$STATE"
+no "maint-scope: rejected.json allowlisted with no rejected_category -> refused, not skipped" do_automerge_tick
+eq "maint-scope: no-category refusal recorded no deploy" "" "$(jq -r '.deploy.repo // ""' "$STATE")"
 
 if [ "$FAIL" -eq 0 ]; then echo "test-automerge: all checks passed"; exit 0; fi
 echo "test-automerge: $FAIL check(s) FAILED"

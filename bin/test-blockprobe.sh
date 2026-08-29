@@ -549,6 +549,7 @@ echo "== the two cross-library helpers PRINT their result (not an exit status) =
 # stubs the scenarios above installed.
 _real_helper_contract() (
   export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+  export AUTOMERGE_SELF_REPO="joshtronic/igor"   # required, no default (igor#558)
   # shellcheck source=../lib/forgejo.sh
   . "$HERE/lib/forgejo.sh"
   # shellcheck source=../lib/automerge.sh
