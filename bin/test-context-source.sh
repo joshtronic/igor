@@ -79,20 +79,41 @@ seed_all_good() {
 }
 
 # write_manifest [exclude-skill] -- (re)generates dist/manifest.json from
-# whatever's currently on disk under $SEED/skills, the same way `still
-# build` records a sha256 per skill at build time. Pass a skill name to
-# simulate that skill never having been built into the manifest at all
-# (present on disk, absent from the recorded hashes). A test that wants a
-# STALE manifest (mismatched hash) simply mutates a skill's file AFTER
-# calling write_manifest, without calling it again.
+# whatever's currently on disk under $SEED/skills, in the REAL shape
+# `still build`'s cmd_build (joshtronic/distillery, bin/still) emits: a
+# `built_from` key plus a `skills` ARRAY of objects, each carrying at
+# least `name` and `sha256` -- not an object keyed by skill name. Pass a
+# skill name to simulate that skill never having been built into the
+# manifest at all (present on disk, absent from the array). A test that
+# wants a STALE manifest (mismatched hash) simply mutates a skill's file
+# AFTER calling write_manifest, without calling it again.
 write_manifest() {
   local exclude="${1:-}"
+  mkdir -p "$SEED/dist"
+  {
+    printf '{\n  "built_from": "fixture",\n  "skills": [\n'
+    local skill first=1 sha
+    for skill in "${CONTEXT_SKILLS[@]}"; do
+      [ -n "$exclude" ] && [ "$skill" = "$exclude" ] && continue
+      [ -f "$SEED/skills/$skill/SKILL.md" ] || continue
+      sha=$(sha256sum "$SEED/skills/$skill/SKILL.md" | cut -d' ' -f1)
+      [ "$first" -eq 1 ] || printf ',\n'
+      first=0
+      printf '    {"name": "%s", "sha256": "%s"}' "$skill" "$sha"
+    done
+    printf '\n  ]\n}\n'
+  } > "$SEED/dist/manifest.json"
+}
+
+# write_manifest_object_shape -- the OLD, fictional shape (.skills as an
+# object keyed by name) that igor#574 fixed. Used only by the regression
+# test proving that shape now fails closed instead of silently passing.
+write_manifest_object_shape() {
   mkdir -p "$SEED/dist"
   {
     printf '{\n  "skills": {\n'
     local skill first=1 sha
     for skill in "${CONTEXT_SKILLS[@]}"; do
-      [ -n "$exclude" ] && [ "$skill" = "$exclude" ] && continue
       [ -f "$SEED/skills/$skill/SKILL.md" ] || continue
       sha=$(sha256sum "$SEED/skills/$skill/SKILL.md" | cut -d' ' -f1)
       [ "$first" -eq 1 ] || printf ',\n'
@@ -140,6 +161,10 @@ for skill in "${CONTEXT_SKILLS[@]}"; do
 done
 eq "every consumed skill cached" "0" "$MISSING"
 eq "context_surface serves the cached (frontmatter-stripped) body" "$WANT" "$(context_surface worker-contract)"
+
+echo "== _context_verify_skill_sha256: a manifest whose skills array contains the skill verifies normally =="
+MANIFEST_GOOD=$(cat "$SEED/dist/manifest.json")
+ok "verifies against the real array-shaped manifest" _context_verify_skill_sha256 worker-contract "$MANIFEST_GOOD"
 
 echo "== context_refresh: HEAD unchanged -> no-op, no re-extract =="
 GEN_BEFORE=$(readlink "$CACHE/current")
@@ -240,6 +265,24 @@ if printf '%s' "$ABSENT_WARN" | grep -q 'missing from manifest'; then
 else
   ok "  warns naming the manifest-absent skill" false
 fi
+
+echo "== context_refresh: REGRESSION -- a manifest whose .skills is an OBJECT (the old fictional shape) fails, not a silent pass =="
+write_manifest_object_shape
+commit_and_push
+fetch_clone
+OBJSHAPE_WARN=$(context_refresh 2>&1 1>/dev/null); OBJSHAPE_RC=$?
+if [ "$OBJSHAPE_RC" -ne 0 ]; then
+  printf '  + %s\n' "refresh returns nonzero against an object-shaped .skills manifest"
+else
+  printf '  x %s\n' "refresh returns nonzero against an object-shaped .skills manifest"; FAIL=$((FAIL + 1))
+fi
+eq "cache stamp still the OLD (good) HEAD" "$FIRST_HEAD" "$(cat "$CACHE/current/HEAD")"
+if printf '%s' "$OBJSHAPE_WARN" | grep -q 'missing from manifest'; then
+  ok "  warns naming the manifest-absent skill (object-shape yields no array match)" true
+else
+  ok "  warns naming the manifest-absent skill (object-shape yields no array match)" false
+fi
+write_manifest   # restore the real array-shaped manifest for the tests below
 
 echo "== context_refresh: manifest missing entirely -> fails loudly, distinct log line =="
 rm -f "$SEED/dist/manifest.json"
