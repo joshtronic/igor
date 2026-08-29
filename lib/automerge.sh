@@ -308,7 +308,9 @@ _automerge_maintenance_path_allowed() {
 # (igor#558): silently skipping the belt on a missing category would turn a
 # safety check into a no-op by omission, which is worse than the file simply
 # not being in the tier at all. That combination refuses the WHOLE
-# declaration, same posture as the dossier-file check below.
+# declaration, same posture as the dossier-file check below -- as does a
+# category that is present but isn't a non-empty string, which would no-op
+# the same belt by matching nothing.
 #
 # Reads agent.json off forgejo_repo_get_file, which -- passed no `ref` --
 # resolves against the repo's DEFAULT BRANCH (see lib/review.sh's
@@ -338,6 +340,20 @@ automerge_maintenance_declaration() {
 
   if _automerge_maintenance_declares_dossier_file "$allowlist" "$data_file"; then
     log "automerge: ${repo} automerge.maintenance allowlist/data_file would match its own dossier (${AUTOMERGE_MAINTENANCE_DOSSIER_FILES}) -- refusing the declaration (a repo can read its privileges, never change them unattended)"
+    return 1
+  fi
+
+  # A DECLARED category must be a non-empty STRING. `jq -r` renders an array,
+  # number or object to a non-empty string, so a mistyped category would sail
+  # past the emptiness check below and then match nothing in rejected.json --
+  # zero rejections counted on both sides, belt passes trivially. Same silent
+  # no-op the missing-category refusal exists to prevent, reached by mistyping
+  # instead of by omission, and unlike branch/data_file (which fail closed at
+  # the branch check and at `git show`) this one fails OPEN. Refused
+  # regardless of whether the allowlist opts the file in: the field is inert
+  # there, but a malformed declaration is still malformed.
+  if ! jq -e '.rejected_category == null or (.rejected_category | type == "string" and length > 0)' <<<"$decl" >/dev/null 2>&1; then
+    log "automerge: ${repo} declares a non-string (or empty) automerge.maintenance rejected_category -- refusing the declaration (a category that matches nothing would silently no-op the guard-rejection belt)"
     return 1
   fi
 

@@ -971,6 +971,29 @@ forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$WITHCAT_DECL" '{aut
 eq "declaration: rejected.json in allowlist WITH a declared category -> echoes it" \
   "$(jq -c . <<<"$WITHCAT_DECL")" "$(jq -c . <<<"$(automerge_maintenance_declaration acme/x)")"
 
+# A category that is DECLARED but isn't a non-empty string is refused just as
+# hard as a missing one: `jq -r` renders an array/number/object to a non-empty
+# string that no string in rejected.json can ever equal, so the belt would
+# count zero rejections on both sides and pass trivially -- the same silent
+# no-op, reached by mistyping instead of omission.
+BADCAT_DECL='{"branch":"review","allowlist":["src/_data/sites.json","src/_data/rejected.json"],"data_file":"src/_data/sites.json","rejected_category":["no-josh-visible"]}'
+forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$BADCAT_DECL" '{automerge:{maintenance:$d}}')"; }
+DECL_OUT=$(automerge_maintenance_declaration acme/x 2>&1); DECL_RC=$?
+if [ "$DECL_RC" -ne 0 ]; then printf '  + %s\n' "declaration: array rejected_category -> refused"
+else printf '  x %s\n' "declaration: array rejected_category -> refused"; FAIL=$((FAIL + 1)); fi
+has "declaration: non-string-category refusal names the field" "$DECL_OUT" "rejected_category"
+
+# Same for a number, and with rejected.json NOT in the allowlist: the field is
+# inert there, but a malformed declaration is still a malformed declaration.
+NUMCAT_DECL='{"branch":"review","allowlist":["src/_data/sites.json"],"data_file":"src/_data/sites.json","rejected_category":123}'
+forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$NUMCAT_DECL" '{automerge:{maintenance:$d}}')"; }
+no "declaration: numeric rejected_category -> refused even with the file un-allowlisted" \
+  automerge_maintenance_declaration acme/x
+
+BLANKCAT_DECL='{"branch":"review","allowlist":["src/_data/sites.json","src/_data/rejected.json"],"data_file":"src/_data/sites.json","rejected_category":""}'
+forgejo_repo_get_file() { printf '%s' "$(jq -n --argjson d "$BLANKCAT_DECL" '{automerge:{maintenance:$d}}')"; }
+no "declaration: blank rejected_category -> refused" automerge_maintenance_declaration acme/x
+
 # A repo that never opts rejected.json into its allowlist at all doesn't need
 # a category -- undeclared/unrelated repos behave exactly as before igor#558.
 NOFILE_DECL='{"branch":"review","allowlist":["src/_data/sites.json"],"data_file":"src/_data/sites.json"}'

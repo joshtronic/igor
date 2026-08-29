@@ -477,7 +477,8 @@ respective tools on the host; install or skip.
   repo whose OWN `agent.json` declares a complete `automerge.maintenance`"
   (`{branch, allowlist: [paths...], data_file, rejected_category?}`) -- REQUIRED-AND-EXPLICIT,
   read via `automerge_maintenance_declaration`: missing or partial (any of
-  the three fields absent/empty) reads as "the tier does not exist for this
+  the three required fields absent/empty, or the conditional fourth present
+  but not a non-empty string) reads as "the tier does not exist for this
   repo," no defaults, with one loud log line on a partial declaration. The
   declared branch's own `<branch>`->`master` PR merges WITHOUT the human gate
   when ALL hold: same-repo `<branch>`->`master` (never a fork of the same
@@ -510,9 +511,17 @@ respective tools on the host; install or skip.
   `no-josh-visible` baked into the harness): it comes from the repo's own
   declared `rejected_category`, read alongside branch/allowlist/data_file.
   joshing.you declares `rejected_category: no-josh-visible` (unchanged
-  behavior); a repo that opts the file in WITHOUT declaring a category
-  refuses the WHOLE declaration (`automerge_maintenance_declaration`) --
-  fail closed, never a silent no-op of the belt. Base branch (`master`)
+  behavior); a repo whose allowlist MATCHES that path -- the check is
+  glob-aware, so a `src/_data/*` entry opts the file in just as a literal one
+  does -- WITHOUT declaring a category refuses the WHOLE declaration
+  (`automerge_maintenance_declaration`), and so does a `rejected_category`
+  that is present but not a non-empty string: `jq -r` renders an array or a
+  number to a non-empty string that matches nothing in rejected.json, which
+  would count zero rejections on both sides and pass the belt trivially --
+  the same no-op by mistyping rather than by omission, and the only one of
+  the four fields that fails OPEN if unchecked (a bad `branch` fails the
+  branch pin, a bad `data_file` fails `git show`). Fail closed, never a
+  silent no-op of the belt. Base branch (`master`)
   also stays hardcoded -- a fleet-wide convention, not a per-repo fact.
 - The block-probe sweep (`do_blockprobe_tick`, `lib/blockprobe.sh`, igor#546)
   re-evaluates WHY a ticket is `Status/Blocked` so the label can go red when
