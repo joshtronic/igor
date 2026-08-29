@@ -17,8 +17,8 @@
 #                                  condition; never auto-requeued (no ref)
 #   transient                  -- no external condition to check; presumed
 #                                  resolved by the next look, so it always
-#                                  clears (bounded by the repeat-block guard
-#                                  if the same reason keeps recurring, no ref)
+#                                  clears (bounded by the repeat-block guard,
+#                                  on reason text and episode count, no ref)
 # Omit both to leave the block UNPROBED -- the sweep reports that honestly
 # rather than guessing, but never clears it.
 #
@@ -44,7 +44,7 @@ cause resolves instead of it sitting blocked forever:
   pr-behind  <owner/repo#N>   block holds while that PR is behind its base
   operator                    a human decision -- never auto-requeued
   transient                   no condition to check -- always clears, bounded
-                               by the repeat-block guard if it keeps recurring
+                               by the repeat-block guard (reason + episodes)
 Omit both probe args to leave the block UNPROBED (reported, never cleared).
 USAGE
 }
