@@ -55,6 +55,106 @@ _I don't monitor these services or accept pull/merge requests on them._
   opted-in repo's published form CSV and files a ticket for anything
   real and new, dropping spam and dupes.
 
+## Requirements
+
+**Stack** -- the real answer lives in `bin/install.sh` and
+`bin/doctor.sh`; this is a summary, not a second copy:
+
+- **Commands on `PATH`:** `jq`, `curl`, `git`, `flock` (`util-linux`),
+  `timeout` (`coreutils`), `sqlite3`, `openssl`, and the `claude` CLI.
+  `install.sh` checks for all of these and refuses to proceed if any
+  are missing. `doctor.sh` additionally uses `fuser` and `journalctl`
+  for diagnostics -- useful, not required; it degrades gracefully
+  without them.
+- **Init system:** systemd **user** units, with lingering enabled so
+  the timer survives logout. `install.sh` checks for this and prints
+  the exact fix if it isn't.
+- **The `claude` CLI**, authenticated with a Claude subscription login
+  (OAuth) -- not an API key. Every model call goes through it, and the
+  harness strips `ANTHROPIC_API_KEY` from every child process on
+  purpose: an inherited key would silently flip billing to
+  pay-as-you-go.
+- **Config:** `.env.example` lists 26 variables, no defaults. The core
+  ones (Forgejo connection, model routing, timeouts) make every tick
+  fail fast if unset; the rest gate opt-in subsystems (website work,
+  SEO reporting, healthcheck pings) that simply no-op without theirs.
+
+We run Debian, so that's what we recommend. Any Linux with systemd and
+the commands above should work -- nothing here is Debian-specific
+except the `apt` package names baked into `install.sh`. We haven't
+tested elsewhere.
+
+### Why systemd
+
+The dependency on systemd is deliberate, not incidental.
+
+The tick cadence itself is a systemd concept. `agent.timer` sets
+`OnUnitInactiveSec=15s` -- 15 seconds after the *previous tick
+finished*, not a wall-clock schedule -- because ticks here run
+anywhere from seconds to many minutes; a fixed cron interval either
+piles up during long ticks or idles after short ones, and cron can't
+express "N seconds after last completion" at all. `AccuracySec=1s`
+skips cron-style batching of wakeups, and `Persistent=true` catches
+up a missed run after downtime, where cron just misses it.
+`agent.service` adds `After=network-online.target` to order the first
+tick on network readiness, which cron has no concept of -- a boot-time
+cron job can fire before the network is up.
+
+Overrun protection is `Type=oneshot` plus systemd's own refusal to
+double-start an active unit, alongside the global `flock` the tick
+also takes (`bin/tick.sh:303`) -- belt-and-braces, not the only
+defence. journald gives per-unit, time-filterable logs, which the
+logwatch pass reads directly.
+
+This targets a modern Linux running systemd and we're not apologizing
+for it. The pieces are all visible, `doctor.sh` degrades gracefully
+when `journalctl` is absent, and nothing stops you from porting it --
+just know that's a different scheduling model, not a config flag.
+
+## Forge support
+
+| Forge | Status | Notes |
+| --- | --- | --- |
+| **Forgejo** | Supported | The full unattended loop -- the harness reviews its own PRs and auto-merges where a repo opts in. |
+| **Codeberg** | **Do not point this at Codeberg.** | Codeberg runs Forgejo, so this would work there with zero code changes -- which is exactly the problem. Codeberg's [Terms of Use](https://codeberg.org/Codeberg/org/src/branch/main/TermsOfUse.md) prohibit sharing projects that mostly consist of code written by generative-AI tools, so pointing an unattended AI agent at it is a policy violation, not a technical limitation. |
+| **GitLab** | Coming soon | Not implemented yet. GitLab only lets a merge request be approved by its own author when a project enables `merge_requests_author_approval` -- without that, the unattended loop can't close on its own. |
+| **GitHub** | Coming soon | Not implemented yet. GitHub blocks `APPROVE` and `REQUEST_CHANGES` on your own pull request; the harness could still post its independent review as a `COMMENT`, but every merge would need a human click. Review works, unattended merge doesn't -- self-host Forgejo for the full loop. |
+
+Only GitLab and GitHub are planned; neither works today.
+
+## Operator setup
+
+Getting a working install means setting up a bot account and its
+credentials on the forge first -- currently manual, one-time work.
+
+- **A dedicated bot account**, separate from the human reviewer. The
+  harness assigns terminal review verdicts (approve, request changes)
+  to `FORGEJO_REVIEWER` -- a bot reviewing its own PRs defeats the
+  point, so the two must be different Forgejo users.
+- **An API token** for the bot with three scopes: `read:user` (resolve
+  the bot's own identity -- there's no separate `BOT_USER` config
+  variable, it's derived from this token at runtime), `write:repository`
+  (repo reads, PR listing/creation), and `write:issue`
+  (issue create/comment/label/assign/close). Forgejo splits repository
+  and issue scopes, so both write scopes are required. Push access for
+  git is via an SSH key, separate from the API token.
+- **`FORGEJO_REVIEWER`**, set in `.env` -- the human Forgejo username
+  every bot PR gets assigned to for review.
+- **Lingering enabled** for the Unix user running the timer
+  (`sudo loginctl enable-linger <user>`), so its systemd user instance
+  keeps running after logout. `install.sh` checks for this and prints
+  the exact command if it's missing.
+- **Where things live:** the runtime checkout is `AGENT_HOME` --
+  wherever you clone the repo (`~/.local/share/agent` below); state
+  (per-repo clones, worktrees, the reading-pipeline database) lives at
+  `~/.local/state/agent` (`AGENT_STATE_DIR`). Neither is a `.env`
+  variable -- both are fixed conventions the scripts derive from their
+  own location and `$HOME`.
+
+See [docs/setup.md](docs/setup.md) for the full walkthrough and
+`.env.example` for the complete variable list -- documented there
+rather than duplicated here so the two can't drift.
+
 ## Install
 
 **Server prerequisites** (one-time on the host before cloning):
