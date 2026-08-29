@@ -366,6 +366,12 @@ respective tools on the host; install or skip.
   harness's own repo -- self-deploy +
   blast radius means it stays a human gate regardless of verdict. Clear
   a PR's `.review` entry to force a re-review.
+- The CEO board digest cascade stage was retired (igor#556 phase 1): `ceo` is
+  gone from `CASCADE_STAGES`, `do_ceo_tick` and its `bin/tick.sh` gate are
+  removed, and `lib/ceo.sh` is no longer sourced. `lib/ceo.sh` and
+  `bin/lib/ceo-digest-directive.md` are deliberately left on disk, orphaned --
+  deleting `lib/ceo.sh` alone is over the per-issue runaway guard, so full
+  removal is a separate, operator-gated phase 2.
 - The auto-merge + deploy barrier (`lib/automerge.sh`, Phase 1) is the "after you
   approve, your job ends" step -- convention opt-in like logwatch, but
   now with TWO merge paths keyed on `automerge_url_status` (dossier root
