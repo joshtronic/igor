@@ -236,25 +236,36 @@ no "mergeable: conflict"                   automerge_mergeable acme/x 1
 FJ='{"state":"closed","mergeable":true}'
 no "mergeable: closed"                     automerge_mergeable acme/x 1
 
-echo "== automerge_require_human (review-gate flag) =="
-forgejo_repo_get_file() { printf '%s' '{"automerge":{"require_human":true}}'; }
-ok "require_human: flagged true -> human gate"        automerge_require_human acme/site
-forgejo_repo_get_file() { printf '%s' '{"automerge":{"require_human":false}}'; }
-no "require_human: explicit false -> shadow gate"     automerge_require_human acme/site
-forgejo_repo_get_file() { printf '%s' '{"smoke":{"url":"x"}}'; }
-no "require_human: no automerge key -> shadow gate"   automerge_require_human acme/site
-forgejo_repo_get_file() { return 1; }
-no "require_human: no agent.json -> shadow gate"      automerge_require_human acme/site
+echo "== automerge_require_human (review-gate flag; fail closed on UNKNOWN, not on unstated -- igor#561) =="
+# Uses forgejo_repo_get_file_status (found/missing/error), not the plain
+# forgejo_repo_get_file -- the whole point is distinguishing a readable
+# config that simply doesn't mention the key (an expressed, unchanged
+# intent -> no gate) from a config the harness genuinely couldn't read
+# (unknown -> human gate, fail closed).
+forgejo_repo_get_file_status() { printf 'found\t%s' '{"automerge":{"require_human":true}}'; }
+ok "require_human: flagged true -> human gate"                    automerge_require_human acme/site
+forgejo_repo_get_file_status() { printf 'found\t%s' '{"automerge":{"require_human":false}}'; }
+no "require_human: explicit false -> shadow gate"                 automerge_require_human acme/site
+forgejo_repo_get_file_status() { printf 'found\t%s' '{"smoke":{"url":"x"}}'; }
+no "require_human: readable config, no automerge object -> shadow gate (unchanged)" automerge_require_human acme/site
+forgejo_repo_get_file_status() { printf 'found\t%s' '{"automerge":{}}'; }
+no "require_human: readable config, key absent -> shadow gate (unchanged)" automerge_require_human acme/site
+forgejo_repo_get_file_status() { printf 'missing\t'; }
+ok "require_human: agent.json deleted (404) -> human gate (fail closed)" automerge_require_human acme/site
+forgejo_repo_get_file_status() { printf 'found\t%s' '{"automerge":{bad json'; }
+ok "require_human: malformed JSON -> human gate (fail closed)"    automerge_require_human acme/site
+forgejo_repo_get_file_status() { printf 'error\t'; }
+ok "require_human: fetch/transport error -> human gate (fail closed)" automerge_require_human acme/site
 
 echo "== automerge_will_take (do_review_tick suppresses the human request) =="
 automerge_url_status() { printf 'ok\thttps://x'; }   # url-bearing repo throughout this section
-forgejo_repo_get_file() { printf '%s' '{"automerge":{"require_human":false}}'; }   # default (shadow-gated) repo
+forgejo_repo_get_file_status() { printf 'found\t%s' '{"automerge":{"require_human":false}}'; }   # default (shadow-gated) repo
 ok "will_take: default repo + APPROVE -> auto-merge takes it"     automerge_will_take acme/site APPROVE
 no "will_take: default repo + COMMENT -> human still asked"       automerge_will_take acme/site COMMENT
 no "will_take: default repo + REQUEST_CHANGES -> not a take"      automerge_will_take acme/site REQUEST_CHANGES
-forgejo_repo_get_file() { printf '%s' '{"automerge":{"require_human":true}}'; }   # carve-out, still url-bearing
+forgejo_repo_get_file_status() { printf 'found\t%s' '{"automerge":{"require_human":true}}'; }   # carve-out, still url-bearing
 no "will_take: carve-out + APPROVE -> human is the gate"          automerge_will_take acme/site APPROVE
-forgejo_repo_get_file() { printf '%s' '{"automerge":{"require_human":false}}'; }   # reset
+forgejo_repo_get_file_status() { printf 'found\t%s' '{"automerge":{"require_human":false}}'; }   # reset
 automerge_url_status() { printf 'ok\t'; }   # url-LESS repo -- igor#520: never a shadow-alone take
 no "will_take: url-less repo + APPROVE -> never a shadow take"    automerge_will_take acme/site APPROVE
 automerge_url_status() { printf 'error\t'; }   # dossier fetch failed this tick -- unknown, not a take

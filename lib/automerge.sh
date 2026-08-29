@@ -141,10 +141,26 @@ automerge_url_status() {
 # (including igor itself) is ALREADY human-gated upstream, unconditionally,
 # regardless of this flag -- see do_automerge_tick's use of
 # automerge_url_status.
+#
+# Fails closed on UNKNOWN, not on unstated (igor#561): a readable agent.json
+# that simply omits `.automerge.require_human` (or the whole `.automerge`
+# object) is an expressed, unchanged intent -- read as false, same as
+# master's behavior before this fix. Only a state the harness cannot
+# actually read -- the file deleted (404, e.g. mid dossier-conversion), a
+# fetch/transport failure, or malformed JSON -- requires a human, because
+# that is precisely the silent-loss failure mode this function exists to
+# close: nothing errors, the pin just stops being readable. Uses
+# forgejo_repo_get_file_status (found/missing/error), not the plain
+# forgejo_repo_get_file, specifically to keep "absent" and "unreadable"
+# distinguishable from "read cleanly, says nothing."
 automerge_require_human() {
-  local repo="$1"
-  [ "$(forgejo_repo_get_file "$repo" "$AGENT_CONFIG_FILE" 2>/dev/null \
-        | jq -r '.automerge.require_human // false' 2>/dev/null)" = "true" ]
+  local repo="$1" out status body val
+  out=$(forgejo_repo_get_file_status "$repo" "$AGENT_CONFIG_FILE" 2>/dev/null)
+  status=${out%%$'\t'*}
+  [ "$status" = "found" ] || return 0
+  body=${out#*$'\t'}
+  val=$(jq -r '.automerge.require_human' <<<"$body" 2>/dev/null) || return 0
+  [ "$val" = "true" ]
 }
 
 # automerge_will_take <repo> <verdict> -- exit 0 if the auto-merge tick will merge

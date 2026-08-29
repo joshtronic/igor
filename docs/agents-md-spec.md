@@ -3,8 +3,13 @@
 Every fleet repo carries exactly one context file: `AGENTS.md`, at the
 repo root. It is the project's dossier -- what the project is, what
 winning looks like, and the decided policy around it -- plus a small
-machine-readable block the harness parses. It replaces `CLAUDE.md`,
-`agent.json`, and `CEO.md`; converted repos delete all three.
+machine-readable block the harness parses. It replaces `CLAUDE.md` and
+`CEO.md`; converted repos delete both.
+
+`agent.json`, if present, is NOT deleted on conversion. It is the
+permanent home for machine config too structured for the dossier's
+flat-scalar Metadata block -- see "`agent.json`: structured config"
+below for which keys live where.
 
 The format follows the [AGENTS.md standard](https://agents.md/): plain
 markdown, prose for agents to read. This spec constrains it further so
@@ -113,6 +118,44 @@ site types and take no `url`. The type drives harness behavior
 expects), so a new value is a harness change, shipped together with
 it.
 
+## `agent.json`: structured config
+
+The Metadata block is flat scalars by design (see "The Metadata
+block" above) -- keeping the parser a grep/awk pass, not a YAML
+library, is worth more than fitting every machine setting into it.
+Config that is genuinely structured (nested objects, lists) has no
+home in Metadata and never will; it lives in `agent.json` at the repo
+root instead, permanently, whether or not the repo has converted to
+this spec. `agent.json` is jq-parsed, not grep/awk, so nesting costs
+nothing there.
+
+Decided split, operator ruling 2026-08-29 (igor#561):
+
+- **Dossier Metadata** (flat scalars): `type`, `url`, `test`, `lint`,
+  `verify`, `feedback-csv`, `landed-kind`, `generated-data`.
+- **`agent.json`** (structured): `automerge.require_human` (a
+  boolean pin to the human merge gate) and `automerge.maintenance`
+  (`{branch, allowlist: [...], data_file, rejected_category}`, the
+  maintenance-tier auto-merge carve-out) -- see `lib/automerge.sh`.
+
+A repo may carry both files at once: `AGENTS.md` for the dossier,
+`agent.json` for whatever structured config it needs. Converting a
+repo to this spec never touches `agent.json`; only `CLAUDE.md` and
+`CEO.md` are deleted (see "Migration order" below). A repo with
+nothing structured to declare simply has no `agent.json`, same as
+today.
+
+`automerge_require_human` (`lib/automerge.sh`) fails closed when
+`agent.json` cannot be read -- missing, unreachable, or malformed all
+require a human, since an unreadable config and a config that reads
+cleanly and simply says nothing are different facts (a repo's
+`agent.json` disappearing must not silently read as "never wanted the
+gate"). `automerge_maintenance_declaration` needs no equivalent fix:
+it treats an unreadable file the same as an absent declaration, and
+absence is already the safe default for that opt-in tier -- no
+declaration just means the carve-out doesn't apply, leaving the
+ordinary (human-gated, absent a `false` pin) path in force.
+
 ## Validation contract
 
 `validate-repo` asserts, loudly and fail-fast, against the ROOT
@@ -173,11 +216,18 @@ fine too; validation is the gate either way.
 Migration order per repo: wizard emits `AGENTS.md`; content worth
 keeping from `CLAUDE.md` moves into Caveats/Metadata; a retired
 `CEO.md`'s guardrails move into DOs and DON'Ts ("fire the CEO, keep
-his notes"); `CLAUDE.md`, `agent.json`, and `CEO.md` are deleted in
-the same PR. During the migration window the harness helpers fall
-back to `agent.json` for any repo that has not adopted the spec (see
-the un-adopted-vs-nonconforming rule above); the fallback is removed on
-the condition stated there -- with the last repo's conversion PR.
+his notes"); `CLAUDE.md` and `CEO.md` are deleted in the same PR.
+**`agent.json` is NOT deleted** -- see "`agent.json`: structured
+config" above; any `automerge.require_human` or
+`automerge.maintenance` it carries must survive the conversion PR
+unchanged. During the migration window the harness helpers also fall
+back to `agent.json` for the Metadata-equivalent keys (`url`,
+`feedback-csv`, `landed-kind`) of any repo that has not adopted the
+spec (see the un-adopted-vs-nonconforming rule above); that
+Metadata-equivalent fallback is removed on the condition stated
+there -- with the last repo's conversion PR. The structured-config
+keys have no such expiry: `agent.json` stays in play for them
+regardless of dossier adoption.
 
 Acceptance test for a conversion: the amnesia test. A cold agent with
 only the thin dossier takes a trivial ticket end-to-end. If it
