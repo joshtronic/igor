@@ -5134,12 +5134,29 @@ Revert those changes (or do them yourself outside the agent) and remove \`Status
   if SEC_FINDINGS=$(security_gate "$WORKTREE" "$PR_BASE" "security-gate-issue"); then
     :
   else
-    log "outcome: blocked (security review flagged the diff)"
-    agent-block.sh "The harness security review flagged a material issue in this change, so it was NOT pushed:
+    # security_gate distinguishes a completed review that found something
+    # (return 1) from a gate that never produced a verdict at all (return
+    # 2, fail-closed -- igor#491). The two are not the same block: a
+    # material finding needs a human decision (probe: operator, never
+    # auto-cleared); a no-verdict gate error is the transient the original
+    # design called out ("just re-queue") and should clear itself, bounded
+    # by the repeat-block guard rather than a new retry counter (igor#555).
+    SEC_RC=$?
+    if [ "$SEC_RC" -eq 2 ]; then
+      log "outcome: blocked (security gate produced no verdict -- transient)"
+      agent-block.sh "The harness security review could not produce a verdict, so this change was NOT pushed:
 
 ${SEC_FINDINGS}
 
-Address it, then remove \`Status/Blocked\` to re-queue. (If the note above says the gate could not complete, that's a transient error -- just re-queue.)"
+This is a transient gate error, not a confirmed finding -- the block records a \`transient\` probe and will clear itself on the next sweep. If it keeps recurring with the same reason, it will escalate to a human instead of requeuing forever." transient
+    else
+      log "outcome: blocked (security review flagged the diff)"
+      agent-block.sh "The harness security review flagged a material issue in this change, so it was NOT pushed:
+
+${SEC_FINDINGS}
+
+A human needs to decide how to proceed -- address it, then remove \`Status/Blocked\` to re-queue." operator
+    fi
     exit 0
   fi
 

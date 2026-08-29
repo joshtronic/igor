@@ -18,8 +18,8 @@
 # currently means.
 #
 #   <!-- probe
-#   kind: issue-open | pr-behind | operator
-#   ref: <owner>/<repo>#<number>   (omitted for kind: operator)
+#   kind: issue-open | pr-behind | operator | transient
+#   ref: <owner>/<repo>#<number>   (omitted for kind: operator, transient)
 #   confirmed: <YYYY-MM-DD>        (written by the sweep, not the producer)
 #   cleared: <YYYY-MM-DD>          (written by the sweep, not the producer)
 #   -->
@@ -40,6 +40,15 @@
 #               operator needs to choose an approach"). Never evaluated,
 #               never auto-requeued; this is the "who" vs "what" split
 #               the issue asks for.
+#   transient   No ref -- there is no external state to poll (e.g. a gate
+#               that failed to produce a verdict at all: igor#491/igor#555).
+#               ALWAYS evaluates CLEARED, so it requeues on the very next
+#               sweep -- "presumed resolved, try again" rather than "prove
+#               it resolved". Boundedness comes from the repeat-block guard
+#               below, not a second counter: if the same failure keeps
+#               recurring, the identical reason re-accumulates across
+#               requeue cycles and the guard escalates on the third
+#               occurrence instead of requeuing forever.
 #
 # do_blockprobe_tick sweeps every Status/Blocked issue in the analysis set
 # once per tick (non-model, API-only, so it runs even during a Claude health
@@ -92,7 +101,7 @@
 # (lib/automerge.sh), log (tick.sh), jq.
 
 BLOCKPROBE_OPEN="<!-- probe"
-BLOCKPROBE_KINDS="issue-open pr-behind operator"
+BLOCKPROBE_KINDS="issue-open pr-behind operator transient"
 BLOCKPROBE_BLOCKED_HEADING="## Blocked ("
 BLOCKPROBE_ESCALATED_MARKER="<!-- blockprobe-escalated -->"
 
@@ -305,8 +314,15 @@ blockprobe_eval_pr_behind() {
 # interpolated straight into an API path. Collaborator rights and GET-only
 # requests already bound the damage, but a checked shape makes "a crafted ref
 # reaches no request" structurally true instead of incidentally true.
+#
+# kind: transient takes no ref and needs no request at all -- it always
+# evaluates CLEARED, so it must be dispatched before the ref-shape check
+# below (an empty ref would otherwise read as UNKNOWN and never requeue).
 blockprobe_evaluate() {
   local kind="$1" ref="$2" repo num
+  if [ "$kind" = "transient" ]; then
+    printf 'CLEARED'; return 0
+  fi
   if [[ ! "$ref" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\#[0-9]+$ ]] || [ "${ref#*..}" != "$ref" ]; then
     printf 'UNKNOWN'; return 0
   fi

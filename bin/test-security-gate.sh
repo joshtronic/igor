@@ -147,10 +147,30 @@ echo "== security_gate: three consecutive no-verdicts -> fail closed =="
 rm -rf "$(logs_dir)"
 claude_call() { printf 'A long essay that never reaches a verdict line at all.\n'; }
 OUT=$(security_gate "$WT" "master" "security-gate-issue"); RC=$?
-eq "returns 1 (blocks)" "1" "$RC"
+# igor#555: a gate that never produced a verdict is a DIFFERENT case from a
+# completed review that found something material -- callers that apply
+# Status/Blocked need to tell them apart, so this is return 2, not the
+# material-BLOCK return 1 (checked in the "immediate BLOCK" case above).
+eq "returns 2 (blocks, but distinct from a material BLOCK)" "2" "$RC"
 has "says why (re-queue, not a confirmed vuln)" "$OUT" "no verdict from the reviewer after 3 attempts"
 has "points at the preserved artifacts" "$OUT" "security-gate-logs"
 eq "all three undiagnosable responses were preserved" "3" "$(log_count)"
+
+echo "== security_gate: a material BLOCK and a no-verdict error are distinguishable return codes =="
+rm -rf "$(logs_dir)"
+claude_call() { printf -- '- hardcoded API key\nSECURITY_VERDICT: BLOCK\n'; }
+BLOCK_RC=0; security_gate "$WT" "master" "security-gate-issue" >/dev/null || BLOCK_RC=$?
+rm -rf "$(logs_dir)"
+claude_call() { printf 'never reaches a verdict line\n'; }
+ERROR_RC=0; security_gate "$WT" "master" "security-gate-issue" >/dev/null || ERROR_RC=$?
+eq "material BLOCK is 1" "1" "$BLOCK_RC"
+eq "gate error is 2" "2" "$ERROR_RC"
+if [ "$BLOCK_RC" != "$ERROR_RC" ]; then
+  printf '  + %s\n' "the two return codes are distinct, so a caller can tell them apart"
+else
+  printf '  x %s\n' "material BLOCK and gate-error returned the SAME code -- a caller cannot distinguish them"
+  FAIL=$((FAIL + 1))
+fi
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-security-gate: all checks passed"

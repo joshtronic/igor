@@ -213,6 +213,19 @@ eq "pr-behind, undetermined -> UNKNOWN" "UNKNOWN" "$(blockprobe_evaluate pr-behi
 automerge_behind_count() { printf -- '-5'; }
 eq "pr-behind, other negative -> UNKNOWN" "UNKNOWN" "$(blockprobe_evaluate pr-behind joshtronic/repo#147)"
 
+echo "== blockprobe_evaluate: kind transient (igor#555) -- always CLEARED, no ref needed =="
+# transient has no external condition to poll (e.g. a security gate that
+# never produced a verdict): it always evaluates CLEARED so a block records
+# with it requeues on the very next sweep, with no ref at all.
+eq "transient, no ref -> CLEARED" "CLEARED" "$(blockprobe_evaluate transient "")"
+eq "transient, a ref present anyway -> still CLEARED (ref is ignored)" "CLEARED" \
+   "$(blockprobe_evaluate transient joshtronic/igor#537)"
+# And it never touches the network to get there.
+forgejo_get_issue() { echo "forgejo_get_issue should not be called for kind transient" >&2; return 1; }
+automerge_behind_count() { echo "automerge_behind_count should not be called for kind transient" >&2; return 1; }
+NOCALL_ERR=$(blockprobe_evaluate transient "" 2>&1 1>/dev/null)
+eq "transient never calls forgejo_get_issue or automerge_behind_count" "" "$NOCALL_ERR"
+
 echo "== do_blockprobe_tick: end-to-end sweep over stubbed Forgejo =="
 
 # Common stubs. Each scenario below overrides what it needs and resets captures.
@@ -420,6 +433,88 @@ _fj() {
 do_blockprobe_tick
 eq "operator: label untouched" "" "$REMOVED"
 eq "operator: no comment"      "" "$COMMENTS"
+
+echo "-- scenario: transient block (igor#555) -- self-clears on the very next sweep --"
+# The motivating case: a security gate that produced no verdict at all
+# (fail-closed) has no external condition to poll, so the probe always
+# evaluates CLEARED and the ticket is requeued unconditionally.
+#
+# blockprobe_evaluate itself never calls forgejo_get_issue for kind
+# transient (asserted directly above), but do_blockprobe_tick's CLEARED
+# path still re-fetches the TICKET's own body to stamp the probe spent
+# (_blockprobe_record_stamp) -- so forgejo_get_issue must answer for the
+# ticket number, same shape as the "probe fails (cause resolved)" scenario.
+_reset_capture
+TRANSIENT_BODY='---
+## Blocked (2026-08-28 01:26Z)
+
+The harness security review could not produce a verdict, so this change was NOT pushed.
+
+<!-- probe
+kind: transient
+-->'
+_fj() {
+  case "$1 $2" in
+    "GET /repos/acme/x/issues?state=open&type=issues&labels=Status/Blocked&limit=50")
+      _issues_payload 18 "$TRANSIENT_BODY" ;;
+    "PATCH /repos/acme/x/issues/18") : ;;
+    *) _no_issues ;;
+  esac
+}
+forgejo_get_issue() { jq -cn --arg b "$TRANSIENT_BODY" '{number:18, body:$b, state:"open"}'; }
+do_blockprobe_tick
+has "transient: Status/Blocked removed"  "$REMOVED" "acme/x#18:Status/Blocked"
+has "transient: unassigned"              "$UNASSIGNED" "acme/x#18"
+has "transient: comment posted"          "$COMMENTS" "acme/x#18"
+eq  "transient: no escalation assignment" "" "$ASSIGNED"
+
+echo "-- scenario: same TRANSIENT reason blocking 3x -> escalate, not requeue forever --"
+# Boundedness comes from the existing repeat-block guard, not a second retry
+# counter: a security gate that keeps failing the same way must not requeue
+# indefinitely, so the identical reason accumulating across requeue cycles
+# trips the same escalation a mechanical probe would.
+_reset_capture
+TRANSIENT_REPEAT_BODY='---
+## Blocked (2026-08-28 01:00Z)
+
+The harness security review could not produce a verdict, so this change was NOT pushed.
+
+<!-- probe
+kind: transient
+-->
+
+---
+## Blocked (2026-08-28 01:05Z)
+
+The harness security review could not produce a verdict, so this change was NOT pushed.
+
+<!-- probe
+kind: transient
+-->
+
+---
+## Blocked (2026-08-28 01:10Z)
+
+The harness security review could not produce a verdict, so this change was NOT pushed.
+
+<!-- probe
+kind: transient
+-->'
+_fj() {
+  if [ "$1 $2" = "GET /repos/acme/x/issues?state=open&type=issues&labels=Status/Blocked&limit=50" ]; then
+    _issues_payload 19 "$TRANSIENT_REPEAT_BODY"
+  else
+    _no_issues
+  fi
+}
+# shellcheck disable=SC2034  # read by do_blockprobe_tick (lib/blockprobe.sh)
+FORGEJO_REVIEWER="josh"
+do_blockprobe_tick
+eq   "transient escalate: label NOT removed" "" "$REMOVED"
+eq   "transient escalate: not unassigned"    "" "$UNASSIGNED"
+has  "transient escalate: comment posted"    "$COMMENTS" "acme/x#19"
+has  "transient escalate: reviewer assigned" "$ASSIGNED" "acme/x#19->josh"
+unset FORGEJO_REVIEWER
 
 echo "-- scenario: same reason blocking 3x -> escalate, not requeue --"
 _reset_capture
