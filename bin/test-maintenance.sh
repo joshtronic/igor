@@ -203,12 +203,14 @@ eq "all-errored tick returns non-zero (cascade continues past maintenance)" "1" 
 
 echo "== do_maintenance_tick: a successful pass still ends the tick as before =="
 STUB_DMFR_RESULTS=(0); STUB_DMFR_CALLS=0
+# shellcheck disable=SC2034
 ANALYSIS_REPOS_JSON="$(repos_json tickrepo-ok)"
 do_maintenance_tick >/dev/null 2>&1
 eq "an all-successful tick still returns success" "0" "$?"
 
 echo "== do_maintenance_tick: one success among several errors is still enough =="
 STUB_DMFR_RESULTS=(1 0 1); STUB_DMFR_CALLS=0
+# shellcheck disable=SC2034
 ANALYSIS_REPOS_JSON="$(repos_json tickrepo-mix-a tickrepo-mix-b tickrepo-mix-c)"
 do_maintenance_tick >/dev/null 2>&1
 eq "a mixed tick with at least one success returns success" "0" "$?"
