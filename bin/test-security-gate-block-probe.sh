@@ -10,7 +10,9 @@
 # The motivating case (joshing.you#220) was blocked by exactly this path.
 #
 # lib/security-gate.sh and lib/blockprobe.sh are unit-tested elsewhere
-# (bin/test-security-gate.sh, bin/test-blockprobe.sh) for the underlying
+# (bin/test-security-gate.sh, bin/test-blockprobe.sh -- including the
+# behavioural pair: this reason WITH a transient probe self-clears, the same
+# reason with the probe recording severed reads UNPROBED) for the underlying
 # return-code split and probe semantics; this file is the wiring check that
 # bin/tick.sh's call site actually USES both, in the spirit of
 # bin/test-heartbeat-before-security-gate.sh. Doesn't run tick.sh -- just
@@ -52,30 +54,48 @@ else
       bad "does not branch on the no-verdict return code (2)"
     fi
 
-    # Each agent-block.sh call's reason string spans several lines (a
-    # multi-line double-quoted argument), so the probe-kind word that
-    # closes it is the LAST line of that call, not the one with
-    # "agent-block.sh" itself. Match on that closing line directly.
-    if printf '%s\n' "$BLOCK" | grep -qF 'forever." transient'; then
-      ok "the no-verdict path records a 'transient' probe"
+    # Assert per BRANCH, not on the reason prose: each agent-block.sh call's
+    # reason is a multi-line double-quoted argument, so the probe kind is the
+    # trailing word on the line that closes it. Slicing the if/else lets the
+    # reason wording change freely without breaking the wiring check.
+    IF_LN=$(printf '%s\n' "$BLOCK" | grep -nE '\[ "\$SEC_RC" -eq 2 \]' | head -1 | cut -d: -f1)
+    ELSE_LN=$(printf '%s\n' "$BLOCK" | tail -n "+${IF_LN:-1}" | grep -nE '^[[:space:]]*else[[:space:]]*$' | head -1 | cut -d: -f1)
+    FI_LN=$(printf '%s\n' "$BLOCK" | tail -n "+${IF_LN:-1}" | grep -nE '^[[:space:]]*fi[[:space:]]*$' | head -1 | cut -d: -f1)
+
+    if [ -z "$IF_LN" ] || [ -z "$ELSE_LN" ] || [ -z "$FI_LN" ]; then
+      bad "could not slice the SEC_RC if/else branches -- the call site's shape changed"
     else
-      bad "the no-verdict path does not record a 'transient' probe -- will read UNPROBED forever"
+      NO_VERDICT_BRANCH=$(printf '%s\n' "$BLOCK" | sed -n "$((IF_LN + 1)),$((IF_LN + ELSE_LN - 2))p")
+      MATERIAL_BRANCH=$(printf '%s\n' "$BLOCK" | sed -n "$((IF_LN + ELSE_LN)),$((IF_LN + FI_LN - 2))p")
+
+      _branch_records() {   # <branch text> <expected kind>
+        printf '%s\n' "$1" | grep -q 'agent-block\.sh' \
+          && printf '%s\n' "$1" | grep -qE "\" $2\$"
+      }
+
+      if _branch_records "$NO_VERDICT_BRANCH" transient; then
+        ok "the no-verdict branch calls agent-block.sh with a 'transient' probe"
+      else
+        bad "the no-verdict branch does not record a 'transient' probe -- will read UNPROBED forever"
+      fi
+
+      if _branch_records "$MATERIAL_BRANCH" operator; then
+        ok "the material-finding branch calls agent-block.sh with an 'operator' probe"
+      else
+        bad "the material-finding branch does not record an 'operator' probe -- will read UNPROBED forever"
+      fi
     fi
 
-    if printf '%s\n' "$BLOCK" | grep -qF 're-queue." operator'; then
-      ok "the material-finding path records an 'operator' probe"
+    # Regression guard on the OLD call shape: pre-igor#555 this block called
+    # agent-block.sh with no trailing probe-kind argument at all. Counting
+    # calls against probe-kind terminators proves no unprobed call survives
+    # anywhere in the block, without depending on any reason wording.
+    N_CALLS=$(printf '%s\n' "$BLOCK" | grep -c 'agent-block\.sh')
+    N_KINDS=$(printf '%s\n' "$BLOCK" | grep -cE '" (transient|operator)$')
+    if [ "$N_CALLS" -gt 0 ] && [ "$N_CALLS" -eq "$N_KINDS" ]; then
+      ok "every agent-block.sh call in the block records a probe kind ($N_CALLS/$N_CALLS)"
     else
-      bad "the material-finding path does not record an 'operator' probe -- will read UNPROBED forever"
-    fi
-
-    # Negative check: the pre-igor#555 shape called agent-block.sh exactly
-    # once in this block, with no trailing probe-kind argument at all --
-    # proving the OLD unprobed call is actually gone, not just that new
-    # strings were added alongside it.
-    if printf '%s\n' "$BLOCK" | grep -qF "that's a transient error -- just re-queue.)\""; then
-      bad "the old unprobed agent-block.sh call (no probe-kind argument) is still present"
-    else
-      ok "the old unprobed agent-block.sh call is gone"
+      bad "an unprobed agent-block.sh call survives: $N_CALLS call(s), $N_KINDS probe kind(s)"
     fi
   fi
 fi
