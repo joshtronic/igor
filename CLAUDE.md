@@ -370,8 +370,9 @@ respective tools on the host; install or skip.
   gone from `CASCADE_STAGES`, `do_ceo_tick` and its `bin/tick.sh` gate are
   removed, and `lib/ceo.sh` is no longer sourced. `lib/ceo.sh` and
   `bin/lib/ceo-digest-directive.md` are deliberately left on disk, orphaned --
-  deleting `lib/ceo.sh` alone is over the per-issue runaway guard, so full
-  removal is a separate, operator-gated phase 2.
+  nothing reads them; full removal is a separate, operator-gated phase 2.
+  `bin/test-retired-directives.sh` holds the negative assertion that the
+  wiring stays gone.
 - The auto-merge + deploy barrier (`lib/automerge.sh`, Phase 1) is the "after you
   approve, your job ends" step -- convention opt-in like logwatch, but
   now with TWO merge paths keyed on `automerge_url_status` (dossier root
