@@ -262,6 +262,38 @@ ok "require_human: 200 with an empty body -> human gate"          automerge_requ
 forgejo_repo_get_file_status() { printf 'error\t'; }
 ok "require_human: fetch/transport error -> human gate"           automerge_require_human acme/site
 
+# Every case above stubs the reader, which leaves its CONTRACT assumed rather
+# than tested. These run the REAL forgejo_repo_get_file_status with only `curl`
+# faked, so the seam is exercised end to end: the helper hands back file content
+# already base64-DECODED, which is the only reason `jq -e '.automerge...'` sees
+# plain JSON. Were it ever to return the raw API envelope, that key would read
+# null on every repo and the whole fleet would silently human-gate -- a failure
+# no stub in this file can catch. Subshell so the sourced lib/forgejo.sh and the
+# curl stub can't leak into the sections below, which need their own stubs.
+_require_human_via_real_reader() {  # <api-body> <http-code> -> human|shadow
+  local api_body="$1" http_code="$2"
+  # lib/forgejo.sh hard-requires both at source time. `local` (bash dynamic
+  # scope) is what the sourced file reads, and keeps them out of the suite's
+  # globals -- assigning them in the subshell instead trips SC2030/SC2031
+  # against the real FORGEJO_TOKEN the merge section sets further down.
+  # shellcheck disable=SC2034  # read by the sourced lib/forgejo.sh
+  local FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+  (
+    # shellcheck source=../lib/forgejo.sh
+    . "$HERE/../lib/forgejo.sh"
+    curl() { printf '%s\n%s' "$api_body" "$http_code"; }
+    if automerge_require_human acme/site; then echo human; else echo shadow; fi
+  )
+}
+# base64 of {"automerge":{"require_human":false}} -- what the contents API
+# actually returns for an opted-out repo.
+eq "require_human: real reader, base64 envelope declaring false -> shadow gate" "shadow" \
+  "$(_require_human_via_real_reader \
+      '{"content":"eyJhdXRvbWVyZ2UiOnsicmVxdWlyZV9odW1hbiI6ZmFsc2V9fQ=="}' 200)"
+eq "require_human: real reader, 403 (not a 404) -> human gate" "human" \
+  "$(_require_human_via_real_reader '{"message":"token lacks scope"}' 403)"
+unset -f _require_human_via_real_reader
+
 echo "== automerge_will_take (do_review_tick suppresses the human request) =="
 automerge_url_status() { printf 'ok\thttps://x'; }   # url-bearing repo throughout this section
 forgejo_repo_get_file_status() { printf 'found\t%s' '{"automerge":{"require_human":false}}'; }   # default (shadow-gated) repo
