@@ -4968,14 +4968,24 @@ A human needs to decide how to proceed -- address it, then remove \`Status/Block
     NEW_PR_NUMBER="$EXISTING_PR"
     # Finalize a checkpoint draft: give it a clean (non-WIP) title + a real body,
     # which marks it ready so the review + merge loops (which skip WIP PRs) pick
-    # it up. Prefer the newest real commit subject, skipping the harness's
-    # "WIP: ... checkpoint" markers; the body comes from PR_BODY.md as usual.
+    # it up. Prefer PR_BODY.md's own first checklist item for the title (the
+    # agent's own stated headline for the WHOLE change, same signal a
+    # single-run PR's title already comes from) -- NOT the newest commit
+    # subject, which can be a small trailing cleanup that describes only one
+    # bullet of the diff (igor#569/igor#572). Fall back to the newest real
+    # commit subject, skipping the harness's "WIP: ... checkpoint" markers,
+    # only when PR_BODY.md is absent or its first item doesn't parse.
     EX_JSON=$(forgejo_get_pr "$FORGEJO_REPO" "$EXISTING_PR" 2>/dev/null || echo '{}')
     EX_TITLE=$(printf '%s' "$EX_JSON" | jq -r '.title // ""')
     if checkpoint_is_wip "$EX_TITLE"; then
-      FINAL_TITLE=$(git log "origin/${PR_BASE}..HEAD" --pretty=%s 2>/dev/null \
+      COMMIT_SUBJECT_FALLBACK=$(git log "origin/${PR_BASE}..HEAD" --pretty=%s 2>/dev/null \
         | grep -vE '^WIP: issue #[0-9]+ checkpoint' | head -1)
-      [ -n "$FINAL_TITLE" ] || FINAL_TITLE="issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
+      [ -n "$COMMIT_SUBJECT_FALLBACK" ] || COMMIT_SUBJECT_FALLBACK="issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
+      if FINAL_TITLE=$(checkpoint_final_title .agent/PR_BODY.md "$COMMIT_SUBJECT_FALLBACK"); then
+        log "checkpoint: finalize title derived from PR_BODY.md's first item"
+      else
+        log "checkpoint: PR_BODY.md yielded no usable title (absent, first item missing or blank, or the derivation helpers weren't sourced) -- finalize title fell back to the commit subject ($COMMIT_SUBJECT_FALLBACK)"
+      fi
       if [ -f .agent/PR_BODY.md ]; then
         FINAL_BODY=$(cat .agent/PR_BODY.md)
       else

@@ -152,6 +152,53 @@ pr_body_ensure_closes() {
   fi
 }
 
+# checkpoint_final_title <pr_body_file> <fallback_subject> -- the title for a
+# resumed PR's finalize (dropping WIP), preferring PR_BODY.md's own first
+# "What this PR does" item over the branch's newest commit subject.
+#
+# igor#572/igor#569: a resumed branch's newest commit can be a small trailing
+# cleanup ("docs: note the CEO stage removal...") that describes one bullet of
+# a much bigger diff (the whole CEO cascade stage retirement). Titling from
+# `git log --pretty=%s | head -1` picked that trailing commit every time,
+# mistitling the PR. PR_BODY.md's first checklist item is the agent's own
+# stated headline for the WHOLE change -- the same string bin/tick.sh's
+# derive_commit_subject already prefers for a single-run (non-resumed) PR's
+# title -- so a resumed PR should prefer it too, for the same reason.
+#
+# rc 0 + the body item (normalized to a conventional-commit subject) when
+# PR_BODY.md exists and its first item parses; rc 1 + <fallback_subject>
+# verbatim when the file is absent or its first item doesn't parse -- the
+# caller (bin/tick.sh) should log on rc 1, since a silent fallback here
+# reproduces the exact bug this fixes, invisibly.
+#
+# The DERIVED title is what's guarded, not the raw item: a whitespace-only
+# item ("- [x]    ") is non-empty yet normalizes to a bare "chore: ", and the
+# finalize edit has no write path to fix a junk title after the fact (a
+# mistitled PR the review/merge loops then act on). Both an empty derivation
+# and an empty raw item fall through to the logged fallback instead.
+#
+# Depends on pr_body_first_item / normalize_subject (lib/claude.sh); callers
+# must source both, as bin/tick.sh already does. A caller that sources this
+# file alone lands on the fallback tier rather than aborting the finalize path
+# with `command not found` -- the same rc 1 the caller already logs.
+checkpoint_final_title() {
+  local pr_body_file="$1" fallback="$2" item title
+  if [ -f "$pr_body_file" ] \
+     && command -v pr_body_first_item >/dev/null 2>&1 \
+     && command -v normalize_subject >/dev/null 2>&1; then
+    item=$(pr_body_first_item "$pr_body_file")
+    item="${item#"${item%%[![:space:]]*}"}"
+    item="${item%"${item##*[![:space:]]}"}"
+    title=$(normalize_subject "$item")
+    if [ -n "$item" ] && [ -n "$title" ]; then
+      printf '%s' "$title"
+      return 0
+    fi
+  fi
+  printf '%s' "$fallback"
+  return 1
+}
+
 # checkpoint_budget_exhausted <count> -- rc 0 when an issue has checkpointed
 # CHECKPOINT_MAX or more times without finishing and must be escalated to a human
 # instead of resumed again.
