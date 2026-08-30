@@ -366,13 +366,13 @@ respective tools on the host; install or skip.
   harness's own repo -- self-deploy +
   blast radius means it stays a human gate regardless of verdict. Clear
   a PR's `.review` entry to force a re-review.
-- The CEO board digest cascade stage was retired (igor#556 phase 1): `ceo` is
-  gone from `CASCADE_STAGES`, `do_ceo_tick` and its `bin/tick.sh` gate are
-  removed, and `lib/ceo.sh` is no longer sourced. `lib/ceo.sh` and
-  `bin/lib/ceo-digest-directive.md` are deliberately left on disk, orphaned --
-  nothing reads them; full removal is a separate, operator-gated phase 2.
-  `bin/test-retired-directives.sh` holds the negative assertion that the
-  wiring stays gone.
+- The CEO board digest cascade stage is retired (igor#556). Phase 1 unwired it:
+  `ceo` gone from `CASCADE_STAGES`, `do_ceo_tick` and its `bin/tick.sh` gate
+  removed, `lib/ceo.sh` unsourced. Phase 2 deleted `lib/ceo.sh` and
+  `bin/lib/ceo-digest-directive.md` outright. It was a live-but-dormant stage,
+  not dead code -- it ran every tick and did nothing, because no repo carried
+  the `CEO.md` mandate that opted it in. `bin/test-retired-directives.sh` holds
+  the negative assertions that both the wiring and the files stay gone.
 - The auto-merge + deploy barrier (`lib/automerge.sh`, Phase 1) is the "after you
   approve, your job ends" step -- convention opt-in like logwatch, but
   now with TWO merge paths keyed on `automerge_url_status` (dossier root
