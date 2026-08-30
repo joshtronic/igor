@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # test-checkpoint.sh -- unit tests for lib/checkpoint.sh: the max-turns stream
 # detection, the commit/checkpoint/discard disposition (incl. the porksicle#114
-# stash guard), the WIP title round-trip, the body checkpoint-counter, and the
-# resume-budget cap. Pure logic -- no network, no git, no state. Skip-safe: needs
-# jq (like the other bin/test-*.sh); exits 0 with a notice if absent.
+# stash guard), the WIP title round-trip, the body checkpoint-counter, the
+# resume-budget cap, and the resumed-PR finalize title derivation (igor#572).
+# Pure logic -- no network, no git, no state. Skip-safe: needs jq (like the
+# other bin/test-*.sh); exits 0 with a notice if absent.
 set -uo pipefail
 
 command -v jq >/dev/null 2>&1 || { echo "test-checkpoint: jq absent -- skipping"; exit 0; }
@@ -11,6 +12,9 @@ command -v jq >/dev/null 2>&1 || { echo "test-checkpoint: jq absent -- skipping"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../lib/checkpoint.sh
 . "$HERE/../lib/checkpoint.sh"
+# checkpoint_final_title derives from pr_body_first_item / normalize_subject.
+# shellcheck source=../lib/claude.sh
+. "$HERE/../lib/claude.sh"
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
@@ -95,6 +99,70 @@ no    "budget: 7 checkpoints -> not exhausted"          checkpoint_budget_exhaus
 ok    "budget: 8 checkpoints -> exhausted (escalate)"   checkpoint_budget_exhausted 8
 ok    "budget: 20 checkpoints -> exhausted"             checkpoint_budget_exhausted 20
 no    "budget: empty arg -> treated as 0"               checkpoint_budget_exhausted ""
+
+echo "== final title derivation on finalize (igor#572) =="
+# igor#569: a resumed branch's newest commit was a small cleanup ("docs: note
+# the CEO stage removal..."), so titling from `git log --pretty=%s | head -1`
+# mistitled a PR that actually retired the whole CEO cascade stage. The fix:
+# derive the title from PR_BODY.md's first checklist item instead, falling
+# back to the (git-log-derived) commit subject only when the file is absent
+# or unparseable -- and the fallback path must be observable (rc!=0) so the
+# caller can log it.
+BODY_OK="$TMP/pr_body_ok.md"
+cat >"$BODY_OK" <<'EOF'
+## What this PR does
+
+- [x] chore: retire the CEO cascade stage (phase 1 -- unwire only)
+- [x] Unwire the retired stage's gate and its per-tick file-output helper
+
+## Test plan
+
+- [x] make test
+EOF
+eq "final_title: uses PR_BODY.md's first item, not the last commit" \
+   "chore: retire the CEO cascade stage (phase 1 -- unwire only)" \
+   "$(checkpoint_final_title "$BODY_OK" 'docs: note the CEO stage removal in CLAUDE.md')"
+ok "final_title: rc0 when derived from the body" \
+   checkpoint_final_title "$BODY_OK" 'docs: note the CEO stage removal in CLAUDE.md'
+
+NO_BODY="$TMP/pr_body_missing.md"
+rm -f "$NO_BODY"
+eq "final_title: no PR_BODY.md -> falls back to the commit subject" \
+   "fix: the actual thing" \
+   "$(checkpoint_final_title "$NO_BODY" 'fix: the actual thing')"
+no "final_title: rc!=0 (fallback) when PR_BODY.md is absent -- caller must log" \
+   checkpoint_final_title "$NO_BODY" 'fix: the actual thing'
+
+BODY_UNPARSEABLE="$TMP/pr_body_unparseable.md"
+cat >"$BODY_UNPARSEABLE" <<'EOF'
+Just some prose with no "What this PR does" checklist at all.
+EOF
+eq "final_title: unparseable first item -> falls back to the commit subject" \
+   "fix: the actual thing" \
+   "$(checkpoint_final_title "$BODY_UNPARSEABLE" 'fix: the actual thing')"
+no "final_title: rc!=0 (fallback) on an unparseable body -- caller must log" \
+   checkpoint_final_title "$BODY_UNPARSEABLE" 'fix: the actual thing'
+
+# negative test: prove the OLD derivation (newest non-WIP commit subject) is
+# what mistitled igor#569 -- i.e. that the fix above is actually load-bearing.
+OLD_STYLE_TITLE="docs: note the CEO stage removal in CLAUDE.md"
+NEW_STYLE_TITLE=$(checkpoint_final_title "$BODY_OK" "$OLD_STYLE_TITLE")
+if [ "$NEW_STYLE_TITLE" = "$OLD_STYLE_TITLE" ]; then
+  printf '  x %s\n' "final_title: negative check -- body-derived title must differ from the commit-subject title it replaces"
+  FAIL=$((FAIL + 1))
+else
+  printf '  + %s\n' "final_title: negative check -- body-derived title differs from (and fixes) the commit-subject title"
+fi
+
+# a non-resumed (single-run) PR never calls checkpoint_final_title at all --
+# bin/tick.sh's derive_commit_subject (tier 1) already does body-first
+# derivation for that path via the same primitives (pr_body_first_item +
+# normalize_subject), so it is unaffected by this change. Spot-check that
+# checkpoint_final_title's body-derived output matches those primitives
+# directly, proving it's the same derivation and not a divergent one:
+eq "single-run path's primitives are unaffected by this change" \
+   "$(normalize_subject "$(pr_body_first_item "$BODY_OK")")" \
+   "$(checkpoint_final_title "$BODY_OK" 'chore: fallback')"
 
 # ---- the forgejo.sh helpers the checkpoint flow depends on ----------------
 # The discovery gate + resume detector key off forgejo_bot_prs_for_issue's title

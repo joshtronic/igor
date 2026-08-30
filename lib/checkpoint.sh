@@ -152,6 +152,40 @@ pr_body_ensure_closes() {
   fi
 }
 
+# checkpoint_final_title <pr_body_file> <fallback_subject> -- the title for a
+# resumed PR's finalize (dropping WIP), preferring PR_BODY.md's own first
+# "What this PR does" item over the branch's newest commit subject.
+#
+# igor#572/igor#569: a resumed branch's newest commit can be a small trailing
+# cleanup ("docs: note the CEO stage removal...") that describes one bullet of
+# a much bigger diff (the whole CEO cascade stage retirement). Titling from
+# `git log --pretty=%s | head -1` picked that trailing commit every time,
+# mistitling the PR. PR_BODY.md's first checklist item is the agent's own
+# stated headline for the WHOLE change -- the same string bin/tick.sh's
+# derive_commit_subject already prefers for a single-run (non-resumed) PR's
+# title -- so a resumed PR should prefer it too, for the same reason.
+#
+# rc 0 + the body item (normalized to a conventional-commit subject) when
+# PR_BODY.md exists and its first item parses; rc 1 + <fallback_subject>
+# verbatim when the file is absent or its first item doesn't parse -- the
+# caller (bin/tick.sh) should log on rc 1, since a silent fallback here
+# reproduces the exact bug this fixes, invisibly.
+#
+# Depends on pr_body_first_item / normalize_subject (lib/claude.sh); callers
+# must source both, as bin/tick.sh already does.
+checkpoint_final_title() {
+  local pr_body_file="$1" fallback="$2" item
+  if [ -f "$pr_body_file" ]; then
+    item=$(pr_body_first_item "$pr_body_file")
+    if [ -n "$item" ]; then
+      normalize_subject "$item"
+      return 0
+    fi
+  fi
+  printf '%s' "$fallback"
+  return 1
+}
+
 # checkpoint_budget_exhausted <count> -- rc 0 when an issue has checkpointed
 # CHECKPOINT_MAX or more times without finishing and must be escalated to a human
 # instead of resumed again.
