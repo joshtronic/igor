@@ -175,16 +175,21 @@ _context_manifest_raw() {
 # Hashes the skill's raw SKILL.md bytes at origin/master (the whole
 # file, exactly as `still build` would have hashed it -- not the
 # frontmatter-stripped body context_skill_body returns) and compares
-# against the manifest's recorded sha256 for that skill, keyed by name
-# under .skills. A skill absent from the manifest is a failure, same as
-# a mismatch -- otherwise the check is bypassed by just deleting the
-# manifest entry. Broken out as its own function (rather than inlined
-# in context_refresh's loop) so a test can stub it to prove the gate,
-# not some unrelated validation, is what rejects a mutated skill.
+# against the manifest's recorded sha256 for that skill. `still build`'s
+# cmd_build (joshtronic/distillery, bin/still) emits `.skills` as an
+# ARRAY of objects -- {"name":..., "sha256":..., ...} -- not an object
+# keyed by name, so the lookup must select by `.name` rather than index.
+# A skill absent from the array is a failure, same as a mismatch --
+# otherwise the check is bypassed by just deleting the manifest entry.
+# An old-shape (object-keyed) manifest also fails here rather than
+# silently passing (igor#574). Broken out as its own function (rather
+# than inlined in context_refresh's loop) so a test can stub it to
+# prove the gate, not some unrelated validation, is what rejects a
+# mutated skill.
 _context_verify_skill_sha256() {
   local skill="$1" manifest="$2" dpath expected computed
   dpath="$(_context_distillery_path)"
-  expected=$(printf '%s' "$manifest" | jq -r --arg s "$skill" '.skills[$s] // empty' 2>/dev/null)
+  expected=$(printf '%s' "$manifest" | jq -r --arg s "$skill" '(.skills // [])[]? | select(.name == $s) | .sha256' 2>/dev/null)
   if [ -z "$expected" ]; then
     printf 'missing from manifest\n' >&2
     return 1
