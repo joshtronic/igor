@@ -10,6 +10,9 @@ for t in jq python3 sha1sum; do
 done
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+# shellcheck source=../lib/forgejo.sh
+. "$HERE/../lib/forgejo.sh"
 # shellcheck source=../lib/dossier.sh
 . "$HERE/../lib/dossier.sh"
 # shellcheck source=../lib/context-source.sh

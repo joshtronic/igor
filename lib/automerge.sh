@@ -684,10 +684,10 @@ automerge_risk_notify_record() {
 # Echoes -1 when it can't be determined, so the caller skips rather than guesses.
 automerge_behind_count() {
   local repo="$1" pr="$2" obj head base cmp
-  obj=$(_fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null) || { echo -1; return; }
+  obj=$(forgejo_get_pr "$repo" "$pr" 2>/dev/null) || { echo -1; return; }
   head=$(jq -r '.head.sha // empty' <<<"$obj"); base=$(jq -r '.base.ref // empty' <<<"$obj")
   if [ -z "$head" ] || [ -z "$base" ]; then echo -1; return; fi
-  cmp=$(_fj GET "/repos/${repo}/compare/${head}...${base}" 2>/dev/null) || { echo -1; return; }
+  cmp=$(forgejo_compare "$repo" "$head" "$base" 2>/dev/null) || { echo -1; return; }
   jq -r 'if type == "object" then (.total_commits // (.commits | length) // 0) else -1 end' <<<"$cmp" 2>/dev/null || echo -1
 }
 
@@ -698,7 +698,7 @@ automerge_behind_count() {
 # diff, so it isn't re-reviewed. rc 0 on success.
 automerge_update_branch() {
   local repo="$1" pr="$2"
-  _fj POST "/repos/${repo}/pulls/${pr}/update" >/dev/null 2>&1
+  forgejo_pr_update_branch "$repo" "$pr"
 }
 
 # automerge_smoke <url> -- exit 0 if the live URL responds 2xx/3xx.
@@ -908,7 +908,7 @@ do_automerge_tick() {
       # to head.sha (below), the CI check needs it, and the maintenance tier
       # (below) reuses this SAME fetch for its branch/base checks rather than
       # re-fetching (a second fetch would only widen the classify-vs-merge race).
-      pr_json=$(_fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null)
+      pr_json=$(forgejo_get_pr "$repo" "$pr" 2>/dev/null)
       head=$(jq -r '.head.sha // ""' <<<"$pr_json" 2>/dev/null)
       [ -n "$head" ] || continue
       verdict=$(jq -r --arg k "$key" '.review[$k].verdict // ""' "$sf" 2>/dev/null)
