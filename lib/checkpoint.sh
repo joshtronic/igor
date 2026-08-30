@@ -171,14 +171,27 @@ pr_body_ensure_closes() {
 # caller (bin/tick.sh) should log on rc 1, since a silent fallback here
 # reproduces the exact bug this fixes, invisibly.
 #
+# The DERIVED title is what's guarded, not the raw item: a whitespace-only
+# item ("- [x]    ") is non-empty yet normalizes to a bare "chore: ", and the
+# finalize edit has no write path to fix a junk title after the fact (a
+# mistitled PR the review/merge loops then act on). Both an empty derivation
+# and an empty raw item fall through to the logged fallback instead.
+#
 # Depends on pr_body_first_item / normalize_subject (lib/claude.sh); callers
-# must source both, as bin/tick.sh already does.
+# must source both, as bin/tick.sh already does. A caller that sources this
+# file alone lands on the fallback tier rather than aborting the finalize path
+# with `command not found` -- the same rc 1 the caller already logs.
 checkpoint_final_title() {
-  local pr_body_file="$1" fallback="$2" item
-  if [ -f "$pr_body_file" ]; then
+  local pr_body_file="$1" fallback="$2" item title
+  if [ -f "$pr_body_file" ] \
+     && command -v pr_body_first_item >/dev/null 2>&1 \
+     && command -v normalize_subject >/dev/null 2>&1; then
     item=$(pr_body_first_item "$pr_body_file")
-    if [ -n "$item" ]; then
-      normalize_subject "$item"
+    item="${item#"${item%%[![:space:]]*}"}"
+    item="${item%"${item##*[![:space:]]}"}"
+    title=$(normalize_subject "$item")
+    if [ -n "$item" ] && [ -n "$title" ]; then
+      printf '%s' "$title"
       return 0
     fi
   fi

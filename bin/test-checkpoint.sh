@@ -22,6 +22,7 @@ FAIL=0
 ok() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  + %s\n' "$d"; else printf '  x %s (expected rc0)\n' "$d"; FAIL=$((FAIL + 1)); fi; }
 no() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (expected rc!=0)\n' "$d"; FAIL=$((FAIL + 1)); else printf '  + %s\n' "$d"; fi; }
 eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
+ne() { if [ "$2" != "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected anything but [%s]\n' "$1" "$2"; FAIL=$((FAIL + 1)); fi; }
 has() { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
 lacks() { case "$2" in *"$3"*) printf '  x %s: [%s] still has [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; *) printf '  + %s\n' "$1" ;; esac; }
 
@@ -143,24 +144,46 @@ eq "final_title: unparseable first item -> falls back to the commit subject" \
 no "final_title: rc!=0 (fallback) on an unparseable body -- caller must log" \
    checkpoint_final_title "$BODY_UNPARSEABLE" 'fix: the actual thing'
 
+# a first item that is plain prose (no conventional-commit prefix) is the
+# common non-conventional case: it must be normalized, not rejected.
+BODY_PROSE="$TMP/pr_body_prose.md"
+printf '## What this PR does\n\n- [x] Add the thing\n' >"$BODY_PROSE"
+eq "final_title: plain-prose first item gets a conventional prefix" \
+   "chore: Add the thing" "$(checkpoint_final_title "$BODY_PROSE" 'fix: fallback')"
+ok "final_title: rc0 on a plain-prose first item" \
+   checkpoint_final_title "$BODY_PROSE" 'fix: fallback'
+
+# a whitespace-only first item passes a raw [ -n ] test but normalizes to a
+# bare "chore: " -- a junk title that would silently replace the WIP one and
+# leave nobody a write path to fix it. Must land on the logged fallback.
+BODY_BLANK_ITEM="$TMP/pr_body_blank_item.md"
+printf '## What this PR does\n\n- [x]    \n' >"$BODY_BLANK_ITEM"
+eq "final_title: whitespace-only first item -> falls back, not 'chore: '" \
+   "fix: the actual thing" "$(checkpoint_final_title "$BODY_BLANK_ITEM" 'fix: the actual thing')"
+no "final_title: rc!=0 (fallback) on a whitespace-only first item" \
+   checkpoint_final_title "$BODY_BLANK_ITEM" 'fix: the actual thing'
+
+# the lib/claude.sh dependency is not sourced by lib/checkpoint.sh itself. A
+# caller that sources checkpoint.sh alone must land on the fallback tier (which
+# the caller logs), not abort the finalize path with `command not found`.
+eq "final_title: missing pr_body_first_item -> fallback, not a hard error" \
+   "fix: the actual thing" \
+   "$(unset -f pr_body_first_item; checkpoint_final_title "$BODY_OK" 'fix: the actual thing')"
+eq "final_title: missing normalize_subject -> fallback, not a hard error" \
+   "fix: the actual thing" \
+   "$(unset -f normalize_subject; checkpoint_final_title "$BODY_OK" 'fix: the actual thing')"
+
 # negative test: prove the OLD derivation (newest non-WIP commit subject) is
 # what mistitled igor#569 -- i.e. that the fix above is actually load-bearing.
-OLD_STYLE_TITLE="docs: note the CEO stage removal in CLAUDE.md"
-NEW_STYLE_TITLE=$(checkpoint_final_title "$BODY_OK" "$OLD_STYLE_TITLE")
-if [ "$NEW_STYLE_TITLE" = "$OLD_STYLE_TITLE" ]; then
-  printf '  x %s\n' "final_title: negative check -- body-derived title must differ from the commit-subject title it replaces"
-  FAIL=$((FAIL + 1))
-else
-  printf '  + %s\n' "final_title: negative check -- body-derived title differs from (and fixes) the commit-subject title"
-fi
+ne "final_title: body-derived title differs from (and fixes) the commit-subject title" \
+   "docs: note the CEO stage removal in CLAUDE.md" \
+   "$(checkpoint_final_title "$BODY_OK" 'docs: note the CEO stage removal in CLAUDE.md')"
 
-# a non-resumed (single-run) PR never calls checkpoint_final_title at all --
-# bin/tick.sh's derive_commit_subject (tier 1) already does body-first
-# derivation for that path via the same primitives (pr_body_first_item +
-# normalize_subject), so it is unaffected by this change. Spot-check that
-# checkpoint_final_title's body-derived output matches those primitives
-# directly, proving it's the same derivation and not a divergent one:
-eq "single-run path's primitives are unaffected by this change" \
+# checkpoint_final_title must stay the SAME derivation bin/tick.sh's
+# derive_commit_subject (tier 1) uses for a single-run PR's title, not a
+# divergent one -- a guard against the two drifting apart, since a non-resumed
+# PR never calls checkpoint_final_title and so can't catch that here:
+eq "final_title: same body derivation derive_commit_subject's tier 1 uses" \
    "$(normalize_subject "$(pr_body_first_item "$BODY_OK")")" \
    "$(checkpoint_final_title "$BODY_OK" 'chore: fallback')"
 
