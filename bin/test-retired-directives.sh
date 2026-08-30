@@ -13,14 +13,17 @@
 # reader can't turn this red; a comment naming a retired path is skipped
 # because nothing dereferences a comment.
 #
-# igor#556 (phase 1) retired the CEO cascade stage as a deliberate removal,
-# not a dead-code cleanup -- do_ceo_tick was live and reachable, it just had
-# zero opted-in repos (no repo carries a CEO.md mandate). Phase 1 unwires only
-# (CASCADE_STAGES, the cascade_run gate, do_ceo_tick, the lib/ceo.sh source
-# line); lib/ceo.sh and bin/lib/ceo-digest-directive.md are left on disk,
-# orphaned, for a separate phase 2. The assertions below check the wiring is
-# gone -- deliberately NOT that those two files still exist, since deleting
-# them is the goal, not a regression.
+# igor#556 retired the CEO cascade stage as a deliberate removal, not a
+# dead-code cleanup -- do_ceo_tick was live and reachable via cascade_run's
+# dynamic `do_${stage}_tick` dispatch, it just had zero opted-in repos (no
+# repo carries a CEO.md mandate), so it ran every tick and did nothing.
+#
+# Phase 1 unwired it: `ceo` out of CASCADE_STAGES, the cascade_run gate, the
+# do_ceo_tick function, and the lib/ceo.sh source line. Phase 2 deleted
+# lib/ceo.sh and bin/lib/ceo-digest-directive.md outright -- phase 1 had
+# already orphaned them, so removal was a filesystem change, not a behaviour
+# one. The assertions below cover both halves: the wiring stays gone, the
+# files stay gone, and nothing grows a reader back around either.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -103,19 +106,30 @@ done < <(grep -inH ceo bin/tick.sh 2>/dev/null || true)
 
 [ "$CEO_SYMBOL_HITS" -eq 0 ] && ok "bin/tick.sh has no reference to the retired CEO wiring"
 
+echo "== igor#556 phase 2: the CEO library and directive are gone from disk =="
+# Phase 2 deleted both outright. They were orphaned by phase 1 (nothing sourced
+# them), so this is the removal half rather than a behaviour change. A file
+# reappearing means the surface is growing back.
+for _f in lib/ceo.sh bin/lib/ceo-digest-directive.md; do
+  if [ -e "$_f" ]; then
+    bad "$_f still exists -- the CEO surface was retired in igor#556 phase 2"
+  else
+    ok "$_f is gone"
+  fi
+done
+
 echo "== and no other script sources lib/ceo.sh or calls into it =="
 # The check above is scoped to one file, which leaves "is tick.sh really the
 # only caller?" resting on a grep someone ran once. This is the repo-side half:
-# lib/ceo.sh and bin/lib/ceo-digest-directive.md stay on disk ORPHANED until
-# phase 2, so a non-comment line in any other shell script that sources the
-# library, calls a ceo_* helper, or reads the directive is a reader growing
-# back. Scoped to *.sh so the directive's own prose isn't matched, and
-# lib/ceo.sh's internals are excluded -- it may of course call itself.
+# both files are DELETED as of phase 2, so a non-comment line in any shell
+# script that sources the library, calls a ceo_* helper, or reads the directive
+# is a reader growing back around a file that no longer exists. Scoped to *.sh
+# so prose isn't matched.
 CEO_READER_HITS=0
 while IFS=: read -r _file _lineno content; do
   [ -n "${content+set}" ] || continue
   case "$_file" in
-    lib/ceo.sh|bin/test-retired-directives.sh) continue ;;
+    bin/test-retired-directives.sh) continue ;;
   esac
   trimmed="${content#"${content%%[![:space:]]*}"}"
   case "$trimmed" in
@@ -129,7 +143,7 @@ while IFS=: read -r _file _lineno content; do
   esac
 done < <(grep -rniH --include='*.sh' ceo bin/ lib/ 2>/dev/null || true)
 
-[ "$CEO_READER_HITS" -eq 0 ] && ok "lib/ceo.sh is orphaned -- no script outside it reads it"
+[ "$CEO_READER_HITS" -eq 0 ] && ok "nothing reaches into the deleted CEO machinery"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-retired-directives: all checks passed"
