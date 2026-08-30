@@ -3,7 +3,9 @@
 # detection, the commit/checkpoint/discard disposition (incl. the porksicle#114
 # stash guard), the WIP title round-trip, the body checkpoint-counter, the
 # resume-budget cap, and the resumed-PR finalize title derivation (igor#572).
-# Pure logic -- no network, no git, no state. Skip-safe: needs jq (like the
+# Pure logic -- no network, no git, no state; the one reach outside lib/ lifts
+# derive_commit_subject out of bin/tick.sh to pin the two title paths together,
+# and stops short of its model-calling tier. Skip-safe: needs jq (like the
 # other bin/test-*.sh); exits 0 with a notice if absent.
 set -uo pipefail
 
@@ -173,19 +175,37 @@ eq "final_title: missing normalize_subject -> fallback, not a hard error" \
    "fix: the actual thing" \
    "$(unset -f normalize_subject; checkpoint_final_title "$BODY_OK" 'fix: the actual thing')"
 
-# negative test: prove the OLD derivation (newest non-WIP commit subject) is
-# what mistitled igor#569 -- i.e. that the fix above is actually load-bearing.
-ne "final_title: body-derived title differs from (and fixes) the commit-subject title" \
-   "docs: note the CEO stage removal in CLAUDE.md" \
-   "$(checkpoint_final_title "$BODY_OK" 'docs: note the CEO stage removal in CLAUDE.md')"
+# A single-run (non-resumed) PR is titled by bin/tick.sh's derive_commit_subject
+# tier 1; a resumed one is now titled by checkpoint_final_title. Off the SAME
+# body those two must agree, or the same change would be titled differently
+# depending on whether it happened to checkpoint. Lift the real function out of
+# tick.sh (the idiom bin/test-cascade.sh already uses for cascade_run) rather
+# than re-composing normalize_subject/pr_body_first_item here -- a
+# re-implementation pins this file's own arithmetic and would sail through the
+# drift it exists to catch. Tier 1 returns before tier 2's model call, so
+# nothing here goes near the network.
+DCS_SRC=$(sed -n '/^derive_commit_subject() {$/,/^}$/p' "$HERE/tick.sh")
+if [ -z "$DCS_SRC" ]; then
+  printf '  x could not extract derive_commit_subject() from bin/tick.sh\n'
+  FAIL=$((FAIL + 1))
+else
+  eval "$DCS_SRC"
+  eq "final_title: agrees with tick.sh's derive_commit_subject tier 1" \
+     "$(derive_commit_subject "$BODY_OK" "" 'chore: fallback')" \
+     "$(checkpoint_final_title "$BODY_OK" 'chore: fallback')"
+  eq "derive_commit_subject: tier 1 still titles a single-run PR from the body item" \
+     "chore: retire the CEO cascade stage (phase 1 -- unwire only)" \
+     "$(derive_commit_subject "$BODY_OK" "" 'chore: fallback')"
 
-# checkpoint_final_title must stay the SAME derivation bin/tick.sh's
-# derive_commit_subject (tier 1) uses for a single-run PR's title, not a
-# divergent one -- a guard against the two drifting apart, since a non-resumed
-# PR never calls checkpoint_final_title and so can't catch that here:
-eq "final_title: same body derivation derive_commit_subject's tier 1 uses" \
-   "$(normalize_subject "$(pr_body_first_item "$BODY_OK")")" \
-   "$(checkpoint_final_title "$BODY_OK" 'chore: fallback')"
+  # The one place the two deliberately diverge. tick.sh's tier 1 tests the RAW
+  # item, so a whitespace-only one yields a junk "chore: " title; the finalize
+  # edit tests the DERIVED title and falls back instead. Asserted so a later
+  # "make these consistent" cleanup has to reckon with the reason rather than
+  # quietly delete the guard.
+  ne "final_title: diverges from tier 1 on a whitespace-only item (guarded)" \
+     "$(derive_commit_subject "$BODY_BLANK_ITEM" "" 'fix: the actual thing')" \
+     "$(checkpoint_final_title "$BODY_BLANK_ITEM" 'fix: the actual thing')"
+fi
 
 # ---- the forgejo.sh helpers the checkpoint flow depends on ----------------
 # The discovery gate + resume detector key off forgejo_bot_prs_for_issue's title

@@ -4984,7 +4984,7 @@ A human needs to decide how to proceed -- address it, then remove \`Status/Block
       if FINAL_TITLE=$(checkpoint_final_title .agent/PR_BODY.md "$COMMIT_SUBJECT_FALLBACK"); then
         log "checkpoint: finalize title derived from PR_BODY.md's first item"
       else
-        log "checkpoint: PR_BODY.md missing or its first item didn't parse -- finalize title fell back to the commit subject ($COMMIT_SUBJECT_FALLBACK)"
+        log "checkpoint: PR_BODY.md yielded no usable title (absent, first item missing or blank, or the derivation helpers weren't sourced) -- finalize title fell back to the commit subject ($COMMIT_SUBJECT_FALLBACK)"
       fi
       if [ -f .agent/PR_BODY.md ]; then
         FINAL_BODY=$(cat .agent/PR_BODY.md)
