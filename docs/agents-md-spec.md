@@ -3,8 +3,11 @@
 Every fleet repo carries exactly one context file: `AGENTS.md`, at the
 repo root. It is the project's dossier -- what the project is, what
 winning looks like, and the decided policy around it -- plus a small
-machine-readable block the harness parses. It replaces `CLAUDE.md`,
-`agent.json`, and `CEO.md`; converted repos delete all three.
+machine-readable block the harness parses. It replaces `CLAUDE.md` and
+`CEO.md`; converted repos delete both. `agent.json` is different: it
+stays permanently as the home for machine config too structured for the
+dossier's flat Metadata block -- see "agent.json: the permanent
+structured-config file" below.
 
 The format follows the [AGENTS.md standard](https://agents.md/): plain
 markdown, prose for agents to read. This spec constrains it further so
@@ -154,6 +157,32 @@ fallback and flips non-adoption to a failure; a fallback still
 standing after that PR is live debt and gets a ticket, not another
 migration window.
 
+## agent.json: the permanent structured-config file
+
+Dossier conversion does not delete `agent.json`. The Metadata block above
+is deliberately flat -- `key: value` scalars, no nesting, no lists -- so a
+grep/awk parser can read it without a YAML library. Some machine config is
+inherently structured (a nested object, a list of allowlist entries) and
+doesn't fit that shape. `agent.json` is where that config lives, for every
+repo, permanently, regardless of dossier adoption.
+
+The split:
+
+| Config | Lives in |
+| --- | --- |
+| Flat scalars: `type`, `url`, `test`, `lint`, `verify`, `feedback-csv`, `landed-kind`, `generated-data` | Dossier `## Metadata` (or `agent.json` as the legacy fallback for a repo that hasn't adopted the dossier yet) |
+| `automerge.require_human` (boolean) | `agent.json` only -- never migrates to the dossier |
+| `automerge.maintenance` (object: `branch`, `allowlist`, `data_file`, `rejected_category`) | `agent.json` only -- never migrates to the dossier |
+
+`lib/automerge.sh`'s `automerge_require_human` and
+`automerge_maintenance_declaration` read `agent.json` directly and
+unconditionally -- not through the dossier fallback chain
+(`dossier_get_repo_status`) that the flat scalar keys above use, and not
+affected by whether the repo has otherwise adopted the dossier. A repo
+that adopts the dossier and needs neither key simply has no `agent.json`
+at all; one that needs either keeps a minimal `agent.json` carrying only
+the `automerge` object.
+
 ## Nested dossiers
 
 Per the AGENTS.md standard, nested files are allowed and the nearest
@@ -173,11 +202,17 @@ fine too; validation is the gate either way.
 Migration order per repo: wizard emits `AGENTS.md`; content worth
 keeping from `CLAUDE.md` moves into Caveats/Metadata; a retired
 `CEO.md`'s guardrails move into DOs and DON'Ts ("fire the CEO, keep
-his notes"); `CLAUDE.md`, `agent.json`, and `CEO.md` are deleted in
-the same PR. During the migration window the harness helpers fall
-back to `agent.json` for any repo that has not adopted the spec (see
-the un-adopted-vs-nonconforming rule above); the fallback is removed on
-the condition stated there -- with the last repo's conversion PR.
+his notes"); `CLAUDE.md` and `CEO.md` are deleted in the same PR.
+`agent.json` is NOT deleted -- see "agent.json: the permanent
+structured-config file" above -- unless the repo declares neither
+`automerge.require_human` nor `automerge.maintenance`, in which case
+there is nothing left in it to keep. During the migration window the
+harness helpers fall back to `agent.json` for the flat scalar keys of
+any repo that has not adopted the spec (see the un-adopted-vs-nonconforming
+rule above); that fallback is removed on the condition stated there --
+with the last repo's conversion PR. `agent.json`'s role as the
+structured-config home is independent of that fallback and is never
+removed.
 
 Acceptance test for a conversion: the amnesia test. A cold agent with
 only the thin dossier takes a trivial ticket end-to-end. If it

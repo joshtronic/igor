@@ -141,10 +141,30 @@ automerge_url_status() {
 # (including igor itself) is ALREADY human-gated upstream, unconditionally,
 # regardless of this flag -- see do_automerge_tick's use of
 # automerge_url_status.
+#
+# Fails closed on UNKNOWN, never on UNSTATED (igor#578; three prior attempts
+# -- igor#561, #562, #571 -- all got this backwards). A readable config that
+# simply never mentions the key, or has no `.automerge` object at all, is an
+# EXPRESSED intent -- the repo hasn't opted in, same as master's behavior
+# always was -- and must NOT gate. Only a state the harness genuinely could
+# not read requires a human: the file gone (404, e.g. mid dossier-conversion),
+# a fetch/transport error, malformed JSON, or a 200 with an empty body. Uses
+# forgejo_repo_get_file_status (found/missing/error) rather than the plain
+# forgejo_repo_get_file so a 403/5xx can't masquerade as "no file" and get
+# read as unstated. The jq comparison is `== true`, not a `-r`-and-string
+# compare, so it's type-aware: the JSON string "true" doesn't count as the
+# boolean and doesn't gate (mirrors -- for the opposite default -- the
+# type-safety the earlier attempts got right for "false").
 automerge_require_human() {
-  local repo="$1"
-  [ "$(forgejo_repo_get_file "$repo" "$AGENT_CONFIG_FILE" 2>/dev/null \
-        | jq -r '.automerge.require_human // false' 2>/dev/null)" = "true" ]
+  local repo="$1" out status body rc
+  out=$(forgejo_repo_get_file_status "$repo" "$AGENT_CONFIG_FILE" 2>/dev/null) || out=$'error\t'
+  status=${out%%$'\t'*}
+  [ "$status" = "found" ] || return 0
+  body=${out#*$'\t'}
+  jq -e '.automerge.require_human == true' <<<"$body" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 1 ] && return 1
+  return 0
 }
 
 # automerge_will_take <repo> <verdict> -- exit 0 if the auto-merge tick will merge
