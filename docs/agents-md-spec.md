@@ -178,10 +178,19 @@ The split:
 `automerge_maintenance_declaration` read `agent.json` directly and
 unconditionally -- not through the dossier fallback chain
 (`dossier_get_repo_status`) that the flat scalar keys above use, and not
-affected by whether the repo has otherwise adopted the dossier. A repo
-that adopts the dossier and needs neither key simply has no `agent.json`
-at all; one that needs either keeps a minimal `agent.json` carrying only
-the `automerge` object.
+affected by whether the repo has otherwise adopted the dossier.
+
+**A url-bearing repo must keep an `agent.json` even if it declares
+neither key.** `automerge_require_human` fails closed on a state it could
+not read, and a missing file is one of those states: no `agent.json` reads
+as UNKNOWN and pins every merge to the human gate, forever. So a
+url-bearing repo that wants the shadow-gated auto-merge path keeps a
+minimal `agent.json` -- `{"automerge": {"require_human": false}}` says it
+outright, though any readable JSON object works, since an absent key is an
+expressed "not opted in" rather than an unknown. A url-LESS repo is
+implicitly human-gated anyway (igor#520; `do_automerge_tick` never reaches
+`automerge_require_human` for one), so there the file is genuinely
+optional.
 
 ## Nested dossiers
 
@@ -204,12 +213,14 @@ keeping from `CLAUDE.md` moves into Caveats/Metadata; a retired
 `CEO.md`'s guardrails move into DOs and DON'Ts ("fire the CEO, keep
 his notes"); `CLAUDE.md` and `CEO.md` are deleted in the same PR.
 `agent.json` is NOT deleted -- see "agent.json: the permanent
-structured-config file" above -- unless the repo declares neither
-`automerge.require_human` nor `automerge.maintenance`, in which case
-there is nothing left in it to keep. During the migration window the
-harness helpers fall back to `agent.json` for the flat scalar keys of
-any repo that has not adopted the spec (see the un-adopted-vs-nonconforming
-rule above); that fallback is removed on the condition stated there --
+structured-config file" above -- unless the repo is url-LESS and declares
+neither `automerge.require_human` nor `automerge.maintenance`, in which
+case there is nothing left in it to keep. On a url-bearing repo, deleting
+it silently converts every future merge into a human-gated one. During the
+migration window the harness helpers fall back to `agent.json` for the flat
+scalar keys of any repo that has not adopted the spec (see the
+un-adopted-vs-nonconforming rule above); that fallback is removed on the
+condition stated there --
 with the last repo's conversion PR. `agent.json`'s role as the
 structured-config home is independent of that fallback and is never
 removed.

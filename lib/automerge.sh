@@ -151,10 +151,8 @@ automerge_url_status() {
 # a fetch/transport error, malformed JSON, or a 200 with an empty body. Uses
 # forgejo_repo_get_file_status (found/missing/error) rather than the plain
 # forgejo_repo_get_file so a 403/5xx can't masquerade as "no file" and get
-# read as unstated. The jq comparison is `== true`, not a `-r`-and-string
-# compare, so it's type-aware: the JSON string "true" doesn't count as the
-# boolean and doesn't gate (mirrors -- for the opposite default -- the
-# type-safety the earlier attempts got right for "false").
+# read as unstated. The comparison is `== true` rather than a `-r`-and-string
+# compare so it stays type-aware: the JSON string "true" is not the boolean.
 automerge_require_human() {
   local repo="$1" out status body rc
   out=$(forgejo_repo_get_file_status "$repo" "$AGENT_CONFIG_FILE" 2>/dev/null) || out=$'error\t'

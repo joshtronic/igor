@@ -270,7 +270,7 @@ ok "require_human: 404 status wins over any paired body -> human gate" automerge
 # Sever the status check itself (a mutated copy with that line deleted) and
 # confirm the SAME fixture then wrongly clears the gate -- proving the check
 # above is load-bearing, not redundant with the JSON parse.
-eval "$(declare -f automerge_require_human | sed '1s/^automerge_require_human/_severed_require_human/' | awk '!index($0, "|| return 0")')"
+eval "$(declare -f automerge_require_human | sed '1s/^automerge_require_human/_severed_require_human/' | awk '!index($0, "= \"found\"")')"
 no "require_human (status check severed): 404 no longer requires a human" _severed_require_human acme/site
 
 echo "== automerge_will_take (do_review_tick suppresses the human request) =="
