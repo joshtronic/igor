@@ -10,11 +10,13 @@
 #  - lib/forgejo.sh itself, where `_fj` is defined and legitimately used.
 #  - bin/test-forgejo.sh, which exercises the private helper directly, by
 #    design (it is the client's own unit test).
-#  - bin/test-*.sh files that redefine `_fj() { ... }` as a stub/mock to
-#    intercept calls a sourced `forgejo_*` wrapper makes underneath. A mock
-#    never talks to a real forge, so a test double using the name doesn't
-#    violate the invariant this guard protects -- only a *bin/lib file that
-#    calls `_fj` as a command would.
+#  - this file, whose fixture heredocs and failure messages spell out the
+#    very calls it hunts for.
+#  - in bin/test-*.sh, only the LINE that redefines `_fj() { ... }` as a
+#    stub/mock to intercept calls a sourced `forgejo_*` wrapper makes
+#    underneath. A mock never talks to a real forge, so a test double using
+#    the name doesn't violate the invariant. A test that hand-rolls a real
+#    `_fj GET ...` call is a stray call like any other and is still flagged.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -33,13 +35,17 @@ scan_for_stray_fj() {
   grep -rnE '(^|[^A-Za-z0-9_])_fj([^A-Za-z0-9_]|$)' --include='*.sh' \
     "$root/bin" "$root/lib" 2>/dev/null \
     | while IFS=: read -r file lineno content; do
-        case "$file" in
-          */lib/forgejo.sh|*/bin/test-forgejo.sh) continue ;;
-          */bin/test-*.sh) continue ;;
-        esac
         trimmed="${content#"${content%%[![:space:]]*}"}"
         case "$trimmed" in
           '#'*) continue ;;
+        esac
+        case "$file" in
+          */lib/forgejo.sh|*/bin/test-forgejo.sh|*/bin/test-forgejo-surface.sh) continue ;;
+          */bin/test-*.sh)
+            case "$content" in
+              *'_fj()'*|*'_fj ()'*) continue ;;
+            esac
+            ;;
         esac
         printf '%s:%s:%s\n' "$file" "$lineno" "$content"
       done
@@ -104,8 +110,54 @@ EOF
     ok "a bin/test-*.sh mock definition of _fj() is correctly exempt"
   fi
 
+  echo "== sanity: the test-file exemption covers mocks only, not real calls =="
+  cat > "$TMPROOT/bin/test-realcall.sh" <<'EOF'
+#!/usr/bin/env bash
+setup_fixture() {
+  _fj GET "/repos/${1}/pulls/${2}"
+}
+EOF
+  REALCALL_HITS=$(scan_for_stray_fj "$TMPROOT")
+  if printf '%s' "$REALCALL_HITS" | grep -q 'test-realcall.sh'; then
+    ok "a bin/test-*.sh file hand-rolling a real _fj call is still flagged"
+  else
+    bad "a bin/test-*.sh file hand-rolling a real _fj call slipped through the mock exemption"
+  fi
+
   rm -rf "$TMPROOT"
   trap - EXIT
+fi
+
+# docs/forgejo-api-surface.md is the human-readable half of the same
+# invariant: if the surface is only explicit in a doc nobody checks, it
+# drifts the first time an operation is added. Both directions are checked --
+# an undocumented operation and a documented ghost are equally wrong.
+echo "== every named forgejo_* operation appears in docs/forgejo-api-surface.md =="
+DOC="$HERE/docs/forgejo-api-surface.md"
+CLIENT="$HERE/lib/forgejo.sh"
+
+UNDOCUMENTED=$(grep -oE '^forgejo_[a-z0-9_]+\(\)' "$CLIENT" | sed 's/()$//' | sort -u \
+  | while IFS= read -r fn; do
+      grep -qF "| \`${fn}\` |" "$DOC" || printf '%s\n' "$fn"
+    done)
+if [ -n "$UNDOCUMENTED" ]; then
+  while IFS= read -r fn; do
+    bad "operation not documented in docs/forgejo-api-surface.md: $fn"
+  done <<<"$UNDOCUMENTED"
+else
+  ok "every operation defined in lib/forgejo.sh has a documented row"
+fi
+
+GHOSTS=$(grep -oE '^\| `forgejo_[a-z0-9_]+`' "$DOC" | grep -oE 'forgejo_[a-z0-9_]+' | sort -u \
+  | while IFS= read -r fn; do
+      grep -qE "^${fn}\(\)" "$CLIENT" || printf '%s\n' "$fn"
+    done)
+if [ -n "$GHOSTS" ]; then
+  while IFS= read -r fn; do
+    bad "documented operation no longer exists in lib/forgejo.sh: $fn"
+  done <<<"$GHOSTS"
+else
+  ok "every documented row names an operation that still exists"
 fi
 
 if [ "$FAIL" -eq 0 ]; then

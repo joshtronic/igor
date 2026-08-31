@@ -15,6 +15,11 @@ Adding a new need means adding a new named operation here — never a generic
 `forgejo_raw_request`-style escape hatch, which would just recreate the
 problem this file exists to solve.
 
+The tables below are checked against `lib/forgejo.sh` by the same test, in
+both directions: an operation defined without a row here fails, and so does
+a row naming an operation that no longer exists. A surface doc nobody checks
+drifts the first time someone adds an operation.
+
 ## Issues
 
 | operation | needs from a forge |
