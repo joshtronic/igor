@@ -1942,14 +1942,14 @@ do_shipreport_tick() {
     reqh=$(forgejo_repo_get_file "$repo" "${AGENT_CONFIG_FILE:-agent.json}" 2>/dev/null \
             | jq -r '.automerge.require_human // false' 2>/dev/null)
     [ "$reqh" = "true" ] || reqh=false
-    merged=$(_fj GET "/repos/${repo}/pulls?state=closed&sort=recentupdate&limit=30" 2>/dev/null \
+    merged=$(forgejo_closed_pulls_recent "$repo" 30 2>/dev/null \
       | jq -c --arg u "$BOT_USER" --arg since "$since" --arg repo "$repo" --argjson rh "$reqh" '
           [ .[]? | select(.user.login == $u)
             | select((.merged_at // "") != "" and .merged_at >= $since)
             | {repo:$repo, number, title, url:.html_url, state:"merged",
                gate:(if $rh then "human" else "shadow" end), require_human:$rh} ]' 2>/dev/null) \
       || merged='[]'
-    open=$(_fj GET "/repos/${repo}/pulls?state=open&sort=oldest&limit=30" 2>/dev/null \
+    open=$(forgejo_open_pulls_oldest "$repo" 30 2>/dev/null \
       | jq -c --arg u "$BOT_USER" --arg repo "$repo" --argjson rh "$reqh" '
           [ .[]? | select(.user.login == $u)
             | {repo:$repo, number, title, url:.html_url, state:"open", gate:"", require_human:$rh} ]' 2>/dev/null) \

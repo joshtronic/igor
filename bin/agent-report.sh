@@ -44,8 +44,6 @@ BODY="${1:?usage: agent-report.sh \"<body>\"}"
 
 forgejo_comment "$FORGEJO_REPO" "$ISSUE_NUMBER" "$BODY"
 
-# Close the issue. (No helper for this yet -- one-liner via _fj.)
-_fj PATCH "/repos/${FORGEJO_REPO}/issues/${ISSUE_NUMBER}" \
-  '{"state": "closed"}' >/dev/null
+forgejo_close_issue "$FORGEJO_REPO" "$ISSUE_NUMBER"
 
 echo "agent-report: issue #${ISSUE_NUMBER} reported and closed" >&2

@@ -121,9 +121,9 @@ deferred_release_to_reviewer() {
     forgejo_assign "$repo" "$num" "$reviewer" 2>/dev/null \
       || log "deferred: warning -- could not assign ${repo}#${num} to ${reviewer}"
   fi
-  _fj POST "/repos/${repo}/issues/${num}/comments" \
-    "$(jq -n --arg b "Gate cleared -- ${evidence:-condition met}. Removed \`Status/Blocked\` + \`Agent\` and assigned to ${reviewer:-a reviewer} for confirmation. This auto gate-check can false-positive, so the ticket is NOT auto-worked: **re-add the \`Agent\` label** once you've confirmed the gate really cleared, and the grind will pick it up." '{body:$b}')" \
-    >/dev/null 2>&1 || true
+  forgejo_comment "$repo" "$num" \
+    "Gate cleared -- ${evidence:-condition met}. Removed \`Status/Blocked\` + \`Agent\` and assigned to ${reviewer:-a reviewer} for confirmation. This auto gate-check can false-positive, so the ticket is NOT auto-worked: **re-add the \`Agent\` label** once you've confirmed the gate really cleared, and the grind will pick it up." \
+    2>/dev/null || true
 }
 
 # do_deferred_tick -- walk the analysis set for deferred-gated tickets; check the
@@ -141,7 +141,7 @@ do_deferred_tick() {
     repo=$(jq -r '.full_name' <<<"$repo_line" 2>/dev/null)
     [ -n "$repo" ] || continue
 
-    issues=$(_fj GET "/repos/${repo}/issues?state=open&type=issues&labels=Status/Blocked&limit=50" 2>/dev/null) || continue
+    issues=$(forgejo_list_blocked_issues "$repo" 2>/dev/null) || continue
     [ -n "$issues" ] || continue
 
     while IFS= read -r n; do

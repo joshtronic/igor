@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Unit tests for lib/deferred.sh -- the deferred-ticket gate pass.
 # Skip-safe: exits 0 with a notice if a required tool is missing. Only the PURE
-# helpers are exercised (no network, no model calls, no _fj).
+# helpers are exercised (no network, no model calls; forgejo_* boundaries stubbed).
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
@@ -56,7 +56,7 @@ echo "== deferred_release_to_reviewer: gate MET hands to the human, not the grin
 REMOVED=""; ASSIGNED="none"; COMMENTED=0
 forgejo_remove_label() { REMOVED="$REMOVED $3"; }   # $3 = label name
 forgejo_assign()       { ASSIGNED="$1#$2->$3"; }
-_fj() { case "$1 $2" in "POST "*/comments) COMMENTED=1 ;; esac; return 0; }
+forgejo_comment()      { COMMENTED=1; }
 log() { :; }
 deferred_release_to_reviewer acme/x 7 josh "the image is listed"
 has "release: dropped Status/Blocked"      "$REMOVED" "Status/Blocked"

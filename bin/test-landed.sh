@@ -46,6 +46,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # AUTOMERGE_SELF_REPO is REQUIRED-AND-EXPLICIT, no default (igor#558) --
 # lib/automerge.sh fails fast at source time without it.
 export AUTOMERGE_SELF_REPO="joshtronic/igor"
+export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+# shellcheck source=../lib/forgejo.sh
+. "$HERE/../lib/forgejo.sh"
 # shellcheck source=../lib/dossier.sh
 . "$HERE/../lib/dossier.sh"
 # shellcheck source=../lib/landed.sh
