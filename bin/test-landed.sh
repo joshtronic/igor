@@ -75,10 +75,10 @@ has() { case "$2" in *"$3"*) pass "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' 
 # DOSSIER_REPO is on the ADOPTED path (a root AGENTS.md `## Metadata` block
 # carrying `landed-kind:`), the shape this genericization exists to establish
 # and the one distillery#7 will add. Reused across every section below.
-SELF_REPO="$AUTOMERGE_SELF_REPO"    # the real self slug, reused as a fixture key below --
-                                    # forgejo_repo_get_file_status is stubbed below and the ancestry
-                                    # sections export AGENT_HOME to $FIXTURE, so nothing here reads
-                                    # this harness's own live dossier or git history
+SELF_REPO="$AUTOMERGE_SELF_REPO"    # declares landed-kind: self-pull; the real self slug is reused
+                                    # as a fixture key -- forgejo_repo_get_file_status is stubbed
+                                    # below and the ancestry sections export AGENT_HOME to $FIXTURE,
+                                    # so nothing reads this harness's own live dossier or git history
 CACHE_REPO="joshtronic/distillery"  # declares landed-kind: context-cache
 PLAIN_REPO="acme/plain"             # declares no landed-kind at all
 WEIRD_REPO="acme/weird"             # declares an unrecognized landed-kind value

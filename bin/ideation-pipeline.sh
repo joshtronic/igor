@@ -906,8 +906,8 @@ classify_url_liveness() {
   esac
 }
 
-# A bare index/home page used as a citation is a stand-in smell (the
-# own-domain-as-citation class). Live, so not stripped -- just flagged.
+# A bare index/home page used as a citation is a stand-in smell (a host root or
+# shallow section index on any domain). Live, so not stripped -- just flagged.
 is_generic_index_url() {
   printf '%s' "$1" \
     | grep -qiE '^https?://[^/]+(/(links|about|blog|tags|index(\.html?)?)?)?/?$'
