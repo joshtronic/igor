@@ -207,7 +207,7 @@ eq "e2e: the self repo short-circuits before any fetch" \
 echo "== approval / mergeable gates =="
 _fj() { printf '%s' "$FJ"; }
 FJ='[{"user":{"login":"reviewer"},"state":"APPROVED"}]'
-ok "approved_by: reviewer APPROVED"            automerge_approved_by acme/x 1 reviewer
+ok "approved_by: reviewer APPROVED"        automerge_approved_by acme/x 1 reviewer
 FJ='[{"user":{"login":"reviewer"},"state":"COMMENT"}]'
 no "approved_by: only a COMMENT"           automerge_approved_by acme/x 1 reviewer
 FJ='[{"user":{"login":"bot"},"state":"APPROVED"}]'
@@ -353,7 +353,7 @@ SMOKE_CODE=000; no "smoke: unreachable -> down" automerge_smoke https://x
 echo "== deploy barrier state machine =="
 ALERTS=0
 export SMTP2GO_API_KEY=k SMTP2GO_SENDER=s
-recipients_with_primary() { printf 'reviewer@x'; }
+recipients_with_primary() { printf 'reviewer@example.com'; }
 email_send() { ALERTS=$((ALERTS + 1)); return 0; }
 COMMENTS=0; COMMENT_BODY=""
 forgejo_comment() { COMMENTS=$((COMMENTS + 1)); COMMENT_BODY="$3"; return 0; }

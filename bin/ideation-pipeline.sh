@@ -864,7 +864,7 @@ broken_internal_links() {
 #
 # PR #169 handed the drafter real source URLs and forbade inventing
 # internal /posts/ slugs, but a post still shipped three stand-in links to
-# the blog's own home page and a fabricated Verge URL: the model reaches
+# the blog's own index pages and a fabricated Verge URL: the model reaches
 # for an EXTERNAL URL from memory when the source it wants isn't in its
 # slice, and the internal-only check above never looked at those. The
 # draft prompt now forbids that; this is the deterministic backstop. Every

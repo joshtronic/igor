@@ -64,7 +64,7 @@ AUTOMERGE_BLOCK_COOLDOWN_SECS=3600                            # after a rejected
 # The base branch stays hardcoded: only the review branch's NAME was ever a
 # per-repo fact (the head side of the refresh pipeline's own PR); "master"
 # is this harness's fleet-wide default-branch convention (see PR_BASE in
-# AGENTS.md), not a joshing.you-specific detail.
+# AGENTS.md), not a fact about whichever repo declares the tier.
 AUTOMERGE_MAINTENANCE_TIER_BASE_BRANCH="master"
 
 # Filenames that must never fall inside a declared maintenance-tier

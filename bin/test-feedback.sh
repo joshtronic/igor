@@ -173,10 +173,10 @@ echo "== file_issue (UNLABELED + assigned + marker) =="
 POST_BODY=""
 _fj() { case "$1 $2" in "POST "*/issues) POST_BODY="$3" ;; esac; }
 feedback_file_issue acme/x "T" "B" "reviewer" >/dev/null 2>&1
-eq  "file: title in payload"    "T"    "$(jq -r '.title' <<<"$POST_BODY")"
+eq  "file: title in payload"    "T"        "$(jq -r '.title' <<<"$POST_BODY")"
 eq  "file: assigned to human"   "reviewer" "$(jq -r '.assignees[0]' <<<"$POST_BODY")"
 has "file: body carries marker" "$(jq -r '.body' <<<"$POST_BODY")" "$FEEDBACK_MARKER"
-eq  "file: UNLABELED at open"   "null" "$(jq -r '.labels // "null"' <<<"$POST_BODY")"
+eq  "file: UNLABELED at open"   "null"     "$(jq -r '.labels // "null"' <<<"$POST_BODY")"
 # The greenlight footer must NOT tell the human to unassign -- the Agent label
 # alone is the claimable gate (find_claimable accepts assigned-to-reviewer).
 case "$(jq -r '.body' <<<"$POST_BODY")" in
