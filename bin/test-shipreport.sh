@@ -24,7 +24,7 @@ echo "== shipreport_build: bucketing + gate tag =="
 ITEMS='[
   {"repo":"acme/deffo","number":1,"title":"shadow merge","url":"u1","state":"merged","gate":"shadow","require_human":false},
   {"repo":"acme/carve","number":2,"title":"human merge","url":"u2","state":"merged","gate":"human","require_human":true},
-  {"repo":"acme/carve","number":3,"title":"awaiting josh","url":"u3","state":"open","gate":"","require_human":true},
+  {"repo":"acme/carve","number":3,"title":"awaiting reviewer","url":"u3","state":"open","gate":"","require_human":true},
   {"repo":"acme/deffo","number":4,"title":"in the loop","url":"u4","state":"open","gate":"","require_human":false}
 ]'
 REPORT=$(printf '%s' "$ITEMS" | shipreport_build)

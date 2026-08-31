@@ -1820,7 +1820,7 @@ do_seo_tick() {
   # normal day -- same monthly gate, same email/ticket/record path -- so a
   # debug run still stamps the domain done. To re-run, clear its stamp
   # under .seo in discretionary-state.json. Bare domain, e.g.
-  # "joshtronic.com".
+  # "example.com".
   local domains target="" d
   if [ -n "${SEO_DEBUG_DOMAIN:-}" ]; then
     domains="$SEO_DEBUG_DOMAIN"

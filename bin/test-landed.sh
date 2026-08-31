@@ -75,7 +75,10 @@ has() { case "$2" in *"$3"*) pass "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' 
 # DOSSIER_REPO is on the ADOPTED path (a root AGENTS.md `## Metadata` block
 # carrying `landed-kind:`), the shape this genericization exists to establish
 # and the one distillery#7 will add. Reused across every section below.
-SELF_REPO="$AUTOMERGE_SELF_REPO"    # joshtronic/igor -- declares landed-kind: self-pull, for real
+SELF_REPO="$AUTOMERGE_SELF_REPO"    # declares landed-kind: self-pull; the real self slug is reused
+                                    # as a fixture key -- forgejo_repo_get_file_status is stubbed
+                                    # below and the ancestry sections export AGENT_HOME to $FIXTURE,
+                                    # so nothing reads this harness's own live dossier or git history
 CACHE_REPO="joshtronic/distillery"  # declares landed-kind: context-cache
 PLAIN_REPO="acme/plain"             # declares no landed-kind at all
 WEIRD_REPO="acme/weird"             # declares an unrecognized landed-kind value
@@ -278,7 +281,7 @@ echo "== do_landed_tick: grace exceeded -> alerts and clears =="
 EMAIL_CALLS=0
 email_send() { EMAIL_CALLS=$((EMAIL_CALLS + 1)); return 0; }
 forgejo_comment() { COMMENT_BODY="$3"; return 0; }
-export PRIMARY_RECIPIENTS=josh@example.com SMTP2GO_API_KEY=k SMTP2GO_SENDER=s@example.com
+export PRIMARY_RECIPIENTS=reviewer@example.com SMTP2GO_API_KEY=k SMTP2GO_SENDER=s@example.com
 echo '{}' > "$STATE"
 landed_record "$SELF_REPO" 521 "deadbeef0000000000000000000000000000dead"
 jq '.landed[$r].attempts = ($n|tonumber)' --arg r "$SELF_REPO" --arg n "$((LANDED_GRACE_TICKS - 1))" "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
@@ -323,7 +326,7 @@ eq "a still-pending kind-less entry has its kind persisted for later ticks" \
 unset AGENT_HOME
 
 echo "== do_automerge_tick wiring: a url-less merge on a kind-declaring repo stamps .landed, not .deploy =="
-export FORGEJO_REVIEWER=josh BOT_USER=igor
+export FORGEJO_REVIEWER=reviewer BOT_USER=igor
 echo '{}' > "$STATE"
 automerge_url_status() { printf 'ok\t'; }   # url-less, like SELF_REPO's real dossier answer
 export VALIDATED_REPOS_JSON="{\"full_name\":\"${SELF_REPO}\"}"

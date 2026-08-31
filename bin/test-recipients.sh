@@ -21,13 +21,13 @@ eq() {  # <desc> <expected> <actual>
 }
 
 echo "== recipients_with_primary =="
-PRIMARY_RECIPIENTS="josh@x.com"
-eq "primary always present, extras added" "josh@x.com,jen@y.com,liz@z.com" "$(recipients_with_primary "jen@y.com,liz@z.com")"
-eq "no extras -> primary only"            "josh@x.com" "$(recipients_with_primary "")"
-eq "missing arg -> primary only"          "josh@x.com" "$(recipients_with_primary)"
-eq "primary first, order preserved"       "josh@x.com,a@x,b@x" "$(recipients_with_primary "a@x,b@x")"
-eq "primary repeated in extras -> deduped" "josh@x.com,jen@y.com" "$(recipients_with_primary "josh@x.com,jen@y.com")"
-eq "internal dupes in extras -> deduped"  "josh@x.com,jen@y.com" "$(recipients_with_primary "jen@y.com,jen@y.com")"
+PRIMARY_RECIPIENTS="reviewer@example.com"
+eq "primary always present, extras added" "reviewer@example.com,jen@y.com,liz@z.com" "$(recipients_with_primary "jen@y.com,liz@z.com")"
+eq "no extras -> primary only"            "reviewer@example.com" "$(recipients_with_primary "")"
+eq "missing arg -> primary only"          "reviewer@example.com" "$(recipients_with_primary)"
+eq "primary first, order preserved"       "reviewer@example.com,a@x,b@x" "$(recipients_with_primary "a@x,b@x")"
+eq "primary repeated in extras -> deduped" "reviewer@example.com,jen@y.com" "$(recipients_with_primary "reviewer@example.com,jen@y.com")"
+eq "internal dupes in extras -> deduped"  "reviewer@example.com,jen@y.com" "$(recipients_with_primary "jen@y.com,jen@y.com")"
 
 # shellcheck disable=SC2034  # read by recipients_with_primary (lib/email.sh)
 PRIMARY_RECIPIENTS=""

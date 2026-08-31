@@ -58,10 +58,10 @@ forgejo_remove_label() { REMOVED="$REMOVED $3"; }   # $3 = label name
 forgejo_assign()       { ASSIGNED="$1#$2->$3"; }
 forgejo_comment()      { COMMENTED=1; }
 log() { :; }
-deferred_release_to_reviewer acme/x 7 josh "the image is listed"
+deferred_release_to_reviewer acme/x 7 reviewer "the image is listed"
 has "release: dropped Status/Blocked"      "$REMOVED" "Status/Blocked"
 has "release: dropped Agent greenlight"     "$REMOVED" "Agent"
-eq  "release: assigned the reviewer"        "acme/x#7->josh" "$ASSIGNED"
+eq  "release: assigned the reviewer"        "acme/x#7->reviewer" "$ASSIGNED"
 eq  "release: posted a comment"             "1" "$COMMENTED"
 
 REMOVED=""; ASSIGNED="none"
