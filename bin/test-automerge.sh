@@ -15,6 +15,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # same way the production .env would, so the rest of this suite's fixtures
 # (which assume "joshtronic/igor" is the self-repo) are unaffected.
 export AUTOMERGE_SELF_REPO="joshtronic/igor"
+export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+# shellcheck source=../lib/forgejo.sh
+. "$HERE/../lib/forgejo.sh"
 # shellcheck source=../lib/dossier.sh
 . "$HERE/../lib/dossier.sh"
 # shellcheck source=../lib/automerge.sh
@@ -493,24 +496,24 @@ eq  "barrier: sitemap-failure alerted"     "1"      "$ALERTS"
 eq  "barrier: sitemap-failure cleared"     ""       "$(jq -r '.deploy.repo // ""' "$STATE")"
 automerge_sitemap_failures() { return 0; }          # restore clean for any later use
 
-echo "== _fj_merge: sends the merge payload, splits code/message =="
-export FORGEJO_TOKEN=test-token FORGEJO_URL=http://localhost   # _fj_merge reads these (set -u)
-# Test the REAL _fj_merge here, BEFORE the automerge_do_merge block below stubs
-# it out. It runs curl inside $(...), a subshell -- capture the payload to a FILE
-# (a var set in the subshell would be lost in the parent).
+echo "== forgejo_merge_pr: sends the merge payload, splits code/message =="
+export FORGEJO_TOKEN=test-token FORGEJO_URL=http://localhost   # forgejo_merge_pr reads these (set -u)
+# Test the REAL forgejo_merge_pr here, BEFORE the automerge_do_merge block below
+# stubs it out. It runs curl inside $(...), a subshell -- capture the payload to
+# a FILE (a var set in the subshell would be lost in the parent).
 curl() { local b=""; while [ $# -gt 0 ]; do [ "$1" = "-d" ] && { b="$2"; shift; }; shift; done; printf '%s' "$b" > "$TMP/merge_payload"; printf 'ignored\n200'; }
-: > "$TMP/merge_payload"; _fj_merge acme/x 5 >/dev/null; PAYLOAD=$(cat "$TMP/merge_payload")
-has "_fj_merge: sends Do=merge"        "$PAYLOAD" '"Do":"merge"'
-has "_fj_merge: sends delete_branch"   "$PAYLOAD" '"delete_branch_after_merge":true'
+: > "$TMP/merge_payload"; forgejo_merge_pr acme/x 5 >/dev/null; PAYLOAD=$(cat "$TMP/merge_payload")
+has "forgejo_merge_pr: sends Do=merge"        "$PAYLOAD" '"Do":"merge"'
+has "forgejo_merge_pr: sends delete_branch"   "$PAYLOAD" '"delete_branch_after_merge":true'
 curl() { printf '{"message":"User not allowed to merge PR"}\n405'; }
-eq  "_fj_merge: splits 405 + message"  "$(printf '405\tUser not allowed to merge PR')" "$(_fj_merge acme/x 5)"
+eq  "forgejo_merge_pr: splits 405 + message"  "$(printf '405\tUser not allowed to merge PR')" "$(forgejo_merge_pr acme/x 5)"
 
 echo "== automerge_do_merge: sha on success, reason on failure =="
 _fj() { printf '%s' '{"merge_commit_sha":"deadbeef"}'; }   # the follow-up GET
-_fj_merge() { printf '200\t'; }
+forgejo_merge_pr() { printf '200\t'; }
 eq  "do_merge: 2xx -> merge sha echoed"  "deadbeef" "$(automerge_do_merge acme/x 5)"
 automerge_do_merge acme/x 5 >/dev/null; eq "do_merge: 2xx -> rc0" "0" "$?"
-_fj_merge() { printf '405\tUser not allowed to merge PR'; }
+forgejo_merge_pr() { printf '405\tUser not allowed to merge PR'; }
 eq  "do_merge: reject -> reason echoed" "$(printf 'HTTP 405: User not allowed to merge PR')" "$(automerge_do_merge acme/x 5)"
 automerge_do_merge acme/x 5 >/dev/null; eq "do_merge: reject -> rc1" "1" "$?"
 

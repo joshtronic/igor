@@ -307,7 +307,7 @@ needsyou_scan_set() {
               '. + {($k): $v}' <<<"$out" 2>/dev/null || printf '%s' "$out")
     done <<<"$prs"
 
-    issues=$(_fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50" 2>/dev/null || true)
+    issues=$(forgejo_list_open_issues "$repo" 2>/dev/null || true)
     _needsyou_listed "$issues" || { failed=1; continue; }
     while IFS= read -r line; do
       [ -n "$line" ] || continue

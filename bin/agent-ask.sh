@@ -63,7 +63,7 @@ QUESTION_MARKER='<!-- agent:question -->'
 # Throttle: refuse if an open bot question exists on this repo.
 # Marker + Agent-label absence distinguishes pending question from
 # promoted-to-work issue.
-EXISTING=$(_fj GET "/repos/${REPO}/issues?state=open&type=issues&limit=50" 2>/dev/null \
+EXISTING=$(forgejo_list_open_issues "$REPO" 2>/dev/null \
   | jq -c --arg u "$BOT_USER" --arg m "$QUESTION_MARKER" '
       [.[]
        | select(.user.login == $u)

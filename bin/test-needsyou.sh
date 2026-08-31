@@ -9,6 +9,9 @@ set -uo pipefail
 
 command -v jq >/dev/null 2>&1 || { echo "test-needsyou: jq absent -- skipping"; exit 0; }
 HERE=$(cd "$(dirname "$0")/.." && pwd)
+export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+# shellcheck source=../lib/forgejo.sh
+. "$HERE/lib/forgejo.sh"
 # shellcheck source=../lib/needsyou.sh
 . "$HERE/lib/needsyou.sh"
 

@@ -186,8 +186,27 @@ forgejo_append_issue_body() {
       then (.body // "") else empty end
     ' <<<"$raw") || return 1
   new=$(printf '%s\n\n---\n## %s\n\n%s\n' "$current" "$heading" "$text")
+  forgejo_set_issue_body "$repo" "$number" "$new"
+}
+
+# forgejo_set_issue_body <repo> <number> <body> -- PATCH an issue's body to
+# exactly <body> (a full replace, unlike forgejo_append_issue_body's
+# read-modify-write). The caller is responsible for having read the current
+# body first if it needs to preserve any of it.
+forgejo_set_issue_body() {
+  local repo="$1" number="$2" body="$3"
   _fj PATCH "/repos/${repo}/issues/${number}" \
-    "$(jq -n --arg b "$new" '{body: $b}')" >/dev/null
+    "$(jq -n --arg b "$body" '{body: $b}')" >/dev/null
+}
+
+# All reviews on a PR, unfiltered, oldest-order not guaranteed (whatever the
+# API returns). Callers that only want the human-vs-bot signal use
+# forgejo_pr_non_bot_reviews below; this is the raw fetch for callers that
+# need to inspect a specific user's review history themselves (e.g. the
+# auto-merge approval/veto checks in lib/automerge.sh).
+forgejo_pr_reviews() {
+  local repo="$1" number="$2"
+  _fj GET "/repos/${repo}/pulls/${number}/reviews"
 }
 
 # All non-bot reviews on a PR, sorted oldest-to-newest. Used to
@@ -413,6 +432,28 @@ forgejo_get_pr() {
   _fj GET "/repos/${repo}/pulls/${number}"
 }
 
+# The tip commit of a branch. Used to walk/verify a PR's approval still
+# covers its current head (lib/automerge.sh).
+forgejo_get_branch() {
+  local repo="$1" branch="$2"
+  _fj GET "/repos/${repo}/branches/${branch}"
+}
+
+# A single git commit object (sha, parents, message, ...).
+forgejo_get_commit() {
+  local repo="$1" sha="$2"
+  _fj GET "/repos/${repo}/git/commits/${sha}"
+}
+
+# Compare two refs: commits <to> has that <from> doesn't (Forgejo/GitHub
+# compare semantics -- "<from>...<to>"). Caller picks the order that answers
+# its question (e.g. "is <to> ahead of <from>", or the reverse to count how
+# far behind a PR head is).
+forgejo_compare() {
+  local repo="$1" from="$2" to="$3"
+  _fj GET "/repos/${repo}/compare/${from}...${to}"
+}
+
 # Issue-level comments on a PR (the "Conversation" tab). Distinct from
 # inline review comments tied to a specific file/line.
 forgejo_pr_comments() {
@@ -469,6 +510,20 @@ forgejo_list_open_bot_prs() {
     | jq --arg u "$user" \
         '[.[] | select(.user.login == $u)
           | {number, title, head: .head.ref}]'
+}
+
+# Open pulls, oldest-first, raw JSON (unfiltered by author). Used by the ship
+# report, which wants every open PR on the repo, not just the bot's.
+forgejo_open_pulls_oldest() {
+  local repo="$1" n="${2:-30}"
+  _fj GET "/repos/${repo}/pulls?state=open&sort=oldest&limit=${n}"
+}
+
+# Closed pulls, most-recently-updated first, raw JSON. Used to find recently
+# merged PRs (the caller filters on .merged_at itself).
+forgejo_closed_pulls_recent() {
+  local repo="$1" n="${2:-30}"
+  _fj GET "/repos/${repo}/pulls?state=closed&sort=recentupdate&limit=${n}"
 }
 
 # Page cap for forgejo_pr_files. 20 pages x 50 = 1000 changed files, far past
@@ -676,6 +731,14 @@ forgejo_repo_has_label() {
   jq -e --arg n "$name" 'any(.[]; .name == $n)' <<<"$labels" >/dev/null 2>&1
 }
 
+# All labels defined on a repo, raw JSON [{id, name, ...}]. Distinct from
+# forgejo_repo_has_label (a single-name existence check): this is for
+# callers that want the whole set, e.g. to offer a model a choice of labels.
+forgejo_list_labels() {
+  local repo="$1"
+  _fj GET "/repos/${repo}/labels?limit=100"
+}
+
 # Bot-authored PRs on this repo that reference this issue via
 # "Closes #N" (case-insensitive). Each entry: {number, state,
 # merged}. Empty array if none.
@@ -795,6 +858,31 @@ forgejo_edit_pr() {
     esac
   done
   _fj PATCH "/repos/${repo}/issues/${number}" "$payload" >/dev/null
+}
+
+# forgejo_merge_pr <repo> <pr> -- POST the merge, echoing "<http_code>\t<message>".
+# Bypasses _fj deliberately: _fj uses `curl -f`, which discards the response body
+# on a non-2xx -- but that body carries the REASON ("User not allowed to merge
+# PR", a conflict, ...), which the caller wants to log instead of a bare "merge
+# API failed". delete_branch_after_merge is baked in: the repo's "delete by
+# default" is only a UI-form default, an API merge must opt in explicitly.
+forgejo_merge_pr() {
+  local repo="$1" pr="$2" out code body
+  out=$(curl -s -w '\n%{http_code}' --max-time 30 -X POST \
+    -H "Authorization: token ${FORGEJO_TOKEN}" -H "Content-Type: application/json" \
+    -d '{"Do":"merge","delete_branch_after_merge":true}' \
+    "${FORGEJO_URL}/api/v1/repos/${repo}/pulls/${pr}/merge" 2>/dev/null)
+  code=${out##*$'\n'}
+  body=${out%$'\n'*}
+  printf '%s\t%s' "$code" "$(printf '%s' "$body" | jq -r '.message // empty' 2>/dev/null | head -1)"
+}
+
+# forgejo_pr_update_branch <repo> <pr> -- merge the base branch into the PR head
+# (Forgejo "update branch"), so a behind PR satisfies require-up-to-date. rc 0
+# on success.
+forgejo_pr_update_branch() {
+  local repo="$1" pr="$2"
+  _fj POST "/repos/${repo}/pulls/${pr}/update" >/dev/null 2>&1
 }
 
 # Returns the authenticated user's login (the bot's username). Empty
@@ -927,6 +1015,31 @@ forgejo_recent_commit_subjects() {
   jq -r '.[]? | .commit.message // empty | split("\n")[0]' <<<"$resp" 2>/dev/null || true
 }
 
+# The N most recent commits on the default branch, raw JSON. Used by callers
+# that need more than the subject line (e.g. searching the full message).
+# Unlike forgejo_recent_commit_subjects this does not trim the response
+# payload (no stat/verification/files=false) -- callers that only want
+# subjects should prefer that helper instead.
+forgejo_recent_commits_raw() {
+  local repo="$1" n="${2:-30}"
+  _fj GET "/repos/${repo}/commits?limit=${n}"
+}
+
+# Closed issues (not PRs), most-recently-updated first. A dedup signal for
+# "was this already worked?" checks.
+forgejo_recent_closed_issues() {
+  local repo="$1" n="${2:-40}"
+  _fj GET "/repos/${repo}/issues?state=closed&type=issues&limit=${n}&sort=updated"
+}
+
+# Closed issues (not PRs) matching a search query, most-relevant first per
+# the forge's own search ranking. <query> must already be URL-encoded by the
+# caller (e.g. via `jq -rn --arg s "$s" '$s|@uri'`).
+forgejo_search_closed_issues() {
+  local repo="$1" query="$2" n="${3:-15}"
+  _fj GET "/repos/${repo}/issues?state=closed&type=issues&q=${query}&limit=${n}"
+}
+
 # Returns 0 if the given dir in the repo contains at least one file
 # matching the given regex. Useful for "does .forgejo/workflows have a
 # .yml file?" without enumerating each candidate path.
@@ -958,10 +1071,42 @@ forgejo_open_issue() {
     | jq -r '.number'
 }
 
+# forgejo_open_issue_assigned <repo> <title> <body> <assignee> <label_ids_json>
+# -- open an issue with an assignee and (optionally) labels set at creation,
+# in one POST. <label_ids_json> is a JSON array of numeric label IDs; an
+# empty array omits the `labels` field entirely.
+forgejo_open_issue_assigned() {
+  local repo="$1" title="$2" body="$3" assignee="$4" label_ids="${5:-[]}" payload
+  payload=$(jq -n --arg t "$title" --arg b "$body" --arg a "$assignee" --argjson labels "$label_ids" \
+    '{title:$t, body:$b, assignees:[$a]} + (if ($labels | length) > 0 then {labels:$labels} else {} end)')
+  _fj POST "/repos/${repo}/issues" "$payload"
+}
+
 forgejo_reopen_issue() {
   local repo="$1" number="$2"
   _fj PATCH "/repos/${repo}/issues/${number}" \
     '{"state": "open"}' >/dev/null
+}
+
+forgejo_close_issue() {
+  local repo="$1" number="$2"
+  _fj PATCH "/repos/${repo}/issues/${number}" \
+    '{"state": "closed"}' >/dev/null
+}
+
+# All open issues in a repo (issues only, not PRs), raw JSON. Callers that
+# only want titles use forgejo_list_open_issue_titles; this is for callers
+# that filter/search the full issue objects themselves.
+forgejo_list_open_issues() {
+  local repo="$1"
+  _fj GET "/repos/${repo}/issues?state=open&type=issues&limit=50"
+}
+
+# Open issues carrying the Status/Blocked label, raw JSON. Used by the
+# deferred-gate and block-probe sweeps to find tickets they might requeue.
+forgejo_list_blocked_issues() {
+  local repo="$1"
+  _fj GET "/repos/${repo}/issues?state=open&type=issues&labels=Status/Blocked&limit=50"
 }
 
 # Find the most recent bot-authored issue in this repo whose body

@@ -132,12 +132,12 @@ feedback_next_unprocessed() {
 feedback_gather_context() {
   local repo="$1"
   printf '### Recently CLOSED issues (was this already worked?)\n'
-  _fj GET "/repos/${repo}/issues?state=closed&type=issues&limit=40&sort=updated" 2>/dev/null \
+  forgejo_recent_closed_issues "$repo" 40 2>/dev/null \
     | jq -r '.[]? | select(.pull_request == null)
         | select((.body // "") | test("agent:feedback-triage") | not)
         | "- #\(.number) \(.title)"' 2>/dev/null | head -30
   printf '\n### Recent commits (was this already fixed?)\n'
-  _fj GET "/repos/${repo}/commits?limit=30" 2>/dev/null \
+  forgejo_recent_commits_raw "$repo" 30 2>/dev/null \
     | jq -r '.[]? | "- \(.commit.message | split("\n")[0])"' 2>/dev/null | head -30
 }
 
@@ -151,11 +151,11 @@ feedback_search_prior() {
   [ -n "$subject" ] && [ "$subject" != "(unknown)" ] || return 0
   q=$(jq -rn --arg s "$subject" '$s|@uri'); sl=$(printf '%s' "$subject" | tr '[:upper:]' '[:lower:]')
   printf '### Prior work mentioning "%s" (targeted search -- already done?)\n' "$subject"
-  _fj GET "/repos/${repo}/issues?state=closed&type=issues&q=${q}&limit=15" 2>/dev/null \
+  forgejo_search_closed_issues "$repo" "$q" 15 2>/dev/null \
     | jq -r '.[]? | select(.pull_request == null)
         | select((.body // "") | test("agent:feedback-triage") | not)
         | "- closed issue #\(.number): \(.title)"' 2>/dev/null | head -8
-  _fj GET "/repos/${repo}/commits?limit=120" 2>/dev/null \
+  forgejo_recent_commits_raw "$repo" 120 2>/dev/null \
     | jq -r --arg g "$sl" '.[]? | (.commit.message | split("\n")[0]) as $s
         | select(($s | ascii_downcase) | contains($g)) | "- commit: \($s)"' 2>/dev/null | head -8
 }
@@ -165,7 +165,7 @@ feedback_search_prior() {
 # gate, onboarding, Status/*) so a model-chosen label can only ever DESCRIBE a
 # ticket, never bypass the human greenlight. Empty array on no labels / error.
 feedback_repo_labels() {
-  local raw; raw=$(_fj GET "/repos/${1}/labels?limit=100" 2>/dev/null)
+  local raw; raw=$(forgejo_list_labels "$1" 2>/dev/null)
   printf '%s' "${raw:-[]}" | jq -c '[ .[]? | {id, name}
       | select((.name | ascii_downcase) as $n
           | $n != "agent" and $n != "onboarding"
@@ -255,12 +255,10 @@ feedback_parse_response() {
 # feedback_file_issue <repo> <title> <body> <assignee> -- UNLABELED issue assigned
 # to <assignee>, stamped as a feedback-triage ticket. Returns 0 on success.
 feedback_file_issue() {
-  local repo="$1" title="$2" body="$3" assignee="$4" label_ids="${5:-[]}" full payload
+  local repo="$1" title="$2" body="$3" assignee="$4" label_ids="${5:-[]}" full
   full=$(printf '%s\n\n---\n_Triaged from player feedback. **Greenlight:** add the `Agent` label. **Reject:** close._\n%s' \
     "$body" "$FEEDBACK_MARKER")
-  payload=$(jq -n --arg t "$title" --arg b "$full" --arg a "$assignee" --argjson labels "$label_ids" \
-    '{title:$t, body:$b, assignees:[$a]} + (if ($labels | length) > 0 then {labels:$labels} else {} end)')
-  _fj POST "/repos/${repo}/issues" "$payload" >/dev/null 2>&1
+  forgejo_open_issue_assigned "$repo" "$title" "$full" "$assignee" "$label_ids" >/dev/null 2>&1
 }
 
 # do_feedback_tick -- triage ONE unprocessed feedback row per tick across the

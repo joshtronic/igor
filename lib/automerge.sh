@@ -199,7 +199,7 @@ automerge_will_take() {
 # against a non-counting review from an unauthorized user.)
 automerge_approved_by() {
   local repo="$1" pr="$2" user="$3"
-  _fj GET "/repos/${repo}/pulls/${pr}/reviews" 2>/dev/null \
+  forgejo_pr_reviews "$repo" "$pr" 2>/dev/null \
     | jq -e --arg u "$user" '
         [ .[]?
           | select(.user.login == $u)
@@ -235,7 +235,7 @@ automerge_approved_by() {
 automerge_approval_covers_head() {
   local repo="$1" pr="$2" user="$3" head="$4"
   local approved base_ref base_tip cur obj n first p ahead walk=0
-  approved=$(_fj GET "/repos/${repo}/pulls/${pr}/reviews" 2>/dev/null \
+  approved=$(forgejo_pr_reviews "$repo" "$pr" 2>/dev/null \
     | jq -r --arg u "$user" '
         [ .[]? | select(.user.login == $u)
           | select((.dismissed // false) == false)
@@ -244,16 +244,16 @@ automerge_approval_covers_head() {
         | if (. != null) and (.state == "APPROVED") then (.commit_id // "") else "" end' 2>/dev/null)
   [ -n "$approved" ] || return 1   # no counting approval, or Forgejo gave no commit_id -> fail closed
 
-  base_ref=$(_fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null | jq -r '.base.ref // ""' 2>/dev/null)
+  base_ref=$(forgejo_get_pr "$repo" "$pr" 2>/dev/null | jq -r '.base.ref // ""' 2>/dev/null)
   [ -n "$base_ref" ] || return 1
-  base_tip=$(_fj GET "/repos/${repo}/branches/${base_ref}" 2>/dev/null | jq -r '.commit.id // ""' 2>/dev/null)
+  base_tip=$(forgejo_get_branch "$repo" "$base_ref" 2>/dev/null | jq -r '.commit.id // ""' 2>/dev/null)
   [ -n "$base_tip" ] || return 1
 
   cur="$head"
   while [ "$walk" -lt 50 ]; do     # bound the walk; base-merges are few
     walk=$((walk + 1))
     [ "$cur" = "$approved" ] && return 0
-    obj=$(_fj GET "/repos/${repo}/git/commits/${cur}" 2>/dev/null)
+    obj=$(forgejo_get_commit "$repo" "$cur" 2>/dev/null)
     n=$(jq -r '.parents | length' <<<"$obj" 2>/dev/null)
     [ -n "$n" ] && [ "$n" != "null" ] || return 1
     [ "$n" -ge 2 ] || return 1     # single-parent commit that isn't the approved one -> new content
@@ -265,7 +265,7 @@ automerge_approval_covers_head() {
     # merge -> fail closed.
     while IFS= read -r p; do
       [ -n "$p" ] || continue
-      ahead=$(_fj GET "/repos/${repo}/compare/${base_tip}...${p}" 2>/dev/null \
+      ahead=$(forgejo_compare "$repo" "$base_tip" "$p" 2>/dev/null \
         | jq -r 'if type == "object" then (.total_commits // (.commits | length) // -1) else -1 end' 2>/dev/null)
       [ "$ahead" = "0" ] || return 1
     done < <(jq -r '.parents[1:][].sha // empty' <<<"$obj" 2>/dev/null)
@@ -281,7 +281,7 @@ automerge_approval_covers_head() {
 # same latest-decision-review logic, inverted to REQUEST_CHANGES.
 automerge_reviewer_blocks() {
   local repo="$1" pr="$2" user="$3"
-  _fj GET "/repos/${repo}/pulls/${pr}/reviews" 2>/dev/null \
+  forgejo_pr_reviews "$repo" "$pr" 2>/dev/null \
     | jq -e --arg u "$user" '
         [ .[]?
           | select(.user.login == $u)
@@ -552,23 +552,8 @@ automerge_maintenance_tier_ok() {
 # automerge_mergeable <repo> <pr> -- exit 0 if the PR is open AND cleanly mergeable.
 automerge_mergeable() {
   local repo="$1" pr="$2"
-  _fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null \
+  forgejo_get_pr "$repo" "$pr" 2>/dev/null \
     | jq -e '(.state == "open") and (.mergeable == true)' >/dev/null 2>&1
-}
-
-# _fj_merge <repo> <pr> -- POST the merge and echo "<http_code>\t<message>".
-# Bypasses _fj deliberately: _fj uses `curl -f`, which discards the response body
-# on a non-2xx -- but that body carries the REASON ("User not allowed to merge
-# PR", a conflict, ...), which we want to log instead of a bare "merge API failed".
-_fj_merge() {
-  local repo="$1" pr="$2" out code body
-  out=$(curl -s -w '\n%{http_code}' --max-time 30 -X POST \
-    -H "Authorization: token ${FORGEJO_TOKEN}" -H "Content-Type: application/json" \
-    -d '{"Do":"merge","delete_branch_after_merge":true}' \
-    "${FORGEJO_URL}/api/v1/repos/${repo}/pulls/${pr}/merge" 2>/dev/null)
-  code=${out##*$'\n'}
-  body=${out%$'\n'*}
-  printf '%s\t%s' "$code" "$(printf '%s' "$body" | jq -r '.message // empty' 2>/dev/null | head -1)"
 }
 
 # automerge_do_merge <repo> <pr> -- merge the PR (merge commit). On success echoes
@@ -577,10 +562,10 @@ _fj_merge() {
 # and back off instead of re-POSTing a doomed merge every tick (igor#322).
 automerge_do_merge() {
   local repo="$1" pr="$2" res code msg
-  res=$(_fj_merge "$repo" "$pr")
+  res=$(forgejo_merge_pr "$repo" "$pr")
   code=${res%%$'\t'*}; msg=${res#*$'\t'}
   case "$code" in
-    2??) _fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null | jq -r '.merge_commit_sha // empty'; return 0 ;;
+    2??) forgejo_get_pr "$repo" "$pr" 2>/dev/null | jq -r '.merge_commit_sha // empty'; return 0 ;;
     *)   printf 'HTTP %s: %s' "$code" "$msg"; return 1 ;;
   esac
 }
@@ -717,10 +702,10 @@ automerge_risk_notify_record() {
 # Echoes -1 when it can't be determined, so the caller skips rather than guesses.
 automerge_behind_count() {
   local repo="$1" pr="$2" obj head base cmp
-  obj=$(_fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null) || { echo -1; return; }
+  obj=$(forgejo_get_pr "$repo" "$pr" 2>/dev/null) || { echo -1; return; }
   head=$(jq -r '.head.sha // empty' <<<"$obj"); base=$(jq -r '.base.ref // empty' <<<"$obj")
   if [ -z "$head" ] || [ -z "$base" ]; then echo -1; return; fi
-  cmp=$(_fj GET "/repos/${repo}/compare/${head}...${base}" 2>/dev/null) || { echo -1; return; }
+  cmp=$(forgejo_compare "$repo" "$head" "$base" 2>/dev/null) || { echo -1; return; }
   jq -r 'if type == "object" then (.total_commits // (.commits | length) // 0) else -1 end' <<<"$cmp" 2>/dev/null || echo -1
 }
 
@@ -731,7 +716,7 @@ automerge_behind_count() {
 # diff, so it isn't re-reviewed. rc 0 on success.
 automerge_update_branch() {
   local repo="$1" pr="$2"
-  _fj POST "/repos/${repo}/pulls/${pr}/update" >/dev/null 2>&1
+  forgejo_pr_update_branch "$repo" "$pr"
 }
 
 # automerge_smoke <url> -- exit 0 if the live URL responds 2xx/3xx.
@@ -941,7 +926,7 @@ do_automerge_tick() {
       # to head.sha (below), the CI check needs it, and the maintenance tier
       # (below) reuses this SAME fetch for its branch/base checks rather than
       # re-fetching (a second fetch would only widen the classify-vs-merge race).
-      pr_json=$(_fj GET "/repos/${repo}/pulls/${pr}" 2>/dev/null)
+      pr_json=$(forgejo_get_pr "$repo" "$pr" 2>/dev/null)
       head=$(jq -r '.head.sha // ""' <<<"$pr_json" 2>/dev/null)
       [ -n "$head" ] || continue
       verdict=$(jq -r --arg k "$key" '.review[$k].verdict // ""' "$sf" 2>/dev/null)

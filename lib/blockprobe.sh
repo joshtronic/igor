@@ -233,8 +233,7 @@ _blockprobe_record_stamp() {
   # argument about the two reads agreeing.
   [ -n "$(blockprobe_parse_kind "$current")" ] || return 1
   new=$(_blockprobe_body_with_field "$current" "$field" "$date") || return 1
-  _fj PATCH "/repos/${repo}/issues/${num}" \
-    "$(jq -n --arg b "$new" '{body: $b}')" >/dev/null
+  forgejo_set_issue_body "$repo" "$num" "$new"
 }
 
 # blockprobe_record_confirmation <repo> <num> <date> -- record that the probe
@@ -445,7 +444,7 @@ do_blockprobe_tick() {
     repo=$(jq -r '.full_name // empty' <<<"$repo_line" 2>/dev/null)
     [ -n "$repo" ] || continue
 
-    issues=$(_fj GET "/repos/${repo}/issues?state=open&type=issues&labels=Status/Blocked&limit=50" 2>/dev/null) || continue
+    issues=$(forgejo_list_blocked_issues "$repo" 2>/dev/null) || continue
     [ -n "$issues" ] || continue
 
     while IFS= read -r n; do
