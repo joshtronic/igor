@@ -206,32 +206,32 @@ eq "e2e: the self repo short-circuits before any fetch" \
 
 echo "== approval / mergeable gates =="
 _fj() { printf '%s' "$FJ"; }
-FJ='[{"user":{"login":"josh"},"state":"APPROVED"}]'
-ok "approved_by: josh APPROVED"            automerge_approved_by acme/x 1 josh
-FJ='[{"user":{"login":"josh"},"state":"COMMENT"}]'
-no "approved_by: only a COMMENT"           automerge_approved_by acme/x 1 josh
+FJ='[{"user":{"login":"reviewer"},"state":"APPROVED"}]'
+ok "approved_by: reviewer APPROVED"            automerge_approved_by acme/x 1 reviewer
+FJ='[{"user":{"login":"reviewer"},"state":"COMMENT"}]'
+no "approved_by: only a COMMENT"           automerge_approved_by acme/x 1 reviewer
 FJ='[{"user":{"login":"bot"},"state":"APPROVED"}]'
-no "approved_by: someone else approved"    automerge_approved_by acme/x 1 josh
+no "approved_by: someone else approved"    automerge_approved_by acme/x 1 reviewer
 # latest-review-wins: an APPROVED later walked back to REQUEST_CHANGES is NOT approval.
-FJ='[{"user":{"login":"josh"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z"},{"user":{"login":"josh"},"state":"REQUEST_CHANGES","submitted_at":"2026-02-01T00:00:00Z"}]'
-no "approved_by: APPROVED then later RC -> walked back" automerge_approved_by acme/x 1 josh
-FJ='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","submitted_at":"2026-01-01T00:00:00Z"},{"user":{"login":"josh"},"state":"APPROVED","submitted_at":"2026-02-01T00:00:00Z"}]'
-ok "approved_by: RC then later APPROVED -> approved"   automerge_approved_by acme/x 1 josh
+FJ='[{"user":{"login":"reviewer"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z"},{"user":{"login":"reviewer"},"state":"REQUEST_CHANGES","submitted_at":"2026-02-01T00:00:00Z"}]'
+no "approved_by: APPROVED then later RC -> walked back" automerge_approved_by acme/x 1 reviewer
+FJ='[{"user":{"login":"reviewer"},"state":"REQUEST_CHANGES","submitted_at":"2026-01-01T00:00:00Z"},{"user":{"login":"reviewer"},"state":"APPROVED","submitted_at":"2026-02-01T00:00:00Z"}]'
+ok "approved_by: RC then later APPROVED -> approved"   automerge_approved_by acme/x 1 reviewer
 # a later COMMENT review does not withdraw a standing APPROVED.
-FJ='[{"user":{"login":"josh"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z"},{"user":{"login":"josh"},"state":"COMMENT","submitted_at":"2026-02-01T00:00:00Z"}]'
-ok "approved_by: later COMMENT keeps APPROVED"         automerge_approved_by acme/x 1 josh
+FJ='[{"user":{"login":"reviewer"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z"},{"user":{"login":"reviewer"},"state":"COMMENT","submitted_at":"2026-02-01T00:00:00Z"}]'
+ok "approved_by: later COMMENT keeps APPROVED"         automerge_approved_by acme/x 1 reviewer
 # a dismissed RC drops out; the prior APPROVED still stands.
-FJ='[{"user":{"login":"josh"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z"},{"user":{"login":"josh"},"state":"REQUEST_CHANGES","submitted_at":"2026-02-01T00:00:00Z","dismissed":true}]'
-ok "approved_by: dismissed RC -> prior APPROVED stands" automerge_approved_by acme/x 1 josh
+FJ='[{"user":{"login":"reviewer"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z"},{"user":{"login":"reviewer"},"state":"REQUEST_CHANGES","submitted_at":"2026-02-01T00:00:00Z","dismissed":true}]'
+ok "approved_by: dismissed RC -> prior APPROVED stands" automerge_approved_by acme/x 1 reviewer
 # a stale APPROVED (head moved past what was reviewed) is not a merge signal.
 # A stale-but-NOT-dismissed APPROVED still counts: Forgejo's `dismissed` flag, not
 # `stale`, is the authoritative "no longer counts." A repo that doesn't dismiss
 # stale approvals keeps them -- so this un-strands a base-merge-staled approval.
-FJ='[{"user":{"login":"josh"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z","stale":true,"dismissed":false,"official":true}]'
-ok "approved_by: stale but NOT dismissed APPROVED -> still counts"  automerge_approved_by acme/x 1 josh
+FJ='[{"user":{"login":"reviewer"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z","stale":true,"dismissed":false,"official":true}]'
+ok "approved_by: stale but NOT dismissed APPROVED -> still counts"  automerge_approved_by acme/x 1 reviewer
 # A DISMISSED APPROVED does not count (the repo dismissed it on a new commit).
-FJ='[{"user":{"login":"josh"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z","stale":true,"dismissed":true}]'
-no "approved_by: dismissed APPROVED -> does not count"  automerge_approved_by acme/x 1 josh
+FJ='[{"user":{"login":"reviewer"},"state":"APPROVED","submitted_at":"2026-01-01T00:00:00Z","stale":true,"dismissed":true}]'
+no "approved_by: dismissed APPROVED -> does not count"  automerge_approved_by acme/x 1 reviewer
 FJ='{"state":"open","mergeable":true}'
 ok "mergeable: open + mergeable"           automerge_mergeable acme/x 1
 FJ='{"state":"open","mergeable":false}'
@@ -293,16 +293,16 @@ automerge_url_status() { printf 'ok\thttps://x'; }   # reset
 
 echo "== automerge_reviewer_blocks (human veto on a shadow-gated repo) =="
 _fj() { printf '%s' "$FJ"; }
-FJ='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","submitted_at":"2026-02-01T00:00:00Z"}]'
-ok "reviewer_blocks: live RC -> blocks"                  automerge_reviewer_blocks acme/x 1 josh
-FJ='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","submitted_at":"2026-01-01T00:00:00Z"},{"user":{"login":"josh"},"state":"APPROVED","submitted_at":"2026-02-01T00:00:00Z"}]'
-no "reviewer_blocks: RC then later APPROVED -> no block" automerge_reviewer_blocks acme/x 1 josh
-FJ='[{"user":{"login":"josh"},"state":"APPROVED","submitted_at":"2026-02-01T00:00:00Z"}]'
-no "reviewer_blocks: only APPROVED -> no block"          automerge_reviewer_blocks acme/x 1 josh
-FJ='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","submitted_at":"2026-02-01T00:00:00Z","stale":true}]'
-no "reviewer_blocks: stale RC -> no block"               automerge_reviewer_blocks acme/x 1 josh
+FJ='[{"user":{"login":"reviewer"},"state":"REQUEST_CHANGES","submitted_at":"2026-02-01T00:00:00Z"}]'
+ok "reviewer_blocks: live RC -> blocks"                  automerge_reviewer_blocks acme/x 1 reviewer
+FJ='[{"user":{"login":"reviewer"},"state":"REQUEST_CHANGES","submitted_at":"2026-01-01T00:00:00Z"},{"user":{"login":"reviewer"},"state":"APPROVED","submitted_at":"2026-02-01T00:00:00Z"}]'
+no "reviewer_blocks: RC then later APPROVED -> no block" automerge_reviewer_blocks acme/x 1 reviewer
+FJ='[{"user":{"login":"reviewer"},"state":"APPROVED","submitted_at":"2026-02-01T00:00:00Z"}]'
+no "reviewer_blocks: only APPROVED -> no block"          automerge_reviewer_blocks acme/x 1 reviewer
+FJ='[{"user":{"login":"reviewer"},"state":"REQUEST_CHANGES","submitted_at":"2026-02-01T00:00:00Z","stale":true}]'
+no "reviewer_blocks: stale RC -> no block"               automerge_reviewer_blocks acme/x 1 reviewer
 FJ='[{"user":{"login":"other"},"state":"REQUEST_CHANGES","submitted_at":"2026-02-01T00:00:00Z"}]'
-no "reviewer_blocks: someone else RC -> no block"        automerge_reviewer_blocks acme/x 1 josh
+no "reviewer_blocks: someone else RC -> no block"        automerge_reviewer_blocks acme/x 1 reviewer
 
 echo "== automerge_approval_covers_head (a stale approval must still be the approved net diff) =="
 # _fj dispatches by path: reviews, the PR object (.base.ref), the base branch tip,
@@ -326,22 +326,22 @@ COMMITS='{
   "bbb":{"parents":[{"sha":"aaa"}]},
   "evilm":{"parents":[{"sha":"aaa"},{"sha":"evil1"}]}
 }'
-# josh approved commit aaa; the approval is now stale (head moved) but not dismissed.
-REVIEWS='[{"user":{"login":"josh"},"state":"APPROVED","commit_id":"aaa","stale":true,"dismissed":false,"submitted_at":"2026-01-01T00:00:00Z"}]'
-ok "covers_head: head IS the approved commit (live) -> covers"        automerge_approval_covers_head acme/x 1 josh aaa
-ok "covers_head: single base-merge of the approved commit -> covers"  automerge_approval_covers_head acme/x 1 josh m1
+# reviewer approved commit aaa; the approval is now stale (head moved) but not dismissed.
+REVIEWS='[{"user":{"login":"reviewer"},"state":"APPROVED","commit_id":"aaa","stale":true,"dismissed":false,"submitted_at":"2026-01-01T00:00:00Z"}]'
+ok "covers_head: head IS the approved commit (live) -> covers"        automerge_approval_covers_head acme/x 1 reviewer aaa
+ok "covers_head: single base-merge of the approved commit -> covers"  automerge_approval_covers_head acme/x 1 reviewer m1
 # The multi-level case the #409 direct-parent helper broke on: aaa is 2 base-merges back.
-ok "covers_head: MULTI-LEVEL base-merge chain -> covers"              automerge_approval_covers_head acme/x 1 josh m2
+ok "covers_head: MULTI-LEVEL base-merge chain -> covers"              automerge_approval_covers_head acme/x 1 reviewer m2
 # A merge with a NON-base (hostile) parent adds unreviewed content -> must NOT cover.
-no "covers_head: merge with an off-base parent -> not covered"        automerge_approval_covers_head acme/x 1 josh evilm
+no "covers_head: merge with an off-base parent -> not covered"        automerge_approval_covers_head acme/x 1 reviewer evilm
 # A real new single-parent commit pushed after approval -> not covered (the reviewer's scenario).
-no "covers_head: real new commit after approval -> not covered"       automerge_approval_covers_head acme/x 1 josh bbb
+no "covers_head: real new commit after approval -> not covered"       automerge_approval_covers_head acme/x 1 reviewer bbb
 # No commit_id on the approval -> fail closed (can't prove same net diff).
-REVIEWS='[{"user":{"login":"josh"},"state":"APPROVED","stale":true,"submitted_at":"2026-01-01T00:00:00Z"}]'
-no "covers_head: approval without commit_id -> fail closed"          automerge_approval_covers_head acme/x 1 josh m1
+REVIEWS='[{"user":{"login":"reviewer"},"state":"APPROVED","stale":true,"submitted_at":"2026-01-01T00:00:00Z"}]'
+no "covers_head: approval without commit_id -> fail closed"          automerge_approval_covers_head acme/x 1 reviewer m1
 # Latest counting review is a REQUEST_CHANGES (not APPROVED) -> not covered.
-REVIEWS='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","commit_id":"aaa","submitted_at":"2026-01-01T00:00:00Z"}]'
-no "covers_head: latest review is RC -> not covered"                 automerge_approval_covers_head acme/x 1 josh aaa
+REVIEWS='[{"user":{"login":"reviewer"},"state":"REQUEST_CHANGES","commit_id":"aaa","submitted_at":"2026-01-01T00:00:00Z"}]'
+no "covers_head: latest review is RC -> not covered"                 automerge_approval_covers_head acme/x 1 reviewer aaa
 
 echo "== live-URL smoke (real fn, stubbed curl) =="
 curl() { echo "$SMOKE_CODE"; }
@@ -353,7 +353,7 @@ SMOKE_CODE=000; no "smoke: unreachable -> down" automerge_smoke https://x
 echo "== deploy barrier state machine =="
 ALERTS=0
 export SMTP2GO_API_KEY=k SMTP2GO_SENDER=s
-recipients_with_primary() { printf 'josh@x'; }
+recipients_with_primary() { printf 'reviewer@x'; }
 email_send() { ALERTS=$((ALERTS + 1)); return 0; }
 COMMENTS=0; COMMENT_BODY=""
 forgejo_comment() { COMMENTS=$((COMMENTS + 1)); COMMENT_BODY="$3"; return 0; }
@@ -611,7 +611,7 @@ has "risk_gate: fetch refusal is not phrased as a bound" \
   "$(automerge_risk_gate acme/x 7 2>&1)" "unable to fetch changed files"
 
 echo "== do_automerge_tick merge decision =="
-export FORGEJO_REVIEWER=josh BOT_USER=igor
+export FORGEJO_REVIEWER=reviewer BOT_USER=igor
 export VALIDATED_REPOS_JSON='{"full_name":"acme/site"}'
 automerge_url_status() { printf 'ok\thttps://x'; }   # url-bearing repo throughout this section
 forgejo_list_open_bot_prs() { echo '[{"number":7}]'; }
@@ -1262,7 +1262,7 @@ eq "maint-tier: shadow-COMMENT records nothing" "" "$(jq -r '.deploy.repo // ""'
 
 # Amendment 2: a live human REQUEST_CHANGES vetoes the maintenance tier even
 # though the diff and shadow verdict both qualify.
-MTREVIEWS='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","stale":false,"dismissed":false}]'
+MTREVIEWS='[{"user":{"login":"reviewer"},"state":"REQUEST_CHANGES","stale":false,"dismissed":false}]'
 echo "{\"review\":{\"joshtronic/joshing.you#42\":{\"verdict\":\"APPROVE\",\"sha\":\"${MTHEAD}\"}}}" > "$STATE"
 no "maint-tier: live human REQUEST_CHANGES vetoes -> no merge" do_automerge_tick
 eq "maint-tier: human-veto records nothing" "" "$(jq -r '.deploy.repo // ""' "$STATE")"

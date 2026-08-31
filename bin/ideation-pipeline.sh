@@ -863,16 +863,17 @@ broken_internal_links() {
 # -- external link gate ----------------------------------------------
 #
 # PR #169 handed the drafter real source URLs and forbade inventing
-# internal /posts/ slugs, but a post still shipped three joshtronic.com/links
-# stand-ins and a fabricated Verge URL: the model reaches for an EXTERNAL
-# URL from memory when the source it wants isn't in its slice, and the
-# internal-only check above never looked at those. The draft prompt now
-# forbids that; this is the deterministic backstop. Every external link in
-# the body is fetched. A definitively-gone URL (404/410) is demoted to plain
-# text so it can't ship. An unverifiable one (timeout, 403, 5xx -- a real
-# page a bot can't reach) and a generic index/home-page stand-in are KEPT
-# but flagged in the PR body for human review. Never strips on an ambiguous
-# result, so a transient blip or a bot-hostile host can't gut good links.
+# internal /posts/ slugs, but a post still shipped three stand-in links to
+# the blog's own home page and a fabricated Verge URL: the model reaches
+# for an EXTERNAL URL from memory when the source it wants isn't in its
+# slice, and the internal-only check above never looked at those. The
+# draft prompt now forbids that; this is the deterministic backstop. Every
+# external link in the body is fetched. A definitively-gone URL (404/410)
+# is demoted to plain text so it can't ship. An unverifiable one (timeout,
+# 403, 5xx -- a real page a bot can't reach) and a generic index/home-page
+# stand-in are KEPT but flagged in the PR body for human review. Never
+# strips on an ambiguous result, so a transient blip or a bot-hostile host
+# can't gut good links.
 
 LINK_GATE_STRIPPED=""   # newline list of demoted (dead) URLs
 LINK_GATE_FLAGGED=""    # newline list of "url -- reason" to eyeball at review
@@ -906,7 +907,7 @@ classify_url_liveness() {
 }
 
 # A bare index/home page used as a citation is a stand-in smell (the
-# joshtronic.com/links class). Live, so not stripped -- just flagged.
+# own-domain-as-citation class). Live, so not stripped -- just flagged.
 is_generic_index_url() {
   printf '%s' "$1" \
     | grep -qiE '^https?://[^/]+(/(links|about|blog|tags|index(\.html?)?)?)?/?$'

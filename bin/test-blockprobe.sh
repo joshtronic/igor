@@ -613,12 +613,12 @@ _fj() {
   fi
 }
 # shellcheck disable=SC2034  # read by do_blockprobe_tick (lib/blockprobe.sh)
-FORGEJO_REVIEWER="josh"
+FORGEJO_REVIEWER="reviewer"
 do_blockprobe_tick
 eq   "transient escalate: label NOT removed" "" "$REMOVED"
 eq   "transient escalate: not unassigned"    "" "$UNASSIGNED"
 has  "transient escalate: comment posted"    "$COMMENTS" "acme/x#19"
-has  "transient escalate: reviewer assigned" "$ASSIGNED" "acme/x#19->josh"
+has  "transient escalate: reviewer assigned" "$ASSIGNED" "acme/x#19->reviewer"
 unset FORGEJO_REVIEWER
 
 echo "-- scenario: 3 transient blocks with DIFFERING reasons -> still escalate --"
@@ -633,12 +633,12 @@ _fj() {
   fi
 }
 # shellcheck disable=SC2034  # read by do_blockprobe_tick (lib/blockprobe.sh)
-FORGEJO_REVIEWER="josh"
+FORGEJO_REVIEWER="reviewer"
 do_blockprobe_tick
 eq  "varying transient: label NOT removed" "" "$REMOVED"
 eq  "varying transient: not unassigned"    "" "$UNASSIGNED"
 has "varying transient: comment posted"    "$COMMENTS" "acme/x#21"
-has "varying transient: reviewer assigned" "$ASSIGNED" "acme/x#21->josh"
+has "varying transient: reviewer assigned" "$ASSIGNED" "acme/x#21->reviewer"
 unset FORGEJO_REVIEWER
 
 echo "-- scenario: two transient blocks (still under the bound) -> requeued --"
@@ -701,12 +701,12 @@ _fj() {
 }
 forgejo_get_issue() { printf '{"state":"closed"}'; }   # probe would otherwise clear
 # shellcheck disable=SC2034  # read by do_blockprobe_tick (lib/blockprobe.sh)
-FORGEJO_REVIEWER="josh"
+FORGEJO_REVIEWER="reviewer"
 do_blockprobe_tick
 eq   "escalate: label NOT removed"       "" "$REMOVED"
 eq   "escalate: not unassigned"          "" "$UNASSIGNED"
 has  "escalate: comment posted"          "$COMMENTS" "acme/x#14"
-has  "escalate: reviewer assigned"       "$ASSIGNED" "acme/x#14->josh"
+has  "escalate: reviewer assigned"       "$ASSIGNED" "acme/x#14->reviewer"
 
 echo "-- scenario: escalation comment is not re-posted every sweep (dedup) --"
 _reset_capture
@@ -800,7 +800,7 @@ _real_helper_contract() (
         jq -cn '[{user:{login:"igor"},body:"nope"},
                  {user:{login:"igor"},body:"tail <!-- m --> end"},
                  {user:{login:"igor"},body:"<!-- m -->"},
-                 {user:{login:"josh"},body:"<!-- m -->"}]' ;;
+                 {user:{login:"reviewer"},body:"<!-- m -->"}]' ;;
       "GET /repos/acme/x/pulls/7")   printf '{"head":{"sha":"abc"},"base":{"ref":"master"}}' ;;
       "GET /repos/acme/x/compare/abc...master") printf '{"total_commits":4}' ;;
       *) printf '{}' ;;

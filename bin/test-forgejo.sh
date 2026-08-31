@@ -41,7 +41,7 @@ FIXTURE='[
   {"number":1,"created_at":"2026-01-01T00:00:00Z","assignees":[],"labels":[{"name":"Agent"}]},
   {"number":2,"created_at":"2026-01-02T00:00:00Z","assignees":[],"labels":[]},
   {"number":3,"created_at":"2026-01-03T00:00:00Z","assignees":[],"labels":[{"name":"Kind/Bug"}]},
-  {"number":4,"created_at":"2026-01-04T00:00:00Z","assignees":[{"login":"josh"}],"labels":[{"name":"Agent"}]},
+  {"number":4,"created_at":"2026-01-04T00:00:00Z","assignees":[{"login":"reviewer"}],"labels":[{"name":"Agent"}]},
   {"number":5,"created_at":"2026-01-05T00:00:00Z","assignees":[{"login":"someone"}],"labels":[{"name":"Agent"}]},
   {"number":6,"created_at":"2026-01-06T00:00:00Z","assignees":[],"labels":[{"name":"Agent"},{"name":"Status/Blocked"}]},
   {"number":7,"created_at":"2025-12-31T00:00:00Z","assignees":[],"labels":[{"name":"Agent"}]}
@@ -50,7 +50,7 @@ _fj() { printf '%s' "$FIXTURE"; }
 
 echo "== forgejo_find_claimable: Agent label required, fails closed =="
 
-OUT=$(forgejo_find_claimable acme/x josh)
+OUT=$(forgejo_find_claimable acme/x reviewer)
 eq "only Agent-labeled survive (unlabeled #2, other-label #3 dropped)" \
   "1 4 7" "$(jq -r '[.[].number] | sort | join(" ")' <<<"$OUT")"
 eq "oldest-first ordering" "7 1 4" "$(jq -r '[.[].number] | join(" ")' <<<"$OUT")"
@@ -71,7 +71,7 @@ NOAGENT='[
 ]'
 _fj() { printf '%s' "$NOAGENT"; }
 eq "repo missing Agent label -> nothing claimable (fails CLOSED)" \
-  "[]" "$(forgejo_find_claimable acme/x josh | jq -c '[.[].number]')"
+  "[]" "$(forgejo_find_claimable acme/x reviewer | jq -c '[.[].number]')"
 
 # forgejo_request_review (#377): retries once on a transient code and surfaces
 # the real HTTP reason instead of a bare, ambiguous warning. Stub the HTTP seam
@@ -82,23 +82,23 @@ echo "== forgejo_request_review: success / transient-retry / real-error =="
 sleep() { :; }
 
 _forgejo_post_reviewers() { printf '[]\n201'; }
-forgejo_request_review acme/x 1 josh 2>/dev/null; eq "201 -> rc 0 (requested)" "0" "$?"
+forgejo_request_review acme/x 1 reviewer 2>/dev/null; eq "201 -> rc 0 (requested)" "0" "$?"
 
 RR_STATE=$(mktemp)
 _forgejo_post_reviewers() {
   local n; n=$(cat "$RR_STATE" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" >"$RR_STATE"
   if [ "$n" -eq 1 ]; then printf 'upstream unavailable\n503'; else printf '[]\n201'; fi
 }
-forgejo_request_review acme/x 1 josh 2>/dev/null; eq "transient 503 then 201 -> rc 0 (retried)" "0" "$?"
+forgejo_request_review acme/x 1 reviewer 2>/dev/null; eq "transient 503 then 201 -> rc 0 (retried)" "0" "$?"
 eq "retry re-POSTed exactly once (2 attempts)" "2" "$(cat "$RR_STATE")"
 rm -f "$RR_STATE"
 
 _forgejo_post_reviewers() { printf 'gateway timeout\n503'; }
-ERR=$(forgejo_request_review acme/x 1 josh 2>&1); eq "persistent 503 -> rc 1" "1" "$?"
+ERR=$(forgejo_request_review acme/x 1 reviewer 2>&1); eq "persistent 503 -> rc 1" "1" "$?"
 eq "persistent failure surfaces the HTTP status" "true" "$(grep -q 503 <<<"$ERR" && echo true || echo false)"
 
 _forgejo_post_reviewers() { printf '{"message":"reviewer invalid"}\n422'; }
-ERR=$(forgejo_request_review acme/x 1 josh 2>&1); eq "client 422 -> rc 1 (no retry)" "1" "$?"
+ERR=$(forgejo_request_review acme/x 1 reviewer 2>&1); eq "client 422 -> rc 1 (no retry)" "1" "$?"
 eq "422 surfaces the reason" "true" "$(grep -qi 'reviewer invalid' <<<"$ERR" && echo true || echo false)"
 # forgejo_repo_has_label: the onboarding check behind #376. Distinct exit codes
 # let validate-repo.sh tell "absent" (flag it) from "couldn't check" (skip).
@@ -305,16 +305,16 @@ unset -f curl sleep
 echo "== forgejo_pr_actionable_request_changes: pickup signal, best-effort (igor#425) =="
 parc() { local fx="$1"; _fj() { printf '%s' "$fx"; }; forgejo_pr_actionable_request_changes acme/x 42 bot; }
 
-LIVE_RC='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","stale":false,"dismissed":false,"submitted_at":"2026-01-01T00:00:00Z"}]'
+LIVE_RC='[{"user":{"login":"reviewer"},"state":"REQUEST_CHANGES","stale":false,"dismissed":false,"submitted_at":"2026-01-01T00:00:00Z"}]'
 eq "live REQUEST_CHANGES -> returns that review" "REQUEST_CHANGES" "$(jq -r '.state' <<<"$(parc "$LIVE_RC")")"
 
-STALE_RC='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","stale":true,"dismissed":false,"submitted_at":"2026-01-01T00:00:00Z"}]'
+STALE_RC='[{"user":{"login":"reviewer"},"state":"REQUEST_CHANGES","stale":true,"dismissed":false,"submitted_at":"2026-01-01T00:00:00Z"}]'
 eq "stale REQUEST_CHANGES -> not actionable (empty)" "" "$(parc "$STALE_RC")"
 
-DISMISSED_RC='[{"user":{"login":"josh"},"state":"REQUEST_CHANGES","stale":false,"dismissed":true,"submitted_at":"2026-01-01T00:00:00Z"}]'
+DISMISSED_RC='[{"user":{"login":"reviewer"},"state":"REQUEST_CHANGES","stale":false,"dismissed":true,"submitted_at":"2026-01-01T00:00:00Z"}]'
 eq "dismissed REQUEST_CHANGES -> not actionable (empty)" "" "$(parc "$DISMISSED_RC")"
 
-APPROVED_RC='[{"user":{"login":"josh"},"state":"APPROVED","stale":false,"dismissed":false,"submitted_at":"2026-01-01T00:00:00Z"}]'
+APPROVED_RC='[{"user":{"login":"reviewer"},"state":"APPROVED","stale":false,"dismissed":false,"submitted_at":"2026-01-01T00:00:00Z"}]'
 eq "latest review APPROVED -> empty (no request-changes signal)" "" "$(parc "$APPROVED_RC")"
 
 eq "no reviews at all -> empty" "" "$(parc '[]')"

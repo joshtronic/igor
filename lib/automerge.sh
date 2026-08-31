@@ -136,8 +136,10 @@ automerge_url_status() {
 # automerge_require_human <repo> -- exit 0 if the repo pins itself to a HUMAN
 # review gate (`agent.json` `.automerge.require_human == true`); exit 1 otherwise
 # (the default -- the shadow review's APPROVE gates the merge). The carve-out for
-# repos whose real defect class a diff review can't judge (joshing.you, igor.bot,
-# a game whose bugs are visual/interaction, not diffable). A url-less repo
+# repos whose real defect class a diff review can't judge (a personal-sites
+# directory whose defects are data content, a blog whose defects are
+# visual/typographic, a game whose bugs are visual/interaction -- none
+# diffable). A url-less repo
 # (including igor itself) is ALREADY human-gated upstream, unconditionally,
 # regardless of this flag -- see do_automerge_tick's use of
 # automerge_url_status.

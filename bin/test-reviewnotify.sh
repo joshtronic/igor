@@ -174,11 +174,11 @@ forgejo_get_pr() {
 }
 
 echo "== only a request FOR the operator is worth mailing him =="
-export FORGEJO_REVIEWER=josh
+export FORGEJO_REVIEWER=reviewer
 SENDS_BEFORE=$SENDS; PR_SHA=2222bbb
 review_notify_human joshtronic/igor 42 someone-else
 eq "a request for somebody else does not email the operator" "$SENDS_BEFORE" "$SENDS"
-review_notify_human joshtronic/igor 42 josh
+review_notify_human joshtronic/igor 42 reviewer
 eq "his own request does" "$((SENDS_BEFORE + 1))" "$SENDS"
 PR_SHA=3333ccc
 review_notify_human joshtronic/igor 42
@@ -289,30 +289,30 @@ HOOKED=""
 review_notify_human() { HOOKED="$1#$2 -> ${3:-}"; }
 
 _forgejo_post_reviewers() { printf '\n201'; }
-forgejo_request_review joshtronic/igor 42 josh
+forgejo_request_review joshtronic/igor 42 reviewer
 eq "a request that LANDS fires the notifier, reviewer and all" \
-   "joshtronic/igor#42 -> josh" "$HOOKED"
+   "joshtronic/igor#42 -> reviewer" "$HOOKED"
 
 HOOKED=""
 _forgejo_post_reviewers() { printf 'nope\n422'; }
-forgejo_request_review joshtronic/igor 42 josh 2>/dev/null
+forgejo_request_review joshtronic/igor 42 reviewer 2>/dev/null
 eq "a REJECTED request does not email" "" "$HOOKED"
 
 HOOKED=""
 _forgejo_post_reviewers() { printf '\n000'; }
-forgejo_request_review joshtronic/igor 42 josh 2>/dev/null
+forgejo_request_review joshtronic/igor 42 reviewer 2>/dev/null
 eq "an unreachable instance does not email" "" "$HOOKED"
 
 # A notifier that blows up must not turn a landed request into a failed one --
 # the request already succeeded server-side.
 review_notify_human() { return 3; }
 _forgejo_post_reviewers() { printf '\n201'; }
-forgejo_request_review joshtronic/igor 42 josh
+forgejo_request_review joshtronic/igor 42 reviewer
 eq "a failing notifier does not fail the request" "0" "$?"
 
 # And the hook is optional: bin/agent-*.sh source forgejo.sh without it.
 unset -f review_notify_human
-forgejo_request_review joshtronic/igor 42 josh
+forgejo_request_review joshtronic/igor 42 reviewer
 eq "with no notifier defined at all, the request still succeeds" "0" "$?"
 
 if [ "$FAIL" -eq 0 ]; then

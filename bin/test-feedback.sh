@@ -172,9 +172,9 @@ eq "parse: FILE without LABELS -> empty"  "" "$(jq -r '.labels' <<<"$OUT")"
 echo "== file_issue (UNLABELED + assigned + marker) =="
 POST_BODY=""
 _fj() { case "$1 $2" in "POST "*/issues) POST_BODY="$3" ;; esac; }
-feedback_file_issue acme/x "T" "B" "josh" >/dev/null 2>&1
+feedback_file_issue acme/x "T" "B" "reviewer" >/dev/null 2>&1
 eq  "file: title in payload"    "T"    "$(jq -r '.title' <<<"$POST_BODY")"
-eq  "file: assigned to human"   "josh" "$(jq -r '.assignees[0]' <<<"$POST_BODY")"
+eq  "file: assigned to human"   "reviewer" "$(jq -r '.assignees[0]' <<<"$POST_BODY")"
 has "file: body carries marker" "$(jq -r '.body' <<<"$POST_BODY")" "$FEEDBACK_MARKER"
 eq  "file: UNLABELED at open"   "null" "$(jq -r '.labels // "null"' <<<"$POST_BODY")"
 # The greenlight footer must NOT tell the human to unassign -- the Agent label
@@ -183,11 +183,11 @@ case "$(jq -r '.body' <<<"$POST_BODY")" in
   *unassign*) printf '  x %s\n' "file: footer still instructs unassign"; FAIL=$((FAIL + 1)) ;;
   *)          printf '  + %s\n' "file: footer does not instruct unassign" ;;
 esac
-feedback_file_issue acme/x "T" "B" "josh" "[2,3]" >/dev/null 2>&1
+feedback_file_issue acme/x "T" "B" "reviewer" "[2,3]" >/dev/null 2>&1
 eq "file: applies resolved label ids to the payload" "[2,3]" "$(jq -c '.labels' <<<"$POST_BODY")"
 
 echo "== do_feedback_tick decision =="
-export FORGEJO_REVIEWER=josh AGENT_MODEL_REVIEW=m
+export FORGEJO_REVIEWER=reviewer AGENT_MODEL_REVIEW=m
 export ANALYSIS_REPOS_JSON='{"full_name":"acme/x"}'
 # context_surface feedback-directive fails cleanly with an unseeded cache
 # (AGENT_STATE_DIR is this test's tmp dir) -- claude_call below is fully
