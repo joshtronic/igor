@@ -139,10 +139,9 @@ automerge_url_status() {
 # repos whose real defect class a diff review can't judge (a personal-sites
 # directory whose defects are data content, a blog whose defects are
 # visual/typographic, a game whose bugs are visual/interaction -- none
-# diffable). A url-less repo
-# (including igor itself) is ALREADY human-gated upstream, unconditionally,
-# regardless of this flag -- see do_automerge_tick's use of
-# automerge_url_status.
+# diffable). A url-less repo (including igor itself) is ALREADY human-gated
+# upstream, unconditionally, regardless of this flag -- see do_automerge_tick's
+# use of automerge_url_status.
 #
 # Fails closed on UNKNOWN, never on UNSTATED (igor#578; three prior attempts
 # -- igor#561, #562, #571 -- all got this backwards). A readable config that
