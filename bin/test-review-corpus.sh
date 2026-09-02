@@ -2,7 +2,7 @@
 # Unit tests for lib/review-corpus.sh -- parsing a PR's comment thread into a
 # review-loop trajectory (igor#582), with no model in the loop.
 #
-# Six behaviors are asserted, each picked because a parser that fakes it (a
+# Eight behaviors are asserted, each picked because a parser that fakes it (a
 # constant, a string-contains check with no anchoring) would still pass a
 # lazier test:
 #   1. a bare APPROVE trajectory
@@ -14,6 +14,7 @@
 #   6. a human-only PR (zero automated artifacts) returns an empty record
 #   7. the scorecard aggregation over a set of records -- verdict mix and
 #      percentages, both median branches, and the zero-record path
+#   8. the file survives being sourced under `set -e`
 set -uo pipefail
 
 command -v jq >/dev/null 2>&1 || { echo "test-review-corpus: jq absent -- skipping"; exit 0; }
@@ -214,6 +215,17 @@ eq "dismissed-then-approved" "Dismissed-then-approved PRs: 1" "$(line 'Dismissed
 eq "reraised findings" "PRs where a dismissed finding reappeared verbatim in a later review: 1" \
   "$(line 'reappeared verbatim')"
 
+# The two lines under that count are a caveat about the METRIC, so they have to
+# read the same whether the count is 1 or 0. The first version asserted "this
+# reads 0 across the live corpus" unconditionally and so contradicted the line
+# directly above it on exactly this fixture.
+caveat() { grep -A2 -F 'reappeared verbatim' <<<"$S" | tail -2; }
+CAVEAT_ON_HIT=$(caveat)
+case "$CAVEAT_ON_HIT" in
+  *"lower bound"*) ok "the reraised count carries a lower-bound caveat" ;;
+  *) bad "the reraised count carries a lower-bound caveat: got [$CAVEAT_ON_HIT]" ;;
+esac
+
 # An odd count takes the other median branch: rounds 1,2,6 -> median 2, mean 3.
 {
   rec '["APPROVE"]'                                                    0 0 false false
@@ -223,6 +235,9 @@ eq "reraised findings" "PRs where a dismissed finding reappeared verbatim in a l
 S=$(review_corpus_scorecard "$RECORDS" 3)
 eq "odd record count takes the middle-value median branch" \
   "Review rounds to merge: mean 3, median 2" "$(line 'Review rounds to merge')"
+eq "no record reraises a finding here" \
+  "PRs where a dismissed finding reappeared verbatim in a later review: 0" "$(line 'reappeared verbatim')"
+eq "the reraised caveat says the same thing at 0 as it does at 1" "$CAVEAT_ON_HIT" "$(caveat)"
 
 # The zero-record path: the script short-circuits before calling this, but the
 # aggregation must not divide by zero if it is ever reached directly.
@@ -233,6 +248,19 @@ eq "zero records: no division by zero, scored 0" \
 eq "zero records: percentages are 0, not null or nan" "  APPROVE: 0 (0%)" "$(line '  APPROVE:')"
 eq "zero records: mean and median are 0" \
   "Review rounds to merge: mean 0, median 0" "$(line 'Review rounds to merge')"
+
+# --- 8. sourcing under set -e ---------------------------------------------
+# `read -d ''` returns nonzero at EOF-without-a-NUL, which is every heredoc, so
+# an unguarded `read -r -d '' VAR <<EOF` at file scope exits any shell that
+# sources this file under `set -e`. Both current callers use `set -uo pipefail`
+# and never noticed; the next one would have.
+
+echo "== sourcing under set -e =="
+if bash -c 'set -euo pipefail; . "$1/lib/review-corpus.sh"; [ -n "$REVIEW_CORPUS_JQ" ] && [ -n "$REVIEW_SCORECARD_JQ" ]' _ "$HERE"; then
+  ok "sourced under set -e with both jq programs set"
+else
+  bad "sourcing under set -e aborted or left a jq program empty"
+fi
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-review-corpus: all checks passed"

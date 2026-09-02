@@ -53,15 +53,19 @@ fi
 #     sharktankdb.com and snail.io: 48 dismissals, 46 with a later review, and
 #     ZERO sharing a literal content line. Neither side quotes the other -- the
 #     dismissal argues in its own words and the next review restates the point
-#     in its own. So `finding_reraised` is a LOWER BOUND that currently reads 0
-#     everywhere, not a measured rate: read a 0 as "no verbatim repeat found",
-#     never as "the reviewer accepted every dismissal". Catching the real thing
-#     needs a semantic comparison, which means a model call -- explicitly the
-#     follow-on ticket's job, not this one's (igor#582 is deliberately
-#     model-free). Loosening this to fuzzy matching instead would manufacture
-#     false positives in exactly the figures the scorecard exists to keep
-#     honest.
-read -r -d '' REVIEW_CORPUS_JQ <<'JQ_EOF'
+#     in its own. So `finding_reraised` is a LOWER BOUND, not a measured rate:
+#     read a 0 as "no verbatim repeat found", never as "the reviewer accepted
+#     every dismissal". Catching the real thing needs a semantic comparison,
+#     which means a model call -- explicitly the follow-on ticket's job, not
+#     this one's (igor#582 is deliberately model-free). Loosening this to fuzzy
+#     matching instead would manufacture false positives in exactly the figures
+#     the scorecard exists to keep honest.
+#
+# `|| true` because `read -d ''` returns nonzero when it reaches EOF without
+# finding a NUL -- which a heredoc never contains. The variable is still set;
+# without it, sourcing this file from a script under `set -e` would exit the
+# shell right here.
+read -r -d '' REVIEW_CORPUS_JQ <<'JQ_EOF' || true
 def strip_lead: sub("^\\s+"; "");
 
 def classify:
@@ -165,7 +169,7 @@ review_corpus_trajectory() {
 # operator reads comes out of this program, so it has to be assertable over
 # synthetic records with no network in the loop. Inline in the script it was
 # reachable only by running the whole thing against a live forge.
-read -r -d '' REVIEW_SCORECARD_JQ <<'JQ_EOF'
+read -r -d '' REVIEW_SCORECARD_JQ <<'JQ_EOF' || true
 def pct($n; $d): if $d == 0 then 0 else (($n * 1000 / $d) | round) / 10 end;
 
 . as $records
@@ -199,8 +203,8 @@ def pct($n; $d): if $d == 0 then 0 else (($n * 1000 / $d) | round) / 10 end;
     , "PRs with at least one dismissal: \($prs_with_dismissal) of \($scored) (\(pct($prs_with_dismissal; $scored))%)"
     , "Dismissed-then-approved PRs: \($dismissed_then_approved)"
     , "PRs where a dismissed finding reappeared verbatim in a later review: \($finding_reraised)"
-    , "  (a lower bound -- neither side quotes the other verbatim, so this reads 0"
-    , "   across the live corpus; see lib/review-corpus.sh)"
+    , "  (a lower bound: only a literal shared line counts, so a finding restated"
+    , "   in different words is invisible here; see lib/review-corpus.sh)"
   )
 JQ_EOF
 

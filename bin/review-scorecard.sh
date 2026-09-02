@@ -10,6 +10,16 @@
 #
 #   --limit N   only the N most recently merged PRs per repo (default: all,
 #               bounded by FORGEJO_CLOSED_PULLS_MAX_PAGES)
+#
+# --limit trims the REPORT, not the fetch: every run walks the repo's whole
+# closed-PR listing first and slices afterwards. So `--limit 5` costs the same
+# API calls as no limit, and a repo past FORGEJO_CLOSED_PULLS_MAX_PAGES x 50
+# closed PRs is skipped even for a small limit (raise that env var to cover it).
+# forgejo_closed_pulls_recent would make the small case cheap, but it sorts by
+# recentupdate over closed PRs, merged and rejected alike -- so "the N most
+# recently merged" would become "however many of the N most recently touched
+# closed PRs happen to have merged", a denominator that silently shrinks. This
+# tool exists to keep these figures honest, so it pays for the exact ordering.
 
 set -uo pipefail
 
