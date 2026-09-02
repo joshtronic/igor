@@ -552,6 +552,49 @@ curl() { printf ''; return 7; }         # curl wrote nothing whatsoever
 eq "no output at all -> error" "error" "$(forgejo_repo_get_file_status acme/x AGENTS.md | cut -f1)"
 unset -f curl _reply
 
+echo "== forgejo_closed_pulls_all: paginates until a page comes back empty =="
+# Mirrors forgejo_open_prs's own contract (bin/test-claim-guard.sh) -- built
+# for bin/review-scorecard.sh (igor#582), which needs a corpus well past what
+# one capped-limit page (forgejo_closed_pulls_recent) can hold.
+_fj() {
+  case "$2" in
+    *page=1*) jq -nc '[range(50) | {number: ., merged: true}]' ;;
+    *page=2*) printf '%s' '[{"number":9001,"merged":true}]' ;;
+    *)        printf '%s' '[]' ;;
+  esac
+}
+OUT=$(forgejo_closed_pulls_all acme/x)
+eq "walks past page 1 to find page 2" "51" "$(jq 'length' <<<"$OUT")"
+eq "page-2 PR is present" "9001" "$(jq -r '.[-1].number' <<<"$OUT")"
+
+# A short first page is not the end -- a server with a lower MAX_RESPONSE_ITEMS
+# would otherwise look complete after page 1.
+_fj() {
+  case "$2" in
+    *page=1*) jq -nc '[range(5) | {number: ., merged: true}]' ;;
+    *page=2*) printf '%s' '[{"number":9002,"merged":true}]' ;;
+    *)        printf '%s' '[]' ;;
+  esac
+}
+eq "a short page is still walked further" "9002" \
+  "$(jq -r '.[-1].number' <<<"$(forgejo_closed_pulls_all acme/x)")"
+
+_fj() { printf '%s' '[]'; }
+eq "no closed PRs at all -> empty array" "0" "$(jq 'length' <<<"$(forgejo_closed_pulls_all acme/x)")"
+
+_fj() { return 1; }
+OUT=$(forgejo_closed_pulls_all acme/x); RC=$?
+eq "an unfetchable listing returns nonzero..." "1" "$RC"
+eq "...with no output" "" "$OUT"
+
+# A server that keeps answering with a full page must hit the cap, not spin
+# the tick forever.
+_fj() { jq -nc '[range(50) | {number: ., merged: true}]'; }
+# shellcheck disable=SC2034  # read by forgejo_closed_pulls_all (lib/forgejo.sh)
+OUT=$(FORGEJO_CLOSED_PULLS_MAX_PAGES=3; forgejo_closed_pulls_all acme/x); RC=$?
+eq "an endless full-page server hits the page cap and returns nonzero" "1" "$RC"
+unset -f _fj
+
 if [ "$FAIL" -eq 0 ]; then echo "test-forgejo: all checks passed"; exit 0; fi
 echo "test-forgejo: $FAIL check(s) FAILED"
 exit 1
