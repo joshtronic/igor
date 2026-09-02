@@ -588,11 +588,14 @@ eq "an unfetchable listing returns nonzero..." "1" "$RC"
 eq "...with no output" "" "$OUT"
 
 # A server that keeps answering with a full page must hit the cap, not spin
-# the tick forever.
+# the tick forever -- and the cap is exit 2, distinct from a fetch failure's 1,
+# so review-scorecard can say WHY a repo dropped out of the totals instead of
+# blaming the network for a repo that is simply past 1000 closed PRs.
 _fj() { jq -nc '[range(50) | {number: ., merged: true}]'; }
 # shellcheck disable=SC2034  # read by forgejo_closed_pulls_all (lib/forgejo.sh)
 OUT=$(FORGEJO_CLOSED_PULLS_MAX_PAGES=3; forgejo_closed_pulls_all acme/x); RC=$?
-eq "an endless full-page server hits the page cap and returns nonzero" "1" "$RC"
+eq "an endless full-page server hits the page cap: exit 2, not 1" "2" "$RC"
+eq "...with no output" "" "$OUT"
 unset -f _fj
 
 if [ "$FAIL" -eq 0 ]; then echo "test-forgejo: all checks passed"; exit 0; fi

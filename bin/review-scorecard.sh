@@ -38,7 +38,9 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --limit)
       LIMIT="${2:-}"
-      case "$LIMIT" in '' | *[!0-9]*) echo "--limit requires a positive integer" >&2; usage 2 ;; esac
+      # 0 has to be rejected explicitly: it passes *[!0-9]* and then `.[-0:]`
+      # is `.[0:]`, i.e. silently "all" -- the opposite of a limit.
+      case "$LIMIT" in '' | *[!0-9]* | 0) echo "--limit requires a positive integer" >&2; usage 2 ;; esac
       shift 2
       ;;
     -h | --help) usage 0 ;;
@@ -55,10 +57,15 @@ TOTAL_MERGED=0
 for repo in "${REPOS[@]}"; do
   echo "== ${repo}: listing merged PRs ==" >&2
   closed=$(forgejo_closed_pulls_all "$repo") || {
-    echo "warning: could not list closed PRs for ${repo} (network/token?) -- skipping" >&2
+    case $? in
+      2) echo "warning: ${repo} has more than $((FORGEJO_CLOSED_PULLS_MAX_PAGES * 50)) closed PRs (FORGEJO_CLOSED_PULLS_MAX_PAGES) -- skipping" >&2 ;;
+      *) echo "warning: could not list closed PRs for ${repo} (network/token?) -- skipping" >&2 ;;
+    esac
     continue
   }
-  merged=$(jq -c '[.[] | select(.merged == true)] | sort_by(.number)' <<<"$closed")
+  # Sorted by merge time, not number: --limit says "most recently merged", and
+  # a PR opened earlier can merge later.
+  merged=$(jq -c '[.[] | select(.merged == true)] | sort_by(.merged_at // "")' <<<"$closed")
   if [ -n "$LIMIT" ]; then
     merged=$(jq -c --argjson n "$LIMIT" '.[-$n:]' <<<"$merged")
   fi
@@ -69,7 +76,11 @@ for repo in "${REPOS[@]}"; do
   i=0
   while [ "$i" -lt "$count" ]; do
     number=$(jq -r ".[$i].number" <<<"$merged")
-    comments=$(forgejo_pr_comments "$repo" "$number" 2>/dev/null) || comments='[]'
+    comments=$(forgejo_pr_comments "$repo" "$number" 2>/dev/null) || comments=''
+    # An empty-but-successful fetch (204, a truncated body) is not a failure the
+    # `||` above catches, and review_corpus_trajectory reads stdin when handed
+    # an empty string -- which here would block on the terminal.
+    [ -n "$comments" ] || comments='[]'
     record=$(review_corpus_trajectory "$comments" true)
     if [ "$record" != "{}" ]; then
       jq -c --arg repo "$repo" --argjson number "$number" '. + {repo: $repo, number: $number}' \
@@ -86,41 +97,6 @@ if [ "$SCORED" -eq 0 ]; then
   exit 0
 fi
 
-# All aggregation happens here, in one jq pass over the slurped records --
-# the shell above is pure plumbing (fetch, filter, append).
-jq -s -r --argjson total_merged "$TOTAL_MERGED" '
-  def pct($n; $d): if $d == 0 then 0 else (($n * 1000 / $d) | round) / 10 end;
-
-  . as $records
-  | ($records | length) as $scored
-  | ($records | map(.verdicts[]) ) as $verdicts
-  | ($verdicts | length) as $vcount
-  | (["APPROVE","REQUEST_CHANGES","COMMENT"] | map(. as $v | {verdict: $v, n: ($verdicts | map(select(. == $v)) | length)})) as $mix
-  | ($records | map(.review_rounds) | sort) as $rounds
-  | ($rounds | length) as $rn
-  | ( if $rn == 0 then 0
-      elif ($rn % 2) == 1 then $rounds[($rn - 1) / 2]
-      else (($rounds[($rn / 2) - 1] + $rounds[$rn / 2]) / 2)
-      end ) as $median_rounds
-  | ((($rounds | add // 0) * 10 / (if $rn == 0 then 1 else $rn end) | round) / 10) as $mean_rounds
-  | ($records | map(.rework_rounds) | add // 0) as $total_rework_rounds
-  | ($records | map(.dismissal_count) | add // 0) as $total_dismissals
-  | ($records | map(select(.dismissal_count > 0)) | length) as $prs_with_dismissal
-  | ($records | map(select(.dismissed_then_approved)) | length) as $dismissed_then_approved
-  | ($records | map(select(.finding_reraised)) | length) as $finding_reraised
-  | (
-      "== review scorecard =="
-      , "PRs scored (had automated review artifacts): \($scored) of \($total_merged) merged"
-      , ""
-      , "Review-verdict artifacts: \($vcount)"
-      , ($mix[] | "  \(.verdict): \(.n) (\(pct(.n; $vcount))%)")
-      , ""
-      , "Review rounds to merge: mean \($mean_rounds), median \($median_rounds)"
-      , "Rework rounds (commits pushed after a review): \($total_rework_rounds)"
-      , ""
-      , "Dismissal comments: \($total_dismissals)"
-      , "PRs with at least one dismissal: \($prs_with_dismissal) of \($scored) (\(pct($prs_with_dismissal; $scored))%)"
-      , "Dismissed-then-approved PRs: \($dismissed_then_approved)"
-      , "PRs where a dismissed finding was raised again: \($finding_reraised)"
-    )
-' "$RECORDS_FILE"
+# All aggregation happens in lib/review-corpus.sh, in one jq pass over the
+# slurped records -- this script is pure plumbing (fetch, filter, append).
+review_corpus_scorecard "$RECORDS_FILE" "$TOTAL_MERGED"

@@ -32,7 +32,7 @@ fi
 # Design notes on the two judgement calls that AREN'T just "count the
 # headers":
 #
-#   - A dismissal's "round" is 1 + however many review artifacts preceded it
+#   - A dismissal's "round" is however many review artifacts preceded it
 #     -- i.e. which review cycle it's answering -- rather than the round
 #     number in a same-round "Rework -- round N" comment, because a
 #     dismiss-only round (no commits) never gets one of those at all
@@ -48,6 +48,19 @@ fi
 #     after stripping is the model's own freeform prose -- the actual finding
 #     text -- so a literal repeat of a line in it is a real signal, not
 #     resemblance by boilerplate.
+#
+#     Measured 2026-09-02 across the last 25 merged PRs of igor, joshing.you,
+#     sharktankdb.com and snail.io: 48 dismissals, 46 with a later review, and
+#     ZERO sharing a literal content line. Neither side quotes the other -- the
+#     dismissal argues in its own words and the next review restates the point
+#     in its own. So `finding_reraised` is a LOWER BOUND that currently reads 0
+#     everywhere, not a measured rate: read a 0 as "no verbatim repeat found",
+#     never as "the reviewer accepted every dismissal". Catching the real thing
+#     needs a semantic comparison, which means a model call -- explicitly the
+#     follow-on ticket's job, not this one's (igor#582 is deliberately
+#     model-free). Loosening this to fuzzy matching instead would manufacture
+#     false positives in exactly the figures the scorecard exists to keep
+#     honest.
 read -r -d '' REVIEW_CORPUS_JQ <<'JQ_EOF'
 def strip_lead: sub("^\\s+"; "");
 
@@ -65,10 +78,8 @@ def classify:
       { kind: "other" }
     end;
 
-# Lines of a comment body that carry actual content -- not the fixed
-# template scaffolding shared by every artifact of a kind. Short lines
-# (< 8 chars trimmed) are dropped too: too easy to "overlap" by accident
-# ("ok.", "done").
+# One line of the fixed template scaffolding shared by every artifact of a
+# kind, as opposed to a line carrying the model's own prose.
 def is_boilerplate:
   test("^### ")
   or test("^CI for `")
@@ -78,6 +89,9 @@ def is_boilerplate:
   or test("No code changes: the agent judged every point raised")
   or test("The rest of the findings were addressed in the commits");
 
+# The lines of a comment body that carry actual content: scaffolding dropped,
+# and short lines (< 8 chars trimmed) with it -- those are too easy to
+# "overlap" by accident ("ok.", "done").
 def content_fingerprint($body):
   ($body // "" | split("\n"))
   | map(gsub("^\\s+|\\s+$"; ""))
@@ -144,4 +158,58 @@ review_corpus_trajectory() {
     *) merged="unknown" ;;
   esac
   jq -c --arg merged "$merged" "$REVIEW_CORPUS_JQ" <<<"$comments"
+}
+
+# The aggregation behind bin/review-scorecard.sh. It lives here, beside the
+# parser, for the same reason the parser's own logic does: every figure the
+# operator reads comes out of this program, so it has to be assertable over
+# synthetic records with no network in the loop. Inline in the script it was
+# reachable only by running the whole thing against a live forge.
+read -r -d '' REVIEW_SCORECARD_JQ <<'JQ_EOF'
+def pct($n; $d): if $d == 0 then 0 else (($n * 1000 / $d) | round) / 10 end;
+
+. as $records
+| ($records | length) as $scored
+| ($records | map(.verdicts[]) ) as $verdicts
+| ($verdicts | length) as $vcount
+| (["APPROVE","REQUEST_CHANGES","COMMENT"] | map(. as $v | {verdict: $v, n: ($verdicts | map(select(. == $v)) | length)})) as $mix
+| ($records | map(.review_rounds) | sort) as $rounds
+| ($rounds | length) as $rn
+| ( if $rn == 0 then 0
+    elif ($rn % 2) == 1 then $rounds[($rn - 1) / 2]
+    else (($rounds[($rn / 2) - 1] + $rounds[$rn / 2]) / 2)
+    end ) as $median_rounds
+| ((($rounds | add // 0) * 10 / (if $rn == 0 then 1 else $rn end) | round) / 10) as $mean_rounds
+| ($records | map(.rework_rounds) | add // 0) as $total_rework_rounds
+| ($records | map(.dismissal_count) | add // 0) as $total_dismissals
+| ($records | map(select(.dismissal_count > 0)) | length) as $prs_with_dismissal
+| ($records | map(select(.dismissed_then_approved)) | length) as $dismissed_then_approved
+| ($records | map(select(.finding_reraised)) | length) as $finding_reraised
+| (
+    "== review scorecard =="
+    , "PRs scored (had automated review artifacts): \($scored) of \($total_merged) merged"
+    , ""
+    , "Review-verdict artifacts: \($vcount)"
+    , ($mix[] | "  \(.verdict): \(.n) (\(pct(.n; $vcount))%)")
+    , ""
+    , "Review rounds to merge: mean \($mean_rounds), median \($median_rounds)"
+    , "Rework rounds (commits pushed after a review): \($total_rework_rounds)"
+    , ""
+    , "Dismissal comments: \($total_dismissals)"
+    , "PRs with at least one dismissal: \($prs_with_dismissal) of \($scored) (\(pct($prs_with_dismissal; $scored))%)"
+    , "Dismissed-then-approved PRs: \($dismissed_then_approved)"
+    , "PRs where a dismissed finding reappeared verbatim in a later review: \($finding_reraised)"
+    , "  (a lower bound -- neither side quotes the other verbatim, so this reads 0"
+    , "   across the live corpus; see lib/review-corpus.sh)"
+  )
+JQ_EOF
+
+# review_corpus_scorecard <records_file> <total_merged>
+# Render the aggregate report over a file of trajectory records, one compact
+# JSON object per line (the shape review_corpus_trajectory emits).
+# <total_merged> is the denominator for "scored N of M merged" -- a PR with no
+# automated artifacts produces no record, so it can't be counted from these.
+review_corpus_scorecard() {
+  local records="$1" total_merged="${2:-0}"
+  jq -s -r --argjson total_merged "$total_merged" "$REVIEW_SCORECARD_JQ" "$records"
 }

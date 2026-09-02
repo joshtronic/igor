@@ -538,6 +538,13 @@ FORGEJO_CLOSED_PULLS_MAX_PAGES="${FORGEJO_CLOSED_PULLS_MAX_PAGES:-20}"
 # holds. Same contract as forgejo_open_prs: nonzero with NO output when the
 # listing couldn't be walked to the end, so a caller can't mistake a
 # truncated read for "that's everything".
+#
+# The two ways to not reach the end are told apart by exit code: 1 for an
+# unfetchable or unparseable page, 2 for hitting the page cap. A report that
+# aggregates over this (review-scorecard) would otherwise show a repo dropping
+# out of the totals as "network/token?" when the real answer is "this repo is
+# past 1000 closed PRs" -- a wrong-but-plausible number, which is the exact
+# failure a measurement tool exists to prevent.
 forgejo_closed_pulls_all() {
   local repo="$1" page=1 batch count all='[]'
   while [ "$page" -le "$FORGEJO_CLOSED_PULLS_MAX_PAGES" ]; do
@@ -548,7 +555,7 @@ forgejo_closed_pulls_all() {
     all=$(printf '%s\n%s' "$all" "$batch" | jq -s 'add') || return 1
     page=$((page + 1))
   done
-  return 1
+  return 2
 }
 
 # Page cap for forgejo_pr_files. 20 pages x 50 = 1000 changed files, far past

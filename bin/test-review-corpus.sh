@@ -12,6 +12,8 @@
 #   4. a dismissed finding raised again vs one that was accepted
 #   5. a header quoted inside a fenced code block must NOT count as an artifact
 #   6. a human-only PR (zero automated artifacts) returns an empty record
+#   7. the scorecard aggregation over a set of records -- verdict mix and
+#      percentages, both median branches, and the zero-record path
 set -uo pipefail
 
 command -v jq >/dev/null 2>&1 || { echo "test-review-corpus: jq absent -- skipping"; exit 0; }
@@ -163,6 +165,74 @@ eq "merged=false" "false" "$(jq -r '.merged' <<<"$(review_corpus_trajectory "$(a
 eq "merged omitted -> null (unknown)" "null" "$(jq -r '.merged' <<<"$(review_corpus_trajectory "$(arr "$C1")")")"
 eq "comments read from stdin when no argument given" "1" \
   "$(arr "$C1" | review_corpus_trajectory | jq -r '.review_rounds')"
+
+# --- 7. the scorecard aggregation -----------------------------------------
+# Every number bin/review-scorecard.sh prints comes out of this function, so
+# it is asserted here over synthetic records rather than only being reachable
+# by running the whole script against a live forge.
+
+echo "== scorecard aggregation over synthetic records =="
+
+RECORDS=$(mktemp); trap 'rm -f "$RECORDS"' EXIT
+
+rec() {  # rec <verdicts-json> <rework> <dismissals> <then_approved> <reraised>
+  jq -n -c --argjson v "$1" --argjson rw "$2" --argjson dc "$3" \
+    --argjson ta "$4" --argjson rr "$5" \
+    '{verdicts: $v, review_rounds: ($v | length), rework_rounds: $rw,
+      dismissal_count: $dc, dismissed_then_approved: $ta, finding_reraised: $rr}'
+}
+
+# 4 records, 10 verdicts: 5 APPROVE / 4 REQUEST_CHANGES / 1 COMMENT.
+# review_rounds are 1,2,3,4 -> even count, median (2+3)/2 = 2.5, mean 2.5.
+# The two middle values differ deliberately: with an even count where they are
+# equal, the odd branch's `rounds[($rn - 1) / 2]` truncates to the same answer
+# and the assertion would pass on either branch.
+{
+  rec '["APPROVE"]'                                            0 0 false false
+  rec '["REQUEST_CHANGES","APPROVE"]'                          1 0 false false
+  rec '["REQUEST_CHANGES","COMMENT","APPROVE"]'                1 1 true  false
+  rec '["REQUEST_CHANGES","REQUEST_CHANGES","APPROVE","APPROVE"]' 2 2 false true
+} >"$RECORDS"
+
+S=$(review_corpus_scorecard "$RECORDS" 10)
+line() { grep -F "$1" <<<"$S" | head -1; }
+
+eq "scored/merged denominators come from the caller" \
+  "PRs scored (had automated review artifacts): 4 of 10 merged" "$(line 'PRs scored')"
+eq "verdict artifacts are counted across all records" \
+  "Review-verdict artifacts: 10" "$(line 'Review-verdict artifacts')"
+eq "APPROVE mix + percentage"         "  APPROVE: 5 (50%)"        "$(line '  APPROVE:')"
+eq "REQUEST_CHANGES mix + percentage" "  REQUEST_CHANGES: 4 (40%)" "$(line '  REQUEST_CHANGES:')"
+eq "COMMENT mix + percentage"         "  COMMENT: 1 (10%)"        "$(line '  COMMENT:')"
+eq "even record count takes the two-middle-values median branch" \
+  "Review rounds to merge: mean 2.5, median 2.5" "$(line 'Review rounds to merge')"
+eq "rework rounds are summed" "Rework rounds (commits pushed after a review): 4" "$(line 'Rework rounds')"
+eq "dismissal comments are summed" "Dismissal comments: 3" "$(line 'Dismissal comments:')"
+eq "PRs with a dismissal counts PRs, not dismissals" \
+  "PRs with at least one dismissal: 2 of 4 (50%)" "$(line 'PRs with at least one')"
+eq "dismissed-then-approved" "Dismissed-then-approved PRs: 1" "$(line 'Dismissed-then-approved')"
+eq "reraised findings" "PRs where a dismissed finding reappeared verbatim in a later review: 1" \
+  "$(line 'reappeared verbatim')"
+
+# An odd count takes the other median branch: rounds 1,2,6 -> median 2, mean 3.
+{
+  rec '["APPROVE"]'                                                    0 0 false false
+  rec '["REQUEST_CHANGES","APPROVE"]'                                  1 0 false false
+  rec '["COMMENT","COMMENT","COMMENT","COMMENT","COMMENT","APPROVE"]'  5 0 false false
+} >"$RECORDS"
+S=$(review_corpus_scorecard "$RECORDS" 3)
+eq "odd record count takes the middle-value median branch" \
+  "Review rounds to merge: mean 3, median 2" "$(line 'Review rounds to merge')"
+
+# The zero-record path: the script short-circuits before calling this, but the
+# aggregation must not divide by zero if it is ever reached directly.
+: >"$RECORDS"
+S=$(review_corpus_scorecard "$RECORDS" 0)
+eq "zero records: no division by zero, scored 0" \
+  "PRs scored (had automated review artifacts): 0 of 0 merged" "$(line 'PRs scored')"
+eq "zero records: percentages are 0, not null or nan" "  APPROVE: 0 (0%)" "$(line '  APPROVE:')"
+eq "zero records: mean and median are 0" \
+  "Review rounds to merge: mean 0, median 0" "$(line 'Review rounds to merge')"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-review-corpus: all checks passed"

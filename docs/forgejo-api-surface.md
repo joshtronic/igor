@@ -67,7 +67,7 @@ drifts the first time someone adds an operation.
 | `forgejo_list_open_bot_prs` | list a repo's open PRs by a given author, oldest-first |
 | `forgejo_open_pulls_oldest` | list every open PR on a repo, oldest-first |
 | `forgejo_closed_pulls_recent` | list a repo's closed PRs, most-recently-updated first |
-| `forgejo_closed_pulls_all` | list every closed PR on a repo, oldest-first, paginated to completion |
+| `forgejo_closed_pulls_all` | list every closed PR on a repo, oldest-first, paginated to completion (exit 2 = page cap, 1 = fetch failure) |
 | `forgejo_open_prs` | list every open PR on a repo, paginated to completion |
 | `forgejo_bot_prs_for_issue` | find bot PRs that close a given issue |
 | `forgejo_prs_covering_issue` | (pure) filter a PR list down to ones covering a given issue |
