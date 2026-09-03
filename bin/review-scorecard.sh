@@ -64,6 +64,7 @@ RECORDS_FILE=$(mktemp)
 trap 'rm -f "$RECORDS_FILE"' EXIT
 
 TOTAL_MERGED=0
+UNFETCHED=0
 for repo in "${REPOS[@]}"; do
   echo "== ${repo}: listing merged PRs ==" >&2
   closed=$(forgejo_closed_pulls_all "$repo") || {
@@ -86,9 +87,19 @@ for repo in "${REPOS[@]}"; do
   i=0
   while [ "$i" -lt "$count" ]; do
     number=$(jq -r ".[$i].number" <<<"$merged")
-    comments=$(forgejo_pr_comments "$repo" "$number" 2>/dev/null) || comments=''
+    i=$((i + 1))
+    # A PR whose comments can't be read is not a PR without artifacts. Handing
+    # the parser an empty array here would score it as a human-only thread and
+    # shave it off the scored count and every percentage's denominator -- one
+    # 500 or one token-scope problem quietly deflating the whole report. Count
+    # it separately instead; the total is printed with the figures it qualifies.
+    if ! comments=$(forgejo_pr_comments "$repo" "$number" 2>/dev/null); then
+      echo "warning: could not fetch comments for ${repo}#${number} -- excluded" >&2
+      UNFETCHED=$((UNFETCHED + 1))
+      continue
+    fi
     # An empty-but-successful fetch (204, a truncated body) is not a failure the
-    # `||` above catches, and review_corpus_trajectory reads stdin when handed
+    # check above catches, and review_corpus_trajectory reads stdin when handed
     # an empty string -- which here would block on the terminal.
     [ -n "$comments" ] || comments='[]'
     record=$(review_corpus_trajectory "$comments" true)
@@ -96,7 +107,6 @@ for repo in "${REPOS[@]}"; do
       jq -c --arg repo "$repo" --argjson number "$number" '. + {repo: $repo, number: $number}' \
         <<<"$record" >>"$RECORDS_FILE"
     fi
-    i=$((i + 1))
   done
 done
 
@@ -104,9 +114,10 @@ SCORED=$(wc -l <"$RECORDS_FILE" | tr -d ' ')
 
 if [ "$SCORED" -eq 0 ]; then
   echo "no PRs with automated review artifacts found across: ${REPOS[*]}"
+  [ "$UNFETCHED" -eq 0 ] || echo "(${UNFETCHED} merged PR(s) excluded: their comments could not be fetched)"
   exit 0
 fi
 
 # All aggregation happens in lib/review-corpus.sh, in one jq pass over the
 # slurped records -- this script is pure plumbing (fetch, filter, append).
-review_corpus_scorecard "$RECORDS_FILE" "$TOTAL_MERGED"
+review_corpus_scorecard "$RECORDS_FILE" "$TOTAL_MERGED" "$UNFETCHED"

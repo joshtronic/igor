@@ -20,10 +20,6 @@
 # instead would count every such quote as a real artifact and silently
 # inflate every figure downstream.
 
-if ! declare -F log >/dev/null; then
-  log() { printf '[agent] %s\n' "$*" >&2; }
-fi
-
 # The jq program backing review_corpus_trajectory. Kept as one constant so
 # the shell wrapper stays a thin plumbing layer -- everything provable is in
 # here, over JSON text, so a bug in it fails a test rather than a production
@@ -192,6 +188,9 @@ def pct($n; $d): if $d == 0 then 0 else (($n * 1000 / $d) | round) / 10 end;
 | (
     "== review scorecard =="
     , "PRs scored (had automated review artifacts): \($scored) of \($total_merged) merged"
+    , (if $unfetched > 0 then
+         "\($unfetched) merged PR(s) excluded: their comments could not be fetched"
+       else empty end)
     , ""
     , "Review-verdict artifacts: \($vcount)"
     , ($mix[] | "  \(.verdict): \(.n) (\(pct(.n; $vcount))%)")
@@ -208,12 +207,18 @@ def pct($n; $d): if $d == 0 then 0 else (($n * 1000 / $d) | round) / 10 end;
   )
 JQ_EOF
 
-# review_corpus_scorecard <records_file> <total_merged>
+# review_corpus_scorecard <records_file> <total_merged> [<unfetched>]
 # Render the aggregate report over a file of trajectory records, one compact
 # JSON object per line (the shape review_corpus_trajectory emits).
 # <total_merged> is the denominator for "scored N of M merged" -- a PR with no
 # automated artifacts produces no record, so it can't be counted from these.
+# <unfetched> is how many merged PRs the caller couldn't read the comments of.
+# Those are indistinguishable from human-only PRs once they reach here (both
+# are simply absent), and every one of them deflates the scored count and the
+# denominator of every percentage -- so the count is printed with the figures
+# it qualifies, not just warned about on stderr.
 review_corpus_scorecard() {
-  local records="$1" total_merged="${2:-0}"
-  jq -s -r --argjson total_merged "$total_merged" "$REVIEW_SCORECARD_JQ" "$records"
+  local records="$1" total_merged="${2:-0}" unfetched="${3:-0}"
+  jq -s -r --argjson total_merged "$total_merged" --argjson unfetched "$unfetched" \
+    "$REVIEW_SCORECARD_JQ" "$records"
 }

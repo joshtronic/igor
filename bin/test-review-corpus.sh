@@ -13,7 +13,8 @@
 #   5. a header quoted inside a fenced code block must NOT count as an artifact
 #   6. a human-only PR (zero automated artifacts) returns an empty record
 #   7. the scorecard aggregation over a set of records -- verdict mix and
-#      percentages, both median branches, and the zero-record path
+#      percentages, both median branches, the zero-record path, and the
+#      unfetchable-PR caveat
 #   8. the file survives being sourced under `set -e`
 set -uo pipefail
 
@@ -28,10 +29,13 @@ ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
 eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
 
-# Byte-identical copies of the three header lines the harness actually posts,
-# pulled straight from source rather than retyped -- an emoji or em-dash
-# transcription slip here would make every other fixture in this file test
-# nothing.
+# The three header lines the harness actually posts, pulled straight from
+# source. Every fixture below is BUILT from these rather than retyping them,
+# so an emoji/ZWJ/em-dash drift between what production posts and what the
+# parser matches fails here instead of passing on fixtures that drifted along
+# with the parser. The eq assertions pin the extraction itself: a grep that
+# stops matching, or a sed that mangles the line, fails on this line rather
+# than cascading into every later fixture as an unexplained mismatch.
 REAL_REVIEW_HEADER_LINE=$(grep -n 'Review —.*automated' "$HERE/bin/tick.sh" | head -1 \
   | sed -E 's/^[0-9]+: *comment="//; s/\\`/`/g')
 REAL_REWORK_HEADER_LINE=$(grep -n 'Rework —.*round.*automated' "$HERE/bin/tick.sh" | head -1 \
@@ -50,17 +54,22 @@ mk_comment() {  # mk_comment <created_at> <body>
   jq -n -c --arg at "$1" --arg body "$2" '{user: {login: "igor"}, created_at: $at, body: $body}'
 }
 
+# The harness's header lines carry the shell placeholder they interpolate at
+# post time; the fixtures substitute it the same way production does.
+review_header()  { printf '%s' "${REAL_REVIEW_HEADER_LINE/'${verdict}'/$1}"; }
+rework_header()  { printf '%s' "${REAL_REWORK_HEADER_LINE/'${PR_REWORK_ROUND}'/$1}"; }
+
 mk_review() {  # mk_review <created_at> <verdict> <sha> <ci> <text>
   local body
-  body=$(printf '### 🤖 Review — `%s` _(automated)_\n\nCI for `%s`: **%s**\n\n%s\n\n---\n<sub>note</sub>\n<!-- review sha=%s verdict=%s ci=%s -->' \
-    "$2" "$3" "$4" "$5" "$3" "$2" "$4")
+  body=$(printf '%s\n\nCI for `%s`: **%s**\n\n%s\n\n---\n<sub>note</sub>\n<!-- review sha=%s verdict=%s ci=%s -->' \
+    "$(review_header "$2")" "$3" "$4" "$5" "$3" "$2" "$4")
   mk_comment "$1" "$body"
 }
 
 mk_rework() {  # mk_rework <created_at> <round>
   local body
-  body=$(printf '### 🔧 Rework — round %s _(automated)_\n\nAddressed the review on `model` at **effort medium** — 1 new commit(s).\n\n<!-- audit:rework round=%s effort=medium -->' \
-    "$2" "$2")
+  body=$(printf '%s\n\nAddressed the review on `model` at **effort medium** — 1 new commit(s).\n\n<!-- audit:rework round=%s effort=medium -->' \
+    "$(rework_header "$2")" "$2")
   mk_comment "$1" "$body"
 }
 
@@ -71,7 +80,8 @@ mk_dismissal() {  # mk_dismissal <created_at> <text> <converged: true|false>
   else
     tail_="The rest of the findings were addressed in the commits on this branch. The reviewer will re-review the new head."
   fi
-  body=$(printf '### 🧑‍⚖️ Rework — findings dismissed _(automated)_\n\n%s\n\n---\n\n%s\n<!-- adjudication:dismissed -->' "$2" "$tail_")
+  body=$(printf '%s\n\n%s\n\n---\n\n%s\n<!-- adjudication:dismissed -->' \
+    "$REAL_DISMISS_HEADER_LINE" "$2" "$tail_")
   mk_comment "$1" "$body"
 }
 
@@ -144,7 +154,10 @@ eq "accepted: dismissals[0].reraised" "false" "$(jq -r '.dismissals[0].reraised'
 # --- 5. a header quoted in a fenced code block is not an artifact ----------
 
 echo "== a header quoted inside a fenced code block is not counted =="
-FENCED_BODY=$(printf 'For reference, this is what the header looks like:\n\n```\n### 🤖 Review — `APPROVE` _(automated)_\n```\n\nJust an example, not an actual review.')
+# The quoted header is the real one, so the anchoring is what rejects this --
+# not bytes the parser would have failed to match wherever they appeared.
+FENCED_BODY=$(printf 'For reference, this is what the header looks like:\n\n```\n%s\n```\n\nJust an example, not an actual review.' \
+  "$(review_header APPROVE)")
 F1=$(mk_comment "2026-01-01T00:00:00Z" "$FENCED_BODY")
 R5=$(review_corpus_trajectory "$(arr "$F1")" true)
 eq "fenced header -> empty record, not counted as APPROVE" "{}" "$R5"
@@ -248,6 +261,19 @@ eq "zero records: no division by zero, scored 0" \
 eq "zero records: percentages are 0, not null or nan" "  APPROVE: 0 (0%)" "$(line '  APPROVE:')"
 eq "zero records: mean and median are 0" \
   "Review rounds to merge: mean 0, median 0" "$(line 'Review rounds to merge')"
+
+# A merged PR whose comments could not be fetched is NOT a PR with no artifacts:
+# it shrinks the scored count and the denominator of every percentage below it.
+# The count rides in the report itself rather than only on stderr, so a run
+# redirected to a file still carries the caveat on its own figures.
+{ rec '["APPROVE"]' 0 0 false false; } >"$RECORDS"
+S=$(review_corpus_scorecard "$RECORDS" 3 2)
+eq "unfetchable PRs are reported next to the scored count" \
+  "2 merged PR(s) excluded: their comments could not be fetched" "$(line 'could not be fetched')"
+S=$(review_corpus_scorecard "$RECORDS" 3 0)
+eq "no unfetchable PRs -> no excluded line at all" "" "$(line 'could not be fetched')"
+S=$(review_corpus_scorecard "$RECORDS" 3)
+eq "the excluded count defaults to 0 when the caller omits it" "" "$(line 'could not be fetched')"
 
 # --- 8. sourcing under set -e ---------------------------------------------
 # `read -d ''` returns nonzero at EOF-without-a-NUL, which is every heredoc, so
