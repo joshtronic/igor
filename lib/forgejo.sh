@@ -526,6 +526,38 @@ forgejo_closed_pulls_recent() {
   _fj GET "/repos/${repo}/pulls?state=closed&sort=recentupdate&limit=${n}"
 }
 
+# Page cap for forgejo_closed_pulls_all, same rationale as
+# FORGEJO_OPEN_PRS_MAX_PAGES: 20 pages x 50 = 1000 closed PRs, far past any
+# real repo's history.
+FORGEJO_CLOSED_PULLS_MAX_PAGES="${FORGEJO_CLOSED_PULLS_MAX_PAGES:-20}"
+
+# forgejo_closed_pulls_all <repo> -- every closed pull request (merged or
+# rejected), oldest first, one JSON array. Unlike forgejo_closed_pulls_recent
+# this walks every page rather than taking a single capped `limit`, for a
+# corpus (bin/review-scorecard.sh) that can run well past what one page
+# holds. Same contract as forgejo_open_prs: nonzero with NO output when the
+# listing couldn't be walked to the end, so a caller can't mistake a
+# truncated read for "that's everything".
+#
+# The two ways to not reach the end are told apart by exit code: 1 for an
+# unfetchable or unparseable page, 2 for hitting the page cap. A report that
+# aggregates over this (review-scorecard) would otherwise show a repo dropping
+# out of the totals as "network/token?" when the real answer is "this repo is
+# past 1000 closed PRs" -- a wrong-but-plausible number, which is the exact
+# failure a measurement tool exists to prevent.
+forgejo_closed_pulls_all() {
+  local repo="$1" page=1 batch count all='[]'
+  while [ "$page" -le "$FORGEJO_CLOSED_PULLS_MAX_PAGES" ]; do
+    batch=$(_fj GET "/repos/${repo}/pulls?state=closed&sort=oldest&limit=50&page=${page}") || return 1
+    count=$(jq 'length' <<<"$batch" 2>/dev/null) || return 1
+    case "$count" in '' | *[!0-9]*) return 1 ;; esac
+    [ "$count" -eq 0 ] && { printf '%s' "$all"; return 0; }
+    all=$(printf '%s\n%s' "$all" "$batch" | jq -s 'add') || return 1
+    page=$((page + 1))
+  done
+  return 2
+}
+
 # Page cap for forgejo_pr_files. 20 pages x 50 = 1000 changed files, far past
 # any PR a human would open; it exists so a server that keeps answering with a
 # full page can't spin the tick forever.
