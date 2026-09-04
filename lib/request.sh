@@ -90,12 +90,22 @@ _request_cache_get() {
 # a cache miss next call is the correct degraded behavior, not a fetch
 # failure now.
 _request_cache_put() {
-  local method="$1" url="$2" body="$3" dir key
+  local method="$1" url="$2" body="$3" dir key tmp
   dir="$(_request_cache_dir)"
   key="$(_request_cache_key "$method" "$url")" || return 0
   mkdir -p "$dir" 2>/dev/null || return 0
-  printf '%s' "$body" >"$dir/$key.body" 2>/dev/null || return 0
-  date +%s >"$dir/$key.meta" 2>/dev/null
+  # Write-then-rename, body before meta. Two ticks can share
+  # $AGENT_STATE_DIR, and a reader that lands mid-write must see either no
+  # meta (a miss) or a meta pointing at a COMPLETE body -- never a
+  # fresh-looking stamp over half-written bytes.
+  tmp="$dir/$key.$$.tmp"
+  if ! printf '%s' "$body" >"$tmp" 2>/dev/null || ! mv -f "$tmp" "$dir/$key.body" 2>/dev/null; then
+    rm -f "$tmp"
+    return 0
+  fi
+  if ! date +%s >"$tmp" 2>/dev/null || ! mv -f "$tmp" "$dir/$key.meta" 2>/dev/null; then
+    rm -f "$tmp"
+  fi
 }
 
 # _request_backoff_delay <attempt> -- 1, 2, 4, 8, ... so a run of
@@ -125,9 +135,10 @@ _request_retry_after_seconds() {
 # the only thing a HEAD carries is its status and its headers. Every
 # other method prints its body but is never cached.
 #
-# Returns 1 on a non-retryable HTTP status or after exhausting the retry
-# budget on a transport failure / 429 / 503. Returns curl's own exit code
-# when a non-retryable transport failure occurs on the first attempt.
+# Returns 1 on a non-retryable HTTP status, and on a 429/503 that outlived
+# the retry budget. A transport failure returns curl's OWN exit code
+# instead -- whether it was non-retryable or outlived the budget -- so the
+# caller can tell a timeout from a refused connection.
 request_fetch() {
   local method="${1^^}" url="$2" ttl="${3:-0}"
   local retryable=0 cacheable=0
@@ -192,7 +203,7 @@ request_fetch() {
           sleep "$delay"
           continue
         fi
-        log "request: ${method} ${url} -> HTTP ${code} (retry budget exhausted)"
+        log "request: ${method} ${url} -> HTTP ${code} after ${attempt} attempt(s)"
         return 1
       fi
 

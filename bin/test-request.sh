@@ -142,6 +142,18 @@ eq "same body served from cache" "$OUT1" "$OUT2"
 eq "first call fetched once" "1" "$CALLS_AFTER_FIRST"
 eq "second call made zero additional curl calls" "$CALLS_AFTER_FIRST" "$(curl_calls)"
 
+echo "== _request_cache_put: leaves no temp file behind =="
+# The entry is written temp-then-renamed so a concurrent reader can't see a
+# meta stamp over a half-written body; a leaked .tmp means a rename went
+# missing.
+reset_mocks
+CURL_RCS=(0)
+CURL_CODES=(200)
+CURL_BODIES=("tmpless-body")
+request_get "http://x.test/f2" 60 >/dev/null
+eq "no leftover .tmp in the cache dir" "0" \
+  "$(find "$(_request_cache_dir)" -name '*.tmp' 2>/dev/null | wc -l | tr -d '[:space:]')"
+
 echo "== request_get: a call after the TTL expires refetches =="
 reset_mocks
 CURL_RCS=(0 0)
