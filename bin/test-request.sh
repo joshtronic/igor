@@ -17,8 +17,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 TMP_STATE=$(mktemp -d)
 CURL_LOG=$(mktemp)
+CURL_ARGS_LOG=$(mktemp)
 SLEEP_LOG=$(mktemp)
-trap 'rm -rf "$TMP_STATE" "$CURL_LOG" "$SLEEP_LOG"' EXIT
+trap 'rm -rf "$TMP_STATE" "$CURL_LOG" "$CURL_ARGS_LOG" "$SLEEP_LOG"' EXIT
 export AGENT_STATE_DIR="$TMP_STATE"
 
 # shellcheck source=../lib/request.sh
@@ -50,8 +51,9 @@ curl() {
   for ((i = 0; i < ${#args[@]}; i++)); do
     [ "${args[$i]}" = "-D" ] && header_file="${args[$((i + 1))]}"
   done
-  idx=$(wc -l <"$CURL_LOG")
+  idx=$(wc -l <"$CURL_LOG" | tr -d '[:space:]')
   echo "$idx" >>"$CURL_LOG"
+  printf '%s\n' "$*" >>"$CURL_ARGS_LOG"
   [ -n "$header_file" ] && printf '%s' "${CURL_HEADERS[$idx]:-}" >"$header_file"
   local rc="${CURL_RCS[$idx]:-0}"
   [ "$rc" != "0" ] && return "$rc"
@@ -60,11 +62,22 @@ curl() {
 }
 sleep() { echo "$1" >>"$SLEEP_LOG"; }
 
-curl_calls() { wc -l <"$CURL_LOG"; }
+# tr -d: BSD/macOS wc pads its count with leading spaces, which would
+# break the string comparisons in eq().
+curl_calls() { wc -l <"$CURL_LOG" | tr -d '[:space:]'; }
+curl_args_at() { sed -n "$(($1 + 1))p" "$CURL_ARGS_LOG"; }
 sleep_at() { sed -n "$(($1 + 1))p" "$SLEEP_LOG"; }
+
+# has_arg <argline> <flag...> -- "true" when the flag sequence appears as
+# whole words in that call's argv.
+has_arg() {
+  local line=" $1 " needle=" ${*:2} "
+  [[ "$line" == *"$needle"* ]] && echo true || echo false
+}
 
 reset_mocks() {
   : >"$CURL_LOG"
+  : >"$CURL_ARGS_LOG"
   : >"$SLEEP_LOG"
   CURL_RCS=()
   CURL_CODES=()
@@ -167,6 +180,59 @@ request_fetch POST "http://x.test/i" 0 >/dev/null 2>&1
 RC=$?
 eq "nonzero rc" "true" "$([ "$RC" -ne 0 ] && echo true || echo false)"
 eq "exactly one call -- POST is never retried" "1" "$(curl_calls)"
+
+echo "== request_fetch HEAD: sends -I, never -X HEAD =="
+# -X HEAD leaves curl expecting a body the server never sends, so the
+# call only unblocks when --max-time trips -- curl exit 28, which is in
+# REQUEST_RETRY_CURL_CODES, so every HEAD would burn the full retry
+# budget and report a transport failure that never happened.
+reset_mocks
+CURL_RCS=(0)
+CURL_CODES=(200)
+CURL_BODIES=("")
+request_fetch HEAD "http://x.test/j" 0 >/dev/null
+eq "exactly one call" "1" "$(curl_calls)"
+ARGS=$(curl_args_at 0)
+eq "passes -I" "true" "$(has_arg "$ARGS" -I)"
+eq "does not pass -X HEAD" "false" "$(has_arg "$ARGS" -X HEAD)"
+eq "discards the header block -I writes to stdout" "true" "$(has_arg "$ARGS" -o /dev/null)"
+
+echo "== request_fetch GET: sends -X GET, never -I =="
+reset_mocks
+CURL_RCS=(0)
+CURL_CODES=(200)
+CURL_BODIES=("body")
+request_fetch GET "http://x.test/j2" 0 >/dev/null
+ARGS=$(curl_args_at 0)
+eq "passes -X GET" "true" "$(has_arg "$ARGS" -X GET)"
+eq "does not pass -I" "false" "$(has_arg "$ARGS" -I)"
+
+echo "== request_fetch HEAD: retries a transport failure like a GET =="
+reset_mocks
+CURL_RCS=(7 7 7)
+request_fetch HEAD "http://x.test/k" 0 >/dev/null 2>&1
+eq "attempt bound is 1 + REQUEST_RETRY_COUNT" "$((REQUEST_RETRY_COUNT + 1))" "$(curl_calls)"
+
+echo "== request_fetch HEAD: never cached, even with a TTL =="
+# A HEAD has no body to serve back, so a cache entry would only ever
+# replay "some HEAD succeeded recently" as an empty body.
+reset_mocks
+CURL_RCS=(0 0)
+CURL_CODES=(200 200)
+request_fetch HEAD "http://x.test/l" 60 >/dev/null
+request_fetch HEAD "http://x.test/l" 60 >/dev/null
+eq "second call refetched" "2" "$(curl_calls)"
+
+echo "== request_get: a cache hit and a live fetch print identically =="
+reset_mocks
+CURL_RCS=(0)
+CURL_CODES=(200)
+CURL_BODIES=("line-body")
+request_get "http://x.test/m" 60 >"$TMP_STATE/live.out"
+request_get "http://x.test/m" 60 >"$TMP_STATE/hit.out"
+eq "zero curl calls on the hit" "1" "$(curl_calls)"
+eq "byte-identical output" "true" \
+  "$(cmp -s "$TMP_STATE/live.out" "$TMP_STATE/hit.out" && echo true || echo false)"
 
 echo "=========================================="
 if [ "$FAIL" -eq 0 ]; then

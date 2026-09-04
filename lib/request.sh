@@ -15,13 +15,17 @@
 # risks a duplicate side effect (a re-sent email, a double-post) and is
 # out of scope -- output connectors need their own idempotency handling.
 #
-# Caching is keyed on method + full URL and stored under
-# $AGENT_STATE_DIR/cache/http, one body file per key plus a fetch-epoch
-# sidecar. A per-call TTL controls freshness; ttl=0 (the default) is the
-# explicit bypass -- no read, no write. A cache hit is never logged as a
-# fetch. A failed re-fetch NEVER falls back to a stale cache entry: a
-# stale "working" digest silently reporting last week's scores is a worse
-# failure than a loud one.
+# Caching applies to GET alone -- a HEAD has no body to serve back, so
+# an entry could only ever replay "some HEAD succeeded recently". It is
+# keyed on method + full URL and stored under $AGENT_STATE_DIR/cache/http,
+# one body file per key plus a fetch-epoch sidecar. A per-call TTL
+# controls freshness; ttl=0 (the default) is the explicit bypass -- no
+# read, no write. A cache hit is never logged as a fetch. A failed
+# re-fetch NEVER falls back to a stale cache entry: a stale "working"
+# digest silently reporting last week's scores is a worse failure than a
+# loud one. The cache is unbounded -- no eviction, no size cap. Nothing
+# opts in yet (every current caller passes ttl=0); the first caller that
+# does needs to bring a reaper with it.
 #
 # Requires on PATH: curl. sha256sum is used for the cache key; its
 # absence degrades to "cache always misses" rather than a hard failure,
@@ -113,31 +117,52 @@ _request_retry_after_seconds() {
 }
 
 # request_fetch <method> <url> [ttl_seconds] -- the core entry point.
-# Prints the response body on stdout and returns 0 on success. GET/HEAD
-# get the cache + retry treatment described above; every other method
-# gets exactly one attempt and is never cached, regardless of ttl.
+# Returns 0 on success. GET/HEAD get the retry treatment described above;
+# every other method gets exactly one attempt. Only GET is ever cached,
+# regardless of ttl.
+#
+# On stdout: a GET prints the response body; a HEAD prints NOTHING, since
+# the only thing a HEAD carries is its status and its headers. Every
+# other method prints its body but is never cached.
 #
 # Returns 1 on a non-retryable HTTP status or after exhausting the retry
 # budget on a transport failure / 429 / 503. Returns curl's own exit code
 # when a non-retryable transport failure occurs on the first attempt.
 request_fetch() {
   local method="${1^^}" url="$2" ttl="${3:-0}"
-  local cacheable=0
+  local retryable=0 cacheable=0
   case "$method" in
-    GET | HEAD) cacheable=1 ;;
+    GET) retryable=1 cacheable=1 ;;
+    HEAD) retryable=1 ;;
+  esac
+
+  # -I, not -X HEAD: -X sends the HEAD verb but leaves curl expecting a
+  # response body the server never sends, so the call blocks until
+  # --max-time trips (curl exit 28, which IS in REQUEST_RETRY_CURL_CODES
+  # -- every HEAD would burn the whole retry budget on a transport
+  # failure that never happened). curl's own man page says as much under
+  # -X. -I writes the header block to stdout, so -o /dev/null keeps it
+  # out of the body -w appends the status to.
+  local -a method_flags
+  case "$method" in
+    HEAD) method_flags=(-I -o /dev/null) ;;
+    *) method_flags=(-X "$method") ;;
   esac
 
   local cached
   if [ "$cacheable" -eq 1 ] && cached=$(_request_cache_get "$method" "$url" "$ttl"); then
-    printf '%s' "$cached"
+    [ -n "$cached" ] && printf '%s\n' "$cached"
     return 0
   fi
 
   local attempts=1
-  [ "$cacheable" -eq 1 ] && attempts=$((REQUEST_RETRY_COUNT + 1))
+  [ "$retryable" -eq 1 ] && attempts=$((REQUEST_RETRY_COUNT + 1))
 
   local header_tmp attempt resp rc code body delay retry_after
-  header_tmp=$(mktemp)
+  header_tmp=$(mktemp) || {
+    log "request: ${method} ${url} -- mktemp failed, cannot capture headers"
+    return 1
+  }
   # A RETURN trap isn't scoped to this call: left alone, it also fires
   # (with header_tmp out of scope, tripping `set -u`) when the CALLER of
   # request_fetch next returns. Clear it as part of its own firing.
@@ -147,7 +172,7 @@ request_fetch() {
     : >"$header_tmp"
     resp=$(curl -s -D "$header_tmp" -w '\n%{http_code}' \
       --connect-timeout "$REQUEST_CONNECT_TIMEOUT" --max-time "$REQUEST_MAX_TIME" \
-      -X "$method" "$url")
+      "${method_flags[@]}" "$url")
     rc=$?
 
     if [ "$rc" -eq 0 ]; then
@@ -161,7 +186,7 @@ request_fetch() {
       fi
 
       if [ "$code" = "429" ] || [ "$code" = "503" ]; then
-        if [ "$cacheable" -eq 1 ] && [ "$attempt" -lt "$attempts" ]; then
+        if [ "$retryable" -eq 1 ] && [ "$attempt" -lt "$attempts" ]; then
           retry_after=$(_request_retry_after_seconds "$header_tmp")
           delay="${retry_after:-$(_request_backoff_delay "$attempt")}"
           sleep "$delay"
@@ -179,7 +204,7 @@ request_fetch() {
     if [[ " $REQUEST_RETRY_CURL_CODES " != *" $rc "* ]]; then
       return "$rc"
     fi
-    if [ "$cacheable" -eq 1 ] && [ "$attempt" -lt "$attempts" ]; then
+    if [ "$retryable" -eq 1 ] && [ "$attempt" -lt "$attempts" ]; then
       sleep "$(_request_backoff_delay "$attempt")"
       continue
     fi

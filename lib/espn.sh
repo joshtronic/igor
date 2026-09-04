@@ -4,7 +4,11 @@
 # lib/request.sh -- every fetch goes through request_get (igor#585) for
 # its bounded retry + 429/503 backoff, rather than a bare curl. Caching
 # is intentionally left off (ttl=0): this is a port, not a behavior
-# change, and the digest wants each day's fetch live.
+# change, and the digest wants each day's fetch live. Two things the
+# bare curl did not do come along with request_get and are wanted:
+# REQUEST_CONNECT_TIMEOUT/REQUEST_MAX_TIME now bound a fetch (an
+# unbounded one could wedge a tick, and ~12 leagues means 24 of them per
+# digest), and a transport failure is logged instead of swallowed.
 #
 # The sports digest is opt-in; callers gate on these being set:
 #   PRIMARY_RECIPIENTS, SPORTS_LEAGUES   (SPORTS_RECIPIENTS adds extra subscribers)
@@ -28,19 +32,20 @@ ESPN_BASE_URL="${ESPN_BASE_URL:-https://site.api.espn.com/apis/site/v2/sports}"
 
 # espn_scoreboard <sport/league> <yyyymmdd>
 # Fetches the league's scoreboard for one calendar day (the digest's
-# "yesterday"). Echoes the raw JSON ({ "events": [...] }) on stdout.
-# Echoes '{"events":[]}' and rc=1 on any failure -- including the 400
-# ESPN returns for leagues with no scoreboard surface -- so callers can
-# branch on the event count and fall back to news-only.
+# "yesterday"; the date must be exactly 8 digits). Echoes the raw JSON
+# ({ "events": [...] }) on stdout. Echoes '{"events":[]}' and rc=1 on any
+# failure -- including a malformed date and the 400 ESPN returns for
+# leagues with no scoreboard surface -- so callers can branch on the
+# event count and fall back to news-only.
 espn_scoreboard() {
   local league="$1" yyyymmdd="$2" resp
-  if [ -z "$league" ] || [ -z "$yyyymmdd" ]; then
+  # The date goes into the query string by interpolation, not by curl's
+  # --data-urlencode, so the digits-only shape is enforced here rather
+  # than assumed of the caller: URL-encoding a digit is a no-op, which
+  # is what makes the interpolation equivalent to the old form.
+  if [ -z "$league" ] || [[ ! "$yyyymmdd" =~ ^[0-9]{8}$ ]]; then
     printf '%s' '{"events":[]}'; return 1
   fi
-  # $yyyymmdd is caller-supplied but always the digest's own %Y%m%d
-  # stamp (digits only), so appending it straight to the query string is
-  # equivalent to the old --data-urlencode: URL-encoding a digit is a
-  # no-op.
   resp=$(request_get "$ESPN_BASE_URL/$league/scoreboard?dates=${yyyymmdd}" 0) || {
       printf '%s' '{"events":[]}'; return 1
     }
