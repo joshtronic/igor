@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # espn.sh -- ESPN public site API client for the daily sports digest.
-# Isolates every ESPN network call. Sourced by bin/tick.sh.
+# Isolates every ESPN network call. Sourced by bin/tick.sh, after
+# lib/request.sh -- every fetch goes through request_get (igor#585) for
+# its bounded retry + 429/503 backoff, rather than a bare curl. Caching
+# is intentionally left off (ttl=0): this is a port, not a behavior
+# change, and the digest wants each day's fetch live.
 #
 # The sports digest is opt-in; callers gate on these being set:
 #   PRIMARY_RECIPIENTS, SPORTS_LEAGUES   (SPORTS_RECIPIENTS adds extra subscribers)
@@ -33,8 +37,11 @@ espn_scoreboard() {
   if [ -z "$league" ] || [ -z "$yyyymmdd" ]; then
     printf '%s' '{"events":[]}'; return 1
   fi
-  resp=$(curl -fsS -G "$ESPN_BASE_URL/$league/scoreboard" \
-    --data-urlencode "dates=${yyyymmdd}" 2>/dev/null) || {
+  # $yyyymmdd is caller-supplied but always the digest's own %Y%m%d
+  # stamp (digits only), so appending it straight to the query string is
+  # equivalent to the old --data-urlencode: URL-encoding a digit is a
+  # no-op.
+  resp=$(request_get "$ESPN_BASE_URL/$league/scoreboard?dates=${yyyymmdd}" 0) || {
       printf '%s' '{"events":[]}'; return 1
     }
   if ! jq -e . >/dev/null 2>&1 <<<"$resp"; then
@@ -53,7 +60,7 @@ espn_news() {
   if [ -z "$league" ]; then
     printf '%s' '{"articles":[]}'; return 1
   fi
-  resp=$(curl -fsS "$ESPN_BASE_URL/$league/news" 2>/dev/null) || {
+  resp=$(request_get "$ESPN_BASE_URL/$league/news" 0) || {
       printf '%s' '{"articles":[]}'; return 1
     }
   if ! jq -e . >/dev/null 2>&1 <<<"$resp"; then
