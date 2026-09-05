@@ -231,6 +231,80 @@ eq "rc=0" "0" "$?"
 eq "the ET-dated event survives at the window's edge" "1" "$(jq '.events | length' <<<"$OUT")"
 eq "emitted date is the ET calendar date, not the UTC date" "2026-09-04" "$(jq -r '.events[0].date' <<<"$OUT")"
 
+echo "== _et_session_date: the BSD date fallback converts through UTC, not the parse zone =="
+# BSD `date -j -f` parses in the CURRENT zone and matches the trailing Z as a
+# literal character, so a one-step TZ=America/New_York parse silently returns
+# the naive UTC date. Stub a BSD-shaped date (no GNU -d, has -j/-f and -r) so
+# that branch runs on a GNU host, where it otherwise never would.
+date() {
+  case "${1:-}" in
+    -d) return 1 ;;
+    -j)
+      # BSD matches the format strictly: the seconds-bearing one rejects a
+      # minute-precision timestamp, which is why espn.sh tries both.
+      case "$3" in
+        *:%SZ) [[ "$4" == *T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z ]] || return 1 ;;
+        *) [[ "$4" == *T[0-9][0-9]:[0-9][0-9]Z ]] || return 1 ;;
+      esac
+      command date -d "${4%Z}" "$5"
+      ;;
+    -r) command date -d "@$2" "$3" ;;
+    *) command date "$@" ;;
+  esac
+}
+eq "a late UTC start resolves to the previous ET day" "2026-09-04" "$(_et_session_date "2026-09-05T02:30:00Z")"
+eq "the minute-precision form falls through to the second format" "2026-09-04" "$(_et_session_date "2026-09-05T02:30Z")"
+eq "a midday UTC start stays on its own ET day" "2026-09-05" "$(_et_session_date "2026-09-05T20:10:00Z")"
+eq "an unparseable timestamp returns nonzero" "1" "$(_et_session_date "not-a-timestamp" >/dev/null 2>&1; echo $?)"
+unset -f date
+
+echo "== espn_team_schedule: a payload past the argv size limit still reduces =="
+# Linux caps a single argv string at 131072 bytes, so the event array has to
+# reach jq on stdin -- passing it as --argjson fails execve with E2BIG, which
+# this function would report as a failed fetch.
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [range(0;40) | {
+    name: ("Game " + (. | tostring)),
+    date: "2026-09-14T20:10Z",
+    status: {type: {description: "Final"}},
+    filler: ("x" * 5000),
+    competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}, score: "4", winner: true}]}]
+  }]
+}')
+BYTES=$(printf '%s' "$REQUEST_BODY" | wc -c)
+eq "the fixture is larger than the argv-string limit" "yes" \
+  "$( [ "$BYTES" -gt 131072 ] && echo yes || echo no )"
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+RC=$?
+eq "rc=0" "0" "$RC"
+eq "events capped, not lost to E2BIG" "20" "$(jq '.events | length' <<<"$OUT")"
+eq "the first event survives intact" "Game 0" "$(jq -r '.events[0].name' <<<"$OUT")"
+
+echo "== espn_team_schedule: an in-window event deep in a long payload is not truncated away =="
+# The window filter, not a slice of the payload's head, is what bounds the
+# candidate set: a season's worth of past games ahead of today must not push
+# today's game out.
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: ([range(0;250) | {
+    name: ("Old game " + (. | tostring)),
+    date: "2026-04-01T20:10Z",
+    status: {type: {description: "Final"}},
+    competitions: [{notes: [], competitors: []}]
+  }] + [{
+    name: "Today",
+    date: "2026-09-15T20:10Z",
+    status: {type: {description: "Scheduled"}},
+    competitions: [{notes: [], competitors: []}]
+  }])
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+eq "only the in-window event survives" "1" "$(jq '.events | length' <<<"$OUT")"
+eq "the tail event is the one kept" "Today" "$(jq -r '.events[0].name' <<<"$OUT")"
+
 echo "== espn_team_schedule: a 404 on /schedule falls back to the bare team endpoint =="
 reset_mock
 REQUEST_FAIL_MATCH='/schedule'

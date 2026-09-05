@@ -118,16 +118,25 @@ ESPN_TEAM_WINDOW_FORWARD_DAYS=3
 # database (handles EST/EDT correctly, unlike a naive split on "T"). Echoes
 # nothing and returns 1 on an empty or unparseable timestamp.
 _et_session_date() {
-  local ts="$1"
+  local ts="$1" epoch
   [ -z "$ts" ] && return 1
-  TZ=America/New_York date -d "$ts" +%F 2>/dev/null \
-    || TZ=America/New_York date -j -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%F 2>/dev/null \
-    || TZ=America/New_York date -j -f '%Y-%m-%dT%H:%MZ' "$ts" +%F 2>/dev/null
+  if TZ=America/New_York date -d "$ts" +%F 2>/dev/null; then
+    return 0
+  fi
+  # BSD date (macOS dev) has to go through an epoch: `-j -f` parses in the
+  # CURRENT zone and matches the trailing Z as a literal character, so a
+  # TZ=America/New_York prefix on the parse would read the timestamp as
+  # Eastern and hand back exactly the naive answer this function exists to
+  # avoid. Parse as UTC, then render that instant in ET.
+  epoch=$(TZ=UTC date -j -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s 2>/dev/null) \
+    || epoch=$(TZ=UTC date -j -f '%Y-%m-%dT%H:%MZ' "$ts" +%s 2>/dev/null) \
+    || return 1
+  TZ=America/New_York date -r "$epoch" +%F 2>/dev/null
 }
 
 espn_team_schedule() {
-  local league="$1" team_id="$2" yyyymmdd="$3" resp today_dash lo hi out
-  local team_json raw_events n i ts et_dates=() dates_json
+  local league="$1" team_id="$2" yyyymmdd="$3" resp today_dash lo hi prehi out
+  local team_json raw_events ts d ts_list=() et_dates=() dates_json
   if [ -z "$league" ] || [ -z "$team_id" ] || [[ ! "$yyyymmdd" =~ ^[0-9]{8}$ ]]; then
     return 1
   fi
@@ -145,30 +154,46 @@ espn_team_schedule() {
     || date -j -v-"${ESPN_TEAM_WINDOW_BACK_DAYS}"d -f %F "$today_dash" +%F 2>/dev/null)
   hi=$(date -d "$today_dash +${ESPN_TEAM_WINDOW_FORWARD_DAYS} days" +%F 2>/dev/null \
     || date -j -v+"${ESPN_TEAM_WINDOW_FORWARD_DAYS}"d -f %F "$today_dash" +%F 2>/dev/null)
-  if [ -z "$lo" ] || [ -z "$hi" ]; then
+  # ET runs behind UTC, so an event's ET date is either its UTC date or the
+  # day before it: everything that can land in [lo, hi] has a UTC date in
+  # [lo, hi+1]. Narrowing to that in jq first costs one fork instead of one
+  # per event, and leaves the window -- not a slice of the payload's head --
+  # as the thing bounding the work.
+  prehi=$(date -d "$today_dash +$((ESPN_TEAM_WINDOW_FORWARD_DAYS + 1)) days" +%F 2>/dev/null \
+    || date -j -v+"$((ESPN_TEAM_WINDOW_FORWARD_DAYS + 1))"d -f %F "$today_dash" +%F 2>/dev/null)
+  if [ -z "$lo" ] || [ -z "$hi" ] || [ -z "$prehi" ]; then
     log "espn: date math failed for team schedule window ($today_dash)"
     return 1
   fi
   team_json=$(jq -n -c '(input).team.displayName // null' <<<"$resp" 2>/dev/null) || return 1
-  # Capped at 200 before the per-event date resolution below (a pathological
-  # payload shouldn't cost 200+ forks just to be trimmed to 20 afterward).
-  raw_events=$(jq -n -c '(input) as $p | ((($p.events // $p.team.nextEvent) // [])[0:200])' <<<"$resp" 2>/dev/null) || return 1
-  n=$(jq 'length' <<<"$raw_events" 2>/dev/null) || return 1
-  # Each event's ET calendar date is resolved outside jq (via the system tz
-  # database) and fed back in by index -- jq alone can't apply EST/EDT
-  # correctly. Cheap: n is already capped upstream by ESPN and this repeats
-  # only within one fetch.
-  for ((i = 0; i < n; i++)); do
-    ts=$(jq -r ".[$i].date // \"\"" <<<"$raw_events")
-    et_dates+=("$(_et_session_date "$ts")")
+  # [0:50] is a runaway guard against a pathological payload, not a second
+  # window: 50 candidates inside a nine-day span is already past any real
+  # schedule, and only 20 are emitted.
+  raw_events=$(jq -n -c --arg lo "$lo" --arg prehi "$prehi" '
+    (input) as $p
+    | [((($p.events // $p.team.nextEvent) // [])[]
+        | select(((.date // "") | split("T")[0]) as $u | $u >= $lo and $u <= $prehi))][0:50]' \
+    <<<"$resp" 2>/dev/null) || return 1
+  # Each candidate's ET calendar date is resolved outside jq (via the system
+  # tz database) and fed back in by index -- jq alone can't apply EST/EDT
+  # correctly.
+  mapfile -t ts_list < <(jq -r '.[] | .date // ""' <<<"$raw_events")
+  for ts in "${ts_list[@]}"; do
+    d=$(_et_session_date "$ts") || d=""
+    et_dates+=("$d")
   done
-  if [ "$n" -eq 0 ]; then
+  if [ "${#et_dates[@]}" -eq 0 ]; then
     dates_json='[]'
   else
     dates_json=$(printf '%s\n' "${et_dates[@]}" | jq -R -s -c 'rtrimstr("\n") | split("\n")')
   fi
+  # The events stay on stdin. Linux caps a single argv string at 128KB and a
+  # full-season team schedule runs well past that, so --argjson would hand
+  # execve an E2BIG that the `|| return 1` below would report as a failed
+  # fetch -- a followed team silently dropping out of the digest.
   out=$(jq -n --arg league "$league" --arg team_id "$team_id" --arg lo "$lo" --arg hi "$hi" \
-    --argjson team "$team_json" --argjson events "$raw_events" --argjson dates "$dates_json" '
+    --argjson team "$team_json" --argjson dates "$dates_json" '
+    (input) as $events |
     {
       league: $league,
       team_id: $team_id,
@@ -189,7 +214,7 @@ espn_team_schedule() {
             record: (((.records // []) | (if type == "array" then . else [] end)) | map(select(type == "object" and .name == "overall")) | (.[0].summary // null))
           }]
         }][0:20]
-    }' 2>/dev/null) || return 1
+    }' <<<"$raw_events" 2>/dev/null) || return 1
   [ -z "$out" ] && return 1
   printf '%s' "$out"
 }
