@@ -241,6 +241,22 @@ respective tools on the host; install or skip.
   midnight CT). `SPORTS_LEAGUES` is one flat CSV of ESPN
   `{sport}/{league}` paths -- no tier var; the directive
   (`bin/lib/sports-digest-directive.md`) curates by significance.
+  `SPORTS_FOLLOW` (igor#587) is a SEPARATE, OPTIONAL, additive CSV of
+  `{sport}/{league}:{team_id}` entries (e.g. `baseball/mlb:laa`) for
+  following specific teams: a league scoreboard truncates to 10 events
+  before the writer sees anything and some teams (small college
+  programs) never appear on the default scoreboard at all, so following
+  a team is a different ESPN query (`espn_team_schedule`, a team's own
+  schedule endpoint) rather than a filter on the league query. Parsed
+  by `espn_parse_follow` (same split-and-trim discipline as
+  `SPORTS_LEAGUES`; a malformed entry is logged and skipped without
+  dropping the rest) and windowed around today (a handful of days back,
+  a couple forward) rather than the full season. Unset/empty
+  `SPORTS_FOLLOW` leaves the digest exactly as it was -- league
+  scoreboards only. The two payloads ride in the prompt as separate,
+  labeled sections (`sports_build_prompt`) so a followed team's game
+  leads and league news stays the fallback; the directive's curation
+  wording is out of scope here.
   Day-state is `.sports = {date, sent, failures, last_attempt}`: a
   cooldown via `SPORTS_RETRY_COOLDOWN_SECS`, a hardcoded 5-failure cap,
   and `sent` flips only on a successful send. Deliberately no

@@ -61,13 +61,18 @@ sports_concepts_append() {
   mv "$tmp" "$f"
 }
 
-# sports_build_prompt <slim_payload_json> <covered_json_array> <date>
+# sports_build_prompt <slim_payload_json> <followed_json_array> <covered_json_array> <date>
 # Assembles the user prompt for the distill call: the digest date, the
-# already-taught concept list, and the per-league payloads from
-# lib/espn.sh. The system prompt (persona, curation rule, output
-# contract) lives in bin/lib/sports-digest-directive.md.
+# already-taught concept list, the followed-team payloads (igor#587,
+# from lib/espn.sh's espn_team_schedule -- empty array when
+# SPORTS_FOLLOW is unset), and the per-league payloads. followed and
+# league payloads are kept in SEPARATE sections, never merged into one
+# event list, so the writer can tell a followed team's game (which
+# leads) from league news (the fallback). The system prompt (persona,
+# curation rule, output contract) lives in
+# bin/lib/sports-digest-directive.md.
 sports_build_prompt() {
-  local payload="$1" covered="$2" date="$3" covered_lines
+  local payload="$1" followed="$2" covered="$3" date="$4" covered_lines
   covered_lines=$(jq -r '.[]? | "- \(.name) (taught \(.date))"' <<<"$covered" 2>/dev/null)
   printf 'Digest date: this email covers %s (yesterday).
 
@@ -78,10 +83,21 @@ for how recency changes what "already taught" means.
 
 %s
 
+## Followed teams (JSON)
+
+One object per followed team (empty array if none are configured).
+Each carries the team'\''s recent + upcoming games, in the same event
+shape as the league payloads below. A followed team'\''s game leads
+the digest over league news for the same league.
+
+%s
+
 ## League payloads (JSON)
 
 One object per configured league. events are yesterday'\''s
 games/sessions; headlines are current ESPN stories with real links.
+This is fallback coverage -- what to write about when a league has no
+followed team, or to round out the digest.
 
 %s
 
@@ -90,7 +106,7 @@ games/sessions; headlines are current ESPN stories with real links.
 Your VERY FIRST line must be the CONCEPTS: label line. Your second
 line must be exactly ===BODY===. Then the markdown digest. No
 preamble, no fences around the whole response, nothing after the
-digest.' "$date" "${covered_lines:-(none yet -- this is the first digest; start from zero)}" "$payload"
+digest.' "$date" "${covered_lines:-(none yet -- this is the first digest; start from zero)}" "$followed" "$payload"
 }
 
 # sports_parse_response <raw>

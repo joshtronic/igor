@@ -280,6 +280,15 @@ export ALERT_RECIPIENTS="${ALERT_RECIPIENTS:-}"
 export SPORTS_RECIPIENTS="${SPORTS_RECIPIENTS:-}"
 export SPORTS_LEAGUES="${SPORTS_LEAGUES:-}"
 
+# Followed teams -- OPTIONAL, additive on top of SPORTS_LEAGUES. A
+# followed team is a different ESPN query (a team schedule, not a
+# league scoreboard filter): the league scoreboard truncates before
+# the writer ever sees it, and some teams never appear on the default
+# scoreboard at all (igor#587). Comma-separated "sport/league:team_id"
+# entries, e.g. "baseball/mlb:laa,basketball/nba:ny". Unset/empty
+# leaves the digest exactly as it was -- league scoreboards only.
+export SPORTS_FOLLOW="${SPORTS_FOLLOW:-}"
+
 # Healthcheck pings (dead-man's switch) -- opt-in, inert, non-model (plain
 # curl via lib/healthcheck.sh). Both default to empty so referencing them
 # under `set -u` is safe; hc_ping no-ops silently when its URL is unset.
@@ -2085,6 +2094,23 @@ do_sports_tick() {
     payload=$(jq -c --argjson item "$slim" '. + [$item]' <<<"$payload")
   done < <(tr ',' '\n' <<<"$SPORTS_LEAGUES" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
 
+  # Followed teams -- a SEPARATE query per team (igor#587), additive on
+  # top of the league payloads above. Windowed around TODAY (not
+  # yesterday): a followed team's payload legitimately covers an
+  # upcoming game, unlike the league scoreboard which is strictly
+  # yesterday's completed slate.
+  local followed='[]' flg ftid fsched today_compact
+  today_compact=$(date +%Y%m%d)
+  while IFS=$'\t' read -r flg ftid; do
+    [ -z "$flg" ] && continue
+    if fsched=$(espn_team_schedule "$flg" "$ftid" "$today_compact"); then
+      fetched_ok=1
+      followed=$(jq -c --argjson item "$fsched" '. + [$item]' <<<"$followed")
+    else
+      log "sports: team schedule fetch failed for $flg:$ftid"
+    fi
+  done < <(espn_parse_follow "${SPORTS_FOLLOW:-}")
+
   if [ "$fetched_ok" -eq 0 ]; then
     failures=$(sports_failure_inc)
     log "sports: every ESPN fetch failed -- not sending (failure ${failures}/${max_failures}, retry after cooldown)"
@@ -2092,7 +2118,10 @@ do_sports_tick() {
   fi
 
   local items
-  items=$(jq '[.[] | (.events | length) + (.headlines | length)] | add // 0' <<<"$payload")
+  items=$(jq -n --argjson p "$payload" --argjson f "$followed" '
+    ([$p[] | (.events | length) + (.headlines | length)] | add // 0)
+    + ([$f[] | (.events | length)] | add // 0)
+  ')
   if [ "${items:-0}" -eq 0 ]; then
     # ESPN answered and there is genuinely nothing -- a quiet day, not
     # a failure. Don't email an empty digest; close the day.
@@ -2121,7 +2150,7 @@ do_sports_tick() {
   # room to finish without compromising the 900s retry cooldown.
   local covered prompt directive raw parsed attempt snippet tail_snip
   covered=$(sports_concepts_load)
-  prompt=$(sports_build_prompt "$payload" "$covered" "$ydash")
+  prompt=$(sports_build_prompt "$payload" "$followed" "$covered" "$ydash")
   directive=$(context_surface sports-digest-directive)
   parsed=""
   for attempt in 1 2; do
