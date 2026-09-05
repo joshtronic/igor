@@ -69,8 +69,9 @@ sports_concepts_append() {
 # league payloads are kept in SEPARATE sections, never merged into one
 # event list, so the writer can tell a followed team's game (which
 # leads) from league news (the fallback). The system prompt (persona,
-# curation rule, output contract) lives in
-# bin/lib/sports-digest-directive.md.
+# curation rule, output contract) is the Distillery's
+# sports-digest-directive skill, served via context_surface -- not a
+# file in this repo.
 sports_build_prompt() {
   local payload="$1" followed="$2" covered="$3" date="$4" covered_lines
   covered_lines=$(jq -r '.[]? | "- \(.name) (taught \(.date))"' <<<"$covered" 2>/dev/null)

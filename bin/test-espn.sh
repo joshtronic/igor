@@ -31,13 +31,17 @@ eq() {  # <desc> <expected> <actual>
 # variable would not survive.
 REQUEST_RC=0
 REQUEST_BODY='{"events":[]}'
+# URL substring whose fetch fails, so a caller that falls back from one
+# path to another can be exercised without failing both.
+REQUEST_FAIL_MATCH=''
 request_get() {
   printf '%s\n' "$1" >>"$URL_LOG"
   [ "$REQUEST_RC" != "0" ] && return "$REQUEST_RC"
+  [ -n "$REQUEST_FAIL_MATCH" ] && [[ "$1" == *"$REQUEST_FAIL_MATCH"* ]] && return 1
   printf '%s' "$REQUEST_BODY"
 }
 urls() { cat "$URL_LOG"; }
-reset_mock() { : >"$URL_LOG"; REQUEST_RC=0; REQUEST_BODY='{"events":[]}'; }
+reset_mock() { : >"$URL_LOG"; REQUEST_RC=0; REQUEST_BODY='{"events":[]}'; REQUEST_FAIL_MATCH=''; }
 
 # shellcheck disable=SC2034  # read by espn_scoreboard/espn_news (lib/espn.sh)
 ESPN_BASE_URL="https://espn.test/sports"
@@ -152,6 +156,38 @@ OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
 eq "only the in-window event survives" "1" "$(jq '.events | length' <<<"$OUT")"
 eq "the in-window event is the one kept" "In the window" "$(jq -r '.events[0].name' <<<"$OUT")"
 
+echo "== espn_team_schedule: a 404 on /schedule falls back to the bare team endpoint =="
+reset_mock
+REQUEST_FAIL_MATCH='/schedule'
+REQUEST_BODY=$(jq -n '{
+  team: {
+    displayName: "Rhode Island Rams",
+    nextEvent: [{
+      name: "Rhode Island at Brown",
+      date: "2026-09-16T23:00Z",
+      status: {type: {description: "Scheduled"}},
+      competitions: [{notes: [], competitors: [{team: {displayName: "Rhode Island Rams"}}]}]
+    }]
+  }
+}')
+OUT=$(espn_team_schedule "football/college-football" "227" "20260915")
+RC=$?
+eq "rc=0" "0" "$RC"
+eq "tries /schedule first, then the bare team endpoint" \
+  "https://espn.test/sports/football/college-football/teams/227/schedule
+https://espn.test/sports/football/college-football/teams/227" "$(urls)"
+eq "team name carried from the fallback payload" "Rhode Island Rams" "$(jq -r '.team' <<<"$OUT")"
+eq "nextEvent read as the event list" "Rhode Island at Brown" "$(jq -r '.events[0].name' <<<"$OUT")"
+eq "fallback event date split from datetime" "2026-09-16" "$(jq -r '.events[0].date' <<<"$OUT")"
+
+echo "== espn_team_schedule: both endpoints failing returns nonzero and emits nothing =="
+reset_mock
+REQUEST_FAIL_MATCH='/teams/'
+OUT=$(espn_team_schedule "football/college-football" "227" "20260915" 2>/dev/null)
+RC=$?
+eq "rc=1" "1" "$RC"
+eq "emits nothing" "" "$OUT"
+
 echo "== espn_team_schedule: an unparseable team payload returns nonzero and emits nothing =="
 reset_mock
 REQUEST_BODY='<html>maintenance</html>'
@@ -159,6 +195,7 @@ OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915" 2>/dev/null)
 RC=$?
 eq "rc=1" "1" "$RC"
 eq "emits nothing" "" "$OUT"
+eq "a parseable fetch that answered garbage is not retried elsewhere" "1" "$(urls | grep -c .)"
 
 echo "== espn_team_schedule: an empty team payload returns nonzero and emits nothing =="
 reset_mock
@@ -189,6 +226,15 @@ eq "3 valid entries survive" "3" "$(printf '%s\n' "$OUT" | grep -c .)"
 eq "first entry" "$(printf 'baseball/mlb\tlaa')" "$(printf '%s\n' "$OUT" | sed -n '1p')"
 eq "second entry" "$(printf 'basketball/nba\tny')" "$(printf '%s\n' "$OUT" | sed -n '2p')"
 eq "third entry" "$(printf 'basketball/nba\tcha')" "$(printf '%s\n' "$OUT" | sed -n '3p')"
+
+echo "== espn_parse_follow: whitespace around the colon is trimmed, not carried into the URL =="
+OUT=$(espn_parse_follow "baseball/mlb: laa , basketball/nba :ny" 2>/dev/null)
+eq "space after the colon dropped" "$(printf 'baseball/mlb\tlaa')" "$(printf '%s\n' "$OUT" | sed -n '1p')"
+eq "space before the colon dropped" "$(printf 'basketball/nba\tny')" "$(printf '%s\n' "$OUT" | sed -n '2p')"
+
+echo "== espn_parse_follow: a whitespace-only half is a malformed entry, not a blank team_id =="
+OUT=$(espn_parse_follow "baseball/mlb:   ,basketball/nba:ny" 2>/dev/null)
+eq "only the valid entry survives" "$(printf 'basketball/nba\tny')" "$OUT"
 
 echo "== espn_parse_follow: unset/empty input emits nothing (the SPORTS_LEAGUES-only regression guard) =="
 OUT=$(espn_parse_follow "" 2>/dev/null)

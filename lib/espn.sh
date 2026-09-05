@@ -91,12 +91,21 @@ espn_news() {
 # 20-event cap are a backstop against a pathological payload. No TTL
 # (pass 0 to request_get) -- no connector caches yet.
 #
+# The `/schedule` sub-path is not guaranteed to exist for every league
+# (igor#587 verified it for `baseball/mlb` but listed the college
+# endpoints without it), so a FAILED fetch there retries the bare team
+# endpoint, whose `.team.nextEvent` carries the same event shape. That
+# fallback covers upcoming games only -- the back half of the window is
+# lost on it -- which still beats going dark on the motivating case. A
+# fetch that SUCCEEDS and answers garbage is ESPN being broken, not a
+# missing path, and is not retried elsewhere.
+#
 # Echoes {league, team_id, team, events:[...]} on success. On ANY
-# failure -- empty args, a malformed date, a failed fetch, a date-math
-# failure, or an unparseable/empty payload -- emits NOTHING and returns
-# 1: a followed team whose fetch failed must not read downstream as
-# "team has no games", which is what a valid-but-empty object would
-# mean.
+# failure -- empty args, a malformed date, both fetches failing, a
+# date-math failure, or an unparseable/empty payload -- emits NOTHING
+# and returns 1: a followed team whose fetch failed must not read
+# downstream as "team has no games", which is what a valid-but-empty
+# object would mean.
 ESPN_TEAM_WINDOW_BACK_DAYS="${ESPN_TEAM_WINDOW_BACK_DAYS:-5}"
 ESPN_TEAM_WINDOW_FORWARD_DAYS="${ESPN_TEAM_WINDOW_FORWARD_DAYS:-3}"
 
@@ -105,7 +114,9 @@ espn_team_schedule() {
   if [ -z "$league" ] || [ -z "$team_id" ] || [[ ! "$yyyymmdd" =~ ^[0-9]{8}$ ]]; then
     return 1
   fi
-  resp=$(request_get "$ESPN_BASE_URL/$league/teams/$team_id/schedule" 0) || return 1
+  if ! resp=$(request_get "$ESPN_BASE_URL/$league/teams/$team_id/schedule" 0); then
+    resp=$(request_get "$ESPN_BASE_URL/$league/teams/$team_id" 0) || return 1
+  fi
   if ! jq -e . >/dev/null 2>&1 <<<"$resp"; then
     log "espn: non-JSON team schedule response for $league/$team_id"
     return 1
@@ -127,7 +138,7 @@ espn_team_schedule() {
       league: $league,
       team_id: $team_id,
       team: ($p.team.displayName // null),
-      events: [($p.events // [])[]
+      events: [(($p.events // $p.team.nextEvent) // [])[]
         | ((.date // "") | split("T")[0]) as $d
         | select($d >= $lo and $d <= $hi)
         | {
@@ -146,6 +157,9 @@ espn_team_schedule() {
   printf '%s' "$out"
 }
 
+# _espn_trim <s> -- strips leading and trailing whitespace.
+_espn_trim() { sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<<"$1"; }
+
 # espn_parse_follow <raw>
 # Parses SPORTS_FOLLOW (comma-separated "sport/league:team_id" entries)
 # into TAB-separated "league<TAB>team_id" lines on stdout, one per
@@ -154,18 +168,20 @@ espn_team_schedule() {
 # team_id) is logged and skipped; it never drops or corrupts the rest
 # of the list. Unset/empty input emits nothing and returns 0 -- the
 # regression case that keeps a bare SPORTS_LEAGUES-only setup untouched.
+# Both halves are trimmed as well as the whole entry, so `mlb: laa`
+# yields the team_id `laa` rather than a URL with a space in it.
 espn_parse_follow() {
   local raw="$1" entry league team_id
   [ -z "$raw" ] && return 0
   while IFS= read -r entry; do
-    entry=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<<"$entry")
+    entry=$(_espn_trim "$entry")
     [ -z "$entry" ] && continue
     case "$entry" in
       *:*) ;;
       *) log "espn: malformed SPORTS_FOLLOW entry (no ':'): $entry"; continue ;;
     esac
-    league="${entry%%:*}"
-    team_id="${entry#*:}"
+    league=$(_espn_trim "${entry%%:*}")
+    team_id=$(_espn_trim "${entry#*:}")
     if [ -z "$league" ] || [ -z "$team_id" ]; then
       log "espn: malformed SPORTS_FOLLOW entry: $entry"
       continue
