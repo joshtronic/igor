@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # espn.sh -- ESPN public site API client for the daily sports digest.
-# Isolates every ESPN network call. Sourced by bin/tick.sh.
+# Isolates every ESPN network call. Sourced by bin/tick.sh, after
+# lib/request.sh -- every fetch goes through request_get (igor#585) for
+# its bounded retry + 429/503 backoff, rather than a bare curl. Caching
+# is intentionally left off (ttl=0): this is a port, not a behavior
+# change, and the digest wants each day's fetch live. Two things the
+# bare curl did not do come along with request_get and are wanted:
+# REQUEST_CONNECT_TIMEOUT/REQUEST_MAX_TIME now bound a fetch (an
+# unbounded one could wedge a tick, and ~12 leagues means 24 of them per
+# digest), and a transport failure is logged instead of swallowed.
 #
 # The sports digest is opt-in; callers gate on these being set:
 #   PRIMARY_RECIPIENTS, SPORTS_LEAGUES   (SPORTS_RECIPIENTS adds extra subscribers)
@@ -24,17 +32,21 @@ ESPN_BASE_URL="${ESPN_BASE_URL:-https://site.api.espn.com/apis/site/v2/sports}"
 
 # espn_scoreboard <sport/league> <yyyymmdd>
 # Fetches the league's scoreboard for one calendar day (the digest's
-# "yesterday"). Echoes the raw JSON ({ "events": [...] }) on stdout.
-# Echoes '{"events":[]}' and rc=1 on any failure -- including the 400
-# ESPN returns for leagues with no scoreboard surface -- so callers can
-# branch on the event count and fall back to news-only.
+# "yesterday"; the date must be exactly 8 digits). Echoes the raw JSON
+# ({ "events": [...] }) on stdout. Echoes '{"events":[]}' and rc=1 on any
+# failure -- including a malformed date and the 400 ESPN returns for
+# leagues with no scoreboard surface -- so callers can branch on the
+# event count and fall back to news-only.
 espn_scoreboard() {
   local league="$1" yyyymmdd="$2" resp
-  if [ -z "$league" ] || [ -z "$yyyymmdd" ]; then
+  # The date goes into the query string by interpolation, not by curl's
+  # --data-urlencode, so the digits-only shape is enforced here rather
+  # than assumed of the caller: URL-encoding a digit is a no-op, which
+  # is what makes the interpolation equivalent to the old form.
+  if [ -z "$league" ] || [[ ! "$yyyymmdd" =~ ^[0-9]{8}$ ]]; then
     printf '%s' '{"events":[]}'; return 1
   fi
-  resp=$(curl -fsS -G "$ESPN_BASE_URL/$league/scoreboard" \
-    --data-urlencode "dates=${yyyymmdd}" 2>/dev/null) || {
+  resp=$(request_get "$ESPN_BASE_URL/$league/scoreboard?dates=${yyyymmdd}" 0) || {
       printf '%s' '{"events":[]}'; return 1
     }
   if ! jq -e . >/dev/null 2>&1 <<<"$resp"; then
@@ -53,7 +65,7 @@ espn_news() {
   if [ -z "$league" ]; then
     printf '%s' '{"articles":[]}'; return 1
   fi
-  resp=$(curl -fsS "$ESPN_BASE_URL/$league/news" 2>/dev/null) || {
+  resp=$(request_get "$ESPN_BASE_URL/$league/news" 0) || {
       printf '%s' '{"articles":[]}'; return 1
     }
   if ! jq -e . >/dev/null 2>&1 <<<"$resp"; then

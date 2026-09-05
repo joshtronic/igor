@@ -130,6 +130,9 @@ unset env_file_hint
 . "$AGENT_HOME/lib/adjudication.sh"
 # shellcheck source=lib/seo-analysis.sh
 . "$AGENT_HOME/lib/seo-analysis.sh"
+# espn.sh's fetches go through request_get, so this must load first.
+# shellcheck source=lib/request.sh
+. "$AGENT_HOME/lib/request.sh"
 # shellcheck source=lib/espn.sh
 . "$AGENT_HOME/lib/espn.sh"
 # shellcheck source=lib/sports-digest.sh
