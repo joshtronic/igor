@@ -31,13 +31,17 @@ eq() {  # <desc> <expected> <actual>
 # variable would not survive.
 REQUEST_RC=0
 REQUEST_BODY='{"events":[]}'
+# URL substring whose fetch fails, so a caller that falls back from one
+# path to another can be exercised without failing both.
+REQUEST_FAIL_MATCH=''
 request_get() {
   printf '%s\n' "$1" >>"$URL_LOG"
   [ "$REQUEST_RC" != "0" ] && return "$REQUEST_RC"
+  [ -n "$REQUEST_FAIL_MATCH" ] && [[ "$1" == *"$REQUEST_FAIL_MATCH"* ]] && return 1
   printf '%s' "$REQUEST_BODY"
 }
 urls() { cat "$URL_LOG"; }
-reset_mock() { : >"$URL_LOG"; REQUEST_RC=0; REQUEST_BODY='{"events":[]}'; }
+reset_mock() { : >"$URL_LOG"; REQUEST_RC=0; REQUEST_BODY='{"events":[]}'; REQUEST_FAIL_MATCH=''; }
 
 # shellcheck disable=SC2034  # read by espn_scoreboard/espn_news (lib/espn.sh)
 ESPN_BASE_URL="https://espn.test/sports"
@@ -96,6 +100,157 @@ OUT=$(espn_news "")
 eq "rc=1" "1" "$?"
 eq "empty articles" '{"articles":[]}' "$OUT"
 eq "no fetch attempted" "" "$(urls)"
+
+echo "== espn_team_schedule: reduces a team payload to the documented shape, with caps applied =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [{
+    name: "Angels at Athletics",
+    date: "2026-09-14T20:10Z",
+    status: {type: {description: "Final"}},
+    competitions: [{
+      notes: [{headline: "Doubleheader Game 1"}],
+      competitors: [range(0;12) | {team: {displayName: ("Team " + (. | tostring))}, score: (. | tostring), winner: (. == 0)}]
+    }]
+  }]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+RC=$?
+eq "rc=0" "0" "$RC"
+eq "URL carries league and team" \
+  "https://espn.test/sports/baseball/mlb/teams/laa/schedule" "$(urls)"
+eq "team name carried" "Los Angeles Angels" "$(jq -r '.team' <<<"$OUT")"
+eq "team_id carried" "laa" "$(jq -r '.team_id' <<<"$OUT")"
+eq "event name mapped" "Angels at Athletics" "$(jq -r '.events[0].name' <<<"$OUT")"
+eq "event date split from datetime" "2026-09-14" "$(jq -r '.events[0].date' <<<"$OUT")"
+eq "event status mapped" "Final" "$(jq -r '.events[0].status' <<<"$OUT")"
+eq "note headline mapped" "Doubleheader Game 1" "$(jq -r '.events[0].notes[0]' <<<"$OUT")"
+eq "competitors capped at 10" "10" "$(jq '.events[0].competitors | length' <<<"$OUT")"
+
+echo "== espn_team_schedule: the event count is capped =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [range(0;25) | {
+    name: ("Game " + (. | tostring)),
+    date: "2026-09-14T20:10Z",
+    status: {type: {description: "Final"}},
+    competitions: [{notes: [], competitors: []}]
+  }]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+eq "events capped" "20" "$(jq '.events | length' <<<"$OUT")"
+
+echo "== espn_team_schedule: the event window excludes events far outside it =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [
+    {name: "Way in the past", date: "2026-01-01T20:00Z", status: {type:{description:"Final"}}, competitions:[{notes:[],competitors:[]}]},
+    {name: "Way in the future", date: "2026-12-01T20:00Z", status: {type:{description:"Scheduled"}}, competitions:[{notes:[],competitors:[]}]},
+    {name: "In the window", date: "2026-09-13T20:00Z", status: {type:{description:"Final"}}, competitions:[{notes:[],competitors:[]}]}
+  ]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+eq "only the in-window event survives" "1" "$(jq '.events | length' <<<"$OUT")"
+eq "the in-window event is the one kept" "In the window" "$(jq -r '.events[0].name' <<<"$OUT")"
+
+echo "== espn_team_schedule: a 404 on /schedule falls back to the bare team endpoint =="
+reset_mock
+REQUEST_FAIL_MATCH='/schedule'
+REQUEST_BODY=$(jq -n '{
+  team: {
+    displayName: "Rhode Island Rams",
+    nextEvent: [{
+      name: "Rhode Island at Brown",
+      date: "2026-09-16T23:00Z",
+      status: {type: {description: "Scheduled"}},
+      competitions: [{notes: [], competitors: [{team: {displayName: "Rhode Island Rams"}}]}]
+    }]
+  }
+}')
+OUT=$(espn_team_schedule "football/college-football" "227" "20260915")
+RC=$?
+eq "rc=0" "0" "$RC"
+eq "tries /schedule first, then the bare team endpoint" \
+  "https://espn.test/sports/football/college-football/teams/227/schedule
+https://espn.test/sports/football/college-football/teams/227" "$(urls)"
+eq "team name carried from the fallback payload" "Rhode Island Rams" "$(jq -r '.team' <<<"$OUT")"
+eq "nextEvent read as the event list" "Rhode Island at Brown" "$(jq -r '.events[0].name' <<<"$OUT")"
+eq "fallback event date split from datetime" "2026-09-16" "$(jq -r '.events[0].date' <<<"$OUT")"
+
+echo "== espn_team_schedule: both endpoints failing returns nonzero and emits nothing =="
+reset_mock
+REQUEST_FAIL_MATCH='/teams/'
+OUT=$(espn_team_schedule "football/college-football" "227" "20260915" 2>/dev/null)
+RC=$?
+eq "rc=1" "1" "$RC"
+eq "emits nothing" "" "$OUT"
+
+echo "== espn_team_schedule: an unparseable team payload returns nonzero and emits nothing =="
+reset_mock
+REQUEST_BODY='<html>maintenance</html>'
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915" 2>/dev/null)
+RC=$?
+eq "rc=1" "1" "$RC"
+eq "emits nothing" "" "$OUT"
+eq "a parseable fetch that answered garbage is not retried elsewhere" "1" "$(urls | grep -c .)"
+
+echo "== espn_team_schedule: an empty team payload returns nonzero and emits nothing =="
+reset_mock
+REQUEST_BODY=''
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915" 2>/dev/null)
+RC=$?
+eq "rc=1" "1" "$RC"
+eq "emits nothing" "" "$OUT"
+
+echo "== espn_team_schedule: a failed fetch returns nonzero and emits nothing =="
+reset_mock
+REQUEST_RC=7
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+RC=$?
+eq "rc=1" "1" "$RC"
+eq "emits nothing" "" "$OUT"
+
+echo "== espn_team_schedule: empty args are rejected without a fetch =="
+reset_mock
+OUT=$(espn_team_schedule "" "laa" "20260915")
+RC=$?
+eq "rc=1" "1" "$RC"
+eq "no fetch attempted" "" "$(urls)"
+
+echo "== espn_parse_follow: parses multiple entries, tolerates whitespace, keeps the rest past a malformed entry =="
+OUT=$(espn_parse_follow " baseball/mlb:laa , basketball/nba:ny,bad-entry-no-colon, basketball/nba:cha , football/college-football: " 2>/dev/null)
+eq "3 valid entries survive" "3" "$(printf '%s\n' "$OUT" | grep -c .)"
+eq "first entry" "$(printf 'baseball/mlb\tlaa')" "$(printf '%s\n' "$OUT" | sed -n '1p')"
+eq "second entry" "$(printf 'basketball/nba\tny')" "$(printf '%s\n' "$OUT" | sed -n '2p')"
+eq "third entry" "$(printf 'basketball/nba\tcha')" "$(printf '%s\n' "$OUT" | sed -n '3p')"
+
+echo "== espn_parse_follow: whitespace around the colon is trimmed, not carried into the URL =="
+OUT=$(espn_parse_follow "baseball/mlb: laa , basketball/nba :ny" 2>/dev/null)
+eq "space after the colon dropped" "$(printf 'baseball/mlb\tlaa')" "$(printf '%s\n' "$OUT" | sed -n '1p')"
+eq "space before the colon dropped" "$(printf 'basketball/nba\tny')" "$(printf '%s\n' "$OUT" | sed -n '2p')"
+
+echo "== espn_parse_follow: a whitespace-only half is a malformed entry, not a blank team_id =="
+OUT=$(espn_parse_follow "baseball/mlb:   ,basketball/nba:ny" 2>/dev/null)
+eq "only the valid entry survives" "$(printf 'basketball/nba\tny')" "$OUT"
+
+echo "== espn_parse_follow: unset/empty input emits nothing (the SPORTS_LEAGUES-only regression guard) =="
+OUT=$(espn_parse_follow "" 2>/dev/null)
+RC=$?
+eq "rc=0" "0" "$RC"
+eq "emits nothing" "" "$OUT"
+
+echo "== followed-team and league-news entries for the same league are structurally distinguishable =="
+reset_mock
+REQUEST_BODY=$(jq -n '{team:{displayName:"Los Angeles Angels"}, events:[{name:"Angels at Athletics", date:"2026-09-14T20:10Z", status:{type:{description:"Final"}}, competitions:[{notes:[],competitors:[]}]}]}')
+FOLLOWED=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+LEAGUE=$(espn_slim_league "baseball/mlb" '{"events":[]}' '{"articles":[]}')
+eq "followed carries team_id" "laa" "$(jq -r '.team_id' <<<"$FOLLOWED")"
+eq "league entry has no team_id key" "false" "$(jq 'has("team_id")' <<<"$LEAGUE")"
+eq "league entry carries headlines key" "true" "$(jq 'has("headlines")' <<<"$LEAGUE")"
+eq "followed entry has no headlines key" "false" "$(jq 'has("headlines")' <<<"$FOLLOWED")"
 
 echo "=========================================="
 if [ "$FAIL" -eq 0 ]; then

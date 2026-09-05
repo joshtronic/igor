@@ -240,7 +240,32 @@ respective tools on the host; install or skip.
   logwatch: the digest covers YESTERDAY and west-coast games end past
   midnight CT). `SPORTS_LEAGUES` is one flat CSV of ESPN
   `{sport}/{league}` paths -- no tier var; the directive
-  (`bin/lib/sports-digest-directive.md`) curates by significance.
+  (the Distillery's `sports-digest-directive` skill, served via
+  `context_surface`) curates by significance.
+  `SPORTS_FOLLOW` (igor#587) is a SEPARATE, OPTIONAL, additive CSV of
+  `{sport}/{league}:{team_id}` entries (e.g. `baseball/mlb:laa`) for
+  following specific teams: a league scoreboard truncates to 10 events
+  before the writer sees anything and some teams (small college
+  programs) never appear on the default scoreboard at all, so following
+  a team is a different ESPN query (`espn_team_schedule`, a team's own
+  schedule endpoint) rather than a filter on the league query. The
+  `/schedule` sub-path isn't guaranteed across leagues, so a failed
+  fetch there retries the bare `teams/{id}` endpoint and reads
+  `.team.nextEvent` (same event shape, upcoming games only) instead of
+  going dark; a fetch that succeeds and answers garbage is not retried.
+  Parsed by `espn_parse_follow` (same split-and-trim discipline as
+  `SPORTS_LEAGUES`, applied to both halves of the entry as well as the
+  whole; a malformed entry is logged and skipped without
+  dropping the rest) and windowed around today (a handful of days back,
+  a couple forward) rather than the full season. Unset/empty
+  `SPORTS_FOLLOW` leaves the digest exactly as it was -- league
+  scoreboards only. The two payloads ride in the prompt as separate,
+  labeled sections (`sports_build_prompt`) so a followed team's game
+  leads and league news stays the fallback. That lead-ordering rule
+  lives in the user prompt rather than the directive because the
+  directive is sourced from the Distillery at runtime
+  (`context_surface`), not from this repo -- changing it is a
+  Distillery-side PR.
   Day-state is `.sports = {date, sent, failures, last_attempt}`: a
   cooldown via `SPORTS_RETRY_COOLDOWN_SECS`, a hardcoded 5-failure cap,
   and `sent` flips only on a successful send. Deliberately no
