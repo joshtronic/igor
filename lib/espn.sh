@@ -86,10 +86,11 @@ espn_news() {
 # college football Saturday runs 50+ games), and some teams (small
 # college programs) never appear on the default scoreboard at all.
 #
-# The window (ESPN_TEAM_WINDOW_BACK_DAYS/ESPN_TEAM_WINDOW_FORWARD_DAYS)
-# trims a 162-game MLB season down to a handful; a 10-competitor and
-# 20-event cap are a backstop against a pathological payload. No TTL
-# (pass 0 to request_get) -- no connector caches yet.
+# The window (5 days back, 3 forward -- hardcoded below, chosen to trim
+# a 162-game MLB season down to a handful without a config surface
+# nobody will ever set differently) and a 10-competitor/20-event cap
+# are a backstop against a pathological payload. No TTL (pass 0 to
+# request_get) -- no connector caches yet.
 #
 # The `/schedule` sub-path is not guaranteed to exist for every league
 # (igor#587 verified it for `baseball/mlb` but listed the college
@@ -100,17 +101,42 @@ espn_news() {
 # fetch that SUCCEEDS and answers garbage is ESPN being broken, not a
 # missing path, and is not retried elsewhere.
 #
-# Echoes {league, team_id, team, events:[...]} on success. On ANY
-# failure -- empty args, a malformed date, both fetches failing, a
+# Echoes {league, team_id, team, events:[{name,date,status,notes,
+# competitors:[{team,score,winner,record}]}]} on success -- `record` is
+# the competitor's overall W-L summary, same as espn_slim_league.
+# Absent/malformed `records` yields null, same as `score`/`winner`. On
+# ANY failure -- empty args, a malformed date, both fetches failing, a
 # date-math failure, or an unparseable/empty payload -- emits NOTHING
 # and returns 1: a followed team whose fetch failed must not read
 # downstream as "team has no games", which is what a valid-but-empty
 # object would mean.
-ESPN_TEAM_WINDOW_BACK_DAYS="${ESPN_TEAM_WINDOW_BACK_DAYS:-5}"
-ESPN_TEAM_WINDOW_FORWARD_DAYS="${ESPN_TEAM_WINDOW_FORWARD_DAYS:-3}"
+ESPN_TEAM_WINDOW_BACK_DAYS=5
+ESPN_TEAM_WINDOW_FORWARD_DAYS=3
+
+# _et_session_date <utc_timestamp> -- echoes the calendar date (YYYY-MM-DD)
+# the given UTC timestamp falls on in America/New_York, using the system tz
+# database (handles EST/EDT correctly, unlike a naive split on "T"). Echoes
+# nothing and returns 1 on an empty or unparseable timestamp.
+_et_session_date() {
+  local ts="$1" epoch
+  [ -z "$ts" ] && return 1
+  if TZ=America/New_York date -d "$ts" +%F 2>/dev/null; then
+    return 0
+  fi
+  # BSD date (macOS dev) has to go through an epoch: `-j -f` parses in the
+  # CURRENT zone and matches the trailing Z as a literal character, so a
+  # TZ=America/New_York prefix on the parse would read the timestamp as
+  # Eastern and hand back exactly the naive answer this function exists to
+  # avoid. Parse as UTC, then render that instant in ET.
+  epoch=$(TZ=UTC date -j -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s 2>/dev/null) \
+    || epoch=$(TZ=UTC date -j -f '%Y-%m-%dT%H:%MZ' "$ts" +%s 2>/dev/null) \
+    || return 1
+  TZ=America/New_York date -r "$epoch" +%F 2>/dev/null
+}
 
 espn_team_schedule() {
-  local league="$1" team_id="$2" yyyymmdd="$3" resp today_dash lo hi out
+  local league="$1" team_id="$2" yyyymmdd="$3" resp today_dash lo hi prehi out
+  local team_json raw_events ts d ts_list=() et_dates=() dates_json
   if [ -z "$league" ] || [ -z "$team_id" ] || [[ ! "$yyyymmdd" =~ ^[0-9]{8}$ ]]; then
     return 1
   fi
@@ -128,31 +154,71 @@ espn_team_schedule() {
     || date -j -v-"${ESPN_TEAM_WINDOW_BACK_DAYS}"d -f %F "$today_dash" +%F 2>/dev/null)
   hi=$(date -d "$today_dash +${ESPN_TEAM_WINDOW_FORWARD_DAYS} days" +%F 2>/dev/null \
     || date -j -v+"${ESPN_TEAM_WINDOW_FORWARD_DAYS}"d -f %F "$today_dash" +%F 2>/dev/null)
-  if [ -z "$lo" ] || [ -z "$hi" ]; then
+  # ET runs behind UTC, so an event's ET date is either its UTC date or the
+  # day before it: everything that can land in [lo, hi] has a UTC date in
+  # [lo, hi+1]. Narrowing to that in jq first costs one fork instead of one
+  # per event, and leaves the window -- not a slice of the payload's head --
+  # as the thing bounding the work.
+  prehi=$(date -d "$today_dash +$((ESPN_TEAM_WINDOW_FORWARD_DAYS + 1)) days" +%F 2>/dev/null \
+    || date -j -v+"$((ESPN_TEAM_WINDOW_FORWARD_DAYS + 1))"d -f %F "$today_dash" +%F 2>/dev/null)
+  if [ -z "$lo" ] || [ -z "$hi" ] || [ -z "$prehi" ]; then
     log "espn: date math failed for team schedule window ($today_dash)"
     return 1
   fi
-  out=$(jq -n --arg league "$league" --arg team_id "$team_id" --arg lo "$lo" --arg hi "$hi" '
-    (input) as $p |
+  team_json=$(jq -n -c '(input).team.displayName // null' <<<"$resp" 2>/dev/null) || return 1
+  # [0:50] is a runaway guard against a pathological payload, not a second
+  # window: 50 candidates inside a nine-day span is already past any real
+  # schedule, and only 20 are emitted.
+  raw_events=$(jq -n -c --arg lo "$lo" --arg prehi "$prehi" '
+    (input) as $p
+    | [((($p.events // $p.team.nextEvent) // [])[]
+        | select((((.date | strings) // "") | split("T")[0]) as $u | $u >= $lo and $u <= $prehi))][0:50]' \
+    <<<"$resp" 2>/dev/null) || return 1
+  # Each candidate's ET calendar date is resolved outside jq (via the system
+  # tz database) and fed back in by index -- jq alone can't apply EST/EDT
+  # correctly. That index is a line number, so the timestamp must render as
+  # exactly one line per event: a non-string `.date` coerces to "" and an
+  # embedded newline is flattened, since either would otherwise slide every
+  # following event onto the wrong date. Both leave a value _et_session_date
+  # rejects, so the offending event drops out on its own.
+  mapfile -t ts_list < <(jq -r '.[] | ((.date | strings) // "") | gsub("[\r\n]"; " ")' <<<"$raw_events")
+  for ts in "${ts_list[@]}"; do
+    d=$(_et_session_date "$ts") || d=""
+    et_dates+=("$d")
+  done
+  if [ "${#et_dates[@]}" -eq 0 ]; then
+    dates_json='[]'
+  else
+    dates_json=$(printf '%s\n' "${et_dates[@]}" | jq -R -s -c 'rtrimstr("\n") | split("\n")')
+  fi
+  # The events stay on stdin. Linux caps a single argv string at 128KB and a
+  # full-season team schedule runs well past that, so --argjson would hand
+  # execve an E2BIG that the `|| return 1` below would report as a failed
+  # fetch -- a followed team silently dropping out of the digest.
+  out=$(jq -n --arg league "$league" --arg team_id "$team_id" --arg lo "$lo" --arg hi "$hi" \
+    --argjson team "$team_json" --argjson dates "$dates_json" '
+    (input) as $events |
     {
       league: $league,
       team_id: $team_id,
-      team: ($p.team.displayName // null),
-      events: [(($p.events // $p.team.nextEvent) // [])[]
-        | ((.date // "") | split("T")[0]) as $d
-        | select($d >= $lo and $d <= $hi)
+      team: $team,
+      events: [range(0; ($events | length)) as $i
+        | $events[$i] as $ev
+        | ($dates[$i] // "") as $d
+        | select($d != "" and $d >= $lo and $d <= $hi)
         | {
-          name: .name,
+          name: $ev.name,
           date: $d,
-          status: (.status.type.description // .competitions[0].status.type.description // "unknown"),
-          notes: [(.competitions[0].notes // [])[] | .headline // empty],
-          competitors: [(.competitions[0].competitors // [])[0:10][] | {
+          status: ($ev.status.type.description // $ev.competitions[0].status.type.description // "unknown"),
+          notes: [($ev.competitions[0].notes // [])[] | .headline // empty],
+          competitors: [($ev.competitions[0].competitors // [])[0:10][] | {
             team: (.team.displayName // .athlete.displayName // null),
             score: (.score // null),
-            winner: (.winner // null)
+            winner: (.winner // null),
+            record: ((.records | if type == "array" then . else [] end) | map(select(type == "object" and .name == "overall")) | (.[0].summary // null))
           }]
         }][0:20]
-    }' <<<"$resp" 2>/dev/null) || return 1
+    }' <<<"$raw_events" 2>/dev/null) || return 1
   [ -z "$out" ] && return 1
   printf '%s' "$out"
 }
@@ -194,8 +260,11 @@ espn_parse_follow() {
 # Pure jq reduction of one league's raw payloads to what the distill
 # prompt needs:
 #   { league,
-#     events:[{name,date,status,notes,competitors:[{team,score,winner}]}],
+#     events:[{name,date,status,notes,competitors:[{team,score,winner,record}]}],
 #     headlines:[{headline,description,published,link}] }
+# `record` is the competitor's overall W-L summary (ESPN's `records`
+# array, `name == "overall"`) -- home/road splits are not carried.
+# Absent or malformed `records` yields null, same as `score`/`winner`.
 # Caps keep the prompt bounded with ~12 configured leagues: 10 events
 # per league (a full MLB Saturday slate runs to 15 games), 10 competitors
 # per event (golf/racing fields run to 150 entrants -- the scoreboard
@@ -217,7 +286,8 @@ espn_slim_league() {
         competitors: [(.competitions[0].competitors // [])[0:10][] | {
           team: (.team.displayName // .athlete.displayName // null),
           score: (.score // null),
-          winner: (.winner // null)
+          winner: (.winner // null),
+          record: (((.records // []) | (if type == "array" then . else [] end)) | map(select(type == "object" and .name == "overall")) | (.[0].summary // null))
         }]
       }],
       headlines: [($nw.articles // [])[0:8][] | {

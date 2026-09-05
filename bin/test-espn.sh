@@ -128,6 +128,61 @@ eq "event status mapped" "Final" "$(jq -r '.events[0].status' <<<"$OUT")"
 eq "note headline mapped" "Doubleheader Game 1" "$(jq -r '.events[0].notes[0]' <<<"$OUT")"
 eq "competitors capped at 10" "10" "$(jq '.events[0].competitors | length' <<<"$OUT")"
 
+echo "== espn_team_schedule: a competitor's overall record is carried, home/road splits are not =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [{
+    name: "Angels at Athletics",
+    date: "2026-09-14T20:10Z",
+    status: {type: {description: "Final"}},
+    competitions: [{
+      notes: [],
+      competitors: [{
+        team: {displayName: "Los Angeles Angels"},
+        score: "4",
+        winner: true,
+        records: [{name: "overall", summary: "67-73"}, {name: "Home", summary: "34-37"}, {name: "Road", summary: "33-36"}]
+      }]
+    }]
+  }]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+eq "overall summary carried as record" "67-73" "$(jq -r '.events[0].competitors[0].record' <<<"$OUT")"
+eq "home/road splits not carried" "false" "$(jq '.events[0].competitors[0] | has("Home") or has("Road")' <<<"$OUT")"
+
+echo "== espn_team_schedule: a competitor with no records array reduces cleanly to a null record =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [{
+    name: "Angels at Athletics",
+    date: "2026-09-14T20:10Z",
+    status: {type: {description: "Final"}},
+    competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}, score: "4", winner: true}]}]
+  }]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+RC=$?
+eq "rc=0, no error on missing records" "0" "$RC"
+eq "record is null" "null" "$(jq -r '.events[0].competitors[0].record' <<<"$OUT")"
+
+echo "== espn_team_schedule: a competitor with a malformed (non-array) records value reduces cleanly to a null record =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [{
+    name: "Angels at Athletics",
+    date: "2026-09-14T20:10Z",
+    status: {type: {description: "Final"}},
+    competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}, score: "4", winner: true, records: "not-an-array"}]}]
+  }]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+RC=$?
+eq "rc=0, no error on malformed records" "0" "$RC"
+eq "record is null" "null" "$(jq -r '.events[0].competitors[0].record' <<<"$OUT")"
+
 echo "== espn_team_schedule: the event count is capped =="
 reset_mock
 REQUEST_BODY=$(jq -n '{
@@ -155,6 +210,120 @@ REQUEST_BODY=$(jq -n '{
 OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
 eq "only the in-window event survives" "1" "$(jq '.events | length' <<<"$OUT")"
 eq "the in-window event is the one kept" "In the window" "$(jq -r '.events[0].name' <<<"$OUT")"
+
+echo "== espn_team_schedule: a late-UTC-start event is windowed and dated by its ET calendar day, not the UTC date =="
+reset_mock
+# 2026-09-05T02:30:00Z is a September 4 game in ET (a 10pm PT first pitch is
+# already "tomorrow" in UTC). Window: today=20260901, back=5 -> lo=2026-08-27,
+# forward=3 -> hi=2026-09-04. The naive UTC split would put this event on
+# 2026-09-05, past hi, and wrongly drop it from the window.
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [{
+    name: "Late West Coast start",
+    date: "2026-09-05T02:30:00Z",
+    status: {type: {description: "Final"}},
+    competitions: [{notes: [], competitors: []}]
+  }]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260901")
+eq "rc=0" "0" "$?"
+eq "the ET-dated event survives at the window's edge" "1" "$(jq '.events | length' <<<"$OUT")"
+eq "emitted date is the ET calendar date, not the UTC date" "2026-09-04" "$(jq -r '.events[0].date' <<<"$OUT")"
+
+echo "== espn_team_schedule: a multi-line .date cannot shift the dates of later events =="
+# ET dates are matched back to events by line index, so one candidate whose
+# .date carries a newline (or is a non-scalar) would emit two lines and slide
+# every following event onto the wrong date. The offender must fail to parse
+# and drop out on its own without disturbing its neighbours.
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [
+    {name: "Poisoned date", date: "2026-09-02T20:00Z\n2026-09-03T20:00Z", status: {type:{description:"Final"}}, competitions:[{notes:[],competitors:[]}]},
+    {name: "Non-scalar date", date: {bad: true}, status: {type:{description:"Final"}}, competitions:[{notes:[],competitors:[]}]},
+    {name: "Good game", date: "2026-09-05T02:30:00Z", status: {type:{description:"Final"}}, competitions:[{notes:[],competitors:[]}]}
+  ]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260901")
+eq "rc=0" "0" "$?"
+eq "only the well-formed event survives" "1" "$(jq '.events | length' <<<"$OUT")"
+eq "the survivor is the good one" "Good game" "$(jq -r '.events[0].name' <<<"$OUT")"
+eq "and it keeps its own ET date" "2026-09-04" "$(jq -r '.events[0].date' <<<"$OUT")"
+
+echo "== _et_session_date: the BSD date fallback converts through UTC, not the parse zone =="
+# BSD `date -j -f` parses in the CURRENT zone and matches the trailing Z as a
+# literal character, so a one-step TZ=America/New_York parse silently returns
+# the naive UTC date. Stub a BSD-shaped date (no GNU -d, has -j/-f and -r) so
+# that branch runs on a GNU host, where it otherwise never would.
+date() {
+  case "${1:-}" in
+    -d) return 1 ;;
+    -j)
+      # BSD matches the format strictly: the seconds-bearing one rejects a
+      # minute-precision timestamp, which is why espn.sh tries both.
+      case "$3" in
+        *:%SZ) [[ "$4" == *T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z ]] || return 1 ;;
+        *) [[ "$4" == *T[0-9][0-9]:[0-9][0-9]Z ]] || return 1 ;;
+      esac
+      command date -d "${4%Z}" "$5"
+      ;;
+    -r) command date -d "@$2" "$3" ;;
+    *) command date "$@" ;;
+  esac
+}
+eq "a late UTC start resolves to the previous ET day" "2026-09-04" "$(_et_session_date "2026-09-05T02:30:00Z")"
+eq "the minute-precision form falls through to the second format" "2026-09-04" "$(_et_session_date "2026-09-05T02:30Z")"
+eq "a midday UTC start stays on its own ET day" "2026-09-05" "$(_et_session_date "2026-09-05T20:10:00Z")"
+eq "an unparseable timestamp returns nonzero" "1" "$(_et_session_date "not-a-timestamp" >/dev/null 2>&1; echo $?)"
+unset -f date
+
+echo "== espn_team_schedule: a payload past the argv size limit still reduces =="
+# Linux caps a single argv string at 131072 bytes, so the event array has to
+# reach jq on stdin -- passing it as --argjson fails execve with E2BIG, which
+# this function would report as a failed fetch.
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [range(0;40) | {
+    name: ("Game " + (. | tostring)),
+    date: "2026-09-14T20:10Z",
+    status: {type: {description: "Final"}},
+    filler: ("x" * 5000),
+    competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}, score: "4", winner: true}]}]
+  }]
+}')
+BYTES=$(printf '%s' "$REQUEST_BODY" | wc -c)
+eq "the fixture is larger than the argv-string limit" "yes" \
+  "$( [ "$BYTES" -gt 131072 ] && echo yes || echo no )"
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+RC=$?
+eq "rc=0" "0" "$RC"
+eq "events capped, not lost to E2BIG" "20" "$(jq '.events | length' <<<"$OUT")"
+eq "the first event survives intact" "Game 0" "$(jq -r '.events[0].name' <<<"$OUT")"
+
+echo "== espn_team_schedule: an in-window event deep in a long payload is not truncated away =="
+# The window filter, not a slice of the payload's head, is what bounds the
+# candidate set: a season's worth of past games ahead of today must not push
+# today's game out.
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: ([range(0;250) | {
+    name: ("Old game " + (. | tostring)),
+    date: "2026-04-01T20:10Z",
+    status: {type: {description: "Final"}},
+    competitions: [{notes: [], competitors: []}]
+  }] + [{
+    name: "Today",
+    date: "2026-09-15T20:10Z",
+    status: {type: {description: "Scheduled"}},
+    competitions: [{notes: [], competitors: []}]
+  }])
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+eq "only the in-window event survives" "1" "$(jq '.events | length' <<<"$OUT")"
+eq "the tail event is the one kept" "Today" "$(jq -r '.events[0].name' <<<"$OUT")"
 
 echo "== espn_team_schedule: a 404 on /schedule falls back to the bare team endpoint =="
 reset_mock
@@ -219,6 +388,45 @@ OUT=$(espn_team_schedule "" "laa" "20260915")
 RC=$?
 eq "rc=1" "1" "$RC"
 eq "no fetch attempted" "" "$(urls)"
+
+echo "== espn_slim_league: a competitor's overall record is carried, home/road splits are not =="
+SB=$(jq -n '{events: [{
+  name: "Team A at Team B",
+  date: "2026-09-14T20:10Z",
+  status: {type: {description: "Final"}},
+  competitions: [{
+    notes: [],
+    competitors: [{
+      team: {displayName: "Team A"},
+      score: "4",
+      winner: true,
+      records: [{name: "overall", summary: "67-73"}, {name: "Home", summary: "34-37"}, {name: "Road", summary: "33-36"}]
+    }]
+  }]
+}]}')
+OUT=$(espn_slim_league "baseball/mlb" "$SB" '{"articles":[]}')
+eq "overall summary carried as record" "67-73" "$(jq -r '.events[0].competitors[0].record' <<<"$OUT")"
+eq "home/road splits not carried" "false" "$(jq '.events[0].competitors[0] | has("Home") or has("Road")' <<<"$OUT")"
+
+echo "== espn_slim_league: a competitor with no records array reduces cleanly to a null record =="
+SB=$(jq -n '{events: [{
+  name: "Team A at Team B",
+  date: "2026-09-14T20:10Z",
+  status: {type: {description: "Final"}},
+  competitions: [{notes: [], competitors: [{team: {displayName: "Team A"}, score: "4", winner: true}]}]
+}]}')
+OUT=$(espn_slim_league "baseball/mlb" "$SB" '{"articles":[]}')
+eq "record is null" "null" "$(jq -r '.events[0].competitors[0].record' <<<"$OUT")"
+
+echo "== espn_slim_league: a competitor with a malformed (non-array) records value reduces cleanly to a null record =="
+SB=$(jq -n '{events: [{
+  name: "Team A at Team B",
+  date: "2026-09-14T20:10Z",
+  status: {type: {description: "Final"}},
+  competitions: [{notes: [], competitors: [{team: {displayName: "Team A"}, score: "4", winner: true, records: "not-an-array"}]}]
+}]}')
+OUT=$(espn_slim_league "baseball/mlb" "$SB" '{"articles":[]}')
+eq "record is null" "null" "$(jq -r '.events[0].competitors[0].record' <<<"$OUT")"
 
 echo "== espn_parse_follow: parses multiple entries, tolerates whitespace, keeps the rest past a malformed entry =="
 OUT=$(espn_parse_follow " baseball/mlb:laa , basketball/nba:ny,bad-entry-no-colon, basketball/nba:cha , football/college-football: " 2>/dev/null)
