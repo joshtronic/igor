@@ -144,6 +144,31 @@ forgejo_find_claimable() {
       '
 }
 
+# Quiet period on the INITIAL claim only (igor#591): a label change bumps
+# `updated_at` the same as a body edit, so gating on it covers both "just
+# labeled" and "just edited" without a second signal. Hardcoded -- not a
+# tunable; see the issue for the incidents (igor#585, igor#587, igor#561)
+# this closes off. The rework loop on an already-open bot PR is a different
+# path (`recovery: ... in flight` in bin/tick.sh) and never calls this.
+FORGEJO_CLAIM_QUIET_PERIOD_SECS=900
+
+# forgejo_claim_quiet_seconds_remaining <updated_at_iso> [now_epoch] --
+# seconds still left in the 15-minute post-edit quiet period for an issue
+# last updated at <updated_at_iso>; 0 once the window has elapsed. Boundary
+# is inclusive of readiness: an issue updated exactly 15 minutes ago has age
+# == period, not < period, so it reads as 0 remaining (claimable). <now_epoch>
+# is injectable so tests don't race the wall clock.
+forgejo_claim_quiet_seconds_remaining() {
+  local updated_at="$1" now="${2:-}"
+  [ -n "$now" ] || now=$(date +%s)
+  local updated_epoch
+  updated_epoch=$(date -d "$updated_at" +%s 2>/dev/null) || { echo 0; return; }
+  local age=$(( now - updated_epoch ))
+  local remaining=$(( FORGEJO_CLAIM_QUIET_PERIOD_SECS - age ))
+  [ "$remaining" -lt 0 ] && remaining=0
+  echo "$remaining"
+}
+
 forgejo_get_issue() {
   local repo="$1" number="$2"
   _fj GET "/repos/${repo}/issues/${number}"

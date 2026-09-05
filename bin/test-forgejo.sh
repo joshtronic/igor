@@ -598,6 +598,64 @@ eq "an endless full-page server hits the page cap: exit 2, not 1" "2" "$RC"
 eq "...with no output" "" "$OUT"
 unset -f _fj
 
+# forgejo_claim_quiet_seconds_remaining: the 15-minute post-edit quiet period
+# on the initial claim (igor#591). A fixed NOW epoch keeps this from racing
+# the wall clock.
+echo "== forgejo_claim_quiet_seconds_remaining: 15m quiet period on updated_at (igor#591) =="
+
+NOW=1700000000
+t_ago() { date -u -d "@$((NOW - $1))" +%Y-%m-%dT%H:%M:%SZ; }
+T_2MIN_AGO=$(t_ago 120)
+T_20MIN_AGO=$(t_ago 1200)
+T_EXACT_15MIN_AGO=$(t_ago 900)
+
+REM=$(forgejo_claim_quiet_seconds_remaining "$T_2MIN_AGO" "$NOW")
+eq "issue updated 2m ago is still inside the quiet period" "true" \
+  "$([ "$REM" -gt 0 ] && echo true || echo false)"
+
+REM=$(forgejo_claim_quiet_seconds_remaining "$T_20MIN_AGO" "$NOW")
+eq "issue updated 20m ago is claimable (remaining == 0)" "0" "$REM"
+
+REM=$(forgejo_claim_quiet_seconds_remaining "$T_EXACT_15MIN_AGO" "$NOW")
+eq "issue updated exactly 15m ago is claimable -- boundary is inclusive of readiness" "0" "$REM"
+
+# Requirement 3 (igor#591): a fresh candidate must not stall an older, ready
+# one in the same tick -- the discovery loop's gate is a `continue`, never a
+# `break`. Simulate the picker's skip loop directly over a fixture list.
+pick_first_ready() {
+  local list="$1" now="$2" c num updated remaining
+  while read -r c; do
+    [ -z "$c" ] && continue
+    num=$(jq -r .number <<<"$c")
+    updated=$(jq -r .updated_at <<<"$c")
+    remaining=$(forgejo_claim_quiet_seconds_remaining "$updated" "$now")
+    [ "$remaining" -gt 0 ] && continue
+    echo "$num"
+    return
+  done < <(jq -c '.[]' <<<"$list")
+}
+MIXED_CANDIDATES='[
+  {"number":100,"updated_at":"'"$T_2MIN_AGO"'"},
+  {"number":101,"updated_at":"'"$T_20MIN_AGO"'"}
+]'
+eq "fresh candidate (#100) is skipped, older ready one (#101) wins" \
+  "101" "$(pick_first_ready "$MIXED_CANDIDATES" "$NOW")"
+
+# Requirement 5 (igor#591): the gate must live in the discovery loop only --
+# the recovery sweep on an already-assigned issue (rework/in-flight path)
+# must never call it, or a review comment bumping updated_at would stall
+# rework.
+TICK_SH="$HERE/tick.sh"
+if [ -f "$TICK_SH" ]; then
+  eq "quiet-period helper is called exactly once in tick.sh (discovery only)" \
+    "1" "$(grep -c 'forgejo_claim_quiet_seconds_remaining' "$TICK_SH")"
+  RECOVERY_SECTION=$(awk '/recovery sweep/,/-- Discovery: find globally oldest claimable/' "$TICK_SH")
+  eq "the recovery sweep section never calls the quiet-period helper" "true" \
+    "$(grep -q 'forgejo_claim_quiet_seconds_remaining' <<<"$RECOVERY_SECTION" && echo false || echo true)"
+else
+  echo "  ! tick.sh not found at $TICK_SH -- skipping structural check"
+fi
+
 if [ "$FAIL" -eq 0 ]; then echo "test-forgejo: all checks passed"; exit 0; fi
 echo "test-forgejo: $FAIL check(s) FAILED"
 exit 1
