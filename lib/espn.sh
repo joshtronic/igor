@@ -172,12 +172,16 @@ espn_team_schedule() {
   raw_events=$(jq -n -c --arg lo "$lo" --arg prehi "$prehi" '
     (input) as $p
     | [((($p.events // $p.team.nextEvent) // [])[]
-        | select(((.date // "") | split("T")[0]) as $u | $u >= $lo and $u <= $prehi))][0:50]' \
+        | select((((.date | strings) // "") | split("T")[0]) as $u | $u >= $lo and $u <= $prehi))][0:50]' \
     <<<"$resp" 2>/dev/null) || return 1
   # Each candidate's ET calendar date is resolved outside jq (via the system
   # tz database) and fed back in by index -- jq alone can't apply EST/EDT
-  # correctly.
-  mapfile -t ts_list < <(jq -r '.[] | .date // ""' <<<"$raw_events")
+  # correctly. That index is a line number, so the timestamp must render as
+  # exactly one line per event: a non-string `.date` coerces to "" and an
+  # embedded newline is flattened, since either would otherwise slide every
+  # following event onto the wrong date. Both leave a value _et_session_date
+  # rejects, so the offending event drops out on its own.
+  mapfile -t ts_list < <(jq -r '.[] | ((.date | strings) // "") | gsub("[\r\n]"; " ")' <<<"$raw_events")
   for ts in "${ts_list[@]}"; do
     d=$(_et_session_date "$ts") || d=""
     et_dates+=("$d")
@@ -211,7 +215,7 @@ espn_team_schedule() {
             team: (.team.displayName // .athlete.displayName // null),
             score: (.score // null),
             winner: (.winner // null),
-            record: (((.records // []) | (if type == "array" then . else [] end)) | map(select(type == "object" and .name == "overall")) | (.[0].summary // null))
+            record: ((.records | if type == "array" then . else [] end) | map(select(type == "object" and .name == "overall")) | (.[0].summary // null))
           }]
         }][0:20]
     }' <<<"$raw_events" 2>/dev/null) || return 1

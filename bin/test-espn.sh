@@ -231,6 +231,26 @@ eq "rc=0" "0" "$?"
 eq "the ET-dated event survives at the window's edge" "1" "$(jq '.events | length' <<<"$OUT")"
 eq "emitted date is the ET calendar date, not the UTC date" "2026-09-04" "$(jq -r '.events[0].date' <<<"$OUT")"
 
+echo "== espn_team_schedule: a multi-line .date cannot shift the dates of later events =="
+# ET dates are matched back to events by line index, so one candidate whose
+# .date carries a newline (or is a non-scalar) would emit two lines and slide
+# every following event onto the wrong date. The offender must fail to parse
+# and drop out on its own without disturbing its neighbours.
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [
+    {name: "Poisoned date", date: "2026-09-02T20:00Z\n2026-09-03T20:00Z", status: {type:{description:"Final"}}, competitions:[{notes:[],competitors:[]}]},
+    {name: "Non-scalar date", date: {bad: true}, status: {type:{description:"Final"}}, competitions:[{notes:[],competitors:[]}]},
+    {name: "Good game", date: "2026-09-05T02:30:00Z", status: {type:{description:"Final"}}, competitions:[{notes:[],competitors:[]}]}
+  ]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260901")
+eq "rc=0" "0" "$?"
+eq "only the well-formed event survives" "1" "$(jq '.events | length' <<<"$OUT")"
+eq "the survivor is the good one" "Good game" "$(jq -r '.events[0].name' <<<"$OUT")"
+eq "and it keeps its own ET date" "2026-09-04" "$(jq -r '.events[0].date' <<<"$OUT")"
+
 echo "== _et_session_date: the BSD date fallback converts through UTC, not the parse zone =="
 # BSD `date -j -f` parses in the CURRENT zone and matches the trailing Z as a
 # literal character, so a one-step TZ=America/New_York parse silently returns
