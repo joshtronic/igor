@@ -998,6 +998,28 @@ review_reviewed_patchid() {
   jq -r --arg k "$key" '.review[$k].patch_id // ""' "$state_file" 2>/dev/null || printf ''
 }
 
+# Echo the CI status stored alongside the last verdict, or empty if none
+# (including older state written before this field existed).
+review_reviewed_ci() {
+  local key="$1" state_file
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || { printf ''; return; }
+  jq -r --arg k "$key" '.review[$k].ci // ""' "$state_file" 2>/dev/null || printf ''
+}
+
+# True (exit 0) when CI has flipped from not-success to success since the
+# stored verdict was made. The review directive makes CI failure a hard
+# REQUEST_CHANGES regardless of diff quality, so a verdict recorded under
+# non-success CI is a function of that CI status, not just the patch --
+# the patch-id dedup below must not treat it as still current once CI goes
+# green. Missing stored CI (older state, igor#593) reads as not-success, so
+# a legacy record gets one re-review when current CI is success rather than
+# staying stale forever.
+review_ci_became_success() {
+  local stored_ci="$1" current_ci="$2"
+  [ "$stored_ci" != "success" ] && [ "$current_ci" = "success" ]
+}
+
 # Record the verdict for a PR's head. epoch `at` is passed in (the
 # caller already has `date +%s` from timing the review) so this stays a
 # pure read-modify-write with no clock of its own. patch_id is optional
@@ -2957,7 +2979,7 @@ do_review_tick() {
     return 1
   fi
 
-  local start ci title body diff truncated_note directive user patch_id reviewed_patch_id
+  local start ci title body diff truncated_note directive user patch_id reviewed_patch_id reviewed_ci
   start=$(date +%s)
 
   # Fetch the diff first; used for patch-id dedup AND the review itself.
@@ -2974,20 +2996,30 @@ do_review_tick() {
   truncated_note=""
   [ "${#diff}" -ge 200000 ] && truncated_note=" (TRUNCATED at 200000 chars -- review what you can see and say so)"
 
+  ci="$target_ci"   # already fetched + confirmed settled during selection
+  [ -n "$ci" ] || ci="unknown"
+
   # Patch-id dedup: when the head sha changed but the net diff is the
   # same (base-merge, rebase without content change), record the new sha
   # so we don't re-fetch every tick, but do NOT re-review or re-request
   # the human. Fall back to sha-only dedup if patch-id comes back empty.
+  # Exception (igor#593): a stored verdict made under non-success CI is
+  # stale once CI goes green, even with the patch unchanged -- the
+  # directive's hard REQUEST_CHANGES-on-red-CI rule means CI status is
+  # part of the verdict's inputs, not just the diff.
   patch_id=$(printf '%s' "$diff" | git patch-id --stable 2>/dev/null | awk '{print $1}')
   reviewed_patch_id=$(review_reviewed_patchid "$key")
   if [ -n "$patch_id" ] && [ -n "$reviewed_patch_id" ] && [ "$patch_id" = "$reviewed_patch_id" ]; then
-    log "review: ${key} head advanced to ${target_sha:0:8} but patch-id unchanged -- skipping re-review"
-    review_update_sha "$key" "$target_sha"
-    return 1
+    reviewed_ci=$(review_reviewed_ci "$key")
+    if review_ci_became_success "$reviewed_ci" "$ci"; then
+      log "review: ${key} head advanced to ${target_sha:0:8}, patch-id unchanged, but CI went ${reviewed_ci:-unknown} -> success -- re-reviewing the stale verdict"
+    else
+      log "review: ${key} head advanced to ${target_sha:0:8} but patch-id unchanged -- skipping re-review"
+      review_update_sha "$key" "$target_sha"
+      return 1
+    fi
   fi
 
-  ci="$target_ci"   # already fetched + confirmed settled during selection
-  [ -n "$ci" ] || ci="unknown"
   title=$(jq -r '.title // ""' <<<"$target_json")
   body=$(jq -r '.body // ""' <<<"$target_json")
 
