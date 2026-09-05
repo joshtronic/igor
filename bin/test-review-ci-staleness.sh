@@ -123,7 +123,7 @@ review_record "$KEY" "oldsha" "REQUEST_CHANGES" "failure" "1000" "$PATCH_ID"
 CUR_DIFF="$DIFF"
 CURRENT_CI="success"
 reset_run
-do_review_tick >/tmp/out.log 2>&1
+do_review_tick >"$TMP/out.log" 2>&1
 eq "claude_call was invoked (re-reviewed)" "1" "$(claude_called)"
 eq "a new comment was posted" "1" "$COMMENT_POSTED"
 eq "the new verdict was recorded" "APPROVE" "$(jq -r --arg k "$KEY" '.review[$k].verdict' "$STATE")"
@@ -135,7 +135,7 @@ review_record "$KEY" "oldsha" "REQUEST_CHANGES" "failure" "1000" "$PATCH_ID"
 CUR_DIFF="$DIFF"
 CURRENT_CI="failure"
 reset_run
-do_review_tick >/tmp/out.log 2>&1
+do_review_tick >"$TMP/out.log" 2>&1
 eq "claude_call was NOT invoked (skipped)" "0" "$(claude_called)"
 eq "the stored verdict is unchanged" "REQUEST_CHANGES" "$(jq -r --arg k "$KEY" '.review[$k].verdict' "$STATE")"
 eq "the stored ci is unchanged" "failure" "$(jq -r --arg k "$KEY" '.review[$k].ci' "$STATE")"
@@ -147,9 +147,22 @@ review_record "$KEY" "oldsha" "APPROVE" "success" "1000" "$PATCH_ID"
 CUR_DIFF="$DIFF"
 CURRENT_CI="success"
 reset_run
-do_review_tick >/tmp/out.log 2>&1
+do_review_tick >"$TMP/out.log" 2>&1
 eq "claude_call was NOT invoked (skipped)" "0" "$(claude_called)"
 eq "the stored verdict is unchanged" "APPROVE" "$(jq -r --arg k "$KEY" '.review[$k].verdict' "$STATE")"
+
+echo "== do_review_tick: 3b. stored APPROVE/success, patch unchanged, CI now failure -> still skip =="
+# The rule is deliberately one-directional: only not-success -> success is a
+# flip. A green-CI APPROVE that goes red on a base merge keeps today's skip.
+echo '{}' > "$STATE"
+review_record "$KEY" "oldsha" "APPROVE" "success" "1000" "$PATCH_ID"
+CUR_DIFF="$DIFF"
+CURRENT_CI="failure"
+reset_run
+do_review_tick >"$TMP/out.log" 2>&1
+eq "claude_call was NOT invoked (skipped)" "0" "$(claude_called)"
+eq "the stored verdict is unchanged" "APPROVE" "$(jq -r --arg k "$KEY" '.review[$k].verdict' "$STATE")"
+eq "the stored ci is unchanged" "success" "$(jq -r --arg k "$KEY" '.review[$k].ci' "$STATE")"
 
 echo "== do_review_tick: 4. patch-id changed -> re-review regardless of CI =="
 echo '{}' > "$STATE"
@@ -157,7 +170,7 @@ review_record "$KEY" "oldsha" "APPROVE" "success" "1000" "$PATCH_ID"
 CUR_DIFF="$OTHER_DIFF"
 CURRENT_CI="success"
 reset_run
-do_review_tick >/tmp/out.log 2>&1
+do_review_tick >"$TMP/out.log" 2>&1
 eq "claude_call was invoked (re-reviewed on patch change)" "1" "$(claude_called)"
 
 echo "== do_review_tick: 5. stored record with no ci field (older state) -> does not crash, defined behaviour =="
@@ -168,7 +181,7 @@ eq "fixture really has no ci field" "null" "$(jq -r --arg k "$KEY" '.review[$k].
 CUR_DIFF="$DIFF"
 CURRENT_CI="success"
 reset_run
-do_review_tick >/tmp/out.log 2>&1
+do_review_tick >"$TMP/out.log" 2>&1
 eq "do_review_tick completes cleanly (no crash on a missing ci field)" "0" "$?"
 eq "a missing stored ci with current CI success re-reviews (pinned)" "1" "$(claude_called)"
 
