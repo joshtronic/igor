@@ -4413,10 +4413,13 @@ while IFS= read -r repo_line; do
     # work starts (igor#585, #587, #561 all shipped wrong specs claimed within
     # ~75s of filing). One fresh candidate must not stall an older ready one,
     # so this is a `continue`, not a `break`.
-    C_UPDATED=$(jq -r '.updated_at // .created_at' <<<"$candidate")
+    # No `// .created_at` fallback: creation time is the weaker signal this
+    # gate exists to avoid, so a candidate missing `updated_at` reads as
+    # unparseable and the helper says so out loud.
+    C_UPDATED=$(jq -r '.updated_at // empty' <<<"$candidate")
     C_QUIET_REMAINING=$(forgejo_claim_quiet_seconds_remaining "$C_UPDATED")
     if [ "$C_QUIET_REMAINING" -gt 0 ]; then
-      C_AGE_MIN=$(( ($(date +%s) - $(date -d "$C_UPDATED" +%s 2>/dev/null || date +%s)) / 60 ))
+      C_AGE_MIN=$(( (FORGEJO_CLAIM_QUIET_PERIOD_SECS - C_QUIET_REMAINING) / 60 ))
       log "skipping ${R_NAME}#${C_NUM} -- updated ${C_AGE_MIN}m ago, inside the 15m quiet period"
       continue
     fi

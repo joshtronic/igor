@@ -608,6 +608,7 @@ t_ago() { date -u -d "@$((NOW - $1))" +%Y-%m-%dT%H:%M:%SZ; }
 T_2MIN_AGO=$(t_ago 120)
 T_20MIN_AGO=$(t_ago 1200)
 T_EXACT_15MIN_AGO=$(t_ago 900)
+unset -f t_ago
 
 REM=$(forgejo_claim_quiet_seconds_remaining "$T_2MIN_AGO" "$NOW")
 eq "issue updated 2m ago is still inside the quiet period" "true" \
@@ -619,34 +620,50 @@ eq "issue updated 20m ago is claimable (remaining == 0)" "0" "$REM"
 REM=$(forgejo_claim_quiet_seconds_remaining "$T_EXACT_15MIN_AGO" "$NOW")
 eq "issue updated exactly 15m ago is claimable -- boundary is inclusive of readiness" "0" "$REM"
 
-# Requirement 3 (igor#591): a fresh candidate must not stall an older, ready
-# one in the same tick -- the discovery loop's gate is a `continue`, never a
-# `break`. Simulate the picker's skip loop directly over a fixture list.
-pick_first_ready() {
-  local list="$1" now="$2" c num updated remaining
-  while read -r c; do
-    [ -z "$c" ] && continue
-    num=$(jq -r .number <<<"$c")
-    updated=$(jq -r .updated_at <<<"$c")
-    remaining=$(forgejo_claim_quiet_seconds_remaining "$updated" "$now")
-    [ "$remaining" -gt 0 ] && continue
-    echo "$num"
-    return
-  done < <(jq -c '.[]' <<<"$list")
-}
-MIXED_CANDIDATES='[
-  {"number":100,"updated_at":"'"$T_2MIN_AGO"'"},
-  {"number":101,"updated_at":"'"$T_20MIN_AGO"'"}
-]'
-eq "fresh candidate (#100) is skipped, older ready one (#101) wins" \
-  "101" "$(pick_first_ready "$MIXED_CANDIDATES" "$NOW")"
+# A timestamp the harness can't read fails OPEN, and says so on stderr. The
+# gate degrading to silence is the failure mode worth pinning: bin/tick.sh
+# passes `.updated_at // empty`, so a candidate missing the field lands here.
+QUIET_ERR=$(forgejo_claim_quiet_seconds_remaining "" "$NOW" 2>&1 >/dev/null)
+eq "an unparseable updated_at is claimable (fails open)" \
+  "0" "$(forgejo_claim_quiet_seconds_remaining "" "$NOW" 2>/dev/null)"
+eq "...and warns rather than skipping the gate silently" "true" \
+  "$(grep -q 'quiet period not applied' <<<"$QUIET_ERR" && echo true || echo false)"
+eq "a non-empty but unreadable timestamp fails open too" \
+  "0" "$(forgejo_claim_quiet_seconds_remaining "not-a-date" "$NOW" 2>/dev/null)"
 
-# Requirement 5 (igor#591): the gate must live in the discovery loop only --
-# the recovery sweep on an already-assigned issue (rework/in-flight path)
-# must never call it, or a review comment bumping updated_at would stall
-# rework.
+# The gate is only as good as the field it reads: forgejo_find_claimable must
+# actually emit `updated_at` on every candidate. It projects nothing today
+# (`[.[] | select(...)]`), but a future projection that dropped the field
+# would turn the whole quiet period into a no-op with no other test failing.
+UPDATED_FIXTURE='[
+  {"number":20,"created_at":"2026-03-01T00:00:00Z","updated_at":"2026-03-02T00:00:00Z","assignees":[],"labels":[{"name":"Agent"}]},
+  {"number":21,"created_at":"2026-03-03T00:00:00Z","updated_at":"2026-03-04T00:00:00Z","assignees":[{"login":"reviewer"}],"labels":[{"name":"Agent"}]}
+]'
+_fj() { printf '%s' "$UPDATED_FIXTURE"; }
+OUT=$(forgejo_find_claimable acme/x reviewer)
+eq "every claimable candidate carries a non-null updated_at" "true" \
+  "$(jq -r 'length == 2 and all(.[]; .updated_at != null and .updated_at != "")' <<<"$OUT")"
+eq "...and it is the issue's own updated_at, not created_at" \
+  "2026-03-02T00:00:00Z 2026-03-04T00:00:00Z" \
+  "$(jq -r '[.[].updated_at] | join(" ")' <<<"$OUT")"
+unset -f _fj
+
+# Requirements 3 and 5 (igor#591) are properties of the real gate block in
+# bin/tick.sh, so assert over that source rather than a re-implementation of
+# the picker: (3) a fresh candidate must be SKIPPED, not stall an older ready
+# one, so the gate ends in `continue` and never `break`; (5) the gate must
+# live in the discovery loop only -- the recovery sweep on an already-assigned
+# issue (rework/in-flight path) must never call it, or a review comment
+# bumping updated_at would stall rework.
 TICK_SH="$HERE/tick.sh"
 if [ -f "$TICK_SH" ]; then
+  GATE_BLOCK=$(awk '/C_QUIET_REMAINING=\$\(forgejo_claim_quiet_seconds_remaining/,/^    fi$/' "$TICK_SH")
+  eq "the quiet-period gate block was found in tick.sh" "true" \
+    "$([ -n "$GATE_BLOCK" ] && echo true || echo false)"
+  eq "a skipped candidate continues the loop" "true" \
+    "$(grep -qE '^ *continue$' <<<"$GATE_BLOCK" && echo true || echo false)"
+  eq "...and never breaks out of it (an older ready issue still gets claimed)" "true" \
+    "$(grep -qE '^ *break$' <<<"$GATE_BLOCK" && echo false || echo true)"
   eq "quiet-period helper is called exactly once in tick.sh (discovery only)" \
     "1" "$(grep -c 'forgejo_claim_quiet_seconds_remaining' "$TICK_SH")"
   RECOVERY_SECTION=$(awk '/recovery sweep/,/-- Discovery: find globally oldest claimable/' "$TICK_SH")
