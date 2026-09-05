@@ -128,6 +128,61 @@ eq "event status mapped" "Final" "$(jq -r '.events[0].status' <<<"$OUT")"
 eq "note headline mapped" "Doubleheader Game 1" "$(jq -r '.events[0].notes[0]' <<<"$OUT")"
 eq "competitors capped at 10" "10" "$(jq '.events[0].competitors | length' <<<"$OUT")"
 
+echo "== espn_team_schedule: a competitor's overall record is carried, home/road splits are not =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [{
+    name: "Angels at Athletics",
+    date: "2026-09-14T20:10Z",
+    status: {type: {description: "Final"}},
+    competitions: [{
+      notes: [],
+      competitors: [{
+        team: {displayName: "Los Angeles Angels"},
+        score: "4",
+        winner: true,
+        records: [{name: "overall", summary: "67-73"}, {name: "Home", summary: "34-37"}, {name: "Road", summary: "33-36"}]
+      }]
+    }]
+  }]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+eq "overall summary carried as record" "67-73" "$(jq -r '.events[0].competitors[0].record' <<<"$OUT")"
+eq "home/road splits not carried" "false" "$(jq '.events[0].competitors[0] | has("Home") or has("Road")' <<<"$OUT")"
+
+echo "== espn_team_schedule: a competitor with no records array reduces cleanly to a null record =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [{
+    name: "Angels at Athletics",
+    date: "2026-09-14T20:10Z",
+    status: {type: {description: "Final"}},
+    competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}, score: "4", winner: true}]}]
+  }]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+RC=$?
+eq "rc=0, no error on missing records" "0" "$RC"
+eq "record is null" "null" "$(jq -r '.events[0].competitors[0].record' <<<"$OUT")"
+
+echo "== espn_team_schedule: a competitor with a malformed (non-array) records value reduces cleanly to a null record =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [{
+    name: "Angels at Athletics",
+    date: "2026-09-14T20:10Z",
+    status: {type: {description: "Final"}},
+    competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}, score: "4", winner: true, records: "not-an-array"}]}]
+  }]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+RC=$?
+eq "rc=0, no error on malformed records" "0" "$RC"
+eq "record is null" "null" "$(jq -r '.events[0].competitors[0].record' <<<"$OUT")"
+
 echo "== espn_team_schedule: the event count is capped =="
 reset_mock
 REQUEST_BODY=$(jq -n '{
@@ -155,6 +210,26 @@ REQUEST_BODY=$(jq -n '{
 OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
 eq "only the in-window event survives" "1" "$(jq '.events | length' <<<"$OUT")"
 eq "the in-window event is the one kept" "In the window" "$(jq -r '.events[0].name' <<<"$OUT")"
+
+echo "== espn_team_schedule: a late-UTC-start event is windowed and dated by its ET calendar day, not the UTC date =="
+reset_mock
+# 2026-09-05T02:30:00Z is a September 4 game in ET (a 10pm PT first pitch is
+# already "tomorrow" in UTC). Window: today=20260901, back=5 -> lo=2026-08-27,
+# forward=3 -> hi=2026-09-04. The naive UTC split would put this event on
+# 2026-09-05, past hi, and wrongly drop it from the window.
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [{
+    name: "Late West Coast start",
+    date: "2026-09-05T02:30:00Z",
+    status: {type: {description: "Final"}},
+    competitions: [{notes: [], competitors: []}]
+  }]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260901")
+eq "rc=0" "0" "$?"
+eq "the ET-dated event survives at the window's edge" "1" "$(jq '.events | length' <<<"$OUT")"
+eq "emitted date is the ET calendar date, not the UTC date" "2026-09-04" "$(jq -r '.events[0].date' <<<"$OUT")"
 
 echo "== espn_team_schedule: a 404 on /schedule falls back to the bare team endpoint =="
 reset_mock
@@ -219,6 +294,45 @@ OUT=$(espn_team_schedule "" "laa" "20260915")
 RC=$?
 eq "rc=1" "1" "$RC"
 eq "no fetch attempted" "" "$(urls)"
+
+echo "== espn_slim_league: a competitor's overall record is carried, home/road splits are not =="
+SB=$(jq -n '{events: [{
+  name: "Team A at Team B",
+  date: "2026-09-14T20:10Z",
+  status: {type: {description: "Final"}},
+  competitions: [{
+    notes: [],
+    competitors: [{
+      team: {displayName: "Team A"},
+      score: "4",
+      winner: true,
+      records: [{name: "overall", summary: "67-73"}, {name: "Home", summary: "34-37"}, {name: "Road", summary: "33-36"}]
+    }]
+  }]
+}]}')
+OUT=$(espn_slim_league "baseball/mlb" "$SB" '{"articles":[]}')
+eq "overall summary carried as record" "67-73" "$(jq -r '.events[0].competitors[0].record' <<<"$OUT")"
+eq "home/road splits not carried" "false" "$(jq '.events[0].competitors[0] | has("Home") or has("Road")' <<<"$OUT")"
+
+echo "== espn_slim_league: a competitor with no records array reduces cleanly to a null record =="
+SB=$(jq -n '{events: [{
+  name: "Team A at Team B",
+  date: "2026-09-14T20:10Z",
+  status: {type: {description: "Final"}},
+  competitions: [{notes: [], competitors: [{team: {displayName: "Team A"}, score: "4", winner: true}]}]
+}]}')
+OUT=$(espn_slim_league "baseball/mlb" "$SB" '{"articles":[]}')
+eq "record is null" "null" "$(jq -r '.events[0].competitors[0].record' <<<"$OUT")"
+
+echo "== espn_slim_league: a competitor with a malformed (non-array) records value reduces cleanly to a null record =="
+SB=$(jq -n '{events: [{
+  name: "Team A at Team B",
+  date: "2026-09-14T20:10Z",
+  status: {type: {description: "Final"}},
+  competitions: [{notes: [], competitors: [{team: {displayName: "Team A"}, score: "4", winner: true, records: "not-an-array"}]}]
+}]}')
+OUT=$(espn_slim_league "baseball/mlb" "$SB" '{"articles":[]}')
+eq "record is null" "null" "$(jq -r '.events[0].competitors[0].record' <<<"$OUT")"
 
 echo "== espn_parse_follow: parses multiple entries, tolerates whitespace, keeps the rest past a malformed entry =="
 OUT=$(espn_parse_follow " baseball/mlb:laa , basketball/nba:ny,bad-entry-no-colon, basketball/nba:cha , football/college-football: " 2>/dev/null)
