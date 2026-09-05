@@ -648,29 +648,68 @@ eq "...and it is the issue's own updated_at, not created_at" \
   "$(jq -r '[.[].updated_at] | join(" ")' <<<"$OUT")"
 unset -f _fj
 
-# Requirements 3 and 5 (igor#591) are properties of the real gate block in
-# bin/tick.sh, so assert over that source rather than a re-implementation of
-# the picker: (3) a fresh candidate must be SKIPPED, not stall an older ready
-# one, so the gate ends in `continue` and never `break`; (5) the gate must
-# live in the discovery loop only -- the recovery sweep on an already-assigned
-# issue (rework/in-flight path) must never call it, or a review comment
-# bumping updated_at would stall rework.
+# Requirement 5 (igor#591) is an ABSENCE property -- the recovery sweep on an
+# already-assigned issue (rework/in-flight path) must never call the helper, or
+# a review comment bumping updated_at would stall rework -- so it is asserted
+# over bin/tick.sh's source. Requirement 3 (a fresh candidate is skipped without
+# stalling an older ready one) is asserted below by RUNNING the shipped gate
+# lines over a fixture, not by reading them.
 TICK_SH="$HERE/tick.sh"
+eq "tick.sh is readable (the checks below run against its source)" "true" \
+  "$([ -f "$TICK_SH" ] && echo true || echo false)"
 if [ -f "$TICK_SH" ]; then
-  GATE_BLOCK=$(awk '/C_QUIET_REMAINING=\$\(forgejo_claim_quiet_seconds_remaining/,/^    fi$/' "$TICK_SH")
-  eq "the quiet-period gate block was found in tick.sh" "true" \
-    "$([ -n "$GATE_BLOCK" ] && echo true || echo false)"
-  eq "a skipped candidate continues the loop" "true" \
-    "$(grep -qE '^ *continue$' <<<"$GATE_BLOCK" && echo true || echo false)"
-  eq "...and never breaks out of it (an older ready issue still gets claimed)" "true" \
-    "$(grep -qE '^ *break$' <<<"$GATE_BLOCK" && echo false || echo true)"
   eq "quiet-period helper is called exactly once in tick.sh (discovery only)" \
     "1" "$(grep -c 'forgejo_claim_quiet_seconds_remaining' "$TICK_SH")"
   RECOVERY_SECTION=$(awk '/recovery sweep/,/-- Discovery: find globally oldest claimable/' "$TICK_SH")
+  eq "the recovery sweep section was found (an empty range would pass vacuously)" "true" \
+    "$([ -n "$RECOVERY_SECTION" ] && echo true || echo false)"
   eq "the recovery sweep section never calls the quiet-period helper" "true" \
     "$(grep -q 'forgejo_claim_quiet_seconds_remaining' <<<"$RECOVERY_SECTION" && echo false || echo true)"
-else
-  echo "  ! tick.sh not found at $TICK_SH -- skipping structural check"
+
+  # WHICH loop the gate's `continue` advances is the whole of requirement 3:
+  # the per-CANDIDATE loop (skip this issue, try the next one in the same repo)
+  # and not the per-REPO loop (one fresh issue suppressing its repo for the
+  # tick). Pin it by line containment first, then run the block.
+  read -r LOOP_START LOOP_END GATE_LINE < <(awk '
+    /^  while read -r candidate; do$/ { start = NR }
+    start && !end && /^  done / { end = NR }
+    /forgejo_claim_quiet_seconds_remaining/ { gate = NR }
+    END { print start, end, gate }' "$TICK_SH")
+  eq "the gate sits inside the per-candidate loop, so its continue takes the next candidate" "true" \
+    "$([ -n "$LOOP_START" ] && [ -n "$LOOP_END" ] && [ -n "$GATE_LINE" ] &&
+      [ "$GATE_LINE" -gt "$LOOP_START" ] && [ "$GATE_LINE" -lt "$LOOP_END" ] && echo true || echo false)"
+
+  # Now execute the SHIPPED lines (extracted from tick.sh, not paraphrased)
+  # over a two-issue fixture, freshest first. Timestamps are relative to the
+  # wall clock because the gate calls the helper with one argument; the 2m/20m
+  # offsets leave minutes of slack on either side of the 15m boundary.
+  GATE_SRC=$(awk '/^    C_UPDATED=\$\(jq -r/,/^    fi$/' "$TICK_SH")
+  eq "the gate block was extracted from tick.sh" "true" \
+    "$(grep -q 'C_QUIET_REMAINING' <<<"$GATE_SRC" && echo true || echo false)"
+  NOW_EPOCH=$(date +%s)
+  GATE_FIXTURE=$(printf '{"number":30,"updated_at":"%s"}\n{"number":31,"updated_at":"%s"}\n' \
+    "$(date -u -d "@$((NOW_EPOCH - 120))" +%Y-%m-%dT%H:%M:%SZ)" \
+    "$(date -u -d "@$((NOW_EPOCH - 1200))" +%Y-%m-%dT%H:%M:%SZ)")
+  # shellcheck disable=SC2034  # C_UPDATED/C_QUIET_REMAINING/C_AGE_MIN are the
+  # extracted block's own variables, scoped here so the eval can't leak them.
+  gate_survivors() {  # <candidates, one JSON object per line> -> surviving numbers
+    local R_NAME="acme/x" candidate C_NUM C_UPDATED C_QUIET_REMAINING C_AGE_MIN survivors=""
+    while read -r candidate; do
+      [ -z "$candidate" ] && continue
+      C_NUM=$(jq -r .number <<<"$candidate")
+      eval "$GATE_SRC"
+      survivors="$survivors $C_NUM"
+    done <<<"$1"
+    printf '%s' "${survivors# }"
+  }
+  eq "the fresh candidate is skipped and the loop still reaches the older ready one" \
+    "31" "$(gate_survivors "$GATE_FIXTURE" 2>/dev/null)"
+  GATE_LOG=$(gate_survivors "$GATE_FIXTURE" 2>&1 >/dev/null)
+  eq "...and the skip is logged with the issue's age" "true" \
+    "$(grep -q 'skipping acme/x#30 -- updated 2m ago, inside the 15m quiet period' <<<"$GATE_LOG" && echo true || echo false)"
+  eq "...while the ready issue is never logged as skipped" "true" \
+    "$(grep -q '#31' <<<"$GATE_LOG" && echo false || echo true)"
+  unset -f gate_survivors
 fi
 
 if [ "$FAIL" -eq 0 ]; then echo "test-forgejo: all checks passed"; exit 0; fi
