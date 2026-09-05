@@ -25,6 +25,7 @@ drifts the first time someone adds an operation.
 | operation | needs from a forge |
 | --- | --- |
 | `forgejo_find_claimable` | list open, `Agent`-labeled issues on a repo, filterable by assignee/label |
+| `forgejo_claim_quiet_seconds_remaining` | pure helper (no forge call): seconds left in the 15-minute post-`updated_at` quiet period before an issue is claimable |
 | `forgejo_get_issue` | fetch one issue |
 | `forgejo_append_issue_body` | read an issue, then replace its body (read-modify-write) |
 | `forgejo_set_issue_body` | replace an issue's body outright |
