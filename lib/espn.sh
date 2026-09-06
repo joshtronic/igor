@@ -101,10 +101,18 @@ espn_news() {
 # fetch that SUCCEEDS and answers garbage is ESPN being broken, not a
 # missing path, and is not retried elsewhere.
 #
-# Echoes {league, team_id, team, events:[{name,date,status,notes,
-# competitors:[{team,score,winner,record}]}]} on success -- `record` is
-# the competitor's overall W-L summary, same as espn_slim_league.
-# Absent/malformed `records` yields null, same as `score`/`winner`. On
+# Echoes {league, team_id, team, events:[{name,date,status,session,notes,
+# competitors:[{team,order,score,winner,record}]}]} on success -- `record` is
+# the competitor's overall W-L summary, same as espn_slim_league. `session`
+# is the event's `competitions[0].type.abbreviation` (FP1, Q, Race, ...),
+# null when absent -- distinct from `status`, which is the SESSION's state
+# (e.g. "Final" on a practice session means practice ended, not that a race
+# concluded). `order` is each competitor's ESPN-assigned rank/grid position,
+# carried straight through. Absent/malformed `records` yields null, same as
+# `score`/`order`; `winner` yields null only when the key is absent -- a
+# `winner: false` in the source survives as `false`, never collapsed to null
+# (jq's `//` treats `false` as empty, so these fields are read with an
+# explicit `has()` check instead). On
 # ANY failure -- empty args, a malformed date, both fetches failing, a
 # date-math failure, or an unparseable/empty payload -- emits NOTHING
 # and returns 1: a followed team whose fetch failed must not read
@@ -210,11 +218,13 @@ espn_team_schedule() {
           name: $ev.name,
           date: $d,
           status: ($ev.status.type.description // $ev.competitions[0].status.type.description // "unknown"),
+          session: (try ($ev.competitions[0].type.abbreviation) catch null),
           notes: [($ev.competitions[0].notes // [])[] | .headline // empty],
           competitors: [($ev.competitions[0].competitors // [])[0:10][] | {
             team: (.team.displayName // .athlete.displayName // null),
-            score: (.score // null),
-            winner: (.winner // null),
+            order: (if has("order") then .order else null end),
+            score: (if has("score") then .score else null end),
+            winner: (if has("winner") then .winner else null end),
             record: ((.records | if type == "array" then . else [] end) | map(select(type == "object" and .name == "overall")) | (.[0].summary // null))
           }]
         }][0:20]
@@ -260,11 +270,22 @@ espn_parse_follow() {
 # Pure jq reduction of one league's raw payloads to what the distill
 # prompt needs:
 #   { league,
-#     events:[{name,date,status,notes,competitors:[{team,score,winner,record}]}],
+#     events:[{name,date,status,session,notes,competitors:[{team,order,score,winner,record}]}],
 #     headlines:[{headline,description,published,link}] }
 # `record` is the competitor's overall W-L summary (ESPN's `records`
 # array, `name == "overall"`) -- home/road splits are not carried.
-# Absent or malformed `records` yields null, same as `score`/`winner`.
+# `session` is the event's `competitions[0].type.abbreviation` (FP1, Q,
+# Race, ...), null when absent -- distinct from `status`, which is the
+# SESSION's state (e.g. "Final" on a practice session means practice
+# ended, not that a race concluded; without `session` a completed
+# practice and a completed race are indistinguishable, igor#595).
+# `order` is each competitor's ESPN-assigned rank/grid position, carried
+# straight through -- for a motorsport field it is the only ranking
+# signal, since array position is not one. Absent or malformed `records`
+# yields null, same as `score`/`order`; `winner` yields null only when
+# the key is absent -- a `winner: false` in the source survives as
+# `false`, never collapsed to null (jq's `//` treats `false` as empty,
+# so these fields are read with an explicit `has()` check instead).
 # Caps keep the prompt bounded with ~12 configured leagues: 10 events
 # per league (a full MLB Saturday slate runs to 15 games), 10 competitors
 # per event (golf/racing fields run to 150 entrants -- the scoreboard
@@ -282,11 +303,13 @@ espn_slim_league() {
         name: .name,
         date: ((.date // "") | split("T")[0]),
         status: (.status.type.description // "unknown"),
+        session: (try (.competitions[0].type.abbreviation) catch null),
         notes: [(.competitions[0].notes // [])[] | .headline // empty],
         competitors: [(.competitions[0].competitors // [])[0:10][] | {
           team: (.team.displayName // .athlete.displayName // null),
-          score: (.score // null),
-          winner: (.winner // null),
+          order: (if has("order") then .order else null end),
+          score: (if has("score") then .score else null end),
+          winner: (if has("winner") then .winner else null end),
           record: (((.records // []) | (if type == "array" then . else [] end)) | map(select(type == "object" and .name == "overall")) | (.[0].summary // null))
         }]
       }],
