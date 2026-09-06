@@ -183,6 +183,89 @@ RC=$?
 eq "rc=0, no error on malformed records" "0" "$RC"
 eq "record is null" "null" "$(jq -r '.events[0].competitors[0].record' <<<"$OUT")"
 
+echo "== espn_team_schedule: a competitor with winner:false emits winner:false, not null (igor#595) =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Scuderia Ferrari"},
+  events: [{
+    name: "Pirelli Italian Grand Prix",
+    date: "2026-09-05T09:30Z",
+    status: {type: {description: "Final"}},
+    competitions: [{
+      type: {abbreviation: "FP1"},
+      notes: [],
+      competitors: [
+        {order: 1, team: {displayName: "Charles Leclerc"}, winner: false},
+        {order: 2, team: {displayName: "Lewis Hamilton"}, winner: false}
+      ]
+    }]
+  }]
+}')
+OUT=$(espn_team_schedule "racing/f1" "ferrari" "20260905")
+eq "winner:false survives, not collapsed to null" "false" "$(jq -r '.events[0].competitors[0].winner' <<<"$OUT")"
+eq "the second competitor's winner:false also survives" "false" "$(jq -r '.events[0].competitors[1].winner' <<<"$OUT")"
+
+echo "== espn_team_schedule: a competitor with no winner key emits null =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Scuderia Ferrari"},
+  events: [{
+    name: "Pirelli Italian Grand Prix",
+    date: "2026-09-05T09:30Z",
+    status: {type: {description: "Final"}},
+    competitions: [{type: {abbreviation: "FP1"}, notes: [], competitors: [{order: 1, team: {displayName: "Charles Leclerc"}}]}]
+  }]
+}')
+OUT=$(espn_team_schedule "racing/f1" "ferrari" "20260905")
+eq "winner is null when the key is absent" "null" "$(jq -r '.events[0].competitors[0].winner' <<<"$OUT")"
+
+echo "== espn_team_schedule: order is carried through and preserved in the emitted competitor order =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Scuderia Ferrari"},
+  events: [{
+    name: "Pirelli Italian Grand Prix",
+    date: "2026-09-05T09:30Z",
+    status: {type: {description: "Final"}},
+    competitions: [{type: {abbreviation: "FP1"}, notes: [], competitors: [
+      {order: 1, team: {displayName: "Charles Leclerc"}, winner: false},
+      {order: 2, team: {displayName: "Lewis Hamilton"}, winner: false}
+    ]}]
+  }]
+}')
+OUT=$(espn_team_schedule "racing/f1" "ferrari" "20260905")
+eq "first competitor's order carried" "1" "$(jq -r '.events[0].competitors[0].order' <<<"$OUT")"
+eq "second competitor's order carried" "2" "$(jq -r '.events[0].competitors[1].order' <<<"$OUT")"
+eq "array order matches input order" "Charles Leclerc" "$(jq -r '.events[0].competitors[0].team' <<<"$OUT")"
+
+echo "== espn_team_schedule: session type is emitted for an FP1 fixture and a Race fixture, and they differ =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Scuderia Ferrari"},
+  events: [
+    {name: "Pirelli Italian Grand Prix", date: "2026-09-05T09:30Z", status: {type: {description: "Final"}},
+     competitions: [{type: {abbreviation: "FP1"}, notes: [], competitors: []}]},
+    {name: "Pirelli Italian Grand Prix", date: "2026-09-06T13:00Z", status: {type: {description: "Final"}},
+     competitions: [{type: {abbreviation: "Race"}, notes: [], competitors: []}]}
+  ]
+}')
+OUT=$(espn_team_schedule "racing/f1" "ferrari" "20260905")
+eq "FP1 session type emitted" "FP1" "$(jq -r '.events[0].session' <<<"$OUT")"
+eq "Race session type emitted" "Race" "$(jq -r '.events[1].session' <<<"$OUT")"
+eq "the two sessions differ" "false" "$(jq -r '.events[0].session == .events[1].session' <<<"$OUT")"
+
+echo "== espn_team_schedule: an event with no competitions[0].type emits a null session rather than erroring =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [{name: "Angels at Athletics", date: "2026-09-14T20:10Z", status: {type: {description: "Final"}},
+            competitions: [{notes: [], competitors: []}]}]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+RC=$?
+eq "rc=0, no error on missing session type" "0" "$RC"
+eq "session is null" "null" "$(jq -r '.events[0].session' <<<"$OUT")"
+
 echo "== espn_team_schedule: the event count is capped =="
 reset_mock
 REQUEST_BODY=$(jq -n '{
@@ -427,6 +510,67 @@ SB=$(jq -n '{events: [{
 }]}')
 OUT=$(espn_slim_league "baseball/mlb" "$SB" '{"articles":[]}')
 eq "record is null" "null" "$(jq -r '.events[0].competitors[0].record' <<<"$OUT")"
+
+echo "== espn_slim_league: a competitor with winner:false emits winner:false, not null (igor#595) =="
+SB=$(jq -n '{events: [{
+  name: "Pirelli Italian Grand Prix",
+  date: "2026-09-05T09:30Z",
+  status: {type: {description: "Final"}},
+  competitions: [{
+    type: {abbreviation: "FP1"},
+    notes: [],
+    competitors: [
+      {order: 1, team: {displayName: "Charles Leclerc"}, winner: false},
+      {order: 2, team: {displayName: "Lewis Hamilton"}, winner: false}
+    ]
+  }]
+}]}')
+OUT=$(espn_slim_league "racing/f1" "$SB" '{"articles":[]}')
+eq "winner:false survives, not collapsed to null" "false" "$(jq -r '.events[0].competitors[0].winner' <<<"$OUT")"
+eq "the second competitor's winner:false also survives" "false" "$(jq -r '.events[0].competitors[1].winner' <<<"$OUT")"
+
+echo "== espn_slim_league: a competitor with no winner key emits null =="
+SB=$(jq -n '{events: [{
+  name: "Pirelli Italian Grand Prix",
+  date: "2026-09-05T09:30Z",
+  status: {type: {description: "Final"}},
+  competitions: [{type: {abbreviation: "FP1"}, notes: [], competitors: [{order: 1, team: {displayName: "Charles Leclerc"}}]}]
+}]}')
+OUT=$(espn_slim_league "racing/f1" "$SB" '{"articles":[]}')
+eq "winner is null when the key is absent" "null" "$(jq -r '.events[0].competitors[0].winner' <<<"$OUT")"
+
+echo "== espn_slim_league: order is carried through and preserved in the emitted competitor order =="
+SB=$(jq -n '{events: [{
+  name: "Pirelli Italian Grand Prix",
+  date: "2026-09-05T09:30Z",
+  status: {type: {description: "Final"}},
+  competitions: [{type: {abbreviation: "FP1"}, notes: [], competitors: [
+    {order: 1, team: {displayName: "Charles Leclerc"}, winner: false},
+    {order: 2, team: {displayName: "Lewis Hamilton"}, winner: false}
+  ]}]
+}]}')
+OUT=$(espn_slim_league "racing/f1" "$SB" '{"articles":[]}')
+eq "first competitor's order carried" "1" "$(jq -r '.events[0].competitors[0].order' <<<"$OUT")"
+eq "second competitor's order carried" "2" "$(jq -r '.events[0].competitors[1].order' <<<"$OUT")"
+eq "array order matches input order" "Charles Leclerc" "$(jq -r '.events[0].competitors[0].team' <<<"$OUT")"
+
+echo "== espn_slim_league: session type is emitted for an FP1 fixture and a Race fixture, and they differ =="
+SB=$(jq -n '{events: [
+  {name: "Pirelli Italian Grand Prix", date: "2026-09-05T09:30Z", status: {type: {description: "Final"}},
+   competitions: [{type: {abbreviation: "FP1"}, notes: [], competitors: []}]},
+  {name: "Pirelli Italian Grand Prix", date: "2026-09-06T13:00Z", status: {type: {description: "Final"}},
+   competitions: [{type: {abbreviation: "Race"}, notes: [], competitors: []}]}
+]}')
+OUT=$(espn_slim_league "racing/f1" "$SB" '{"articles":[]}')
+eq "FP1 session type emitted" "FP1" "$(jq -r '.events[0].session' <<<"$OUT")"
+eq "Race session type emitted" "Race" "$(jq -r '.events[1].session' <<<"$OUT")"
+eq "the two sessions differ" "false" "$(jq -r '.events[0].session == .events[1].session' <<<"$OUT")"
+
+echo "== espn_slim_league: an event with no competitions[0].type emits a null session rather than erroring =="
+SB=$(jq -n '{events: [{name: "Team A at Team B", date: "2026-09-14T20:10Z", status: {type: {description: "Final"}},
+  competitions: [{notes: [], competitors: []}]}]}')
+OUT=$(espn_slim_league "baseball/mlb" "$SB" '{"articles":[]}')
+eq "session is null" "null" "$(jq -r '.events[0].session' <<<"$OUT")"
 
 echo "== espn_parse_follow: parses multiple entries, tolerates whitespace, keeps the rest past a malformed entry =="
 OUT=$(espn_parse_follow " baseball/mlb:laa , basketball/nba:ny,bad-entry-no-colon, basketball/nba:cha , football/college-football: " 2>/dev/null)
