@@ -2095,11 +2095,14 @@ do_sports_tick() {
   fi
   sports_mark_attempt  # start the cooldown clock for this attempt
 
-  # Yesterday, both shapes (dashed for humans/prompt, compact for ESPN).
-  # Portable across GNU (Linux server) and BSD (macOS dev) date.
-  local ydash ycompact
+  # Yesterday, both shapes (dashed for humans/prompt, compact for ESPN), plus
+  # today (the actual send date -- what the story ledger stamps and windows
+  # against, computed once here rather than re-derived near the subject line
+  # below). Portable across GNU (Linux server) and BSD (macOS dev) date.
+  local ydash ycompact today
   ydash=$(date -d "-1 days" +%F 2>/dev/null || date -v-1d +%F 2>/dev/null)
   ycompact=${ydash//-/}
+  today=$(date +%Y-%m-%d)
 
   # Fetch + slim every configured league -- ESPN is free, and the
   # PROMPT curates by significance, so a quiet league rides along at
@@ -2132,6 +2135,19 @@ do_sports_tick() {
       log "sports: team schedule fetch failed for $flg:$ftid"
     fi
   done < <(espn_parse_follow "${SPORTS_FOLLOW:-}")
+
+  # Story ledger (igor#598): drop headlines whose article link already went
+  # out in the last 7 days -- a repeat has no value on day two -- and mark
+  # completed events the reader already saw with reported_on, so the writer
+  # keeps the context (a losing streak) without leading with old news.
+  # Applied before the fetched/quiet-day checks below so a day whose only
+  # "content" is a repeated headline reads as quiet rather than sending an
+  # all-repeat digest.
+  local stories
+  stories=$(sports_stories_load)
+  payload=$(sports_stories_filter_news "$payload" "$stories" "$today")
+  payload=$(sports_stories_mark_events "$payload" "$stories")
+  followed=$(sports_stories_mark_events "$followed" "$stories")
 
   if [ "$fetched_ok" -eq 0 ]; then
     failures=$(sports_failure_inc)
@@ -2201,18 +2217,20 @@ do_sports_tick() {
   # Subject carries TODAY's date: it's today's digest of yesterday's
   # action, and the body already frames the content as yesterday's
   # highlights.
-  local body concepts html subject today formatted
+  local body concepts html subject formatted
   body=$(jq -r '.body' <<<"$parsed")
   concepts=$(jq -c '.concepts' <<<"$parsed")
   html=$(sports_render_html <<<"$body")
-  today=$(date +%Y-%m-%d)
   formatted=$(format_report_date "$today")
   subject="[Sports] ${formatted:-$today}"
   local recipients; recipients=$(recipients_with_primary "${SPORTS_RECIPIENTS:-}")
   if email_send "$subject" "$html" "$body" "$recipients"; then
     sports_mark_sent
-    sports_concepts_append "$concepts" "$(date +%Y-%m-%d)" \
+    sports_concepts_append "$concepts" "$today" \
       || log "warning: sports: curriculum ledger update failed (digest sent fine)"
+    stories=$(sports_stories_record "$payload" "$followed" "$stories" "$today")
+    sports_stories_save "$stories" \
+      || log "warning: sports: story ledger update failed (digest sent fine)"
     log "sports: emailed digest for ${ydash} ($(jq 'length' <<<"$concepts") new concepts) to $recipients"
     return 0
   fi

@@ -61,6 +61,101 @@ sports_concepts_append() {
   mv "$tmp" "$f"
 }
 
+# sports_stories_load
+# Echoes the story ledger as JSON {articles:[{link,date}], events:[{key,
+# reported_on}]} -- what the digest already sent, as opposed to what it
+# already TAUGHT (the concepts ledger above). A missing file, or one written
+# before this key existed (concepts-only, the ledger's original shape), both
+# read as "nothing reported yet" -- that is the real upgrade path here, not
+# an edge case.
+sports_stories_load() {
+  local f; f=$(sports_curriculum_file)
+  [ -f "$f" ] || { printf '{"articles":[],"events":[]}'; return 0; }
+  jq -c '{articles: (.stories.articles // []), events: (.stories.events // [])}' "$f" 2>/dev/null \
+    || printf '{"articles":[],"events":[]}'
+}
+
+# sports_stories_save <stories_json>
+# Persists the story ledger into the SAME file as the concepts curriculum,
+# under its own "stories" key -- one state file, one atomic-write-via-mktemp
+# discipline, reused rather than duplicated.
+sports_stories_save() {
+  local stories="$1" f tmp
+  f=$(sports_curriculum_file)
+  [ -f "$f" ] || printf '{"concepts":[]}' > "$f"
+  tmp=$(mktemp)
+  jq --argjson stories "$stories" '.stories = $stories' "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$f"
+}
+
+# sports_stories_filter_news <league_payload_json> <stories_json> <today>
+# Drops any league headline whose article link was already recorded within
+# the last 7 days (hardcoded -- a repeated article has no value on day two).
+# Completed EVENTS are handled separately by sports_stories_mark_events: a
+# finished game keeps context value (a losing streak needs its prior losses
+# visible) so it is marked, never dropped.
+sports_stories_filter_news() {
+  local payload="$1" stories="$2" today="$3" cutoff
+  cutoff=$(date -d "$today -7 days" +%F 2>/dev/null \
+    || date -j -v-7d -f %F "$today" +%F 2>/dev/null)
+  jq -c --argjson stories "$stories" --arg cutoff "$cutoff" '
+    ($stories.articles // [] | map(select((.date // "") >= $cutoff) | .link)) as $recent
+    | map(.headlines |= map(select((.link // "") as $l | ($l == "") or ($recent | index($l) | not))))
+  ' <<<"$payload"
+}
+
+# sports_stories_mark_events <items_json> <stories_json>
+# Stamps `reported_on: <date>` onto any event -- in a league-payload array OR
+# a followed-team array, both sharing the {league, events:[...]} shape --
+# whose key was already recorded. An event never reported before is left
+# exactly as it arrived, carrying no reported_on key at all. Keyed on
+# league+date+name: neither reduction (espn_slim_league, espn_team_schedule)
+# carries an ESPN event id, and the composite is stable enough -- the same
+# league never plays two games of the same name on the same date.
+sports_stories_mark_events() {
+  local items="$1" stories="$2"
+  jq -c --argjson stories "$stories" '
+    ($stories.events // [] | map({(.key): .reported_on}) | add // {}) as $seen
+    | map(
+        .league as $league
+        | .events |= map(
+            (($league // "") + "|" + (.date // "") + "|" + (.name // "")) as $key
+            | if ($seen | has($key)) then . + {reported_on: $seen[$key]} else . end
+          )
+      )
+  ' <<<"$items"
+}
+
+# sports_stories_record <league_payload_json> <followed_json> <stories_json> <today>
+# Echoes the UPDATED ledger for the caller to sports_stories_save (this
+# function never writes) after a digest actually sent: every article link
+# that made it into the payload -- already filtered by
+# sports_stories_filter_news, so a dropped repeat is never re-stamped with a
+# fresh date -- is recorded once, and every COMPLETED event across both the
+# league and followed payloads is upserted with reported_on = today, whether
+# it is brand new or was already reported (it is back in front of the reader
+# either way). "Completed" is a status starting with "Final"
+# (case-insensitive), ESPN's convention for a finished game/session.
+sports_stories_record() {
+  local payload="$1" followed="$2" stories="$3" today="$4"
+  jq -c --argjson followed "$followed" --argjson stories "$stories" --arg today "$today" '
+    def completed: (.status // "") | test("^final"; "i");
+    ($stories.articles // []) as $had_articles
+    | ($had_articles | map(.link)) as $had_links
+    | ([.[] | .headlines[]? | .link // empty] | unique) as $seen_links
+    | ($had_articles + ([$seen_links[] | select(. as $l | ($had_links | index($l) | not))]
+        | map({link: ., date: $today}))) as $articles
+    | (reduce ($stories.events // [])[] as $e ({}; .[$e.key] = $e)) as $had_event_map
+    | (. + $followed) as $all
+    | (reduce ($all[] | .league as $league | (.events[]? | select(completed) | {league: $league, ev: .})) as $x (
+        $had_event_map;
+        (($x.league // "") + "|" + ($x.ev.date // "") + "|" + ($x.ev.name // "")) as $key
+        | .[$key] = {key: $key, reported_on: $today}
+      )) as $event_map
+    | {articles: $articles, events: ($event_map | to_entries | map(.value))}
+  ' <<<"$payload"
+}
+
 # sports_build_prompt <slim_payload_json> <followed_json_array> <covered_json_array> <date>
 # Assembles the user prompt for the distill call: the digest date, the
 # already-taught concept list, the followed-team payloads (igor#587,
