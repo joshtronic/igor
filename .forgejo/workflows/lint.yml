@@ -16,4 +16,11 @@ jobs:
       - name: Check AGENTS.md <-> tick.sh sync
         env:
           CHECK_SYNC_STRICT: "1"
+          # lib/forgejo.sh fail-fasts on these (igor#391's required-not-optional
+          # rule), and bin/test-checkpoint.sh sources it transitively. The suites
+          # double `curl`, so no request is ever made -- these only satisfy the
+          # guard. `.invalid` is RFC 2606 reserved and can never resolve, so a
+          # test that accidentally reaches the network fails loudly here.
+          FORGEJO_URL: "https://ci.invalid"
+          FORGEJO_TOKEN: "ci-placeholder"
         run: bin/check-sync.sh
