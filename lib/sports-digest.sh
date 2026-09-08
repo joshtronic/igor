@@ -88,16 +88,44 @@ sports_stories_save() {
   mv "$tmp" "$f"
 }
 
+# How long a story stays in the ledger. Hardcoded, not env knobs: igor has one
+# operator, so the right value gets baked in. The news window is what "already
+# sent" means for a headline; events outlive it because their value is context
+# (a losing streak needs its prior losses marked), and both ESPN queries only
+# ever reach a handful of days back, so a month is already generous.
+SPORTS_STORIES_NEWS_DAYS=7
+SPORTS_STORIES_EVENT_DAYS=30
+
+# sports_stories_cutoff <today> <days>
+# Echoes <today> minus <days> as YYYY-MM-DD, or NOTHING if neither date
+# dialect could compute it. Portable across GNU (Linux server) and BSD (macOS
+# dev). Callers must decide what an empty cutoff means for them -- the two
+# call sites want opposite fallbacks, so this one refuses to guess.
+sports_stories_cutoff() {
+  local today="$1" days="$2"
+  date -d "$today -${days} days" +%F 2>/dev/null \
+    || date -j "-v-${days}d" -f %F "$today" +%F 2>/dev/null \
+    || true
+}
+
 # sports_stories_filter_news <league_payload_json> <stories_json> <today>
-# Drops any league headline whose article link was already recorded within
-# the last 7 days (hardcoded -- a repeated article has no value on day two).
-# Completed EVENTS are handled separately by sports_stories_mark_events: a
-# finished game keeps context value (a losing streak needs its prior losses
-# visible) so it is marked, never dropped.
+# Drops any league headline whose article link was already recorded inside the
+# news window -- a repeated article has no value on day two. Completed EVENTS
+# are handled separately by sports_stories_mark_events: a finished game keeps
+# context value (a losing streak needs its prior losses visible) so it is
+# marked, never dropped.
 sports_stories_filter_news() {
   local payload="$1" stories="$2" today="$3" cutoff
-  cutoff=$(date -d "$today -7 days" +%F 2>/dev/null \
-    || date -j -v-7d -f %F "$today" +%F 2>/dev/null)
+  cutoff=$(sports_stories_cutoff "$today" "$SPORTS_STORIES_NEWS_DAYS")
+  # An empty cutoff would make every recorded article compare as "recent"
+  # (`>= ""` is true for any string), suppressing the entire ledger's worth of
+  # headlines with nothing in the log to say why. Send the repeat instead:
+  # a duplicated story is a worse digest, a silent one is no digest.
+  if [ -z "$cutoff" ]; then
+    log "warning: sports: could not compute the news window from '$today' -- not filtering repeats today"
+    printf '%s' "$payload"
+    return 0
+  fi
   jq -c --argjson stories "$stories" --arg cutoff "$cutoff" '
     ($stories.articles // [] | map(select((.date // "") >= $cutoff) | .link)) as $recent
     | map(.headlines |= map(select((.link // "") as $l | ($l == "") or ($recent | index($l) | not))))
@@ -128,23 +156,34 @@ sports_stories_mark_events() {
 
 # sports_stories_record <league_payload_json> <followed_json> <stories_json> <today>
 # Echoes the UPDATED ledger for the caller to sports_stories_save (this
-# function never writes) after a digest actually sent: every article link
-# that made it into the payload -- already filtered by
-# sports_stories_filter_news, so a dropped repeat is never re-stamped with a
-# fresh date -- is recorded once, and every COMPLETED event across both the
-# league and followed payloads is upserted with reported_on = today, whether
-# it is brand new or was already reported (it is back in front of the reader
-# either way). "Completed" is a status starting with "Final"
-# (case-insensitive), ESPN's convention for a finished game/session.
+# function never writes) after a digest actually sent.
+#
+# Articles and events are both UPSERTED to reported_on/date = today, keyed on
+# link and league+date+name respectively. Upserting matters most for the entry
+# that was ALREADY on file: a link that aged out of the news window survives
+# sports_stories_filter_news and goes back out, so re-stamping it is what
+# restarts its window. Carrying the old date through instead leaves it expired
+# tomorrow as well, and every day after -- the same headline forever, which is
+# the exact repeat this ledger exists to stop.
+#
+# Anything older than its retention window is then dropped, so the file does
+# not grow without bound. For articles that is provably behavior-neutral: an
+# entry past the news cutoff no longer suppresses anything, so keeping it and
+# forgetting it are the same digest. An unparseable date leaves both cutoffs
+# empty, which prunes nothing -- stale state beats discarded state.
+#
+# "Completed" is a status starting with "Final" (case-insensitive), ESPN's
+# convention for a finished game/session.
 sports_stories_record() {
-  local payload="$1" followed="$2" stories="$3" today="$4"
-  jq -c --argjson followed "$followed" --argjson stories "$stories" --arg today "$today" '
+  local payload="$1" followed="$2" stories="$3" today="$4" news_cutoff event_cutoff
+  news_cutoff=$(sports_stories_cutoff "$today" "$SPORTS_STORIES_NEWS_DAYS")
+  event_cutoff=$(sports_stories_cutoff "$today" "$SPORTS_STORIES_EVENT_DAYS")
+  jq -c --argjson followed "$followed" --argjson stories "$stories" --arg today "$today" \
+        --arg news_cutoff "$news_cutoff" --arg event_cutoff "$event_cutoff" '
     def completed: (.status // "") | test("^final"; "i");
-    ($stories.articles // []) as $had_articles
-    | ($had_articles | map(.link)) as $had_links
-    | ([.[] | .headlines[]? | .link // empty] | unique) as $seen_links
-    | ($had_articles + ([$seen_links[] | select(. as $l | ($had_links | index($l) | not))]
-        | map({link: ., date: $today}))) as $articles
+    ([.[] | .headlines[]? | .link // empty] | unique) as $seen_links
+    | (reduce ($stories.articles // [])[] as $a ({}; .[$a.link] = $a)) as $had_article_map
+    | (reduce $seen_links[] as $l ($had_article_map; .[$l] = {link: $l, date: $today})) as $article_map
     | (reduce ($stories.events // [])[] as $e ({}; .[$e.key] = $e)) as $had_event_map
     | (. + $followed) as $all
     | (reduce ($all[] | .league as $league | (.events[]? | select(completed) | {league: $league, ev: .})) as $x (
@@ -152,7 +191,12 @@ sports_stories_record() {
         (($x.league // "") + "|" + ($x.ev.date // "") + "|" + ($x.ev.name // "")) as $key
         | .[$key] = {key: $key, reported_on: $today}
       )) as $event_map
-    | {articles: $articles, events: ($event_map | to_entries | map(.value))}
+    | {
+        articles: ($article_map | to_entries | map(.value)
+                   | map(select((.date // "") >= $news_cutoff))),
+        events:   ($event_map   | to_entries | map(.value)
+                   | map(select((.reported_on // "") >= $event_cutoff)))
+      }
   ' <<<"$payload"
 }
 

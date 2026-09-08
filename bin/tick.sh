@@ -2096,9 +2096,11 @@ do_sports_tick() {
   sports_mark_attempt  # start the cooldown clock for this attempt
 
   # Yesterday, both shapes (dashed for humans/prompt, compact for ESPN), plus
-  # today (the actual send date -- what the story ledger stamps and windows
-  # against, computed once here rather than re-derived near the subject line
-  # below). Portable across GNU (Linux server) and BSD (macOS dev) date.
+  # today -- the send date. ONE value for it: the story ledger's stamps and the
+  # subject line must name the same day, and a tick that straddles midnight
+  # would otherwise file the ledger under a date its own subject disagrees
+  # with, aging every story a day early.
+  # Portable across GNU (Linux server) and BSD (macOS dev) date.
   local ydash ycompact today
   ydash=$(date -d "-1 days" +%F 2>/dev/null || date -v-1d +%F 2>/dev/null)
   ycompact=${ydash//-/}

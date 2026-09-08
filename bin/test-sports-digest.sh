@@ -55,6 +55,18 @@ OUT=$(sports_stories_filter_news "$PAYLOAD" "$STORIES" "2026-09-07")
 eq "the stale-recorded headline stays" "1" "$(jq '.[0].headlines | length' <<<"$OUT")"
 eq "it is the same headline" "Star signs deal" "$(jq -r '.[0].headlines[0].headline' <<<"$OUT")"
 
+echo "== sports_stories_filter_news: the window edge is inclusive -- exactly 7 days old is still a repeat =="
+PAYLOAD='[{"league":"basketball/nba","events":[],"headlines":[{"headline":"Star signs deal","link":"http://espn.test/a"}]}]'
+STORIES='{"articles":[{"link":"http://espn.test/a","date":"2026-08-31"}],"events":[]}'
+OUT=$(sports_stories_filter_news "$PAYLOAD" "$STORIES" "2026-09-07")
+eq "the exactly-7-day-old link is still dropped" "0" "$(jq '.[0].headlines | length' <<<"$OUT")"
+
+echo "== sports_stories_filter_news: an uncomputable cutoff sends the repeat rather than everything going silent =="
+PAYLOAD='[{"league":"basketball/nba","events":[],"headlines":[{"headline":"Star signs deal","link":"http://espn.test/a"}]}]'
+STORIES='{"articles":[{"link":"http://espn.test/a","date":"2026-09-06"}],"events":[]}'
+OUT=$(sports_stories_filter_news "$PAYLOAD" "$STORIES" "not-a-date")
+eq "nothing is suppressed when the window cannot be computed" "1" "$(jq '.[0].headlines | length' <<<"$OUT")"
+
 echo "== sports_stories_filter_news: an unrecorded link is untouched =="
 PAYLOAD='[{"league":"basketball/nba","events":[],"headlines":[{"headline":"Fresh news","link":"http://espn.test/z"}]}]'
 STORIES='{"articles":[],"events":[]}'
@@ -99,6 +111,40 @@ FOLLOWED='[{"league":"baseball/mlb","team_id":"laa","events":[{"name":"Angels at
 OUT=$(sports_stories_record '[]' "$FOLLOWED" '{"articles":[],"events":[]}' "2026-09-07")
 eq "one followed event recorded" "1" "$(jq '.events | length' <<<"$OUT")"
 eq "keyed on its own league" "baseball/mlb|2026-09-06|Angels at Athletics" "$(jq -r '.events[0].key' <<<"$OUT")"
+
+echo "== sports_stories_record: a resurfaced article's date is refreshed, not left stale =="
+# The repeat engine this ledger exists to kill: a link recorded outside the
+# window survives the filter and goes out again. If record carries its old
+# date through untouched it is outside the window tomorrow too, and every day
+# after -- the same headline forever.
+PAYLOAD='[{"league":"basketball/nba","events":[],"headlines":[{"headline":"H1","link":"http://espn.test/a"}]}]'
+STORIES='{"articles":[{"link":"http://espn.test/a","date":"2026-08-30"}],"events":[]}'
+OUT=$(sports_stories_record "$PAYLOAD" '[]' "$STORIES" "2026-09-07")
+eq "still a single entry for the link" "1" "$(jq '.articles | length' <<<"$OUT")"
+eq "its date is refreshed to today" "2026-09-07" "$(jq -r '.articles[0].date' <<<"$OUT")"
+# ...and the refresh must actually close the loop: re-filtering tomorrow drops it.
+OUT2=$(sports_stories_filter_news "$PAYLOAD" "$OUT" "2026-09-08")
+eq "so tomorrow the same headline is suppressed" "0" "$(jq '.[0].headlines | length' <<<"$OUT2")"
+
+echo "== sports_stories_record: an article that fell out of the window and did NOT resurface is pruned =="
+PAYLOAD='[{"league":"basketball/nba","events":[],"headlines":[{"headline":"H1","link":"http://espn.test/a"}]}]'
+STORIES='{"articles":[{"link":"http://espn.test/a","date":"2026-09-06"},{"link":"http://espn.test/gone","date":"2026-07-01"}],"events":[]}'
+OUT=$(sports_stories_record "$PAYLOAD" '[]' "$STORIES" "2026-09-07")
+eq "the long-dead link is dropped" "1" "$(jq '.articles | length' <<<"$OUT")"
+eq "the surviving entry is the one still in play" "http://espn.test/a" "$(jq -r '.articles[0].link' <<<"$OUT")"
+
+echo "== sports_stories_record: events far outside any payload window are pruned =="
+PAYLOAD='[{"league":"basketball/nba","events":[{"name":"Lakers at Warriors","date":"2026-09-06","status":"Final"}],"headlines":[]}]'
+STORIES='{"articles":[],"events":[{"key":"basketball/nba|2025-01-02|Ancient Game","reported_on":"2025-01-03"}]}'
+OUT=$(sports_stories_record "$PAYLOAD" '[]' "$STORIES" "2026-09-07")
+eq "only the still-relevant event remains" "1" "$(jq '.events | length' <<<"$OUT")"
+eq "and it is today's" "basketball/nba|2026-09-06|Lakers at Warriors" "$(jq -r '.events[0].key' <<<"$OUT")"
+
+echo "== sports_stories_record: a recently-reported event is retained so streak context survives =="
+PAYLOAD='[]'
+STORIES='{"articles":[],"events":[{"key":"basketball/nba|2026-09-05|Lakers at Suns","reported_on":"2026-09-06"}]}'
+OUT=$(sports_stories_record "$PAYLOAD" '[]' "$STORIES" "2026-09-07")
+eq "yesterday's reported event is kept" "1" "$(jq '.events | length' <<<"$OUT")"
 
 echo "== sports_stories_record + sports_stories_save: sending twice in one day does not duplicate entries =="
 reset_state
