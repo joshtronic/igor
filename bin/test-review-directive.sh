@@ -33,6 +33,71 @@ eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]";
 # fail-closed behaviour is covered in CI, where no directive text is reachable.
 ACCEPTED=(APPROVE REQUEST_CHANGES COMMENT)
 
+# A verdict "has a rubric entry" means a line bolds the token AND carries more
+# than the token itself -- MEANING, not layout. Deliberately blind to bullet
+# vs numbered vs any other list style, and to whether the verdict sits at the
+# front or the end of the line (distillery#31 moved it to the end). A line
+# that is only the bolded token, with no explanation attached, still fails --
+# that is a verdict left undocumented in every layout, not a documented one.
+rubric_has_entry() {
+  local rubric="$1" verdict="$2" line rest found=1
+  while IFS= read -r line; do
+    case "$line" in *"**${verdict}**"*) ;; *) continue ;; esac
+    rest="${line//\*\*${verdict}\*\*/}"
+    # Strip a leading list marker (bullet or number) so its digit/dash isn't
+    # mistaken for explanatory content -- "1. **COMMENT**" must still fail.
+    rest="$(printf '%s' "$rest" | sed -E 's/^[[:space:]]*([-*]|[0-9]+\.)?[[:space:]]*//')"
+    if printf '%s' "$rest" | grep -qE '[A-Za-z0-9]'; then
+      found=0
+      break
+    fi
+  done <<<"$rubric"
+  return "$found"
+}
+
+echo "== the rubric-entry check is meaning-based, not layout-based (fixtures) =="
+# Regression coverage for the check ITSELF, independent of context_seeded --
+# these run everywhere, CI included, so the check's own logic is proven
+# without needing a live directive.
+
+FIXTURE_NUMBERED='The verdict follows mechanically from the findings above:
+
+1. Any `blocking` finding -> **REQUEST_CHANGES**.
+2. Otherwise, if you could not actually evaluate the change (CI
+   pending, ...) -> **COMMENT** (see routing below).
+3. Otherwise -> **APPROVE**, with every note carried into the body.'
+for v in "${ACCEPTED[@]}"; do
+  if rubric_has_entry "$FIXTURE_NUMBERED" "$v"; then ok "  numbered fixture: $v has a rubric entry"
+  else bad "  numbered fixture: $v has no rubric entry (distillery#31's format must pass)"; fi
+done
+
+FIXTURE_BULLETED='- **APPROVE**: no blocking findings, everything looks fine.
+- **REQUEST_CHANGES**: at least one blocking finding.
+- **COMMENT**: could not evaluate the change, or non-blocking notes only.'
+for v in "${ACCEPTED[@]}"; do
+  if rubric_has_entry "$FIXTURE_BULLETED" "$v"; then ok "  bulleted fixture: $v has a rubric entry"
+  else bad "  bulleted fixture: $v has no rubric entry (the old format must not newly break)"; fi
+done
+
+FIXTURE_MISSING_COMMENT='1. Any blocking finding -> **REQUEST_CHANGES**.
+2. Otherwise -> **APPROVE**.'
+if rubric_has_entry "$FIXTURE_MISSING_COMMENT" "COMMENT"; then
+  bad "  fixture omitting COMMENT was wrongly accepted"
+else
+  ok "  fixture omitting COMMENT is correctly rejected"
+fi
+
+FIXTURE_BARE_TOKENS='1. **APPROVE**
+2. **REQUEST_CHANGES**
+3. **COMMENT**'
+for v in "${ACCEPTED[@]}"; do
+  if rubric_has_entry "$FIXTURE_BARE_TOKENS" "$v"; then
+    bad "  bare-token fixture: $v was wrongly accepted with no explanation attached"
+  else
+    ok "  bare-token fixture: $v is correctly rejected"
+  fi
+done
+
 # Lift the real parser rather than reimplementing it -- a hand-rolled copy would
 # happily agree with a directive that the shipping parser rejects.
 PARSER_SRC=$(sed -n '/^review_parse_response() {$/,/^}$/p' "$TICK")
@@ -150,11 +215,12 @@ RUBRIC=$(awk '/^## Verdict rubric$/{f=1;next} /^## /{f=0} f' "$DIRECTIVE")
 if [ -z "$RUBRIC" ]; then
   bad "could not locate the '## Verdict rubric' section"
 else
-  # Bullet char and whatever follows the bolded token are left loose on purpose:
-  # this asserts the entry EXISTS, and a cosmetic reformat of the rubric (a
-  # different dash, a `*` bullet) shouldn't fail as "verdict never explained".
+  # rubric_has_entry (defined above, fixture-tested) asserts MEANING -- a
+  # bolded token with an explanation attached -- not list layout. Bullets,
+  # numbers, verdict-first or verdict-last all pass; a bare bolded token
+  # with nothing else on its line does not.
   for v in "${ACCEPTED[@]}"; do
-    if printf '%s' "$RUBRIC" | grep -qE "^[[:space:]]*[-*][[:space:]]+\*\*${v}\*\*"; then ok "  $v has a rubric entry"
+    if rubric_has_entry "$RUBRIC" "$v"; then ok "  $v has a rubric entry"
     else bad "  $v has no rubric entry -- parser accepts a verdict the directive never explains"; fi
   done
 fi
