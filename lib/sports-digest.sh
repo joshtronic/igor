@@ -158,19 +158,18 @@ sports_stories_mark_events() {
 # Echoes the UPDATED ledger for the caller to sports_stories_save (this
 # function never writes) after a digest actually sent.
 #
-# Articles and events are both UPSERTED to reported_on/date = today, keyed on
-# link and league+date+name respectively. Upserting matters most for the entry
-# that was ALREADY on file: a link that aged out of the news window survives
-# sports_stories_filter_news and goes back out, so re-stamping it is what
-# restarts its window. Carrying the old date through instead leaves it expired
-# tomorrow as well, and every day after -- the same headline forever, which is
-# the exact repeat this ledger exists to stop.
+# The two stamps move in opposite directions, deliberately. An article's date
+# is RE-stamped on every send: a link that aged out of the news window survives
+# sports_stories_filter_news and goes back out, and re-stamping is what restarts
+# its window -- carrying the old date through leaves it expired tomorrow too,
+# and every day after, the same headline forever. An event's reported_on is the
+# day it was FIRST reported and never moves: a final lingers in ESPN's window
+# for days, and the stamp is what tells the writer how stale the result already
+# is to the reader.
 #
-# Anything older than its retention window is then dropped, so the file does
-# not grow without bound. For articles that is provably behavior-neutral: an
-# entry past the news cutoff no longer suppresses anything, so keeping it and
-# forgetting it are the same digest. An unparseable date leaves both cutoffs
-# empty, which prunes nothing -- stale state beats discarded state.
+# Anything past its retention window is then dropped so the file stays bounded.
+# An unparseable date leaves both cutoffs empty, which prunes nothing -- stale
+# state beats discarded state.
 #
 # "Completed" is a status starting with "Final" (case-insensitive), ESPN's
 # convention for a finished game/session.
@@ -189,7 +188,7 @@ sports_stories_record() {
     | (reduce ($all[] | .league as $league | (.events[]? | select(completed) | {league: $league, ev: .})) as $x (
         $had_event_map;
         (($x.league // "") + "|" + ($x.ev.date // "") + "|" + ($x.ev.name // "")) as $key
-        | .[$key] = {key: $key, reported_on: $today}
+        | .[$key] = {key: $key, reported_on: (.[$key].reported_on // $today)}
       )) as $event_map
     | {
         articles: ($article_map | to_entries | map(.value)

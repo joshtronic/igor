@@ -146,6 +146,18 @@ STORIES='{"articles":[],"events":[{"key":"basketball/nba|2026-09-05|Lakers at Su
 OUT=$(sports_stories_record "$PAYLOAD" '[]' "$STORIES" "2026-09-07")
 eq "yesterday's reported event is kept" "1" "$(jq '.events | length' <<<"$OUT")"
 
+echo "== sports_stories_record: an event keeps the day it was FIRST reported =="
+# reported_on is what the writer reads as "how stale is this to the reader".
+# A final lingers in ESPN's window for days, so re-stamping it every send
+# would make a week-old result read as reported yesterday, forever.
+PAYLOAD='[{"league":"basketball/nba","events":[{"name":"Lakers at Warriors","date":"2026-09-06","status":"Final"}],"headlines":[]}]'
+STORIES='{"articles":[],"events":[{"key":"basketball/nba|2026-09-06|Lakers at Warriors","reported_on":"2026-09-06"}]}'
+OUT=$(sports_stories_record "$PAYLOAD" '[]' "$STORIES" "2026-09-09")
+eq "still a single entry for the event" "1" "$(jq '.events | length' <<<"$OUT")"
+eq "reported_on is the first date, not today" "2026-09-06" "$(jq -r '.events[0].reported_on' <<<"$OUT")"
+eq "and that is what the writer is shown" "2026-09-06" \
+  "$(jq -r '.[0].events[0].reported_on' <<<"$(sports_stories_mark_events "$PAYLOAD" "$OUT")")"
+
 echo "== sports_stories_record + sports_stories_save: sending twice in one day does not duplicate entries =="
 reset_state
 PAYLOAD='[{"league":"basketball/nba","events":[{"name":"Lakers at Warriors","date":"2026-09-06","status":"Final"}],"headlines":[{"headline":"H1","link":"http://espn.test/a"}]}]'
