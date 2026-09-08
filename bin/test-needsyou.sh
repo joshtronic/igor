@@ -169,6 +169,21 @@ eq "and the item is still well formed" "acme/site" \
 eq "an array where a set belongs announces nothing" "" "$(needsyou_added '{}' '[1,2,3]')"
 eq "and does not read array indices as keys" "" "$(needsyou_added '[1,2,3]' '[1,2,3]')"
 
+echo "== _needsyou_listed: 'the call answered' must not depend on the jq minor =="
+# The three incomplete-scan assertions below all route through this predicate,
+# and it used to hand an EMPTY payload straight to `jq -ce`. jq 1.7 exits 4
+# there, Debian's 1.6 exits 0 -- so in CI a scan that reached nothing reported
+# itself complete, which is the exact failure the function exists to prevent
+# (igor#600). Assert the verdicts directly, so the intent is pinned on any jq.
+if _needsyou_listed ""; then bad "no payload read as an answered call"
+else ok "no payload is not an answer"; fi
+if _needsyou_listed "[]"; then ok "an empty ARRAY is still an answer"
+else bad "an empty array must count as answered"; fi
+if _needsyou_listed '{"a":1}'; then bad "a non-array payload read as an answer"
+else ok "a non-array payload is not an answer"; fi
+if _needsyou_listed 'not json'; then bad "unparseable payload read as an answer"
+else ok "an unparseable payload is not an answer"; fi
+
 # -- the glue ------------------------------------------------------------
 # Everything above tests pure functions. What shipped broken last round was the
 # layer BELOW them -- the scan that turns fleet API payloads into a set -- so it

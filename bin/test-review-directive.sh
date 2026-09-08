@@ -40,10 +40,14 @@ ACCEPTED=(APPROVE REQUEST_CHANGES COMMENT)
 # that is only the bolded token, with no explanation attached, still fails --
 # that is a verdict left undocumented in every layout, not a documented one.
 rubric_has_entry() {
-  local rubric="$1" verdict="$2" line rest found=1
+  local rubric="$1" verdict="$2" line rest tok found=1
   while IFS= read -r line; do
     case "$line" in *"**${verdict}**"*) ;; *) continue ;; esac
-    rest="${line//\*\*${verdict}\*\*/}"
+    # Strip EVERY bolded verdict token, not just the one under test: on a line
+    # that collapses two of them, each would otherwise read as the other's
+    # explanation and both would pass unexplained.
+    rest="$line"
+    for tok in "${ACCEPTED[@]}"; do rest="${rest//\*\*${tok}\*\*/}"; done
     # Strip a leading list marker (bullet or number) so its digit/dash isn't
     # mistaken for explanatory content -- "1. **COMMENT**" must still fail.
     rest="$(printf '%s' "$rest" | sed -E 's/^[[:space:]]*([-*]|[0-9]+\.)?[[:space:]]*//')"
@@ -97,6 +101,22 @@ for v in "${ACCEPTED[@]}"; do
     ok "  bare-token fixture: $v is correctly rejected"
   fi
 done
+
+# Two bare tokens sharing a line must not count as each other's explanation.
+FIXTURE_COLLAPSED='1. **APPROVE** **COMMENT**
+2. **REQUEST_CHANGES**: at least one blocking finding.'
+for v in APPROVE COMMENT; do
+  if rubric_has_entry "$FIXTURE_COLLAPSED" "$v"; then
+    bad "  collapsed fixture: $v was wrongly accepted -- the other verdict is not an explanation"
+  else
+    ok "  collapsed fixture: $v is correctly rejected"
+  fi
+done
+if rubric_has_entry "$FIXTURE_COLLAPSED" "REQUEST_CHANGES"; then
+  ok "  collapsed fixture: REQUEST_CHANGES still passes on its own explained line"
+else
+  bad "  collapsed fixture: REQUEST_CHANGES has no rubric entry"
+fi
 
 # Lift the real parser rather than reimplementing it -- a hand-rolled copy would
 # happily agree with a directive that the shipping parser rejects.

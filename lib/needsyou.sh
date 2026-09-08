@@ -254,7 +254,11 @@ _needsyou_repo_lines() {
 # from "this repo has no open bot PRs". A payload that parses as an array is
 # the only evidence the call landed.
 _needsyou_listed() {
-  jq -ce 'type == "array"' >/dev/null 2>&1 <<<"${1:-}"
+  # No payload is answered here, not by jq: `jq -ce` on EMPTY input exits 4 on
+  # jq 1.7 and 0 on Debian's 1.6, so asking jq about nothing made the verdict a
+  # function of the jq minor (igor#600).
+  [ -n "${1:-}" ] || return 1
+  jq -ce 'type == "array"' >/dev/null 2>&1 <<<"$1"
 }
 
 # needsyou_scan_set
