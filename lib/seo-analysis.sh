@@ -250,9 +250,13 @@ seo_build_report() {
   ca=$(seo_cannibalization "$cur_qp" "$floor" "$sk")
   zc=$(seo_zero_click "$cur_qp" "$floor" "$sk")
 
+  # The window end binds as wend, not end: `end` is a jq KEYWORD, so a variable
+  # by that name is a parse error on jq 1.6 (Debian's, and CI's) and legal only
+  # on 1.7 -- which silently dropped the whole report there (igor#600). The
+  # object key of the same name below is unaffected.
   jq -n \
     --arg domain "$domain" \
-    --arg start "$start" --arg end "$end" --arg pstart "$pstart" --arg pend "$pend" \
+    --arg start "$start" --arg wend "$end" --arg pstart "$pstart" --arg pend "$pend" \
     --argjson good "$good_upside" \
     --argjson sd "$sd" --argjson lc "$lc" --argjson dc "$dc" \
     --argjson ri "$ri" --argjson ca "$ca" --argjson zc "$zc" --argjson ga "$ga" '
@@ -269,7 +273,7 @@ seo_build_report() {
     | ($sd2 + $lc2 + $dc + $ri + $ca + $zc) as $all
     | {
         domain: $domain,
-        window: {start:$start, end:$end, prev_start:$pstart, prev_end:$pend},
+        window: {start:$start, end:$wend, prev_start:$pstart, prev_end:$pend},
         count: ($all | length),
         total_upside: ($upside | round),
         grade: (if $top >= $good then "GOOD" else "INDIFFERENT" end),

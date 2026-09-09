@@ -211,6 +211,13 @@ fi
 # The discovery gate + resume detector key off forgejo_bot_prs_for_issue's title
 # field; the counter-bump + WIP-drop go through forgejo_edit_pr. Stub _fj -- no
 # network. (forgejo.sh is just function defs; safe to source.)
+#
+# It does fail-fast on FORGEJO_URL/FORGEJO_TOKEN at source time though, so a
+# bare container aborts the suite mid-run where a configured host sails through
+# (igor#600). Same two-var export bin/test-needsyou.sh already carries; the
+# reserved `.invalid` TLD can never resolve, so a stub that leaks a real request
+# fails loudly rather than reaching something.
+export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
 # shellcheck source=../lib/forgejo.sh
 . "$HERE/../lib/forgejo.sh"
 
