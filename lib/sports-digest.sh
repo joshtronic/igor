@@ -61,6 +61,144 @@ sports_concepts_append() {
   mv "$tmp" "$f"
 }
 
+# sports_stories_load
+# Echoes the story ledger as JSON {articles:[{link,date}], events:[{key,
+# reported_on}]} -- what the digest already sent, as opposed to what it
+# already TAUGHT (the concepts ledger above). A missing file, or one written
+# before this key existed (concepts-only, the ledger's original shape), both
+# read as "nothing reported yet" -- that is the real upgrade path here, not
+# an edge case.
+sports_stories_load() {
+  local f; f=$(sports_curriculum_file)
+  [ -f "$f" ] || { printf '{"articles":[],"events":[]}'; return 0; }
+  jq -c '{articles: (.stories.articles // []), events: (.stories.events // [])}' "$f" 2>/dev/null \
+    || printf '{"articles":[],"events":[]}'
+}
+
+# sports_stories_save <stories_json>
+# Persists the story ledger into the SAME file as the concepts curriculum,
+# under its own "stories" key -- one state file, one atomic-write-via-mktemp
+# discipline, reused rather than duplicated.
+sports_stories_save() {
+  local stories="$1" f tmp
+  f=$(sports_curriculum_file)
+  [ -f "$f" ] || printf '{"concepts":[]}' > "$f"
+  tmp=$(mktemp)
+  jq --argjson stories "$stories" '.stories = $stories' "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$f"
+}
+
+# How long a story stays in the ledger. Hardcoded, not env knobs: igor has one
+# operator, so the right value gets baked in. The news window is what "already
+# sent" means for a headline; events outlive it because their value is context
+# (a losing streak needs its prior losses marked), and both ESPN queries only
+# ever reach a handful of days back, so a month is already generous.
+SPORTS_STORIES_NEWS_DAYS=7
+SPORTS_STORIES_EVENT_DAYS=30
+
+# sports_stories_cutoff <today> <days>
+# Echoes <today> minus <days> as YYYY-MM-DD, or NOTHING if neither date
+# dialect could compute it. Portable across GNU (Linux server) and BSD (macOS
+# dev). Callers must decide what an empty cutoff means for them -- the two
+# call sites want opposite fallbacks, so this one refuses to guess.
+sports_stories_cutoff() {
+  local today="$1" days="$2"
+  date -d "$today -${days} days" +%F 2>/dev/null \
+    || date -j "-v-${days}d" -f %F "$today" +%F 2>/dev/null \
+    || true
+}
+
+# sports_stories_filter_news <league_payload_json> <stories_json> <today>
+# Drops any league headline whose article link was already recorded inside the
+# news window -- a repeated article has no value on day two. Completed EVENTS
+# are handled separately by sports_stories_mark_events: a finished game keeps
+# context value (a losing streak needs its prior losses visible) so it is
+# marked, never dropped.
+sports_stories_filter_news() {
+  local payload="$1" stories="$2" today="$3" cutoff
+  cutoff=$(sports_stories_cutoff "$today" "$SPORTS_STORIES_NEWS_DAYS")
+  # An empty cutoff would make every recorded article compare as "recent"
+  # (`>= ""` is true for any string), suppressing the entire ledger's worth of
+  # headlines with nothing in the log to say why. Send the repeat instead:
+  # a duplicated story is a worse digest, a silent one is no digest.
+  if [ -z "$cutoff" ]; then
+    log "warning: sports: could not compute the news window from '$today' -- not filtering repeats today"
+    printf '%s' "$payload"
+    return 0
+  fi
+  jq -c --argjson stories "$stories" --arg cutoff "$cutoff" '
+    ($stories.articles // [] | map(select((.date // "") >= $cutoff) | .link)) as $recent
+    | map(.headlines |= map(select((.link // "") as $l | ($l == "") or ($recent | index($l) | not))))
+  ' <<<"$payload"
+}
+
+# sports_stories_mark_events <items_json> <stories_json>
+# Stamps `reported_on: <date>` onto any event -- in a league-payload array OR
+# a followed-team array, both sharing the {league, events:[...]} shape --
+# whose key was already recorded. An event never reported before is left
+# exactly as it arrived, carrying no reported_on key at all. Keyed on
+# league+date+name: neither reduction (espn_slim_league, espn_team_schedule)
+# carries an ESPN event id, and the composite is stable enough -- the same
+# league never plays two games of the same name on the same date.
+sports_stories_mark_events() {
+  local items="$1" stories="$2"
+  jq -c --argjson stories "$stories" '
+    ($stories.events // [] | map({(.key): .reported_on}) | add // {}) as $seen
+    | map(
+        .league as $league
+        | .events |= map(
+            (($league // "") + "|" + (.date // "") + "|" + (.name // "")) as $key
+            | if ($seen | has($key)) then . + {reported_on: $seen[$key]} else . end
+          )
+      )
+  ' <<<"$items"
+}
+
+# sports_stories_record <league_payload_json> <followed_json> <stories_json> <today>
+# Echoes the UPDATED ledger for the caller to sports_stories_save (this
+# function never writes) after a digest actually sent.
+#
+# The two stamps move in opposite directions, deliberately. An article's date
+# is RE-stamped on every send: a link that aged out of the news window survives
+# sports_stories_filter_news and goes back out, and re-stamping is what restarts
+# its window -- carrying the old date through leaves it expired tomorrow too,
+# and every day after, the same headline forever. An event's reported_on is the
+# day it was FIRST reported and never moves: a final lingers in ESPN's window
+# for days, and the stamp is what tells the writer how stale the result already
+# is to the reader.
+#
+# Anything past its retention window is then dropped so the file stays bounded.
+# An unparseable date leaves both cutoffs empty, which prunes nothing -- stale
+# state beats discarded state.
+#
+# "Completed" is a status starting with "Final" (case-insensitive), ESPN's
+# convention for a finished game/session.
+sports_stories_record() {
+  local payload="$1" followed="$2" stories="$3" today="$4" news_cutoff event_cutoff
+  news_cutoff=$(sports_stories_cutoff "$today" "$SPORTS_STORIES_NEWS_DAYS")
+  event_cutoff=$(sports_stories_cutoff "$today" "$SPORTS_STORIES_EVENT_DAYS")
+  jq -c --argjson followed "$followed" --argjson stories "$stories" --arg today "$today" \
+        --arg news_cutoff "$news_cutoff" --arg event_cutoff "$event_cutoff" '
+    def completed: (.status // "") | test("^final"; "i");
+    ([.[] | .headlines[]? | .link // empty] | unique) as $seen_links
+    | (reduce ($stories.articles // [])[] as $a ({}; .[$a.link] = $a)) as $had_article_map
+    | (reduce $seen_links[] as $l ($had_article_map; .[$l] = {link: $l, date: $today})) as $article_map
+    | (reduce ($stories.events // [])[] as $e ({}; .[$e.key] = $e)) as $had_event_map
+    | (. + $followed) as $all
+    | (reduce ($all[] | .league as $league | (.events[]? | select(completed) | {league: $league, ev: .})) as $x (
+        $had_event_map;
+        (($x.league // "") + "|" + ($x.ev.date // "") + "|" + ($x.ev.name // "")) as $key
+        | .[$key] = {key: $key, reported_on: (.[$key].reported_on // $today)}
+      )) as $event_map
+    | {
+        articles: ($article_map | to_entries | map(.value)
+                   | map(select((.date // "") >= $news_cutoff))),
+        events:   ($event_map   | to_entries | map(.value)
+                   | map(select((.reported_on // "") >= $event_cutoff)))
+      }
+  ' <<<"$payload"
+}
+
 # sports_build_prompt <slim_payload_json> <followed_json_array> <covered_json_array> <date>
 # Assembles the user prompt for the distill call: the digest date, the
 # already-taught concept list, the followed-team payloads (igor#587,
