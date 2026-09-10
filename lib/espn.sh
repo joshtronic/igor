@@ -128,9 +128,15 @@ espn_news() {
 # set" a value instead of something the writer has to count (igor#605): it
 # groups events that are adjacent in the emitted list (ESPN's own order)
 # and share the same opponent -- `key` is a stable opponent+start-date
-# string (null when the opponent can't be resolved from the competitors),
-# `game` is this event's 1-based position in that run, `of` is the run's
-# total length. A lone game is its own series of one; the same opponent
+# string, `game` is this event's 1-based position in that run, and `of` is
+# the run's length WITHIN THE EMITTED LIST: a set that began before `lo`
+# is counted from its first emitted game, so a four-game set whose opener
+# fell outside the window reads as `of: 3`. An opponent resolves only on a
+# head-to-head event -- exactly two competitors, exactly one of them not
+# the followed team -- so a motorsport session's field, or an event this
+# team can't be matched against at all, yields `key: null` and a series of
+# one rather than a run built on whoever happened to be listed first. A
+# lone game is its own series of one; the same opponent
 # reappearing after a different game starts a new series rather than
 # merging with the earlier one. The flat `events` list's order and meaning
 # are unchanged -- `series` is additive. On
@@ -232,15 +238,23 @@ espn_team_schedule() {
         (.score as $s | if ($s | type) == "object" then ($s.displayValue // null) else $s end)
       else null end;
     # Groups events that are ADJACENT in the emitted list and share the same
-    # opponent (resolved as the reduced competitor whose team differs from
-    # $self) into a run -- a different opponent, or an unresolvable one,
+    # opponent into a run -- a different opponent, or an unresolvable one,
     # always starts a new run, so the same opponent reappearing later never
-    # merges back into an earlier series.
+    # merges back into an earlier series. An opponent resolves ONLY on a
+    # head-to-head event: exactly two competitors, exactly one of them not
+    # $self. A multi-competitor field (a motorsport session) and an event
+    # where $self matches nothing (a constructor-level follow, or a payload
+    # with no .team.displayName) both leave $opp null, so adjacent sessions
+    # sharing a leader are never published as a two-game series.
     def series_tag($self):
       . as $evts
       | (reduce range(0; ($evts | length)) as $i (
           {out: [], prev_opp: null, cur_id: -1, start_date: null};
-          (($evts[$i].competitors // []) | map(select(.team != null and .team != $self)) | (.[0].team // null)) as $opp
+          (($evts[$i].competitors // []) as $c
+           | if ($c | length) == 2
+             then ($c | map(select(.team != null and .team != $self))
+                      | if length == 1 then .[0].team else null end)
+             else null end) as $opp
           | ($evts[$i].date // "") as $d
           | (if $i == 0 then {gid: 0, start: $d}
              elif ($opp != null and $opp == .prev_opp) then {gid: .cur_id, start: .start_date}
@@ -289,7 +303,7 @@ espn_team_schedule() {
             winner: (if has("winner") then .winner else null end),
             record: ((.records | if type == "array" then . else [] end) | map(select(type == "object" and .name == "overall")) | (.[0].summary // null))
           }]
-        }] | series_tag($team)) | .[0:20])
+        }] | .[0:20] | series_tag($team)))
     }' <<<"$raw_events" 2>/dev/null) || return 1
   [ -z "$out" ] && return 1
   printf '%s' "$out"

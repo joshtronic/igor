@@ -616,6 +616,7 @@ REQUEST_BODY=$(jq -n '{team: {displayName: "Los Angeles Angels"}, events: []}')
 OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
 RC=$?
 eq "rc=0" "0" "$RC"
+eq "record key is emitted" "true" "$(jq -r 'has("record")' <<<"$OUT")"
 eq "record is null" "null" "$(jq -r '.record' <<<"$OUT")"
 
 echo "== espn_team_schedule: an object-shaped score normalizes to its displayValue (igor#605) =="
@@ -718,6 +719,48 @@ eq "second Red Sox pair member: series of 2" "2" "$(jq -r '.events[1].series.of'
 eq "lone later Red Sox game: series of 1" "1" "$(jq -r '.events[3].series.of' <<<"$OUT")"
 eq "the split-by-Athletics Red Sox games use different series keys" "false" \
   "$(jq -r '.events[0].series.key == .events[3].series.key' <<<"$OUT")"
+
+echo "== espn_team_schedule: adjacent multi-competitor sessions never group into a series (igor#605) =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Red Bull"},
+  events: [
+    {name: "Italian Grand Prix (FP1)", date: "2026-09-07T13:30Z", status: {type: {description: "Final"}},
+     competitions: [{type: {abbreviation: "FP1"}, notes: [], competitors: [
+       {athlete: {displayName: "Max Verstappen"}, order: 1},
+       {athlete: {displayName: "Lando Norris"}, order: 2},
+       {athlete: {displayName: "Charles Leclerc"}, order: 3}]}]},
+    {name: "Italian Grand Prix (FP2)", date: "2026-09-07T17:00Z", status: {type: {description: "Final"}},
+     competitions: [{type: {abbreviation: "FP2"}, notes: [], competitors: [
+       {athlete: {displayName: "Max Verstappen"}, order: 1},
+       {athlete: {displayName: "Lando Norris"}, order: 2},
+       {athlete: {displayName: "Charles Leclerc"}, order: 3}]}]}
+  ]
+}')
+OUT=$(espn_team_schedule "racing/f1" "rbr" "20260907")
+eq "2 sessions survive the window" "2" "$(jq '.events | length' <<<"$OUT")"
+eq "FP1 is its own series of one" "1" "$(jq -r '.events[0].series.of' <<<"$OUT")"
+eq "FP2 is its own series of one" "1" "$(jq -r '.events[1].series.of' <<<"$OUT")"
+eq "FP1 has no series key" "null" "$(jq -r '.events[0].series.key' <<<"$OUT")"
+eq "FP2 has no series key" "null" "$(jq -r '.events[1].series.key' <<<"$OUT")"
+
+echo "== espn_team_schedule: an unnamed team never groups adjacent games by opponent (igor#605) =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {},
+  events: [
+    {name: "Angels at Red Sox (1)", date: "2026-09-07T23:05Z", status: {type: {description: "Final"}},
+     competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}}, {team: {displayName: "Boston Red Sox"}}]}]},
+    {name: "Angels at Red Sox (2)", date: "2026-09-08T23:05Z", status: {type: {description: "Final"}},
+     competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}}, {team: {displayName: "Boston Red Sox"}}]}]}
+  ]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260908")
+eq "2 events survive the window" "2" "$(jq '.events | length' <<<"$OUT")"
+eq "first game is its own series of one" "1" "$(jq -r '.events[0].series.of' <<<"$OUT")"
+eq "second game is its own series of one" "1" "$(jq -r '.events[1].series.of' <<<"$OUT")"
+eq "neither game carries a series key" "null" \
+  "$(jq -r '[.events[].series.key] | unique | .[0]' <<<"$OUT")"
 
 echo "=========================================="
 if [ "$FAIL" -eq 0 ]; then
