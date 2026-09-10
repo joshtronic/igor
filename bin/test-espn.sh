@@ -604,6 +604,121 @@ eq "league entry has no team_id key" "false" "$(jq 'has("team_id")' <<<"$LEAGUE"
 eq "league entry carries headlines key" "true" "$(jq 'has("headlines")' <<<"$LEAGUE")"
 eq "followed entry has no headlines key" "false" "$(jq 'has("headlines")' <<<"$FOLLOWED")"
 
+echo "== espn_team_schedule: the top-level team record is carried from .team.recordSummary (igor#605) =="
+reset_mock
+REQUEST_BODY=$(jq -n '{team: {displayName: "Los Angeles Angels", recordSummary: "56-90"}, events: []}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+eq "team record carried" "56-90" "$(jq -r '.record' <<<"$OUT")"
+
+echo "== espn_team_schedule: a payload lacking .team.recordSummary yields a null record, not an error (igor#605) =="
+reset_mock
+REQUEST_BODY=$(jq -n '{team: {displayName: "Los Angeles Angels"}, events: []}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260915")
+RC=$?
+eq "rc=0" "0" "$RC"
+eq "record is null" "null" "$(jq -r '.record' <<<"$OUT")"
+
+echo "== espn_team_schedule: an object-shaped score normalizes to its displayValue (igor#605) =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [{
+    name: "Angels at Red Sox", date: "2026-09-07T23:05Z", status: {type: {description: "Final"}},
+    competitions: [{notes: [], competitors: [
+      {team: {displayName: "Los Angeles Angels"}, score: {value: 4.0, displayValue: "4"}, winner: true},
+      {team: {displayName: "Boston Red Sox"}, score: {value: 2.0, displayValue: "2"}, winner: false}
+    ]}]
+  }]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260907")
+eq "object score normalizes to displayValue" "4" "$(jq -r '.events[0].competitors[0].score' <<<"$OUT")"
+eq "same for the other competitor" "2" "$(jq -r '.events[0].competitors[1].score' <<<"$OUT")"
+
+echo "== espn_team_schedule and espn_slim_league: score emits the same shape for equivalent input (igor#605) =="
+reset_mock
+REQUEST_BODY=$(jq -n '{team: {displayName: "Los Angeles Angels"}, events: [{
+  name: "Angels at Red Sox", date: "2026-09-07T23:05Z", status: {type: {description: "Final"}},
+  competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}, score: {value: 4.0, displayValue: "4"}, winner: true}]}]
+}]}')
+TEAM_OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260907")
+SB=$(jq -n '{events: [{
+  name: "Angels at Red Sox", date: "2026-09-07T23:05Z", status: {type: {description: "Final"}},
+  competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}, score: "4", winner: true}]}]
+}]}')
+LEAGUE_OUT=$(espn_slim_league "baseball/mlb" "$SB" '{"articles":[]}')
+eq "team-schedule score" "4" "$(jq -r '.events[0].competitors[0].score' <<<"$TEAM_OUT")"
+eq "league score matches team-schedule shape" \
+  "$(jq -r '.events[0].competitors[0].score' <<<"$TEAM_OUT")" \
+  "$(jq -r '.events[0].competitors[0].score' <<<"$LEAGUE_OUT")"
+
+echo "== espn_team_schedule: a competitor with no score key emits null, not an empty object (igor#605) =="
+reset_mock
+REQUEST_BODY=$(jq -n '{team: {displayName: "Los Angeles Angels"}, events: [{
+  name: "Angels at Red Sox", date: "2026-09-07T23:05Z", status: {type: {description: "Final"}},
+  competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}, winner: true}]}]
+}]}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260907")
+eq "score is null" "null" "$(jq -r '.events[0].competitors[0].score' <<<"$OUT")"
+
+echo "== espn_team_schedule: an empty-object score normalizes to null, not {} (igor#605) =="
+reset_mock
+REQUEST_BODY=$(jq -n '{team: {displayName: "Los Angeles Angels"}, events: [{
+  name: "Angels at Red Sox", date: "2026-09-07T23:05Z", status: {type: {description: "Final"}},
+  competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}, score: {}, winner: true}]}]
+}]}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260907")
+eq "score is null" "null" "$(jq -r '.events[0].competitors[0].score' <<<"$OUT")"
+
+echo "== espn_team_schedule: three consecutive games against the same opponent group into one series of three (igor#605) =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [
+    {name: "Angels at Red Sox (1)", date: "2026-09-07T23:05Z", status: {type: {description: "Final"}},
+     competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}}, {team: {displayName: "Boston Red Sox"}}]}]},
+    {name: "Angels at Red Sox (2)", date: "2026-09-08T23:05Z", status: {type: {description: "Final"}},
+     competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}}, {team: {displayName: "Boston Red Sox"}}]}]},
+    {name: "Angels at Red Sox (3)", date: "2026-09-09T23:05Z", status: {type: {description: "Final"}},
+     competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}}, {team: {displayName: "Boston Red Sox"}}]}]},
+    {name: "Angels at Athletics", date: "2026-09-10T23:05Z", status: {type: {description: "Scheduled"}},
+     competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}}, {team: {displayName: "Oakland Athletics"}}]}]}
+  ]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260908")
+eq "4 events survive the window" "4" "$(jq '.events | length' <<<"$OUT")"
+eq "first game: series of 3" "3" "$(jq -r '.events[0].series.of' <<<"$OUT")"
+eq "first game: game 1 of the series" "1" "$(jq -r '.events[0].series.game' <<<"$OUT")"
+eq "second game: game 2 of the series" "2" "$(jq -r '.events[1].series.game' <<<"$OUT")"
+eq "third game: game 3 of the series" "3" "$(jq -r '.events[2].series.game' <<<"$OUT")"
+eq "first three games share the same series key" "true" \
+  "$(jq -r '[.events[0].series.key, .events[1].series.key, .events[2].series.key] | unique | length == 1' <<<"$OUT")"
+eq "fourth game (different opponent) is its own series of one" "1" "$(jq -r '.events[3].series.of' <<<"$OUT")"
+eq "fourth game's series key differs from the first three" "false" \
+  "$(jq -r '.events[3].series.key == .events[0].series.key' <<<"$OUT")"
+
+echo "== espn_team_schedule: two separate series against the same opponent, split by another game, do not merge (igor#605) =="
+reset_mock
+REQUEST_BODY=$(jq -n '{
+  team: {displayName: "Los Angeles Angels"},
+  events: [
+    {name: "Angels at Red Sox (1)", date: "2026-09-04T23:05Z", status: {type: {description: "Final"}},
+     competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}}, {team: {displayName: "Boston Red Sox"}}]}]},
+    {name: "Angels at Red Sox (2)", date: "2026-09-05T23:05Z", status: {type: {description: "Final"}},
+     competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}}, {team: {displayName: "Boston Red Sox"}}]}]},
+    {name: "Angels at Athletics", date: "2026-09-06T23:05Z", status: {type: {description: "Final"}},
+     competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}}, {team: {displayName: "Oakland Athletics"}}]}]},
+    {name: "Angels at Red Sox (3)", date: "2026-09-07T23:05Z", status: {type: {description: "Final"}},
+     competitions: [{notes: [], competitors: [{team: {displayName: "Los Angeles Angels"}}, {team: {displayName: "Boston Red Sox"}}]}]}
+  ]
+}')
+OUT=$(espn_team_schedule "baseball/mlb" "laa" "20260906")
+eq "4 events survive the window" "4" "$(jq '.events | length' <<<"$OUT")"
+eq "first Red Sox pair: series of 2" "2" "$(jq -r '.events[0].series.of' <<<"$OUT")"
+eq "second Red Sox pair member: series of 2" "2" "$(jq -r '.events[1].series.of' <<<"$OUT")"
+eq "lone later Red Sox game: series of 1" "1" "$(jq -r '.events[3].series.of' <<<"$OUT")"
+eq "the split-by-Athletics Red Sox games use different series keys" "false" \
+  "$(jq -r '.events[0].series.key == .events[3].series.key' <<<"$OUT")"
+
 echo "=========================================="
 if [ "$FAIL" -eq 0 ]; then
   echo "test-espn: all checks passed"
