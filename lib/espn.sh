@@ -101,18 +101,45 @@ espn_news() {
 # fetch that SUCCEEDS and answers garbage is ESPN being broken, not a
 # missing path, and is not retried elsewhere.
 #
-# Echoes {league, team_id, team, events:[{name,date,status,session,notes,
-# competitors:[{team,order,score,winner,record}]}]} on success -- `record` is
-# the competitor's overall W-L summary, same as espn_slim_league. `session`
-# is the event's `competitions[0].type.abbreviation` (FP1, Q, Race, ...),
-# null when absent -- distinct from `status`, which is the SESSION's state
-# (e.g. "Final" on a practice session means practice ended, not that a race
-# concluded). `order` is each competitor's ESPN-assigned rank/grid position,
-# carried straight through. Absent/malformed `records` yields null, same as
+# Echoes {league, team_id, team, record, events:[{name,date,status,session,
+# notes, competitors:[{team,order,score,winner,record}], series:{key,game,
+# of}}]} on success. Top-level `record` is the TEAM's own overall W-L
+# summary, read from `.team.recordSummary` -- null when absent (igor#605).
+# It is NOT the same thing as the per-competitor `record` below: ESPN
+# populates the `records` array (name == "overall") on the league
+# SCOREBOARD (espn_slim_league), but this endpoint's competitor objects
+# carry only homeAway/id/order/team/type, so per-competitor `record` is
+# null in practice here -- it's kept for shape parity with
+# espn_slim_league, not because this endpoint populates it. `score` is
+# normalized to the plain displayable value regardless of whether ESPN
+# hands back a bare string (as the scoreboard does) or a
+# `{value,displayValue}` object (as this endpoint does): null stays null,
+# and an object with no usable `displayValue` collapses to null rather
+# than surviving as `{}` (igor#605). `session` is the event's
+# `competitions[0].type.abbreviation` (FP1, Q, Race, ...), null when absent
+# -- distinct from `status`, which is the SESSION's state (e.g. "Final" on
+# a practice session means practice ended, not that a race concluded).
+# `order` is each competitor's ESPN-assigned rank/grid position, carried
+# straight through. Absent/malformed `records` yields null, same as
 # `score`/`order`; `winner` yields null only when the key is absent -- a
 # `winner: false` in the source survives as `false`, never collapsed to null
 # (jq's `//` treats `false` as empty, so these fields are read with an
-# explicit `has()` check instead). On
+# explicit `has()` check instead). `series` makes "how many games in this
+# set" a value instead of something the writer has to count (igor#605): it
+# groups events that are adjacent in the emitted list (ESPN's own order)
+# and share the same opponent -- `key` is a stable opponent+start-date
+# string, `game` is this event's 1-based position in that run, and `of` is
+# the run's length WITHIN THE EMITTED LIST: a set that began before `lo`
+# is counted from its first emitted game, so a four-game set whose opener
+# fell outside the window reads as `of: 3`. An opponent resolves only on a
+# head-to-head event -- exactly two competitors, exactly one of them not
+# the followed team -- so a motorsport session's field, or an event this
+# team can't be matched against at all, yields `key: null` and a series of
+# one rather than a run built on whoever happened to be listed first. A
+# lone game is its own series of one; the same opponent
+# reappearing after a different game starts a new series rather than
+# merging with the earlier one. The flat `events` list's order and meaning
+# are unchanged -- `series` is additive. On
 # ANY failure -- empty args, a malformed date, both fetches failing, a
 # date-math failure, or an unparseable/empty payload -- emits NOTHING
 # and returns 1: a followed team whose fetch failed must not read
@@ -144,7 +171,7 @@ _et_session_date() {
 
 espn_team_schedule() {
   local league="$1" team_id="$2" yyyymmdd="$3" resp today_dash lo hi prehi out
-  local team_json raw_events ts d ts_list=() et_dates=() dates_json
+  local team_json team_record_json raw_events ts d ts_list=() et_dates=() dates_json
   if [ -z "$league" ] || [ -z "$team_id" ] || [[ ! "$yyyymmdd" =~ ^[0-9]{8}$ ]]; then
     return 1
   fi
@@ -174,6 +201,7 @@ espn_team_schedule() {
     return 1
   fi
   team_json=$(jq -n -c '(input).team.displayName // null' <<<"$resp" 2>/dev/null) || return 1
+  team_record_json=$(jq -n -c '(input).team.recordSummary // null' <<<"$resp" 2>/dev/null) || return 1
   # [0:50] is a runaway guard against a pathological payload, not a second
   # window: 50 candidates inside a nine-day span is already past any real
   # schedule, and only 20 are emitted.
@@ -204,13 +232,61 @@ espn_team_schedule() {
   # execve an E2BIG that the `|| return 1` below would report as a failed
   # fetch -- a followed team silently dropping out of the digest.
   out=$(jq -n --arg league "$league" --arg team_id "$team_id" --arg lo "$lo" --arg hi "$hi" \
-    --argjson team "$team_json" --argjson dates "$dates_json" '
+    --argjson team "$team_json" --argjson record "$team_record_json" --argjson dates "$dates_json" '
+    def normalize_score:
+      if has("score") then
+        (.score as $s | if ($s | type) == "object" then ($s.displayValue // null) else $s end)
+      else null end;
+    # Groups events that are ADJACENT in the emitted list and share the same
+    # opponent into a run -- a different opponent, or an unresolvable one,
+    # always starts a new run, so the same opponent reappearing later never
+    # merges back into an earlier series. An opponent resolves ONLY on a
+    # head-to-head event: exactly two competitors, exactly one of them not
+    # $self. A multi-competitor field (a motorsport session) and an event
+    # where $self matches nothing (a constructor-level follow, or a payload
+    # with no .team.displayName) both leave $opp null, so adjacent sessions
+    # sharing a leader are never published as a two-game series.
+    def series_tag($self):
+      . as $evts
+      | (reduce range(0; ($evts | length)) as $i (
+          {out: [], prev_opp: null, cur_id: -1, start_date: null};
+          (($evts[$i].competitors // []) as $c
+           | if ($c | length) == 2
+             then ($c | map(select(.team != null and .team != $self))
+                      | if length == 1 then .[0].team else null end)
+             else null end) as $opp
+          | ($evts[$i].date // "") as $d
+          | (if $i == 0 then {gid: 0, start: $d}
+             elif ($opp != null and $opp == .prev_opp) then {gid: .cur_id, start: .start_date}
+             else {gid: (.cur_id + 1), start: $d}
+             end) as $step
+          | .out += [{opponent: $opp, group_id: $step.gid, start: $step.start}]
+          | .prev_opp = $opp
+          | .cur_id = $step.gid
+          | .start_date = $step.start
+        )).out as $tagged
+      | ($tagged | reduce .[] as $t ({}; .[($t.group_id | tostring)] += 1)) as $counts
+      | (reduce range(0; ($evts | length)) as $i (
+          {out: [], seen: {}};
+          ($tagged[$i].group_id | tostring) as $gid
+          | ((.seen[$gid] // 0) + 1) as $idx
+          | .out += [$evts[$i] + {
+              series: {
+                key: (if $tagged[$i].opponent == null then null
+                      else ($tagged[$i].opponent + "|" + $tagged[$i].start) end),
+                game: $idx,
+                of: $counts[$gid]
+              }
+            }]
+          | .seen[$gid] = $idx
+        )).out;
     (input) as $events |
     {
       league: $league,
       team_id: $team_id,
       team: $team,
-      events: [range(0; ($events | length)) as $i
+      record: $record,
+      events: (([range(0; ($events | length)) as $i
         | $events[$i] as $ev
         | ($dates[$i] // "") as $d
         | select($d != "" and $d >= $lo and $d <= $hi)
@@ -223,11 +299,11 @@ espn_team_schedule() {
           competitors: [($ev.competitions[0].competitors // [])[0:10][] | {
             team: (.team.displayName // .athlete.displayName // null),
             order: (if has("order") then .order else null end),
-            score: (if has("score") then .score else null end),
+            score: normalize_score,
             winner: (if has("winner") then .winner else null end),
             record: ((.records | if type == "array" then . else [] end) | map(select(type == "object" and .name == "overall")) | (.[0].summary // null))
           }]
-        }][0:20]
+        }] | .[0:20] | series_tag($team)))
     }' <<<"$raw_events" 2>/dev/null) || return 1
   [ -z "$out" ] && return 1
   printf '%s' "$out"
@@ -274,6 +350,10 @@ espn_parse_follow() {
 #     headlines:[{headline,description,published,link}] }
 # `record` is the competitor's overall W-L summary (ESPN's `records`
 # array, `name == "overall"`) -- home/road splits are not carried.
+# `score` is normalized to the plain displayable value -- this endpoint's
+# native shape is already a bare string, but the same normalization as
+# espn_team_schedule is applied so the two reductions never hand the
+# writer two different shapes for the same field (igor#605).
 # `session` is the event's `competitions[0].type.abbreviation` (FP1, Q,
 # Race, ...), null when absent -- distinct from `status`, which is the
 # SESSION's state (e.g. "Final" on a practice session means practice
@@ -296,6 +376,10 @@ espn_slim_league() {
   local league="$1" scoreboard="$2" news="$3"
   printf '%s\n%s\n' "$scoreboard" "$news" \
   | jq -n --arg league "$league" '
+    def normalize_score:
+      if has("score") then
+        (.score as $s | if ($s | type) == "object" then ($s.displayValue // null) else $s end)
+      else null end;
     (input) as $sb | (input) as $nw |
     {
       league: $league,
@@ -308,7 +392,7 @@ espn_slim_league() {
         competitors: [(.competitions[0].competitors // [])[0:10][] | {
           team: (.team.displayName // .athlete.displayName // null),
           order: (if has("order") then .order else null end),
-          score: (if has("score") then .score else null end),
+          score: normalize_score,
           winner: (if has("winner") then .winner else null end),
           record: (((.records // []) | (if type == "array" then . else [] end)) | map(select(type == "object" and .name == "overall")) | (.[0].summary // null))
         }]
