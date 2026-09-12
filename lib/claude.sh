@@ -249,7 +249,7 @@ claude_run_with_cost() {
     err_text=$(
       {
         { grep -vE '^\{' "$stream_log" || true; } | tail -c 1000
-        { grep -E '^\{"type":"result"' "$stream_log" || true; } | tail -1 \
+        { jq -c 'select(.type == "result")' "$stream_log" 2>/dev/null || true; } | tail -1 \
           | { jq -r 'select(.is_error == true) | .result // empty' 2>/dev/null || true; }
       } 2>/dev/null
     ) || true
