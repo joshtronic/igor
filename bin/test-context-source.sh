@@ -11,6 +11,9 @@
 #   context_surface     -- echoes a skill's cached body; nonzero only when
 #                          the cache has never been seeded.
 #   context_seeded / context_bootstrap_alert -- the bootstrap gate.
+#   context_unaccounted_skills / context_stale_declined_skills -- the
+#                          igor#616 accounting ratchet over CONTEXT_SKILLS
+#                          and CONTEXT_SKILLS_UNSOURCED.
 # Skip-safe: needs git, jq, sha256sum; exits 0 with a notice if any is absent.
 set -uo pipefail
 
@@ -336,6 +339,60 @@ fi
 ok "no leftover current.tmp after a swap" bash -c '[ ! -e "$1" ]' _ "$CACHE/current.tmp"
 STRAY=$(find "$CACHE" -maxdepth 1 -type d -name '.gen-*' ! -name "$(basename "$(readlink "$CACHE/current")")" | wc -l)
 eq "no orphaned generation directories left behind" "0" "$STRAY"
+
+echo "== skill accounting: a skill on distillery master that is neither consumed nor declined is named (igor#616) =="
+for skill in "${CONTEXT_SKILLS_UNSOURCED[@]}"; do write_good_skill "$skill"; done
+write_good_skill brand-new-skill
+commit_and_push
+fetch_clone
+eq "exactly the stranger is unaccounted -- consumed and declined skills are not" \
+  "brand-new-skill" "$(context_unaccounted_skills)"
+
+echo "== skill accounting: context_refresh names it in the log, so a new skill can't land silently =="
+ACCT_WARN=$(context_refresh 2>&1 1>/dev/null)
+if printf '%s' "$ACCT_WARN" | grep -q 'brand-new-skill'; then
+  ok "the successful pour logs the unaccounted skill by name" true
+else
+  ok "the successful pour logs the unaccounted skill by name" false
+fi
+
+echo "== skill accounting: declaring it silences the warning =="
+git -C "$SEED" rm -rq skills/brand-new-skill
+commit_and_push
+fetch_clone
+eq "nothing unaccounted once the stranger is gone" "" "$(context_unaccounted_skills)"
+
+echo "== skill accounting: a declined name that has since vanished from master is named as stale =="
+git -C "$SEED" rm -rq skills/design
+commit_and_push
+fetch_clone
+eq "the vanished declined skill is named" "design" "$(context_stale_declined_skills)"
+write_good_skill design
+commit_and_push
+fetch_clone
+eq "nothing stale once it's back" "" "$(context_stale_declined_skills)"
+
+echo "== skill accounting: CONTEXT_SKILLS and CONTEXT_SKILLS_UNSOURCED don't overlap =="
+OVERLAP=""
+for skill in "${CONTEXT_SKILLS[@]}"; do
+  for u in "${CONTEXT_SKILLS_UNSOURCED[@]}"; do
+    [ "$skill" = "$u" ] && OVERLAP="$OVERLAP $skill"
+  done
+done
+eq "a skill is either consumed or declined, never both" "" "$OVERLAP"
+
+echo "== deploy sequencing: a cache generation missing a NEWLY consumed skill re-extracts at an unchanged HEAD (igor#616) =="
+# The hazard this covers: an igor deploy that ADDS a name to CONTEXT_SKILLS
+# lands while distillery master sits still, so the HEAD stamp matches and the
+# old no-op path would serve a generation that has no file for the new skill
+# -- making context_surface fail for a name CONTEXT_SKILLS promises is there.
+ok "cache brought current with the fixture master first" context_refresh
+rm -f "$CACHE/current/ticket-skeleton.md"
+UNCHANGED_HEAD=$(cat "$CACHE/current/HEAD")
+ok "refresh re-extracts rather than no-opping on an incomplete generation" context_refresh
+ok "the missing skill is back in the cache" bash -c '[ -s "$1" ]' _ "$CACHE/current/ticket-skeleton.md"
+eq "still the same distillery HEAD (a re-extract, not an advance)" "$UNCHANGED_HEAD" "$(cat "$CACHE/current/HEAD")"
+ok "context_surface serves it again" context_surface ticket-skeleton
 
 echo "== unseeded cache + failed refresh -> surfaces refuse, loudly =="
 export CONTEXT_CACHE_DIR="$TMPROOT/fresh-cache"

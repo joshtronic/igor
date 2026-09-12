@@ -283,6 +283,10 @@ do_feedback_tick() {
     key=$(feedback_row_key "$row")
     labels_json=$(feedback_repo_labels "$repo")
     context=$(feedback_gather_context "$repo"; feedback_search_prior "$repo" "$(jq -r '.Game // ""' <<<"$row")"; feedback_labels_section "$labels_json")
+    # feedback-directive only: the `ticket-skeleton` skill is deliberately
+    # NOT layered in here even though this pass authors issue bodies
+    # (igor#616). Its multi-section spec shape would fight the narrow
+    # DECISION:/TITLE:/===BODY=== contract feedback_parse_response parses.
     directive=$(context_surface feedback-directive)
     prompt=$(feedback_build_prompt "$repo" "$row" "$context")
     parsed=""

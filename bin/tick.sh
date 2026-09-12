@@ -2596,6 +2596,11 @@ EOF
 )
   fi
 
+  # Self-contained prompt by design: the `ticket-skeleton` skill is
+  # deliberately NOT sourced here even though this pass authors issue
+  # bodies (igor#616). The two-section "What was observed / Evidence"
+  # schema below is narrower on purpose, and the output is strict JSON
+  # this function parses.
   local system user
   system="You are the daily log reviewer for systemd services owned by an
 unattended agent's operator. Each repo that runs as a service declares its

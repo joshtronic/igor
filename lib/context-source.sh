@@ -61,9 +61,8 @@ CONTEXT_SKILLS=(
 
 # Skills that exist on distillery master but are deliberately NOT sourced
 # into any igor prompt surface (igor#616 -- named here, not just absent,
-# so bin/test-context-skills-completeness.sh can tell "considered and
-# declined" apart from "nobody looked").
-# shellcheck disable=SC2034  # read only by bin/test-context-skills-completeness.sh
+# so context_unaccounted_skills can tell "considered and declined" apart
+# from "nobody looked").
 CONTEXT_SKILLS_UNSOURCED=(
   ai-writing-tells    # recall-only catalog by its own SKILL.md; the prompt-facing subset already ships in the `voice` skill's Bans section
   design              # no igor surface does full redesign/reskin work; site-work-directive deliberately caps visual polish smaller than this skill's charter
@@ -80,6 +79,58 @@ _context_distillery_path() {
 
 _context_cache_root() {
   printf '%s' "${CONTEXT_CACHE_DIR:-${AGENT_STATE_DIR:-$HOME/.local/state/agent}/context}"
+}
+
+# The accounting ratchet for the two lists above (igor#616). A skill that
+# lands on distillery master and reaches no igor prompt is invisible:
+# nothing fails, the fleet just never gets doctrine somebody wrote. These
+# compare the live skills/ tree at origin/master against both
+# declarations so context_refresh can name the drift in the tick log the
+# moment a new generation pours.
+#
+# Deliberately a runtime check rather than a bin/test-*.sh assertion: the
+# distillery is a DIFFERENT repo, so gating igor's own CI on its master
+# would turn every unrelated igor PR red the moment a skill landed there,
+# and a CI container has no distillery clone to read at all. The tick is
+# where that clone exists.
+_context_in_list() {
+  local needle="$1" item
+  shift
+  for item in "$@"; do
+    [ "$item" = "$needle" ] && return 0
+  done
+  return 1
+}
+
+_context_master_skills() {
+  git -C "$(_context_distillery_path)" ls-tree -r --name-only origin/master -- skills 2>/dev/null \
+    | sed -n -E 's#^skills/([^/]+)/SKILL\.md$#\1#p' \
+    | sort -u
+}
+
+# context_unaccounted_skills -- names on distillery master that appear in
+# neither list: consumed by nothing, and nobody recorded that on purpose.
+context_unaccounted_skills() {
+  local skill
+  while IFS= read -r skill; do
+    [ -z "$skill" ] && continue
+    _context_in_list "$skill" "${CONTEXT_SKILLS[@]}" && continue
+    _context_in_list "$skill" "${CONTEXT_SKILLS_UNSOURCED[@]}" && continue
+    printf '%s\n' "$skill"
+  done < <(_context_master_skills)
+}
+
+# context_stale_declined_skills -- the other direction: a decline that
+# outlived the skill it declined. Harmless, but it makes the record lie
+# about what's on master. (The same drift in CONTEXT_SKILLS needs no
+# check here -- context_refresh already refuses the whole swap when a
+# consumed skill won't resolve.)
+context_stale_declined_skills() {
+  local skill master
+  master="$(_context_master_skills)"
+  for skill in "${CONTEXT_SKILLS_UNSOURCED[@]}"; do
+    printf '%s\n' "$master" | grep -qx -- "$skill" || printf '%s\n' "$skill"
+  done
 }
 
 # context_skill_body <skill-name>
@@ -217,12 +268,30 @@ _context_verify_skill_sha256() {
   fi
 }
 
+# _context_generation_complete <generation-dir>
+#
+# True iff the generation holds a non-empty body for every CONTEXT_SKILLS
+# entry. The HEAD stamp alone is not sufficient currency: an igor deploy
+# that ADDS a consumed skill leaves distillery master untouched, so the
+# stamp still matches while the cached generation predates the new name
+# -- and context_surface would then fail for a skill CONTEXT_SKILLS
+# promises is there, taking the tick down with it (an assignment from a
+# failing $( ) under set -e). Re-extracting on an incomplete generation
+# makes the deploy self-heal on the next tick instead.
+_context_generation_complete() {
+  local gen="$1" skill
+  for skill in "${CONTEXT_SKILLS[@]}"; do
+    [ -s "$gen/${skill}.md" ] || return 1
+  done
+}
+
 # context_refresh
 #
 # Called once per tick (bin/tick.sh, near the self-pull). Reads the
 # distillery clone's origin/master HEAD; a no-op if it matches the
-# cache's stamp. Otherwise reads dist/manifest.json and extracts +
-# validates every CONTEXT_SKILLS entry -- shape (frontmatter present,
+# cache's stamp AND the cached generation covers every consumed skill
+# (_context_generation_complete). Otherwise reads dist/manifest.json and
+# extracts + validates every CONTEXT_SKILLS entry -- shape (frontmatter present,
 # body >= CONTEXT_MIN_LINES lines) AND integrity (raw SKILL.md bytes
 # hash to the sha256 the manifest recorded for that skill) -- into a
 # fresh generation dir and, ONLY if every one is valid, atomically
@@ -257,7 +326,7 @@ context_refresh() {
 
   stamp=""
   [ -f "$current/HEAD" ] && stamp=$(cat "$current/HEAD" 2>/dev/null)
-  if [ "$head" = "$stamp" ]; then
+  if [ "$head" = "$stamp" ] && _context_generation_complete "$current"; then
     return 0   # already current -- no re-extract
   fi
 
@@ -318,6 +387,20 @@ context_refresh() {
 
   find "$cache_root" -maxdepth 1 -type d -name '.gen-*' ! -name "$(basename "$gen")" -exec rm -rf {} +
   rm -f "$cache_root/.bad-head"
+
+  # The accounting ratchet, on the pour rather than every tick: a new
+  # skill can only have appeared in a generation igor hadn't already
+  # extracted. Log-only and after the swap -- an unconsumed skill is a
+  # gap in igor's wiring, never a reason to refuse a valid brain.
+  local unaccounted stale
+  unaccounted=$(context_unaccounted_skills)
+  if [ -n "$unaccounted" ]; then
+    log "context-source: on distillery master but consumed by nothing and not declined in CONTEXT_SKILLS_UNSOURCED -- $(printf '%s' "$unaccounted" | tr '\n' ' ')(wire it into a surface or record the decline in lib/context-source.sh)"
+  fi
+  stale=$(context_stale_declined_skills)
+  if [ -n "$stale" ]; then
+    log "context-source: CONTEXT_SKILLS_UNSOURCED declines skill(s) no longer on distillery master -- $(printf '%s' "$stale" | tr '\n' ' ')(drop the stale entry in lib/context-source.sh)"
+  fi
   return 0
 }
 
