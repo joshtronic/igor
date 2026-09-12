@@ -10,7 +10,8 @@
 #                          skill and swaps ALL-OR-NOTHING into the cache.
 #   context_surface     -- echoes a skill's cached body; nonzero only when
 #                          the cache has never been seeded.
-#   context_seeded / context_bootstrap_alert -- the bootstrap gate.
+#   context_seeded / context_complete / context_bootstrap_alert -- the
+#                          bootstrap gate.
 #   context_unaccounted_skills / context_stale_declined_skills -- the
 #                          igor#616 accounting ratchet over CONTEXT_SKILLS
 #                          and CONTEXT_SKILLS_UNSOURCED.
@@ -439,6 +440,21 @@ ok "the missing skill is back in the cache" bash -c '[ -s "$1" ]' _ "$CACHE/curr
 eq "still the same distillery HEAD (a re-extract, not an advance)" "$UNCHANGED_HEAD" "$(cat "$CACHE/current/HEAD")"
 ok "context_surface serves it again" context_surface ticket-skeleton
 
+echo "== deploy sequencing: context_complete is the tick gate for the case the re-extract above can't reach =="
+# The re-extract only fires on a tick that can READ the distillery. When the
+# clone is unreachable on the same tick the deploy lands, the generation stays
+# incomplete, and what a consuming surface does then depends on WHERE the gap
+# falls in its call sequence: a missing skill mid-sequence is dropped from the
+# prompt with only a log line (errexit is off inside `$( )` unless
+# inherit_errexit is set, which tick.sh does not set), while a missing LAST
+# skill makes the enclosing assignment nonzero and takes the tick down. Neither
+# is acceptable, so the gate refuses to run model work on a partial brain.
+ok "a whole generation reads as complete" context_complete
+rm -f "$CACHE/current/doctrine.md"
+no "a generation missing a consumed skill does not" context_complete
+ok "restored by the next reachable refresh" context_refresh
+ok "complete again afterwards" context_complete
+
 echo "== unseeded cache + failed refresh -> surfaces refuse, loudly =="
 export CONTEXT_CACHE_DIR="$TMPROOT/fresh-cache"
 export CONTEXT_DISTILLERY_PATH="$TMPROOT/also-no-such-clone"
@@ -520,6 +536,13 @@ if grep -q 'DIRECTIVE_BODY=\$(context_surface "\${DIRECTIVE}-directive")' "$SWB"
   ok "site-work-block sources its directive via context_surface" true
 else
   ok "site-work-block sources its directive via context_surface" false
+fi
+
+echo "== wiring: bin/tick.sh's bootstrap gate blocks model work on a partial brain =="
+if grep -q '^if ! context_complete; then' "$TICK"; then
+  ok "the tick gates on context_complete, not just context_seeded" true
+else
+  ok "the tick gates on context_complete, not just context_seeded" false
 fi
 
 echo "== wiring: lib/feedback.sh's do_feedback_tick routes through context_surface =="

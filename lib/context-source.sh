@@ -155,11 +155,11 @@ context_account_skills() {
   local unaccounted stale
   unaccounted=$(context_unaccounted_skills)
   if [ -n "$unaccounted" ]; then
-    log "warning: context-source: on distillery master but consumed by nothing and not declined in CONTEXT_SKILLS_UNSOURCED -- $(printf '%s' "$unaccounted" | tr '\n' ' ')(wire it into a surface or record the decline in lib/context-source.sh)"
+    log "warning: context-source: on distillery master but consumed by nothing and not declined in CONTEXT_SKILLS_UNSOURCED -- $(printf '%s' "$unaccounted" | tr '\n' ' ') (wire it into a surface or record the decline in lib/context-source.sh)"
   fi
   stale=$(context_stale_declined_skills)
   if [ -n "$stale" ]; then
-    log "warning: context-source: CONTEXT_SKILLS_UNSOURCED declines skill(s) no longer on distillery master -- $(printf '%s' "$stale" | tr '\n' ' ')(drop the stale entry in lib/context-source.sh)"
+    log "warning: context-source: CONTEXT_SKILLS_UNSOURCED declines skill(s) no longer on distillery master -- $(printf '%s' "$stale" | tr '\n' ' ') (drop the stale entry in lib/context-source.sh)"
   fi
 }
 
@@ -429,13 +429,15 @@ context_refresh() {
 
 # context_surface <skill-name>
 #
-# Echoes the cached body for a consumed skill. Nonzero ONLY when the
-# cache has never been seeded (see context_seeded) -- once seeded, every
-# name in CONTEXT_SKILLS is guaranteed present (context_refresh writes
-# them all together or none at all). bin/tick.sh's bootstrap gate checks
-# context_seeded once per tick, before any of these call sites run, so
-# reaching a live "unseeded" failure here would mean that gate was
-# skipped -- a caller bug, not a runtime condition to design around.
+# Echoes the cached body for a consumed skill. Nonzero when the cache has
+# never been seeded (see context_seeded), or when the served generation
+# predates a deploy that added this skill (see context_complete) --
+# context_refresh writes a generation's skills all together or not at all,
+# so within one generation the only gap is a name that generation never
+# knew about. bin/tick.sh's bootstrap gate checks both once per tick,
+# before any of these call sites run, so reaching either failure live
+# would mean that gate was skipped -- a caller bug, not a runtime
+# condition to design around.
 context_surface() {
   local skill="$1" current
   current="$(_context_cache_root)/current"
@@ -455,6 +457,26 @@ context_surface() {
 # generation into place. The tick-level bootstrap gate reads this.
 context_seeded() {
   [ -f "$(_context_cache_root)/current/HEAD" ]
+}
+
+# context_complete -- true iff the SERVED generation covers every consumed
+# skill. The second half of the bootstrap gate, for the one window
+# _context_generation_complete's re-extract can't reach: an igor deploy
+# that adds a CONTEXT_SKILLS name landing on a tick where the distillery
+# clone is unreachable, so context_refresh bails before it can re-extract.
+#
+# Worth gating rather than letting the call site deal with it, because the
+# call site deals with it badly and in two different ways. Command
+# substitution unsets errexit (bash leaves inherit_errexit off and tick.sh
+# doesn't set it), so inside `SYSTEM_PROMPT=$(issue_system_prompt)` a
+# missing skill mid-sequence just logs and is DROPPED -- the worker then
+# runs on a silently incomplete brain -- while a missing LAST skill makes
+# the assignment itself nonzero and kills the tick under set -e. Which one
+# you get is an accident of ordering. Both are worse than declining to run
+# model work for a tick, which is the posture the module already takes on
+# a half-updated brain.
+context_complete() {
+  _context_generation_complete "$(_context_cache_root)/current"
 }
 
 # context_bootstrap_alert

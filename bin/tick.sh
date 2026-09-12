@@ -3424,6 +3424,20 @@ if ! context_seeded; then
   exit 0
 fi
 
+# Second half of the same gate: seeded, but the served generation predates
+# a deploy that ADDED a consumed skill, and this tick couldn't reach the
+# distillery to re-extract. Same all-or-nothing posture as the swap itself
+# -- a partial brain is not a brain (context_complete explains why the
+# consuming call sites can't be left to handle it). No bootstrap alert:
+# unlike never-seeded, this self-heals on the next tick that can read the
+# clone, so the once-per-day email would be noise.
+if ! context_complete; then
+  log "context-source: cached brain is missing a consumed skill -- blocking all model work until a refresh completes (see lib/context-source.sh)"
+  do_seo_tick || true
+  do_shipreport_tick || true
+  exit 0
+fi
+
 # Task heartbeat (check B) -- the gates above (health probe, deploy
 # barrier, cooldown check) can end the tick before real work ever starts,
 # so the start ping sits here, at the true top of the cascade. Paired
