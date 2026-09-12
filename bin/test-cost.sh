@@ -99,6 +99,23 @@ cost_record_cli "pretty-envelope" "$STREAM5" "fallback-model"
 LINE5=$(tail -1 "$COST_LEDGER_PATH")
 eq "pretty envelope: usd recorded" "9.427110749999999" "$(jq -r '.usd' <<<"$LINE5")"
 
+echo "== cost_result_event: a valid-JSON NON-OBJECT line doesn't hide the result event =="
+# `fromjson?` guards the PARSE but not the INDEX. A stream-log line can be
+# valid JSON and still not be an object (a bare number, a quoted string), and
+# `.type` on those raises -- jq 1.7 reports the error and reads on, jq 1.6
+# (what CI runs) is less forgiving. `objects` drops them before the index.
+STREAM6="$TMP/stream6.jsonl"
+{
+  printf '%s\n' '42'
+  printf '%s\n' '"a bare json string"'
+  printf '%s\n' "$SHUFFLED_ORDER"
+} > "$STREAM6"
+eq "non-object lines: result event still found" "result" \
+   "$(cost_result_event "$STREAM6" | jq -r '.type')"
+cost_record_cli "non-object-lines" "$STREAM6"
+LINE6=$(tail -1 "$COST_LEDGER_PATH")
+eq "non-object lines: usd recorded" "3.5" "$(jq -r '.usd' <<<"$LINE6")"
+
 BEFORE_COUNT=$(wc -l < "$COST_LEDGER_PATH")
 
 echo "== cost_record_cli: missing stream log warns once, records nothing =="
@@ -152,6 +169,41 @@ SM=$(cost_ledger_summary "2026-09-11T00:00:00Z" "2026-09-12T00:00:00Z")
 eq "malformed line: still has_data"        "true" "$(jq -r '.has_data' <<<"$SM")"
 eq "malformed line: good rows still count" "3"    "$(jq -r '.count' <<<"$SM")"
 eq "malformed line: total_usd intact"      "3"    "$(jq -r '.total_usd' <<<"$SM")"
+
+echo "== cost_ledger_summary: a valid-JSON NON-OBJECT line doesn't blank the window =="
+# Worse than the unparseable line above: `fromjson?` accepts `7` and then
+# `.timestamp` raises on it, which takes down the whole `[inputs | ...]`
+# expression -- so a window full of real spend renders as "no cost data
+# recorded". That is igor#612's own failure mode, relocated to the reader.
+printf '%s\n' '7' >> "$COST_LEDGER_PATH"
+printf '%s\n' '"a bare json string"' >> "$COST_LEDGER_PATH"
+SN=$(cost_ledger_summary "2026-09-11T00:00:00Z" "2026-09-12T00:00:00Z")
+eq "non-object line: still has_data"        "true" "$(jq -r '.has_data' <<<"$SN")"
+eq "non-object line: good rows still count" "3"    "$(jq -r '.count' <<<"$SN")"
+eq "non-object line: total_usd intact"      "3"    "$(jq -r '.total_usd' <<<"$SN")"
+
+echo "== bin/tick.sh: the ship-report window bounds render the ledger's timestamp format =="
+# cost_ledger_summary and tick_timing_summary compare timestamps as STRINGS,
+# which is only chronological for this exact spelling. Any other RFC3339
+# rendering (an offset form, sub-second precision, date-only) sorts wrong
+# against the ledgers' own `date -u +%Y-%m-%dT%H:%M:%SZ` and reads EVERY
+# window as empty -- a report that says "no cost data recorded" forever. The
+# wiring lives in tick.sh, so pin it there rather than trusting it by eye.
+WINDOW_FN=$(awk '/^do_shipreport_tick\(\) \{/,/^\}/' "$HERE/bin/tick.sh")
+eq "shipreport window: 5 date -u invocations" "5" \
+   "$(printf '%s\n' "$WINDOW_FN" | grep -c 'date -u')"
+eq "shipreport window: none render a different format" "0" \
+   "$(printf '%s\n' "$WINDOW_FN" | grep 'date -u' | grep -vc '+%Y-%m-%dT%H:%M:%SZ' || true)"
+
+echo "== cost_ledger_summary: a just-recorded line falls inside a tick.sh-shaped window =="
+# The one check with COMPUTED bounds rather than fixtured ones: it runs the
+# real `date` renderings against a real _cost_write_line stamp.
+: > "$COST_LEDGER_PATH"
+cost_record_cli "roundtrip" "$STREAM2"
+RT_SINCE=$(date -u -d "-1 days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1d +%Y-%m-%dT%H:%M:%SZ)
+RT_UNTIL=$(date -u -d "+1 minute" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+1M +%Y-%m-%dT%H:%M:%SZ)
+RT=$(cost_ledger_summary "$RT_SINCE" "$RT_UNTIL")
+eq "roundtrip: the fresh line is inside the 24h window" "1" "$(jq -r '.count' <<<"$RT")"
 
 echo "== cost_ledger_summary: missing ledger file reads as no data, not an error =="
 rm -f "$COST_LEDGER_PATH"

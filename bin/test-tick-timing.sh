@@ -58,6 +58,27 @@ eq "windowed max excludes the prior day"   "30" "$(jq -r '.max_s' <<<"$S2")"
 EMPTY_WINDOW=$(tick_timing_summary "2020-01-01T00:00:00Z" "2020-01-02T00:00:00Z")
 eq "a window with no matching entries -> has_data false" "false" "$(jq -r '.has_data' <<<"$EMPTY_WINDOW")"
 
+echo "== tick_timing_summary: a valid-JSON NON-OBJECT line doesn't blank the window =="
+# `fromjson?` accepts `7` and then `.timestamp` raises on it, aborting the
+# whole `[inputs | ...]` expression -- a day of real ticks would render as "no
+# tick-timing data recorded". Same guard, same reason, as cost_ledger_summary.
+printf '%s\n' '7' >> "$TICK_TIMING_LEDGER_PATH"
+S3=$(tick_timing_summary "2026-09-11T00:00:00Z" "2026-09-12T00:00:00Z")
+eq "non-object line: still has_data" "true" "$(jq -r '.has_data' <<<"$S3")"
+eq "non-object line: count intact"   "2"    "$(jq -r '.count' <<<"$S3")"
+eq "non-object line: max intact"     "30"   "$(jq -r '.max_s' <<<"$S3")"
+
+echo "== tick_timing_record: the ledger is bounded, newest lines kept =="
+# 1440 lines/day at the 1-minute cadence, forever, and every ship report
+# full-scans it with jq. Cap of 10 with a tenth-over slack means the trim
+# fires at 12 (-> 3..12) and again at 14 (-> 5..14), not on every append.
+: > "$TICK_TIMING_LEDGER_PATH"
+TICK_TIMING_MAX_LINES=10
+for i in $(seq 1 14); do tick_timing_record "$i" 0; done
+eq "trimmed to the cap"     "10" "$(wc -l < "$TICK_TIMING_LEDGER_PATH" | tr -d ' ')"
+eq "keeps the newest line"  "14" "$(tail -1 "$TICK_TIMING_LEDGER_PATH" | jq -r '.duration_s')"
+eq "drops the oldest lines" "5"  "$(head -1 "$TICK_TIMING_LEDGER_PATH" | jq -r '.duration_s')"
+
 [ "$FAIL" -eq 0 ] && { echo "test-tick-timing: all checks passed"; exit 0; }
 echo "test-tick-timing: $FAIL check(s) FAILED"
 exit 1

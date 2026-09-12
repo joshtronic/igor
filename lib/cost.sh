@@ -114,10 +114,15 @@ _COST_WARNED_NO_RESULT_EVENT=""
 # `--output-format json` envelope, a single JSON document the CLI may
 # pretty-print across lines. It only runs when the line pass found nothing,
 # and that file is a clean rc-0 capture with no interleaved text.
+#
+# `objects` because `fromjson?` guards the PARSE but not the INDEX: a line can
+# be valid JSON and still not be an object (a bare number, a quoted string),
+# and `.type` raises on those. Cheaper to drop them than to depend on how
+# forgiving the host's jq is about a runtime error mid-stream.
 cost_result_event() {
   local stream_log="$1" line
-  line=$(jq -c -R 'fromjson? | select(.type == "result")' "$stream_log" 2>/dev/null | tail -1)
-  [ -n "$line" ] || line=$(jq -c 'select(.type == "result")' "$stream_log" 2>/dev/null | tail -1)
+  line=$(jq -c -R 'fromjson? | objects | select(.type == "result")' "$stream_log" 2>/dev/null | tail -1)
+  [ -n "$line" ] || line=$(jq -c 'objects | select(.type == "result")' "$stream_log" 2>/dev/null | tail -1)
   printf '%s' "$line"
 }
 
@@ -127,11 +132,11 @@ cost_result_event() {
 # store the precomputed USD verbatim -- authoritative wins. Token
 # counts come along for the ride so reports can show breakdowns.
 #
-# Parses as JSON (jq `select(.type == "result")`), NOT by grepping for
-# a `{"type":"result"` prefix -- key order in the CLI's result event is
-# not a contract (igor#612: a CLI update reordered it, `type` moved from
-# 1st to 15th key, the old text-anchored grep silently stopped matching
-# for seven weeks). Best-effort: a missing/malformed log still skips
+# Finds that event with cost_result_event above -- parsed as JSON, NOT by
+# grepping for a `{"type":"result"` prefix, since key order in the CLI's
+# result event is not a contract (igor#612: a CLI update reordered it, `type`
+# moved from 1st to 15th key, the old text-anchored grep silently stopped
+# matching for seven weeks). Best-effort: a missing/malformed log still skips
 # recording (failing open is right -- a bad ledger write must never
 # break a tick), but now it says so instead of failing silently.
 #
@@ -182,6 +187,12 @@ cost_record_cli() {
 # quiet window from a missing/unreadable ledger -- the report must say "no
 # cost data recorded", never a bare $0.00 that reads the same as "checked,
 # spent nothing".
+#
+# `fromjson? | objects` for the same reason cost_result_event needs it, but
+# the stakes are higher here: `inputs` feeds ONE expression, so `.timestamp`
+# raising on a valid-JSON non-object line takes the whole pass down and a
+# window of real spend renders as "no cost data recorded" -- igor#612's own
+# failure mode, relocated to the reader.
 cost_ledger_summary() {
   local since="$1" until_="$2"
   if [ ! -f "$COST_LEDGER_PATH" ]; then
@@ -189,7 +200,7 @@ cost_ledger_summary() {
     return 0
   fi
   jq -cnR --arg since "$since" --arg until "$until_" '
-    [inputs | fromjson? | select(.timestamp >= $since and .timestamp < $until)] as $rows
+    [inputs | fromjson? | objects | select(.timestamp >= $since and .timestamp < $until)] as $rows
     | {
         count: ($rows | length),
         has_data: ($rows | length > 0),
