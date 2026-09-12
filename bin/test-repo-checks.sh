@@ -234,6 +234,77 @@ ok "the sourced lib defines rc_context_file_exists_at" \
 ok "block message names AGENTS.md first, CLAUDE.md as legacy fallback" \
   grep -qE 'AGENTS\.md.*legacy.*CLAUDE\.md.*missing at the repo root' "$HERE/tick.sh"
 
+echo "== rc_lang_present: language detection from the tree (igor#614) =="
+f="$(new_fixture)"; : >"$f/go.mod"; commit_fixture "$f"
+ok "go.mod -> go present"            rc_lang_present go
+no "no package.json -> node absent"  rc_lang_present node
+f="$(new_fixture)"; printf '{}' >"$f/package.json"; commit_fixture "$f"
+ok "package.json -> node present"    rc_lang_present node
+f="$(new_fixture)"; mkdir -p "$f/scanner"; : >"$f/scanner/main.py"; commit_fixture "$f"
+ok "*.py anywhere in tree -> python present" rc_lang_present python
+f="$(new_fixture)"; mkdir -p "$f/bin"; : >"$f/bin/setup.sh"; commit_fixture "$f"
+ok "*.sh anywhere in tree -> shell present"  rc_lang_present shell
+f="$(new_fixture)"; : >"$f/composer.json"; commit_fixture "$f"
+ok "composer.json -> php present"    rc_lang_present php
+f="$(new_fixture)"; : >"$f/Cargo.toml"; commit_fixture "$f"
+ok "Cargo.toml -> rust present"      rc_lang_present rust
+f="$(new_fixture)"; : >"$f/README.md"; commit_fixture "$f"
+no "no markers at all -> go absent"  rc_lang_present go
+
+echo "== rc_lang_ci_ok: per-language CI coverage (igor#614) =="
+GO_CI=$'name: ci\non:\n  pull_request:\njobs:\n  go:\n    steps:\n      - run: go test ./...'
+SH_PY_CI=$'name: ci\non:\n  pull_request:\njobs:\n  test:\n    steps:\n      - run: shellcheck bin/*.sh\n      - run: pytest'
+f="$(new_fixture)"; mkdir -p "$f/.forgejo/workflows"; printf '%s' "$GO_CI" >"$f/.forgejo/workflows/ci.yml"; commit_fixture "$f"
+ok "go test step -> go CI ok"           rc_lang_ci_ok go
+no "no python step -> python CI not ok" rc_lang_ci_ok python
+f="$(new_fixture)"; mkdir -p "$f/.forgejo/workflows"; printf '%s' "$SH_PY_CI" >"$f/.forgejo/workflows/ci.yml"; commit_fixture "$f"
+ok "shellcheck step -> shell CI ok"  rc_lang_ci_ok shell
+ok "pytest step -> python CI ok"     rc_lang_ci_ok python
+no "no go step -> go CI not ok"      rc_lang_ci_ok go
+
+echo "== check_language_ci_coverage: the stonks fixture (igor#614) =="
+# Before: shell + Python CI, go.mod present, no go step in CI at all -- the
+# historical stonks gap this ticket exists to catch.
+f="$(new_fixture)"
+mkdir -p "$f/bin"; : >"$f/bin/run.sh"
+mkdir -p "$f/tests"; : >"$f/tests/test_thing.py"
+: >"$f/go.mod"
+mkdir -p "$f/scanner"; : >"$f/scanner/main.go"
+mkdir -p "$f/.forgejo/workflows"; printf '%s' "$SH_PY_CI" >"$f/.forgejo/workflows/ci.yml"
+commit_fixture "$f"
+V=0; check_language_ci_coverage >/dev/null 2>&1 || V=$?
+if [ "$V" -eq 1 ]; then printf '  + stonks-before: 1 language (go) with no CI step\n'; else printf '  x expected 1 missing language, got %s\n' "$V"; FAIL=$((FAIL + 1)); fi
+if grep -qF 'go: NO CI step' <<<"$LANG_CI_REPORT"; then printf '  + report names go as missing\n'; else printf '  x report should name go as missing\n'; FAIL=$((FAIL + 1)); fi
+if grep -qF 'shell: ok' <<<"$LANG_CI_REPORT"; then printf '  + report shows shell as ok\n'; else printf '  x report should show shell ok\n'; FAIL=$((FAIL + 1)); fi
+if grep -qF 'python: ok' <<<"$LANG_CI_REPORT"; then printf '  + report shows python as ok\n'; else printf '  x report should show python ok\n'; FAIL=$((FAIL + 1)); fi
+
+# After: a go test step added to the same workflow -- clean.
+GO_SH_PY_CI=$'name: ci\non:\n  pull_request:\njobs:\n  test:\n    steps:\n      - run: shellcheck bin/*.sh\n      - run: pytest\n      - run: go test ./...'
+f="$(new_fixture)"
+: >"$f/go.mod"
+mkdir -p "$f/scanner"; : >"$f/scanner/main.go"
+mkdir -p "$f/.forgejo/workflows"; printf '%s' "$GO_SH_PY_CI" >"$f/.forgejo/workflows/ci.yml"
+commit_fixture "$f"
+V=0; check_language_ci_coverage >/dev/null 2>&1 || V=$?
+if [ "$V" -eq 0 ]; then printf '  + stonks-after: every detected language has CI coverage\n'; else printf '  x expected 0 missing languages, got %s\n' "$V"; FAIL=$((FAIL + 1)); fi
+
+echo "== validate_repo_local: language coverage is reported but never gates (igor#614) =="
+# The stonks-before shape, but otherwise fully ready (a Makefile test target
+# covers check_test_signal, the same workflow covers check_ci_workflow) --
+# it must still validate (rc 0), with the go gap surfaced as advisory only.
+LBARE="$TMPROOT/lang.git"; git init -q --bare -b master "$LBARE"
+LWORK="$(new_fixture)"
+: >"$LWORK/go.mod"
+mkdir -p "$LWORK/scanner"; : >"$LWORK/scanner/main.go"
+printf 'test:\n\tpytest\n' >"$LWORK/Makefile"
+mkdir -p "$LWORK/.forgejo/workflows"; printf '%s' "$SH_PY_CI" >"$LWORK/.forgejo/workflows/ci.yml"
+git -C "$LWORK" add -A; git -C "$LWORK" commit -q -m lang
+git -C "$LWORK" remote add origin "$LBARE"; git -C "$LWORK" push -q origin master
+LCLONE="$TMPROOT/lang-clone"; git clone -q "$LBARE" "$LCLONE"
+OUT=$(validate_repo_local demo/lang "$LCLONE"); V=$?
+if [ "$V" -eq 0 ]; then printf '  + repo with an unwatched Go module still validates (report-only)\n'; else printf '  x expected rc 0 (report-only), got %s\n' "$V"; FAIL=$((FAIL + 1)); fi
+if grep -qF 'go: NO CI step' <<<"$OUT"; then printf '  + validate_repo_local surfaces the go gap\n'; else printf '  x validate_repo_local should surface the go gap\n'; FAIL=$((FAIL + 1)); fi
+
 if [ "$FAIL" -eq 0 ]; then
   echo "test-repo-checks: all passed"
 else

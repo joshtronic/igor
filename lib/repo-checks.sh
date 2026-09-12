@@ -232,6 +232,87 @@ check_lint_signal() {
   return 1
 }
 
+# -- Per-language CI coverage (igor#614) -------------------------
+#
+# check_test_signal above answers "does this repo have ANY test signal" --
+# an existence check. That's the wrong question for a polyglot repo: a repo
+# can carry an immaculate shell+Python suite and ALSO carry a whole untested
+# Go module, and check_test_signal alone reads that as fully validated (the
+# stonks case this ticket is fixing -- the `scanner/` Go tree sat behind
+# validated CI for months with nothing ever compiling it). rc_lang_present
+# detects a language from the tree; rc_lang_ci_ok asks whether any
+# pull_request-triggered workflow actually runs something against it.
+# Report-only for now -- see check_language_ci_coverage.
+
+_RC_LANGS="go node python php rust shell"
+
+rc_lang_present() {
+  case "$1" in
+    go)     rc_file_exists go.mod ;;
+    node)   rc_file_exists package.json ;;
+    php)    rc_file_exists composer.json ;;
+    rust)   rc_file_exists Cargo.toml ;;
+    python) git -C "$_RC_REPO_PATH" ls-tree -r --name-only "$_RC_REF" 2>/dev/null | grep -qE '\.py$' ;;
+    shell)  git -C "$_RC_REPO_PATH" ls-tree -r --name-only "$_RC_REF" 2>/dev/null | grep -qE '\.sh$' ;;
+    *) return 1 ;;
+  esac
+}
+
+# rc_pr_workflow_content -- concatenated content of every workflow file
+# (.forgejo/workflows, .gitea/workflows) that triggers on pull_request.
+# Mirrors check_ci_workflow's file scan but without the verify-keyword
+# filter -- per-language coverage is judged against the union of everything
+# that actually runs, not just the files that already look CI-shaped.
+rc_pr_workflow_content() {
+  local dir f content listing
+  for dir in .forgejo/workflows .gitea/workflows; do
+    listing=$(rc_dir_list "$dir")
+    [ -n "$listing" ] || continue
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      [[ "$f" =~ \.ya?ml$ ]] || continue
+      content=$(rc_file_read "${dir}/${f}")
+      [ -n "$content" ] || continue
+      grep -q 'pull_request' <<<"$content" || continue
+      printf '%s\n' "$content"
+    done <<<"$listing"
+  done
+}
+
+rc_lang_ci_ok() {
+  local lang="$1" content
+  content=$(rc_pr_workflow_content)
+  case "$lang" in
+    go)     grep -qE 'go (build|test|vet)|golangci-lint' <<<"$content" ;;
+    node)   grep -qE 'npm (ci|run|test)|yarn |pnpm |jest|vitest|eslint' <<<"$content" ;;
+    python) grep -qE 'pytest|python3?[[:space:]]|tox' <<<"$content" ;;
+    php)    grep -qE 'composer |phpunit' <<<"$content" ;;
+    rust)   grep -qE 'cargo (build|test|clippy)' <<<"$content" ;;
+    shell)  grep -qE 'shellcheck|shfmt|bats' <<<"$content" ;;
+    *) return 1 ;;
+  esac
+}
+
+# check_language_ci_coverage -- populates LANG_CI_REPORT with one
+# "<lang>: ok" or "<lang>: NO CI step" line per detected language, and
+# returns the count of languages with no CI step (0 = every detected
+# language is covered). Callers report this; nothing gates on it yet.
+LANG_CI_REPORT=""
+check_language_ci_coverage() {
+  local lang missing=0 lines=""
+  for lang in $_RC_LANGS; do
+    rc_lang_present "$lang" || continue
+    if rc_lang_ci_ok "$lang"; then
+      lines="${lines}${lang}: ok"$'\n'
+    else
+      lines="${lines}${lang}: NO CI step"$'\n'
+      missing=$((missing + 1))
+    fi
+  done
+  LANG_CI_REPORT="$lines"
+  return "$missing"
+}
+
 check_ci_workflow() {
   # A REAL CI workflow must run ON pull_request AND actually verify the change
   # (a build/test/lint step) -- a deploy-only workflow (push:master + rsync)
@@ -354,6 +435,24 @@ validate_repo_local() {
   check_lint_signal
   _advise $? "Linter config detected" \
     "\`.eslintrc*\`, \`.markdownlint*\`, \`.stylelintrc*\`, \`[tool.ruff]\`, \`.golangci.yml\`, \`.shellcheckrc\`, etc."
+
+  # Per-language CI coverage (igor#614) -- report only, never gates: a repo
+  # can be fully validated above (a real test signal + a real Validate
+  # action) and still carry a whole language CI never touches. Surface it
+  # so a human can decide what to fix versus accept; see lib/repo-checks.sh
+  # header comment for why this isn't a hard gate yet.
+  check_language_ci_coverage
+  if [ -n "$LANG_CI_REPORT" ]; then
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      case "$line" in
+        *': ok')
+          printf -- '- [x] language CI coverage: %s (advisory)\n' "$line" ;;
+        *)
+          printf -- '- [ ] language CI coverage: %s (advisory -- report only, does not block work)\n' "$line" ;;
+      esac
+    done <<<"$LANG_CI_REPORT"
+  fi
 
   [ "$fail" -eq 0 ]
 }
