@@ -234,6 +234,167 @@ ok "the sourced lib defines rc_context_file_exists_at" \
 ok "block message names AGENTS.md first, CLAUDE.md as legacy fallback" \
   grep -qE 'AGENTS\.md.*legacy.*CLAUDE\.md.*missing at the repo root' "$HERE/tick.sh"
 
+echo "== rc_lang_present: language detection from the tree (igor#614) =="
+f="$(new_fixture)"; : >"$f/go.mod"; commit_fixture "$f"
+ok "go.mod -> go present"            rc_lang_present go
+no "no package.json -> node absent"  rc_lang_present node
+f="$(new_fixture)"; printf '{}' >"$f/package.json"; commit_fixture "$f"
+ok "package.json -> node present"    rc_lang_present node
+f="$(new_fixture)"; mkdir -p "$f/scanner"; : >"$f/scanner/a.py"; : >"$f/scanner/b.py"; : >"$f/scanner/c.py"; commit_fixture "$f"
+ok "a tree of *.py -> python present" rc_lang_present python
+f="$(new_fixture)"; mkdir -p "$f/bin"; : >"$f/bin/a.sh"; : >"$f/bin/b.sh"; : >"$f/bin/c.sh"; commit_fixture "$f"
+ok "a tree of *.sh -> shell present"  rc_lang_present shell
+# An incidental script is not a language tier -- nearly every repo carries a
+# deploy.sh, and reporting each one as an uncovered language buries the real
+# gaps under fleet-wide noise.
+f="$(new_fixture)"; : >"$f/deploy.sh"; commit_fixture "$f"
+no "one loose *.sh is not a shell repo"  rc_lang_present shell
+f="$(new_fixture)"; : >"$f/gen.py"; : >"$f/other.py"; commit_fixture "$f"
+no "two loose *.py is not a python repo" rc_lang_present python
+f="$(new_fixture)"; : >"$f/composer.json"; commit_fixture "$f"
+ok "composer.json -> php present"    rc_lang_present php
+f="$(new_fixture)"; : >"$f/Cargo.toml"; commit_fixture "$f"
+ok "Cargo.toml -> rust present"      rc_lang_present rust
+f="$(new_fixture)"; : >"$f/README.md"; commit_fixture "$f"
+no "no markers at all -> go absent"  rc_lang_present go
+
+echo "== rc_lang_present: manifests nested anywhere in the tree, not just root (igor#614) =="
+# The bug the first attempt shipped: a root-only rc_file_exists check reports
+# a language absent when its manifest lives in a subdirectory -- exactly
+# stonks' real layout (flow/go.mod, scanner/go.mod, no root go.mod).
+f="$(new_fixture)"; mkdir -p "$f/flow" "$f/scanner"; : >"$f/flow/go.mod"; : >"$f/scanner/go.mod"; commit_fixture "$f"
+ok "go.mod nested in flow/ and scanner/, no root go.mod -> go present" rc_lang_present go
+f="$(new_fixture)"; mkdir -p "$f/frontend"; printf '{}' >"$f/frontend/package.json"; commit_fixture "$f"
+ok "package.json nested in frontend/, no root package.json -> node present" rc_lang_present node
+f="$(new_fixture)"; mkdir -p "$f/api"; : >"$f/api/composer.json"; commit_fixture "$f"
+ok "composer.json nested in api/, no root composer.json -> php present" rc_lang_present php
+f="$(new_fixture)"; mkdir -p "$f/crates/core"; : >"$f/crates/core/Cargo.toml"; commit_fixture "$f"
+ok "Cargo.toml nested in crates/core/, no root Cargo.toml -> rust present" rc_lang_present rust
+
+echo "== rc_lang_ci_ok: per-language CI coverage (igor#614) =="
+GO_CI=$'name: ci\non:\n  pull_request:\njobs:\n  go:\n    steps:\n      - run: go test ./...'
+SH_PY_CI=$'name: ci\non:\n  pull_request:\njobs:\n  test:\n    steps:\n      - run: shellcheck bin/*.sh\n      - run: pytest'
+f="$(new_fixture)"; mkdir -p "$f/.forgejo/workflows"; printf '%s' "$GO_CI" >"$f/.forgejo/workflows/ci.yml"; commit_fixture "$f"
+ok "go test step -> go CI ok"           rc_lang_ci_ok go
+no "no python step -> python CI not ok" rc_lang_ci_ok python
+f="$(new_fixture)"; mkdir -p "$f/.forgejo/workflows"; printf '%s' "$SH_PY_CI" >"$f/.forgejo/workflows/ci.yml"; commit_fixture "$f"
+ok "shellcheck step -> shell CI ok"  rc_lang_ci_ok shell
+ok "pytest step -> python CI ok"     rc_lang_ci_ok python
+no "no go step -> go CI not ok"      rc_lang_ci_ok go
+
+echo "== rc_lang_ci_ok: installing a toolchain is not running it =="
+# The false-ok this check exists to catch: CI that installs a runtime and
+# never points it at the code would otherwise report that language covered.
+INSTALL_CI=$'name: ci\non:\n  pull_request:\njobs:\n  test:\n    steps:\n      - uses: actions/setup-go@v5\n      - run: apt-get install -y python3 make composer\n      - run: pip install tox\n      - run: npm ci\n      - run: go test ./...'
+f="$(new_fixture)"; mkdir -p "$f/.forgejo/workflows"; printf '%s' "$INSTALL_CI" >"$f/.forgejo/workflows/ci.yml"; commit_fixture "$f"
+no "apt-get install python3 -> python CI not ok" rc_lang_ci_ok python
+no "apt-get install composer -> php CI not ok"   rc_lang_ci_ok php
+no "npm ci alone -> node CI not ok"              rc_lang_ci_ok node
+ok "a real go test step still counts"            rc_lang_ci_ok go
+# ...but dropping the install half of a compound step must keep the other half.
+COMPOUND_CI=$'name: ci\non:\n  pull_request:\njobs:\n  test:\n    steps:\n      - run: npm ci && npm test'
+f="$(new_fixture)"; mkdir -p "$f/.forgejo/workflows"; printf '%s' "$COMPOUND_CI" >"$f/.forgejo/workflows/ci.yml"; commit_fixture "$f"
+ok "npm ci && npm test -> node CI ok" rc_lang_ci_ok node
+# igor's own shape: CI runs the repo's test script, never shellcheck.
+SCRIPT_CI=$'name: ci\non:\n  pull_request:\njobs:\n  test:\n    steps:\n      - run: bin/check-sync.sh'
+f="$(new_fixture)"; mkdir -p "$f/.forgejo/workflows"; printf '%s' "$SCRIPT_CI" >"$f/.forgejo/workflows/ci.yml"; commit_fixture "$f"
+ok "running a repo script counts as shell coverage" rc_lang_ci_ok shell
+
+echo "== check_language_ci_coverage: the stonks fixture (igor#614) =="
+# Before: shell + Python CI, Go living in flow/go.mod and scanner/go.mod --
+# stonks' REAL layout, with NO root go.mod -- and no go step in CI at all.
+# A root-only manifest check reports Go absent on exactly this repo; that was
+# the first attempt's bug (PR #615, closed).
+f="$(new_fixture)"
+mkdir -p "$f/bin"; : >"$f/bin/run.sh"; : >"$f/bin/load.sh"; : >"$f/bin/report.sh"
+mkdir -p "$f/tests"; : >"$f/tests/test_thing.py"; : >"$f/tests/test_other.py"; : >"$f/quotes.py"
+mkdir -p "$f/flow" "$f/scanner"
+: >"$f/flow/go.mod"; : >"$f/flow/main.go"
+: >"$f/scanner/go.mod"; : >"$f/scanner/main.go"
+mkdir -p "$f/.forgejo/workflows"; printf '%s' "$SH_PY_CI" >"$f/.forgejo/workflows/ci.yml"
+commit_fixture "$f"
+V=0; check_language_ci_coverage >/dev/null 2>&1 || V=$?
+if [ "$V" -eq 1 ]; then printf '  + stonks-before: 1 language (go) with no CI step\n'; else printf '  x expected 1 missing language, got %s\n' "$V"; FAIL=$((FAIL + 1)); fi
+if grep -qF 'go: NO CI step' <<<"$LANG_CI_REPORT"; then printf '  + report names go as missing\n'; else printf '  x report should name go as missing\n'; FAIL=$((FAIL + 1)); fi
+if grep -qF 'shell: ok' <<<"$LANG_CI_REPORT"; then printf '  + report shows shell as ok\n'; else printf '  x report should show shell ok\n'; FAIL=$((FAIL + 1)); fi
+if grep -qF 'python: ok' <<<"$LANG_CI_REPORT"; then printf '  + report shows python as ok\n'; else printf '  x report should show python ok\n'; FAIL=$((FAIL + 1)); fi
+
+# After: a go test step added to the same workflow -- clean. Same nested,
+# no-root-go.mod layout throughout.
+GO_SH_PY_CI=$'name: ci\non:\n  pull_request:\njobs:\n  test:\n    steps:\n      - run: shellcheck bin/*.sh\n      - run: pytest\n      - run: go test ./...'
+f="$(new_fixture)"
+mkdir -p "$f/flow" "$f/scanner"
+: >"$f/flow/go.mod"; : >"$f/flow/main.go"
+: >"$f/scanner/go.mod"; : >"$f/scanner/main.go"
+mkdir -p "$f/.forgejo/workflows"; printf '%s' "$GO_SH_PY_CI" >"$f/.forgejo/workflows/ci.yml"
+commit_fixture "$f"
+V=0; check_language_ci_coverage >/dev/null 2>&1 || V=$?
+if [ "$V" -eq 0 ]; then printf '  + stonks-after: every detected language has CI coverage\n'; else printf '  x expected 0 missing languages, got %s\n' "$V"; FAIL=$((FAIL + 1)); fi
+
+echo "== validate_repo_local: language coverage is reported but never gates (igor#614) =="
+# The stonks-before shape, but otherwise fully ready (a Makefile test target
+# covers check_test_signal, the same workflow covers check_ci_workflow) --
+# it must still validate (rc 0), with the go gap surfaced as advisory only.
+LBARE="$TMPROOT/lang.git"; git init -q --bare -b master "$LBARE"
+LWORK="$(new_fixture)"
+mkdir -p "$LWORK/scanner"; : >"$LWORK/scanner/go.mod"; : >"$LWORK/scanner/main.go"
+printf 'test:\n\tpytest\n' >"$LWORK/Makefile"
+mkdir -p "$LWORK/.forgejo/workflows"; printf '%s' "$SH_PY_CI" >"$LWORK/.forgejo/workflows/ci.yml"
+git -C "$LWORK" add -A; git -C "$LWORK" commit -q -m lang
+git -C "$LWORK" remote add origin "$LBARE"; git -C "$LWORK" push -q origin master
+LCLONE="$TMPROOT/lang-clone"; git clone -q "$LBARE" "$LCLONE"
+OUT=$(validate_repo_local demo/lang "$LCLONE"); V=$?
+if [ "$V" -eq 0 ]; then printf '  + repo with an unwatched Go module still validates (report-only)\n'; else printf '  x expected rc 0 (report-only), got %s\n' "$V"; FAIL=$((FAIL + 1)); fi
+if grep -qE '^- \[ \] language CI coverage: .go. \(advisory' <<<"$OUT"; then printf '  + validate_repo_local surfaces the go gap as an advisory line\n'; else printf '  x validate_repo_local should surface the go gap as an advisory line\n'; FAIL=$((FAIL + 1)); fi
+
+echo "== lang_ci_gap_list: what bin/validate-repo.sh folds into the fleet summary =="
+LANG_CI_REPORT=$'go: NO CI step\nshell: ok\npython: NO CI step\n'
+G=$(lang_ci_gap_list)
+if [ "$G" = "go,python" ]; then printf '  + gap list joins only the uncovered languages\n'; else printf '  x expected "go,python", got "%s"\n' "$G"; FAIL=$((FAIL + 1)); fi
+LANG_CI_REPORT=$'shell: ok\npython: ok\n'
+G=$(lang_ci_gap_list)
+if [ -z "$G" ]; then printf '  + a fully covered repo contributes nothing\n'; else printf '  x expected an empty gap list, got "%s"\n' "$G"; FAIL=$((FAIL + 1)); fi
+
+# The fleet summary reads LANG_CI_REPORT back out of validate_repo_local's
+# side effect, so a bare (un-substituted) call must overwrite whatever the
+# PREVIOUS repo left behind -- otherwise --all attributes one repo's gaps to
+# the next.
+LANG_CI_REPORT=$'rust: NO CI step\n'
+validate_repo_local demo/lang "$LCLONE" >/dev/null
+G=$(lang_ci_gap_list)
+if [ "$G" = "go" ]; then printf '  + a bare call propagates this repo report, not the last one\n'; else printf '  x expected gap list "go" after a bare call, got "%s"\n' "$G"; FAIL=$((FAIL + 1)); fi
+LANG_CI_REPORT=$'rust: NO CI step\n'
+validate_repo_local demo/nope "$TMPROOT/not-a-clone" >/dev/null
+G=$(lang_ci_gap_list)
+if [ -z "$G" ]; then printf '  + an indeterminate clone leaves no stale report behind\n'; else printf '  x indeterminate clone should clear the report, got "%s"\n' "$G"; FAIL=$((FAIL + 1)); fi
+
+echo "== check_language_ci_coverage does not gate a caller that runs errexit =="
+# check_language_ci_coverage returns the COUNT of uncovered languages, so a repo
+# with a gap returns non-zero. Every check here is invoked bare and read via $?,
+# so under errexit the FIRST non-zero one aborts the function -- which for most
+# repos is an earlier check (a missing CLAUDE.md, an un-adopted dossier) and was
+# true long before this section existed. What must stay true is narrower: the
+# language report must not be the thing that turns an OTHERWISE-CLEAN repo
+# not-ready. Hence a fixture that passes every other check -- conforming
+# dossier, CLAUDE.md, README, lint config, test signal, CI -- and differs from
+# a perfect repo only in the unwatched Go module.
+CBARE="$TMPROOT/clean.git"; git init -q --bare -b master "$CBARE"
+CWORK="$(new_fixture)"
+printf '%s' $'# demo\n\nA demo repo.\n\n## KPIs\n\n1. Tasks shipped per week -- tracker count\n\n## DOs and DON\'Ts\n\n- DO keep it small.\n\n## Caveats\n\n- None.\n\n## Metadata\n\n```yaml\ntype: tool\n```\n' >"$CWORK/AGENTS.md"
+printf 'demo\n' >"$CWORK/CLAUDE.md"
+printf '# demo\n' >"$CWORK/README.md"
+: >"$CWORK/.shellcheckrc"
+printf 'test:\n\tpytest\n' >"$CWORK/Makefile"
+mkdir -p "$CWORK/scanner"; : >"$CWORK/scanner/go.mod"; : >"$CWORK/scanner/main.go"
+mkdir -p "$CWORK/.forgejo/workflows"; printf '%s' "$SH_PY_CI" >"$CWORK/.forgejo/workflows/ci.yml"
+git -C "$CWORK" add -A; git -C "$CWORK" commit -q -m clean
+git -C "$CWORK" remote add origin "$CBARE"; git -C "$CWORK" push -q origin master
+CCLONE="$TMPROOT/clean-clone"; git clone -q "$CBARE" "$CCLONE"
+
+OUT=$(set -e; validate_repo_local demo/clean "$CCLONE"); V=$?
+if [ "$V" -eq 0 ]; then printf '  + an otherwise-clean repo with a language gap still validates under errexit\n'; else printf '  x errexit caller got rc %s -- the language report is gating\n' "$V"; FAIL=$((FAIL + 1)); fi
+if grep -qE '^- \[ \] language CI coverage: .go. \(advisory' <<<"$OUT"; then printf '  + and the go gap is still reported, not swallowed by the abort\n'; else printf '  x the go advisory line is missing under errexit\n'; FAIL=$((FAIL + 1)); fi
+
 if [ "$FAIL" -eq 0 ]; then
   echo "test-repo-checks: all passed"
 else

@@ -232,6 +232,130 @@ check_lint_signal() {
   return 1
 }
 
+# -- Per-language CI coverage (igor#614) -------------------------
+#
+# check_test_signal above answers "does this repo have ANY test signal" --
+# an existence check. That's the wrong question for a polyglot repo: a repo
+# can carry an immaculate shell+Python suite and ALSO carry a whole untested
+# Go module, and check_test_signal alone reads that as fully validated (the
+# stonks case this ticket is fixing -- the `scanner/` Go tree sat behind
+# validated CI for months with nothing ever compiling it). rc_lang_present
+# detects a language from the tree; rc_lang_ci_ok asks whether any
+# pull_request-triggered workflow actually runs something against it.
+# Report-only for now -- see check_language_ci_coverage.
+
+_RC_LANGS="go node python php rust shell"
+
+# A manifest (go.mod, package.json, ...) is a declaration -- one file is
+# enough. Python and shell have no manifest and are detected by extension, so
+# they need a floor: nearly every repo in the fleet carries a deploy.sh or a
+# one-off generator script, and reporting each of those as an uncovered
+# language would bury the gaps worth acting on (the untested Go module) under
+# fleet-wide noise.
+_RC_LANG_MIN_FILES=3
+
+rc_lang_file_count() {
+  git -C "$_RC_REPO_PATH" ls-tree -r --name-only "$_RC_REF" 2>/dev/null | grep -cE "$1"
+}
+
+# rc_manifest_exists_anywhere <escaped-basename-regex> -- true if the
+# basename (e.g. `go\.mod`) appears at ANY depth in the tree, not just the
+# root. Manifests routinely live in subdirectories (stonks carries
+# flow/go.mod and scanner/go.mod and no root go.mod at all); a root-only
+# `rc_file_exists` reports the language absent on exactly the repo this
+# check exists to catch (igor#614).
+rc_manifest_exists_anywhere() {
+  [ "$(rc_lang_file_count "(^|/)$1\$")" -ge 1 ]
+}
+
+rc_lang_present() {
+  case "$1" in
+    go)     rc_manifest_exists_anywhere 'go\.mod' ;;
+    node)   rc_manifest_exists_anywhere 'package\.json' ;;
+    php)    rc_manifest_exists_anywhere 'composer\.json' ;;
+    rust)   rc_manifest_exists_anywhere 'Cargo\.toml' ;;
+    python) [ "$(rc_lang_file_count '\.py$')" -ge "$_RC_LANG_MIN_FILES" ] ;;
+    shell)  [ "$(rc_lang_file_count '\.sh$')" -ge "$_RC_LANG_MIN_FILES" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# rc_pr_workflow_content -- concatenated content of every workflow file
+# (.forgejo/workflows, .gitea/workflows) that triggers on pull_request.
+# Mirrors check_ci_workflow's file scan but without the verify-keyword
+# filter -- per-language coverage is judged against the union of everything
+# that actually runs, not just the files that already look CI-shaped.
+rc_pr_workflow_content() {
+  local dir f content listing
+  for dir in .forgejo/workflows .gitea/workflows; do
+    listing=$(rc_dir_list "$dir")
+    [ -n "$listing" ] || continue
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      [[ "$f" =~ \.ya?ml$ ]] || continue
+      content=$(rc_file_read "${dir}/${f}")
+      [ -n "$content" ] || continue
+      grep -q 'pull_request' <<<"$content" || continue
+      printf '%s\n' "$content"
+    done <<<"$listing"
+  done
+}
+
+# Installing a toolchain is not running it. `apt-get install python3` or
+# `npm ci` proves a runtime is present, not that anything is pointed at the
+# code -- counting those as coverage would report "ok" for the exact
+# installed-but-never-run shape this check exists to catch. Compound steps
+# (`npm ci && npm test`) are split on `&&` and `;` first, so dropping the
+# install half keeps the half that verifies.
+_RC_INSTALL_LINE='(apt|apt-get|yum|dnf|apk|brew)[[:space:]]+(install|add)|pip3?[[:space:]]+install|npm[[:space:]]+(ci|install)|(yarn|pnpm|composer|go|cargo|gem)[[:space:]]+(install|update)|uses:[[:space:]]*[^[:space:]]*setup-'
+
+rc_lang_ci_ok() {
+  local lang="$1" content
+  content=$(rc_pr_workflow_content | tr '&;' '\n' | grep -vE "$_RC_INSTALL_LINE") || true
+  case "$lang" in
+    go)     grep -qE 'go (build|test|vet)|golangci-lint' <<<"$content" ;;
+    node)   grep -qE 'npm (run|test)|yarn |pnpm |jest|vitest|eslint' <<<"$content" ;;
+    python) grep -qE 'pytest|unittest|[[:space:]](tox|nox|ruff|mypy|flake8|pylint)([[:space:]]|$)|python3?[[:space:]]+[^[:space:]]*\.py' <<<"$content" ;;
+    php)    grep -qE 'composer[[:space:]]+(run|run-script|test|exec)|phpunit|phpstan|psalm|pest' <<<"$content" ;;
+    rust)   grep -qE 'cargo (build|test|clippy)' <<<"$content" ;;
+    # A step that EXECUTES a script from the repo counts as much as a linter
+    # does -- igor's own CI runs `bin/check-sync.sh` (which runs every shell
+    # unit test) and no shellcheck, and calling that uncovered would be the
+    # report's first false positive on the repo producing it.
+    shell)  grep -qE 'shellcheck|shfmt|bats|[^[:space:]]*\.sh([[:space:]]|$)' <<<"$content" ;;
+    *) return 1 ;;
+  esac
+}
+
+# check_language_ci_coverage -- populates LANG_CI_REPORT with one
+# "<lang>: ok" or "<lang>: NO CI step" line per detected language, and
+# returns the count of languages with no CI step (0 = every detected
+# language is covered). Callers report this; nothing gates on it yet.
+LANG_CI_REPORT=""
+check_language_ci_coverage() {
+  local lang missing=0 lines=""
+  for lang in $_RC_LANGS; do
+    rc_lang_present "$lang" || continue
+    if rc_lang_ci_ok "$lang"; then
+      lines="${lines}${lang}: ok"$'\n'
+    else
+      lines="${lines}${lang}: NO CI step"$'\n'
+      missing=$((missing + 1))
+    fi
+  done
+  LANG_CI_REPORT="$lines"
+  return "$missing"
+}
+
+# lang_ci_gap_list -- the comma-joined language names with no CI step from the
+# LAST check_language_ci_coverage run; empty when every detected language is
+# covered. bin/validate-repo.sh folds this into its fleet-wide summary; it
+# lives here rather than inline there because that summary is the deliverable
+# of igor#614 and needs a test of its own.
+lang_ci_gap_list() {
+  grep 'NO CI step' <<<"$LANG_CI_REPORT" | cut -d: -f1 | paste -sd, - || true
+}
+
 check_ci_workflow() {
   # A REAL CI workflow must run ON pull_request AND actually verify the change
   # (a build/test/lint step) -- a deploy-only workflow (push:master + rsync)
@@ -283,7 +407,13 @@ check_ci_workflow() {
 # checklist body never needs it.
 validate_repo_local() {
   # shellcheck disable=SC2034  # repo is signature-only, see above.
-  local repo="$1" path="$2" fail=0
+  local repo="$1" path="$2" fail=0 line lang
+
+  # LANG_CI_REPORT is read back by callers AFTER this returns (the fleet
+  # summary in bin/validate-repo.sh), so clear it before the indeterminate
+  # early return below -- otherwise a repo whose clone couldn't be read would
+  # be credited with the previous repo's gaps.
+  LANG_CI_REPORT=""
 
   # _gate  <status> <name> <hint> -- a hard requirement; a failure marks the
   #                                   repo not-ready (rc 1).
@@ -354,6 +484,27 @@ validate_repo_local() {
   check_lint_signal
   _advise $? "Linter config detected" \
     "\`.eslintrc*\`, \`.markdownlint*\`, \`.stylelintrc*\`, \`[tool.ruff]\`, \`.golangci.yml\`, \`.shellcheckrc\`, etc."
+
+  # Per-language CI coverage (igor#614) -- report only, never gates: a repo
+  # can be fully validated above (a real test signal + a real Validate
+  # action) and still carry a whole language CI never touches. Surface it
+  # so a human can decide what to fix versus accept; see lib/repo-checks.sh
+  # header comment for why this isn't a hard gate yet.
+  # `|| true` because the return value is the COUNT of uncovered languages, and
+  # the report is read from LANG_CI_REPORT, not from $?. Left bare, a gap makes
+  # this the one check that can abort validate_repo_local under a caller's
+  # errexit on a repo where everything else passes -- a report-only check
+  # silently becoming a hard gate.
+  check_language_ci_coverage || true
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    lang="${line%%:*}"
+    case "$line" in
+      *': ok') _advise 0 "language CI coverage: \`$lang\`" ;;
+      *) _advise 1 "language CI coverage: \`$lang\`" \
+           "no \`pull_request\` workflow step runs \`$lang\` -- the code is in the repo but CI never exercises it" ;;
+    esac
+  done <<<"$LANG_CI_REPORT"
 
   [ "$fail" -eq 0 ]
 }
