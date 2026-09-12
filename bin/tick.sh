@@ -19,6 +19,13 @@
 
 set -euo pipefail
 
+# Tick-timing (igor#612): captured before the self-pull re-exec below, and
+# preserved (not reset) across it via export + the ${:-} guard, so a
+# self-update tick's duration still reflects the WHOLE invocation the
+# systemd timer paid for, not just the post-re-exec remainder.
+TICK_START_TS="${TICK_START_TS:-$(date +%s)}"
+export TICK_START_TS
+
 # -- Paths ------------------------------------------------------
 
 AGENT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
@@ -106,8 +113,12 @@ unset env_file_hint
 . "$AGENT_HOME/lib/http-reap.sh"
 # shellcheck source=lib/cost.sh
 . "$AGENT_HOME/lib/cost.sh"
+# shellcheck source=lib/tick-timing.sh
+. "$AGENT_HOME/lib/tick-timing.sh"
 # shellcheck source=lib/claude.sh
 . "$AGENT_HOME/lib/claude.sh"
+# shellcheck source=lib/claude-version.sh
+. "$AGENT_HOME/lib/claude-version.sh"
 # shellcheck source=lib/crashlog.sh
 . "$AGENT_HOME/lib/crashlog.sh"
 # shellcheck source=lib/healthcheck.sh
@@ -191,6 +202,16 @@ WORKTREE=""
 PR_WORKTREE=""
 cleanup() {
   local rc=$?
+  # Tick-timing (igor#612): record on EVERY exit path (success, no-work,
+  # crash alike), same as the crashlog/worktree cleanup below -- a slow or
+  # hung tick is exactly the kind of thing this ledger exists to surface.
+  # Guarded the same way as crashlog_preserve just below: declare -F because
+  # cleanup can fire before lib/tick-timing.sh is sourced (an early exit,
+  # e.g. a missing .env var), and AGENT_STATE_DIR because that's the
+  # earliest var lib/tick-timing.sh requires.
+  if [ -n "${AGENT_STATE_DIR:-}" ] && declare -F tick_timing_record >/dev/null; then
+    tick_timing_record "$(( $(date +%s) - "${TICK_START_TS:-$(date +%s)}" ))" "$rc" 2>/dev/null || true
+  fi
   # Task heartbeat (check B): pair the start ping (fired once the tick
   # clears the health/deploy gates -- see HC_TASK_STARTED) with a
   # success/fail ping here so every exit path reports honestly, not just
@@ -2005,6 +2026,26 @@ do_shipreport_tick() {
   if [ "$(jq -r 'length' <<<"$landed_notes" 2>/dev/null || echo 0)" != "0" ]; then
     report=$(shipreport_merge_landed "$report" "$landed_notes")
   fi
+
+  # igor#612: "times and costs shown in aggregate so we can check if there's
+  # a change" -- current-window (this "since") vs prior-window (the 24h
+  # before that) cost + tick-timing summaries, plus the Claude Code
+  # installed-vs-latest check. Unconditional (unlike landed_notes above):
+  # shipreport_is_empty now also treats real cost/timing data or a behind
+  # version as "not empty", so this visibility survives a quiet PR day
+  # instead of vanishing with the rest of the report.
+  local now_iso since_prev cost_now cost_prev timing_now timing_prev claude_ver metrics
+  now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  since_prev=$(date -u -d "-2 days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+               || date -u -v-2d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+  cost_now=$(cost_ledger_summary "$since" "$now_iso")
+  cost_prev=$(cost_ledger_summary "$since_prev" "$since")
+  timing_now=$(tick_timing_summary "$since" "$now_iso")
+  timing_prev=$(tick_timing_summary "$since_prev" "$since")
+  claude_ver=$(claude_version_check)
+  metrics=$(shipreport_metrics_build "$cost_now" "$cost_prev" "$timing_now" "$timing_prev" "$claude_ver")
+  report=$(jq -c --argjson m "$metrics" '. + $m' <<<"$report" 2>/dev/null || printf '%s' "$report")
+
   if shipreport_is_empty "$report"; then
     log "shipreport: quiet 24h -- nothing to report (stamping done)"
     shipreport_mark_sent

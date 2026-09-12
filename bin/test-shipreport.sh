@@ -95,6 +95,82 @@ shipreport_landed_clear
 eq "landed_clear: drains the queue" "[]" "$(shipreport_landed_read)"
 eq "landed_clear: is a no-op when the state file is missing" "[]" "$(rm -f "$sf"; shipreport_landed_clear; shipreport_landed_read)"
 
+echo "== shipreport_metrics_build: merges cost/timing/version into one object =="
+COST_NOW='{"count":2,"has_data":true,"total_usd":12.3,"by_site":[{"site":"tier-1-issue","usd":9.43,"count":1},{"site":"review","usd":2.87,"count":1}]}'
+COST_PREV='{"count":1,"has_data":true,"total_usd":8.0,"by_site":[]}'
+COST_PREV_NONE='{"count":0,"has_data":false,"total_usd":0,"by_site":[]}'
+TIMING_NOW='{"count":1440,"has_data":true,"median_s":12,"p90_s":45,"max_s":3612}'
+TIMING_PREV='{"count":1440,"has_data":true,"median_s":10,"p90_s":40,"max_s":3600}'
+CV_BEHIND='{"installed":"2.1.229","latest":"2.1.269","checked_ok":true,"behind":true,"since_days":31}'
+CV_CURRENT='{"installed":"2.1.269","latest":"2.1.269","checked_ok":true,"behind":false,"since_days":1}'
+CV_UNKNOWN='{"installed":null,"latest":null,"checked_ok":false,"behind":false,"since_days":null}'
+
+METRICS=$(shipreport_metrics_build "$COST_NOW" "$COST_PREV" "$TIMING_NOW" "$TIMING_PREV" "$CV_BEHIND")
+eq "metrics: delta_usd computed"    "4.3" "$(jq -r '.metrics.cost.delta_usd' <<<"$METRICS")"
+eq "metrics: delta_median_s computed" "2" "$(jq -r '.metrics.timing.delta_median_s' <<<"$METRICS")"
+eq "metrics: claude_version passed through" "2.1.229" "$(jq -r '.claude_version.installed' <<<"$METRICS")"
+
+METRICS_NO_PREV=$(shipreport_metrics_build "$COST_NOW" "$COST_PREV_NONE" "$TIMING_NOW" "$TIMING_PREV" "$CV_BEHIND")
+eq "metrics: no prior data -> delta_usd null" "null" "$(jq -r '.metrics.cost.delta_usd' <<<"$METRICS_NO_PREV")"
+
+echo "== shipreport_is_empty: metrics/version can keep an otherwise-quiet report NOT empty =="
+QUIET='{"needs_you":[],"shipped":[],"inflight":[]}'
+WITH_COST=$(jq -c --argjson m "$METRICS" '. + $m' <<<"$QUIET")
+no "is_empty: real cost data present -> NOT empty" shipreport_is_empty "$WITH_COST"
+
+COST_ZERO=$(shipreport_metrics_build "$COST_PREV_NONE" "$COST_PREV_NONE" "$COST_PREV_NONE" "$COST_PREV_NONE" "$CV_CURRENT")
+WITH_NO_DATA=$(jq -c --argjson m "$COST_ZERO" '. + $m' <<<"$QUIET")
+ok "is_empty: no cost/timing data + version current -> still empty" shipreport_is_empty "$WITH_NO_DATA"
+
+COST_ZERO_BEHIND=$(shipreport_metrics_build "$COST_PREV_NONE" "$COST_PREV_NONE" "$COST_PREV_NONE" "$COST_PREV_NONE" "$CV_BEHIND")
+WITH_BEHIND_ONLY=$(jq -c --argjson m "$COST_ZERO_BEHIND" '. + $m' <<<"$QUIET")
+no "is_empty: version behind alone -> NOT empty" shipreport_is_empty "$WITH_BEHIND_ONLY"
+
+echo "== renderers: cost/timing + version sections =="
+FULL_REPORT=$(jq -c --argjson m "$METRICS" '. + $m' <<<"$REPORT")
+FTEXT=$(shipreport_render_text <<<"$FULL_REPORT")
+has "text: COST & TIMING heading"      "$FTEXT" "COST & TIMING"
+has "text: total spend"                "$FTEXT" '$12.3'
+has "text: delta vs prior period"      "$FTEXT" "vs prior 24h"
+has "text: per-call-site breakdown"    "$FTEXT" "tier-1-issue: \$9.43"
+has "text: tick count + median/p90"    "$FTEXT" "median 12s"
+has "text: BEHIND version line"        "$FTEXT" "BEHIND latest 2.1.269"
+FHTML=$(shipreport_render_html <<<"$FULL_REPORT")
+has "html: cost/timing block present"  "$FHTML" "COST & TIMING"
+has "html: version line present"       "$FHTML" "BEHIND latest 2.1.269"
+
+echo "== renderers: no metrics key -> no cost/version section (existing plain report) =="
+NO_METRICS_TEXT=$(shipreport_render_text <<<"$REPORT")
+if printf '%s' "$NO_METRICS_TEXT" | grep -q 'COST & TIMING'; then
+  printf '  x %s\n' "text: no COST & TIMING section when metrics was never merged in"; FAIL=$((FAIL + 1))
+else
+  printf '  + %s\n' "text: no COST & TIMING section when metrics was never merged in"
+fi
+
+echo "== renderers: stale ledger says so explicitly, never a bare \$0.00 =="
+NO_DATA_METRICS=$(shipreport_metrics_build "$COST_PREV_NONE" "$COST_PREV_NONE" "$COST_PREV_NONE" "$COST_PREV_NONE" "$CV_UNKNOWN")
+STALE_REPORT=$(jq -c --argjson m "$NO_DATA_METRICS" '. + $m' <<<"$REPORT")
+STEXT=$(shipreport_render_text <<<"$STALE_REPORT")
+has "text: says no cost data recorded"   "$STEXT" "no cost data recorded"
+has "text: says no tick-timing data"     "$STEXT" "no tick-timing data recorded"
+has "text: says could not check version" "$STEXT" "could not check"
+if printf '%s' "$STEXT" | grep -q '\$0\.00'; then
+  printf '  x %s\n' "text: never prints a bare \$0.00 for missing data"; FAIL=$((FAIL + 1))
+else
+  printf '  + %s\n' "text: never prints a bare \$0.00 for missing data"
+fi
+
+echo "== renderers: version current -> one quiet line, not silence =="
+CURRENT_METRICS=$(shipreport_metrics_build "$COST_NOW" "$COST_PREV" "$TIMING_NOW" "$TIMING_PREV" "$CV_CURRENT")
+CURRENT_REPORT=$(jq -c --argjson m "$CURRENT_METRICS" '. + $m' <<<"$REPORT")
+CTEXT=$(shipreport_render_text <<<"$CURRENT_REPORT")
+has "text: up to date line"  "$CTEXT" "up to date"
+if printf '%s' "$CTEXT" | grep -q 'BEHIND'; then
+  printf '  x %s\n' "text: does not shout BEHIND when current"; FAIL=$((FAIL + 1))
+else
+  printf '  + %s\n' "text: does not shout BEHIND when current"
+fi
+
 echo "== fully scripted: no model call in the module =="
 if grep -qE "claude_call|claude_run|anthropic_call" "$HERE/../lib/ship-report.sh"; then
   printf '  x %s\n' "ship-report.sh contains a model call"; FAIL=$((FAIL + 1))
