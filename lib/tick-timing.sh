@@ -49,7 +49,7 @@ tick_timing_summary() {
     printf '{"count":0,"has_data":false,"median_s":null,"p90_s":null,"max_s":null}'
     return 0
   fi
-  jq -cn --arg since "$since" --arg until "$until_" '
+  jq -cnR --arg since "$since" --arg until "$until_" '
     def percentile(p):
       sort as $s
       | ($s | length) as $n
@@ -62,7 +62,7 @@ tick_timing_summary() {
             else $s[$lo] + ($s[$hi] - $s[$lo]) * ($idx - $lo)
             end
         end;
-    [inputs | select(.timestamp >= $since and .timestamp < $until) | .duration_s] as $durs
+    [inputs | fromjson? | select(.timestamp >= $since and .timestamp < $until) | .duration_s] as $durs
     | {
         count: ($durs | length),
         has_data: ($durs | length > 0),

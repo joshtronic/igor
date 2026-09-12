@@ -98,6 +98,29 @@ cost_record_api() {
 _COST_WARNED_NO_STREAM_LOG=""
 _COST_WARNED_NO_RESULT_EVENT=""
 
+# cost_result_event <stream_log> -- the last `type == "result"` event in a
+# Claude CLI log, or empty. Shared by cost_record_cli and claude.sh's health
+# classification: both read the same log, so a parse bug here is a bug in both.
+#
+# Line-oriented (`-R 'fromjson?'`) because the stream log is NOT pure JSON --
+# the CLI's plain-text output (auth failures, rate-limit notices, node
+# warnings) is merged into it via 2>&1, which is exactly why claude.sh greps
+# `-vE '^\{'` to harvest those lines. A whole-file `jq 'select(...)'` ABORTS on
+# the first non-JSON byte and stops reading, so a result event printed after
+# any stderr leak would be silently missed -- the same silent-parse-failure
+# class as igor#612 itself. `fromjson?` drops unparseable lines and reads on.
+#
+# The fallback handles the one log that ISN'T line-delimited: claude_call's
+# `--output-format json` envelope, a single JSON document the CLI may
+# pretty-print across lines. It only runs when the line pass found nothing,
+# and that file is a clean rc-0 capture with no interleaved text.
+cost_result_event() {
+  local stream_log="$1" line
+  line=$(jq -c -R 'fromjson? | select(.type == "result")' "$stream_log" 2>/dev/null | tail -1)
+  [ -n "$line" ] || line=$(jq -c 'select(.type == "result")' "$stream_log" 2>/dev/null | tail -1)
+  printf '%s' "$line"
+}
+
 # Claude Code CLI call: pull the final "result" event from the
 # stream-json log. It contains both `usage` and `total_cost_usd`
 # (precomputed by the CLI, accounts for tool-use accounting). We
@@ -128,7 +151,7 @@ cost_record_cli() {
     return 0
   fi
   local result_line
-  result_line=$(jq -c 'select(.type == "result")' "$stream_log" 2>/dev/null | tail -1)
+  result_line=$(cost_result_event "$stream_log")
   if [ -z "$result_line" ]; then
     if [ -z "$_COST_WARNED_NO_RESULT_EVENT" ]; then
       log "cost: no result event found in $stream_log ($call_site) -- spend for this call was NOT recorded (malformed or truncated log?)"
@@ -165,8 +188,8 @@ cost_ledger_summary() {
     printf '{"count":0,"has_data":false,"total_usd":0,"by_site":[]}'
     return 0
   fi
-  jq -cn --arg since "$since" --arg until "$until_" '
-    [inputs | select(.timestamp >= $since and .timestamp < $until)] as $rows
+  jq -cnR --arg since "$since" --arg until "$until_" '
+    [inputs | fromjson? | select(.timestamp >= $since and .timestamp < $until)] as $rows
     | {
         count: ($rows | length),
         has_data: ($rows | length > 0),

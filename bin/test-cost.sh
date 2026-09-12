@@ -70,6 +70,35 @@ cost_record_cli "security" "$STREAM3" "fallback-model"
 LINE3=$(tail -1 "$COST_LEDGER_PATH")
 eq "envelope: usd recorded" "9.427110749999999" "$(jq -r '.usd' <<<"$LINE3")"
 
+echo "== cost_record_cli: a result event AFTER plain-text stderr still parses =="
+# The stream log is `claude ... 2>&1`, so the CLI's plain-text output (auth
+# failure, rate-limit notice, node warning) is interleaved with the JSONL. A
+# whole-file `jq 'select(...)'` aborts on the first non-JSON byte and STOPS
+# READING, so a result event printed after any such line would be silently
+# missed -- the same silent-parse-failure class igor#612 is about.
+STREAM4="$TMP/stream4.jsonl"
+{
+  printf '%s\n' 'API Error: Connection error.'
+  printf '%s\n' '(node:1234) Warning: something deprecated'
+  printf '%s\n' '{"type":"assistant","message":{"content":[]}}'
+  printf '%s\n' "$SHUFFLED_ORDER"
+} > "$STREAM4"
+cost_record_cli "mixed-content" "$STREAM4"
+LINE4=$(tail -1 "$COST_LEDGER_PATH")
+eq "leading non-JSON: call_site recorded" "mixed-content" "$(jq -r '.call_site' <<<"$LINE4")"
+eq "leading non-JSON: usd still recorded" "3.5"           "$(jq -r '.usd' <<<"$LINE4")"
+
+echo "== cost_record_cli: a pretty-printed single-object envelope parses =="
+# claude_call captures `--output-format json` verbatim; if the CLI ever
+# pretty-prints that envelope it spans lines, which the line-oriented pass
+# can't read. The whole-file fallback covers it.
+STREAM5="$TMP/stream5.json"
+jq -n --argjson e "$CURRENT_ORDER" '$e' > "$STREAM5"   # multi-line, indented
+eq "envelope really is multi-line" "true" "$([ "$(wc -l < "$STREAM5")" -gt 1 ] && echo true || echo false)"
+cost_record_cli "pretty-envelope" "$STREAM5" "fallback-model"
+LINE5=$(tail -1 "$COST_LEDGER_PATH")
+eq "pretty envelope: usd recorded" "9.427110749999999" "$(jq -r '.usd' <<<"$LINE5")"
+
 BEFORE_COUNT=$(wc -l < "$COST_LEDGER_PATH")
 
 echo "== cost_record_cli: missing stream log warns once, records nothing =="
@@ -113,6 +142,16 @@ eq "summary: by_site has 2 entries"  "2"   "$(jq -r '.by_site | length' <<<"$S")
 EMPTY=$(cost_ledger_summary "2020-01-01T00:00:00Z" "2020-01-02T00:00:00Z")
 eq "summary: empty window has_data false" "false" "$(jq -r '.has_data' <<<"$EMPTY")"
 eq "summary: empty window total_usd zero" "0"     "$(jq -r '.total_usd' <<<"$EMPTY")"
+
+echo "== cost_ledger_summary: one malformed line doesn't blank the whole window =="
+# Without `fromjson?` a single bad line aborts the stream and a full window of
+# real spend renders as "no cost data recorded".
+printf '%s\n' 'not json at all' >> "$COST_LEDGER_PATH"
+printf '%s\n' '{"timestamp":"2026-09-11T12:00:00Z","call_site":"review","usd":1.0,"source":"cli"}' >> "$COST_LEDGER_PATH"
+SM=$(cost_ledger_summary "2026-09-11T00:00:00Z" "2026-09-12T00:00:00Z")
+eq "malformed line: still has_data"        "true" "$(jq -r '.has_data' <<<"$SM")"
+eq "malformed line: good rows still count" "3"    "$(jq -r '.count' <<<"$SM")"
+eq "malformed line: total_usd intact"      "3"    "$(jq -r '.total_usd' <<<"$SM")"
 
 echo "== cost_ledger_summary: missing ledger file reads as no data, not an error =="
 rm -f "$COST_LEDGER_PATH"

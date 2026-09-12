@@ -27,9 +27,16 @@ _claude_version_installed() {
 
 # _claude_version_latest -- bare X.Y.Z from the npm registry. Non-zero (and
 # empty stdout) on any failure -- offline host, registry outage, npm absent.
+#
+# Bounded by `timeout`: this is a network call on the ship-report tick's path,
+# and a registry connection that hangs rather than refuses would stall the
+# tick. A timeout kills the lookup, stdout is empty, and checked_ok goes false
+# -- "could not check", which is the designed degradation.
 _claude_version_latest() {
   command -v npm >/dev/null 2>&1 || return 1
-  npm view @anthropic-ai/claude-code version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
+  timeout "${CLAUDE_VERSION_LOOKUP_TIMEOUT_SECS:-20}" \
+    npm view @anthropic-ai/claude-code version 2>/dev/null \
+    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
 }
 
 # claude_version_check -- {installed, latest, checked_ok, behind, since_days}

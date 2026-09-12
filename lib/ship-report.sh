@@ -151,7 +151,11 @@ shipreport_metrics_build() {
 # Shared jq defs for the metrics/version renderers below.
 _SHIPREPORT_FMT_DEFS='
   def fabs: if . < 0 then -. else . end;
-  def fmt_usd: if . == null then "?" else (. as $v | (($v*100|round)/100) | tostring) end;
+  def fmt_usd: if . == null then "?" else
+      ((. * 100) | round | fabs) as $c
+      | (($c / 100) | floor | tostring) + "."
+        + (($c % 100 | tostring) | if length < 2 then "0" + . else . end)
+    end;
   def fmt_dur: if . == null then "?" else
       (. as $s | ($s|floor) as $secs
        | if $secs < 60 then "\($secs)s"
