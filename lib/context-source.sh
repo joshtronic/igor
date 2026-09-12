@@ -60,8 +60,7 @@ CONTEXT_SKILLS=(
                     # fixed spec shape for a ticket a future amnesiac worker
                     # will read. Deliberately NOT on issue_system_prompt (the
                     # worker-facing surface): a worker executing an assigned
-                    # ticket has no use for the rules on how to WRITE one
-                    # (igor#619, reverting the igor#616 first attempt's mistake).
+                    # ticket has no use for the rules on how to WRITE one.
 )
 
 # CONTEXT_DISTILLERY_PATH / CONTEXT_CACHE_DIR are overridable (tests

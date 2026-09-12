@@ -384,6 +384,8 @@ else
   # attempt put both here; this locks in the revert.
   no "issue_system_prompt does NOT source ticket-skeleton (worker-facing noise)" \
     bash -c 'printf "%s" "$1" | grep -q "context_surface[[:space:]]\+ticket-skeleton\b"' _ "$FN_SRC"
+  no "issue_system_prompt does NOT source doctrine (worker-facing noise)" \
+    bash -c 'printf "%s" "$1" | grep -q "context_surface[[:space:]]\+doctrine\b"' _ "$FN_SRC"
 fi
 
 echo "== wiring: bin/tick.sh's do_maintenance_for_repo routes doctrine + ticket-skeleton through context_surface =="
