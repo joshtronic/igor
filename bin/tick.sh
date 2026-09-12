@@ -1706,7 +1706,22 @@ EOF
 
   # Maintenance triage is classification work, not agent work: no voice
   # anchor, no AGENTS.md -- the user message is self-contained. Claude
-  # Code's built-in system prompt is fine; we don't append our own.
+  # Code's built-in system prompt is fine; we don't append our own, except
+  # for the two ticket-authoring skills: this pass IS what writes the
+  # SECURITY/BUMPS/FINDINGS tickets a later amnesiac worker will read, so
+  # doctrine + ticket-skeleton (sourced via context_surface, igor#619) go
+  # here -- not on issue_system_prompt, which executes a ticket rather
+  # than writing one.
+  local m_system_prompt
+  m_system_prompt=$(cat <<EOF
+$(context_surface doctrine)
+
+---
+
+$(context_surface ticket-skeleton)
+EOF
+)
+
   log "invoking claude for maintenance triage (timeout ${TICK_TIMEOUT})"
   local m_log="$m_worktree/.agent/claude-output.log"
   local m_start; m_start=$(date +%s)
@@ -1714,6 +1729,7 @@ EOF
   set +e
   claude_run_with_cost "maintenance" "$m_log" "$TICK_TIMEOUT" \
     --model "$AGENT_MODEL_REVIEW" \
+    --append-system-prompt "$m_system_prompt" \
     --settings "$AGENT_HOME/agent-settings.json" \
     --max-turns 100 \
     --print "$m_user_msg"

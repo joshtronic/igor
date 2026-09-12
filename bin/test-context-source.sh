@@ -378,6 +378,29 @@ else
   else
     ok "issue_system_prompt sources the worker contract via context_surface" false
   fi
+  # igor#619: ticket-skeleton (and doctrine, its companion) belong on the
+  # surface that AUTHORS tickets, not the one that EXECUTES them -- a
+  # worker reading ticket-writing rules is noise. The igor#616 first
+  # attempt put both here; this locks in the revert.
+  no "issue_system_prompt does NOT source ticket-skeleton (worker-facing noise)" \
+    bash -c 'printf "%s" "$1" | grep -q "context_surface[[:space:]]\+ticket-skeleton\b"' _ "$FN_SRC"
+fi
+
+echo "== wiring: bin/tick.sh's do_maintenance_for_repo routes doctrine + ticket-skeleton through context_surface =="
+MAINT_FN_SRC=$(fn_src do_maintenance_for_repo "$TICK")
+if [ -z "$MAINT_FN_SRC" ]; then
+  ok "could not extract do_maintenance_for_repo() from bin/tick.sh" false
+else
+  if printf '%s' "$MAINT_FN_SRC" | grep -q 'context_surface[[:space:]]\+doctrine\b'; then
+    ok "do_maintenance_for_repo sources doctrine via context_surface" true
+  else
+    ok "do_maintenance_for_repo sources doctrine via context_surface" false
+  fi
+  if printf '%s' "$MAINT_FN_SRC" | grep -q 'context_surface[[:space:]]\+ticket-skeleton\b'; then
+    ok "do_maintenance_for_repo sources ticket-skeleton via context_surface" true
+  else
+    ok "do_maintenance_for_repo sources ticket-skeleton via context_surface" false
+  fi
 fi
 
 echo "== wiring: bin/tick.sh's do_review_tick and do_sports_tick route through context_surface =="
