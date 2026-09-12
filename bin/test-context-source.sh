@@ -206,7 +206,11 @@ else
   ok "  warns once, naming the refusal" false
 fi
 WARN2=$(context_refresh 2>&1 1>/dev/null)
-eq "same bad HEAD again -> no repeat warn (deduped)" "" "$WARN2"
+# Scoped to the refusal line, which is what _context_warn_once dedupes. The
+# accounting ratchet also logs to stderr here and is deliberately NOT deduped
+# -- it repeats every tick so logwatch can count it.
+eq "same bad HEAD again -> no repeat warn (deduped)" "" \
+  "$(printf '%s\n' "$WARN2" | grep 'context-source:.*refused')"
 
 echo "== context_refresh: a too-short body (< 10 lines) in a new HEAD also refuses the whole swap =="
 write_good_skill feedback-directive   # un-break the previous test's skill
@@ -356,6 +360,38 @@ else
   ok "the successful pour logs the unaccounted skill by name" false
 fi
 
+echo "== skill accounting: the warning recurs on an already-current tick, not only on a pour =="
+# What makes the ratchet enforceable rather than advisory: logwatch files a
+# ticket on a signature that recurs LOGWATCH_MIN_OCCURRENCES times inside a
+# day. A pour-only warning fires once per distillery commit and can sit under
+# that bar indefinitely; one per tick clears it by lunchtime.
+GEN_BEFORE_ACCT=$(readlink "$CACHE/current")
+NOOP_WARN=$(context_refresh 2>&1 1>/dev/null)
+eq "the second refresh really was a no-op (same generation)" "$GEN_BEFORE_ACCT" "$(readlink "$CACHE/current")"
+if printf '%s' "$NOOP_WARN" | grep -q 'brand-new-skill'; then
+  ok "an unchanged-HEAD refresh still names the unaccounted skill" true
+else
+  ok "an unchanged-HEAD refresh still names the unaccounted skill" false
+fi
+
+echo "== skill accounting: the warning is shaped so logwatch can escalate it =="
+# The ratchet's whole enforcement path is logwatch's recurrence gate, and that
+# gate only counts lines passing BOTH its source and failure-smell filters. A
+# reworded log line that drops the smell would silently stop being escalatable
+# while still looking like a warning to a human, so pin it against the real
+# patterns rather than a copy of them.
+if [ -r "$HERE/../lib/logwatch.sh" ]; then
+  # shellcheck source=../lib/logwatch.sh
+  . "$HERE/../lib/logwatch.sh"
+  ACCT_LINE=$(printf '%s\n' "$NOOP_WARN" | grep 'brand-new-skill' | head -1)
+  ok "the ratchet line passes logwatch's trusted-source filter" \
+    bash -c 'printf "%s\n" "$1" | grep -qE "$2"' _ "$ACCT_LINE" "$LOGWATCH_SOURCE"
+  ok "the ratchet line passes logwatch's failure-smell filter" \
+    bash -c 'printf "%s\n" "$1" | grep -qE "$2"' _ "$ACCT_LINE" "$LOGWATCH_SMELL"
+  eq "every tick collapses to ONE signature, so the count is occurrences not variants" \
+    "1" "$(printf '%s\n%s\n' "$ACCT_LINE" "$ACCT_LINE" | _logwatch_normalize_stream | sort -u | wc -l)"
+fi
+
 echo "== skill accounting: declaring it silences the warning =="
 git -C "$SEED" rm -rq skills/brand-new-skill
 commit_and_push
@@ -371,6 +407,15 @@ write_good_skill design
 commit_and_push
 fetch_clone
 eq "nothing stale once it's back" "" "$(context_stale_declined_skills)"
+
+echo "== skill accounting: an unreadable clone reports nothing, rather than every decline as stale =="
+# "I can't read master" and "master dropped all five declined skills" are not
+# the same fact. Now that the ratchet runs every tick rather than only after a
+# successful pour, an unreachable distillery is a live path through here.
+eq "no stale declines when origin/master can't be listed" "" \
+  "$(CONTEXT_DISTILLERY_PATH="$TMPROOT/no-such-clone" context_stale_declined_skills)"
+eq "nothing unaccounted either when origin/master can't be listed" "" \
+  "$(CONTEXT_DISTILLERY_PATH="$TMPROOT/no-such-clone" context_unaccounted_skills)"
 
 echo "== skill accounting: CONTEXT_SKILLS and CONTEXT_SKILLS_UNSOURCED don't overlap =="
 OVERLAP=""

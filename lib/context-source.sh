@@ -85,8 +85,7 @@ _context_cache_root() {
 # lands on distillery master and reaches no igor prompt is invisible:
 # nothing fails, the fleet just never gets doctrine somebody wrote. These
 # compare the live skills/ tree at origin/master against both
-# declarations so context_refresh can name the drift in the tick log the
-# moment a new generation pours.
+# declarations so context_refresh can name the drift in the tick log.
 #
 # Deliberately a runtime check rather than a bin/test-*.sh assertion: the
 # distillery is a DIFFERENT repo, so gating igor's own CI on its master
@@ -128,9 +127,40 @@ context_unaccounted_skills() {
 context_stale_declined_skills() {
   local skill master
   master="$(_context_master_skills)"
+  # An unreadable clone lists nothing, which is not the same fact as master
+  # having dropped every declined skill at once. Say nothing rather than
+  # declare all five stale -- the ratchet runs on ticks where the distillery
+  # is unreachable too.
+  [ -n "$master" ] || return 0
   for skill in "${CONTEXT_SKILLS_UNSOURCED[@]}"; do
-    printf '%s\n' "$master" | grep -qx -- "$skill" || printf '%s\n' "$skill"
+    printf '%s\n' "$master" | grep -Fqx -- "$skill" || printf '%s\n' "$skill"
   done
+}
+
+# context_account_skills -- run both directions and log what drifted.
+#
+# Called once per context_refresh, on EVERY tick rather than only after a
+# pour. A pour-only warning fires once per distillery commit, which can
+# sit under logwatch's LOGWATCH_MIN_OCCURRENCES bar for days; one per tick
+# clears it the same morning, so an unwired skill becomes a ticket the
+# operator sees instead of a line nobody greps for. Both lines are
+# `warning:`-prefixed for that reason and not for emphasis -- logwatch
+# only counts what matches its failure-smell filter (lib/logwatch.sh,
+# LOGWATCH_SMELL), and the wording is otherwise fixed per tick so the
+# whole day collapses to one signature.
+#
+# Log-only, always. An unconsumed skill is a gap in igor's wiring, never
+# a reason to refuse an otherwise-valid brain.
+context_account_skills() {
+  local unaccounted stale
+  unaccounted=$(context_unaccounted_skills)
+  if [ -n "$unaccounted" ]; then
+    log "warning: context-source: on distillery master but consumed by nothing and not declined in CONTEXT_SKILLS_UNSOURCED -- $(printf '%s' "$unaccounted" | tr '\n' ' ')(wire it into a surface or record the decline in lib/context-source.sh)"
+  fi
+  stale=$(context_stale_declined_skills)
+  if [ -n "$stale" ]; then
+    log "warning: context-source: CONTEXT_SKILLS_UNSOURCED declines skill(s) no longer on distillery master -- $(printf '%s' "$stale" | tr '\n' ' ')(drop the stale entry in lib/context-source.sh)"
+  fi
 }
 
 # context_skill_body <skill-name>
@@ -288,9 +318,10 @@ _context_generation_complete() {
 # context_refresh
 #
 # Called once per tick (bin/tick.sh, near the self-pull). Reads the
-# distillery clone's origin/master HEAD; a no-op if it matches the
-# cache's stamp AND the cached generation covers every consumed skill
-# (_context_generation_complete). Otherwise reads dist/manifest.json and
+# distillery clone's origin/master HEAD; extraction is a no-op if it
+# matches the cache's stamp AND the cached generation covers every
+# consumed skill (_context_generation_complete) -- context_account_skills
+# still runs on that path. Otherwise reads dist/manifest.json and
 # extracts + validates every CONTEXT_SKILLS entry -- shape (frontmatter present,
 # body >= CONTEXT_MIN_LINES lines) AND integrity (raw SKILL.md bytes
 # hash to the sha256 the manifest recorded for that skill) -- into a
@@ -323,6 +354,12 @@ context_refresh() {
     _context_warn_once "clone-unavailable" "cannot resolve origin/master at $path -- serving last-good cache"
     return 1
   fi
+
+  # Above the no-op return on purpose: the drift being named here is
+  # between distillery master and igor's own two lists, so it persists
+  # across ticks where nothing pours, and that recurrence is what makes
+  # it escalatable (see context_account_skills).
+  context_account_skills
 
   stamp=""
   [ -f "$current/HEAD" ] && stamp=$(cat "$current/HEAD" 2>/dev/null)
@@ -387,20 +424,6 @@ context_refresh() {
 
   find "$cache_root" -maxdepth 1 -type d -name '.gen-*' ! -name "$(basename "$gen")" -exec rm -rf {} +
   rm -f "$cache_root/.bad-head"
-
-  # The accounting ratchet, on the pour rather than every tick: a new
-  # skill can only have appeared in a generation igor hadn't already
-  # extracted. Log-only and after the swap -- an unconsumed skill is a
-  # gap in igor's wiring, never a reason to refuse a valid brain.
-  local unaccounted stale
-  unaccounted=$(context_unaccounted_skills)
-  if [ -n "$unaccounted" ]; then
-    log "context-source: on distillery master but consumed by nothing and not declined in CONTEXT_SKILLS_UNSOURCED -- $(printf '%s' "$unaccounted" | tr '\n' ' ')(wire it into a surface or record the decline in lib/context-source.sh)"
-  fi
-  stale=$(context_stale_declined_skills)
-  if [ -n "$stale" ]; then
-    log "context-source: CONTEXT_SKILLS_UNSOURCED declines skill(s) no longer on distillery master -- $(printf '%s' "$stale" | tr '\n' ' ')(drop the stale entry in lib/context-source.sh)"
-  fi
   return 0
 }
 
