@@ -96,7 +96,7 @@ if [ "$1" = "--all" ]; then
     audit_one "$r" || ANY_FAIL=1
   done < <(jq -r '.[].full_name' <<<"$repos")
 
-  printf '== Language CI gaps (fleet-wide, igor#614) ==\n'
+  printf '== Language CI gaps (fleet-wide) ==\n'
   if [ -n "$FLEET_LANG_GAPS" ]; then
     printf '%s' "$FLEET_LANG_GAPS"
   else

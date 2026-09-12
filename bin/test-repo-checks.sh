@@ -246,7 +246,7 @@ f="$(new_fixture)"; mkdir -p "$f/bin"; : >"$f/bin/a.sh"; : >"$f/bin/b.sh"; : >"$
 ok "a tree of *.sh -> shell present"  rc_lang_present shell
 # An incidental script is not a language tier -- nearly every repo carries a
 # deploy.sh, and reporting each one as an uncovered language buries the real
-# gaps under fleet-wide noise (igor#615 review).
+# gaps under fleet-wide noise.
 f="$(new_fixture)"; : >"$f/deploy.sh"; commit_fixture "$f"
 no "one loose *.sh is not a shell repo"  rc_lang_present shell
 f="$(new_fixture)"; : >"$f/gen.py"; : >"$f/other.py"; commit_fixture "$f"
@@ -269,7 +269,7 @@ ok "shellcheck step -> shell CI ok"  rc_lang_ci_ok shell
 ok "pytest step -> python CI ok"     rc_lang_ci_ok python
 no "no go step -> go CI not ok"      rc_lang_ci_ok go
 
-echo "== rc_lang_ci_ok: installing a toolchain is not running it (igor#615 review) =="
+echo "== rc_lang_ci_ok: installing a toolchain is not running it =="
 # The false-ok this check exists to catch: CI that installs a runtime and
 # never points it at the code would otherwise report that language covered.
 INSTALL_CI=$'name: ci\non:\n  pull_request:\njobs:\n  test:\n    steps:\n      - uses: actions/setup-go@v5\n      - run: apt-get install -y python3 make composer\n      - run: pip install tox\n      - run: npm ci\n      - run: go test ./...'
@@ -330,7 +330,7 @@ OUT=$(validate_repo_local demo/lang "$LCLONE"); V=$?
 if [ "$V" -eq 0 ]; then printf '  + repo with an unwatched Go module still validates (report-only)\n'; else printf '  x expected rc 0 (report-only), got %s\n' "$V"; FAIL=$((FAIL + 1)); fi
 if grep -qE '^- \[ \] language CI coverage: .go. \(advisory' <<<"$OUT"; then printf '  + validate_repo_local surfaces the go gap as an advisory line\n'; else printf '  x validate_repo_local should surface the go gap as an advisory line\n'; FAIL=$((FAIL + 1)); fi
 
-echo "== lang_ci_gap_list: what bin/validate-repo.sh folds into the fleet summary (igor#615 review) =="
+echo "== lang_ci_gap_list: what bin/validate-repo.sh folds into the fleet summary =="
 LANG_CI_REPORT=$'go: NO CI step\nshell: ok\npython: NO CI step\n'
 G=$(lang_ci_gap_list)
 if [ "$G" = "go,python" ]; then printf '  + gap list joins only the uncovered languages\n'; else printf '  x expected "go,python", got "%s"\n' "$G"; FAIL=$((FAIL + 1)); fi
@@ -350,6 +350,33 @@ LANG_CI_REPORT=$'rust: NO CI step\n'
 validate_repo_local demo/nope "$TMPROOT/not-a-clone" >/dev/null
 G=$(lang_ci_gap_list)
 if [ -z "$G" ]; then printf '  + an indeterminate clone leaves no stale report behind\n'; else printf '  x indeterminate clone should clear the report, got "%s"\n' "$G"; FAIL=$((FAIL + 1)); fi
+
+echo "== check_language_ci_coverage does not gate a caller that runs errexit =="
+# check_language_ci_coverage returns the COUNT of uncovered languages, so a repo
+# with a gap returns non-zero. Every check here is invoked bare and read via $?,
+# so under errexit the FIRST non-zero one aborts the function -- which for most
+# repos is an earlier check (a missing CLAUDE.md, an un-adopted dossier) and was
+# true long before this section existed. What must stay true is narrower: the
+# language report must not be the thing that turns an OTHERWISE-CLEAN repo
+# not-ready. Hence a fixture that passes every other check -- conforming
+# dossier, CLAUDE.md, README, lint config, test signal, CI -- and differs from
+# a perfect repo only in the unwatched Go module.
+CBARE="$TMPROOT/clean.git"; git init -q --bare -b master "$CBARE"
+CWORK="$(new_fixture)"
+printf '%s' $'# demo\n\nA demo repo.\n\n## KPIs\n\n1. Tasks shipped per week -- tracker count\n\n## DOs and DON\'Ts\n\n- DO keep it small.\n\n## Caveats\n\n- None.\n\n## Metadata\n\n```yaml\ntype: tool\n```\n' >"$CWORK/AGENTS.md"
+printf 'demo\n' >"$CWORK/CLAUDE.md"
+printf '# demo\n' >"$CWORK/README.md"
+: >"$CWORK/.shellcheckrc"
+printf 'test:\n\tpytest\n' >"$CWORK/Makefile"
+: >"$CWORK/go.mod"; mkdir -p "$CWORK/scanner"; : >"$CWORK/scanner/main.go"
+mkdir -p "$CWORK/.forgejo/workflows"; printf '%s' "$SH_PY_CI" >"$CWORK/.forgejo/workflows/ci.yml"
+git -C "$CWORK" add -A; git -C "$CWORK" commit -q -m clean
+git -C "$CWORK" remote add origin "$CBARE"; git -C "$CWORK" push -q origin master
+CCLONE="$TMPROOT/clean-clone"; git clone -q "$CBARE" "$CCLONE"
+
+OUT=$(set -e; validate_repo_local demo/clean "$CCLONE"); V=$?
+if [ "$V" -eq 0 ]; then printf '  + an otherwise-clean repo with a language gap still validates under errexit\n'; else printf '  x errexit caller got rc %s -- the language report is gating\n' "$V"; FAIL=$((FAIL + 1)); fi
+if grep -qE '^- \[ \] language CI coverage: .go. \(advisory' <<<"$OUT"; then printf '  + and the go gap is still reported, not swallowed by the abort\n'; else printf '  x the go advisory line is missing under errexit\n'; FAIL=$((FAIL + 1)); fi
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-repo-checks: all passed"

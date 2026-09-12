@@ -480,7 +480,12 @@ validate_repo_local() {
   # action) and still carry a whole language CI never touches. Surface it
   # so a human can decide what to fix versus accept; see lib/repo-checks.sh
   # header comment for why this isn't a hard gate yet.
-  check_language_ci_coverage
+  # `|| true` because the return value is the COUNT of uncovered languages, and
+  # the report is read from LANG_CI_REPORT, not from $?. Left bare, a gap makes
+  # this the one check that can abort validate_repo_local under a caller's
+  # errexit on a repo where everything else passes -- a report-only check
+  # silently becoming a hard gate.
+  check_language_ci_coverage || true
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     lang="${line%%:*}"
