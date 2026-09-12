@@ -42,8 +42,15 @@ ssh_clone_url() {
   fi
 }
 
+# FLEET_LANG_GAPS -- one "repo: lang1, lang2" line per repo audited this run
+# that has a detected language with no CI step (lib/repo-checks.sh's
+# check_language_ci_coverage, via validate_repo_local's advisory report).
+# Accumulated across audit_one calls so --all can print a fleet-wide summary
+# at the end -- that list is the actual deliverable of igor#614.
+FLEET_LANG_GAPS=""
+
 audit_one() {
-  local repo="$1" tmp status
+  local repo="$1" tmp status gaps
   printf '== %s ==\n' "$repo"
   tmp=$(mktemp -d) || { echo "mktemp failed" >&2; return 2; }
   # Shallow clone of the default branch is all the checks read.
@@ -55,6 +62,13 @@ audit_one() {
   validate_repo_local "$repo" "$tmp"
   status=$?
   rm -rf "$tmp"
+
+  # validate_repo_local sets LANG_CI_REPORT as a side effect (igor#614) and
+  # clears it first, so this reads THIS repo's gaps even when the clone turned
+  # out to be unreadable. Called bare above -- a command substitution would
+  # strand the report in a subshell and leave the summary permanently empty.
+  gaps=$(lang_ci_gap_list)
+  [ -n "$gaps" ] && FLEET_LANG_GAPS="${FLEET_LANG_GAPS}${repo}: ${gaps}"$'\n'
 
   # Agent greenlight label -- repo metadata, so it's the one API read here and
   # deliberately NOT in validate_repo_local (that stays pure local-clone reads
@@ -81,6 +95,14 @@ if [ "$1" = "--all" ]; then
     [ -z "$r" ] && continue
     audit_one "$r" || ANY_FAIL=1
   done < <(jq -r '.[].full_name' <<<"$repos")
+
+  printf '== Language CI gaps (fleet-wide) ==\n'
+  if [ -n "$FLEET_LANG_GAPS" ]; then
+    printf '%s' "$FLEET_LANG_GAPS"
+  else
+    printf 'none -- every detected language in every repo has a CI step\n'
+  fi
+
   exit $ANY_FAIL
 else
   audit_one "$1"
