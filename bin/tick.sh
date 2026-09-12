@@ -407,11 +407,15 @@ init_igor_scratch() {
 
 # Build the full system prompt for issue-work Claude invocations.
 #
-# Two pieces, in order:
-#   voice anchor      -- shared voice anchor (2 paragraphs)
-#   worker contract   -- slim, issue-work-specific protocol/rules
+# Five pieces, in order:
+#   voice anchor       -- shared voice anchor (2 paragraphs)
+#   worker contract    -- slim, issue-work-specific protocol/rules
+#   coding standards   -- the code-output contract (minimal touch, comments, TDD)
+#   doctrine           -- the operator's engineering doctrine (context/spec/evidence/validation/operating)
+#   ticket skeleton    -- the fixed spec shape for any ticket this session files
+#                         itself (agent-ask.sh / agent-enqueue.sh)
 #
-# Both are sourced from the Distillery at origin/master, live, via
+# All are sourced from the Distillery at origin/master, live, via
 # context_surface's last-good cache -- no in-repo fallback
 # (lib/context-source.sh, igor#485). The bootstrap gate above the main
 # cascade guarantees the cache is seeded before this ever runs.
@@ -431,6 +435,12 @@ issue_system_prompt() {
   context_surface voice
   printf '\n'
   context_surface worker-contract
+  printf '\n'
+  context_surface coding-standards
+  printf '\n'
+  context_surface doctrine
+  printf '\n'
+  context_surface ticket-skeleton
 }
 
 
@@ -4761,9 +4771,10 @@ init_igor_scratch "$WORKTREE"
 
 cd "$WORKTREE"
 
-# System prompt: voice anchor + worker contract, sourced from the
-# Distillery (issue_system_prompt). Per-repo CLAUDE.md is auto-loaded
-# by Claude Code from the worktree root.
+# System prompt: voice anchor, worker contract, coding standards,
+# doctrine, and the ticket skeleton, sourced from the Distillery
+# (issue_system_prompt). Per-repo CLAUDE.md is auto-loaded by Claude
+# Code from the worktree root.
 SYSTEM_PROMPT=$(issue_system_prompt)
 
 USER_MSG=$(cat <<EOF

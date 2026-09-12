@@ -54,6 +54,22 @@ CONTEXT_SKILLS=(
   site-work-directive
   sports-digest-directive
   now-directive
+  coding-standards    # issue_system_prompt (bin/tick.sh): the code-output contract for issue work + PR review
+  doctrine            # issue_system_prompt (bin/tick.sh): operating doctrine for the worker + its own ticket-filing
+  ticket-skeleton     # issue_system_prompt (bin/tick.sh): the spec shape for tickets it files via agent-ask.sh/agent-enqueue.sh
+)
+
+# Skills that exist on distillery master but are deliberately NOT sourced
+# into any igor prompt surface (igor#616 -- named here, not just absent,
+# so bin/test-context-skills-completeness.sh can tell "considered and
+# declined" apart from "nobody looked").
+# shellcheck disable=SC2034  # read only by bin/test-context-skills-completeness.sh
+CONTEXT_SKILLS_UNSOURCED=(
+  ai-writing-tells    # recall-only catalog by its own SKILL.md; the prompt-facing subset already ships in the `voice` skill's Bans section
+  design              # no igor surface does full redesign/reskin work; site-work-directive deliberately caps visual polish smaller than this skill's charter
+  dossier-spec        # documents the AGENTS.md shape enforced entirely by deterministic code (lib/dossier.sh, lib/automerge.sh); no LLM prompt reads or writes a dossier
+  product-research    # no surface delegates a product goal to an agent; the autonomous-CEO pass this replaces was retired in igor#556
+  worker-permissions  # documents the static agent-settings.json for a human/operator; not runtime prompt guidance
 )
 
 # CONTEXT_DISTILLERY_PATH / CONTEXT_CACHE_DIR are overridable (tests

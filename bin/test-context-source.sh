@@ -378,6 +378,21 @@ else
   else
     ok "issue_system_prompt sources the worker contract via context_surface" false
   fi
+  if printf '%s' "$FN_SRC" | grep -q 'context_surface[[:space:]]\+coding-standards\b'; then
+    ok "issue_system_prompt sources coding-standards via context_surface" true
+  else
+    ok "issue_system_prompt sources coding-standards via context_surface" false
+  fi
+  if printf '%s' "$FN_SRC" | grep -q 'context_surface[[:space:]]\+doctrine\b'; then
+    ok "issue_system_prompt sources doctrine via context_surface" true
+  else
+    ok "issue_system_prompt sources doctrine via context_surface" false
+  fi
+  if printf '%s' "$FN_SRC" | grep -q 'context_surface[[:space:]]\+ticket-skeleton\b'; then
+    ok "issue_system_prompt sources ticket-skeleton via context_surface" true
+  else
+    ok "issue_system_prompt sources ticket-skeleton via context_surface" false
+  fi
 fi
 
 echo "== wiring: bin/tick.sh's do_review_tick and do_sports_tick route through context_surface =="
