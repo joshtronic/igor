@@ -102,8 +102,112 @@ shipreport_build() {
 # shipreport_is_empty <report_json> -- exit 0 if every bucket is empty,
 # including `landed` when the caller merged one in (shipreport_merge_landed)
 # -- a report with landed-verification notes and nothing else is NOT empty.
+# Also NOT empty (igor#612) when the caller merged in a metrics section that
+# actually has cost or tick-timing data, or a Claude Code version check that
+# came back behind -- a quiet PR day still gets the spend/timing visibility
+# Josh asked for, rather than the whole report vanishing on the days with
+# nothing else to say. Both conditions default to "absent" via `// false`,
+# so a report that never called shipreport_metrics_build (every existing
+# caller, and every existing test) behaves exactly as before.
 shipreport_is_empty() {
-  [ "$(jq -r '[.needs_you, .shipped, .inflight, (.landed // [])] | map(length) | add // 0' <<<"$1" 2>/dev/null)" = "0" ]
+  [ "$(jq -r '
+    (([.needs_you, .shipped, .inflight, (.landed // [])] | map(length) | add) == 0)
+    and ((.metrics.cost.now.has_data // false) | not)
+    and ((.metrics.timing.now.has_data // false) | not)
+    and ((.claude_version.behind // false) | not)
+  ' <<<"$1" 2>/dev/null)" = "true" ]
+}
+
+# shipreport_metrics_build <cost_now> <cost_prev> <timing_now> <timing_prev> <claude_version>
+# igor#612: "times and costs shown in aggregate so we can check if there's a
+# change." Bundles the current-window cost/tick-timing summaries (from
+# lib/cost.sh's cost_ledger_summary / lib/tick-timing.sh's
+# tick_timing_summary) with the prior-period equivalents for a delta, plus
+# the Claude Code version check (lib/claude-version.sh). Pure merge, no
+# gathering -- same split as shipreport_build vs. do_shipreport_tick's
+# Forgejo gathering, so this stays unit-testable off fixtures. Merge the
+# result into a report with `jq '. + $that'` -- it emits BOTH the `metrics`
+# and `claude_version` top-level keys the renderers below look for.
+shipreport_metrics_build() {
+  local cost_now="$1" cost_prev="$2" timing_now="$3" timing_prev="$4" claude_version="$5"
+  jq -cn \
+    --argjson cn "$cost_now" --argjson cp "$cost_prev" \
+    --argjson tn "$timing_now" --argjson tp "$timing_prev" \
+    --argjson cv "$claude_version" \
+    '{
+       metrics: {
+         cost: { now: $cn, prev: $cp,
+                 delta_usd: (if $cn.has_data and $cp.has_data
+                             then ((($cn.total_usd - $cp.total_usd) * 100 | round) / 100)
+                             else null end) },
+         timing: { now: $tn, prev: $tp,
+                   delta_median_s: (if $tn.has_data and $tp.has_data
+                                    then ($tn.median_s - $tp.median_s) else null end) }
+       },
+       claude_version: $cv
+     }'
+}
+
+# Shared jq defs for the metrics/version renderers below.
+_SHIPREPORT_FMT_DEFS='
+  def fabs: if . < 0 then -. else . end;
+  def fmt_usd: if . == null then "?" else (. as $v | (($v*100|round)/100) | tostring) end;
+  def fmt_dur: if . == null then "?" else
+      (. as $s | ($s|floor) as $secs
+       | if $secs < 60 then "\($secs)s"
+         else "\($secs/60|floor)m\($secs%60)s" end)
+    end;
+'
+
+# _shipreport_metrics_lines <report_json on stdin> -- one line per array
+# element (jq -r on a multi-value filter), empty output when the report
+# never merged in a `metrics` key (a plain PR-only report).
+_shipreport_metrics_lines() {
+  jq -r "$_SHIPREPORT_FMT_DEFS"'
+    if has("metrics") then
+      "-- COST & TIMING (24h) --",
+      (if .metrics.cost.now.has_data then
+         "  spend: $" + (.metrics.cost.now.total_usd|fmt_usd)
+         + (if .metrics.cost.delta_usd == null then " (no prior-period data to compare)"
+            else (if .metrics.cost.delta_usd >= 0 then " (+$" else " (-$" end)
+                 + ((.metrics.cost.delta_usd|fabs)|fmt_usd) + " vs prior 24h)" end)
+       else "  no cost data recorded" end),
+      (.metrics.cost.now.by_site[]? | "    " + .site + ": $" + (.usd|fmt_usd)),
+      (if .metrics.timing.now.has_data then
+         "  ticks: " + (.metrics.timing.now.count|tostring)
+         + " (median " + (.metrics.timing.now.median_s|fmt_dur)
+         + ", p90 " + (.metrics.timing.now.p90_s|fmt_dur)
+         + ", longest " + (.metrics.timing.now.max_s|fmt_dur) + ")"
+         + (if .metrics.timing.delta_median_s == null then ""
+            else (if .metrics.timing.delta_median_s >= 0 then " (median +" else " (median -" end)
+                 + ((.metrics.timing.delta_median_s|fabs)|fmt_dur) + " vs prior 24h)" end)
+       else "  no tick-timing data recorded" end)
+    else empty end
+  '
+}
+
+# _shipreport_claude_version_line <report_json on stdin> -- one line, or
+# empty when the report never merged in a `claude_version` key. Shouts
+# (BEHIND) only when actually behind; a matching version gets one quiet
+# line; a failed registry lookup says so explicitly rather than going dark
+# (igor#612: "a version check that silently stops is this whole ticket
+# happening again").
+_shipreport_claude_version_line() {
+  jq -r '
+    if has("claude_version") then
+      (if .claude_version.checked_ok then
+         (if .claude_version.behind then
+            "Claude Code: " + .claude_version.installed + " -- BEHIND latest " + .claude_version.latest
+              + (if .claude_version.since_days != null
+                 then " (unchanged " + (.claude_version.since_days|tostring) + "d)" else "" end)
+          else
+            "Claude Code: " + .claude_version.installed + " (up to date)"
+          end)
+       else
+         "Claude Code: could not check (installed " + (.claude_version.installed // "unknown") + ")"
+       end)
+    else empty end
+  '
 }
 
 # shipreport_render_text <report_json on stdin> -- plain-text email body (ASCII).
@@ -146,6 +250,17 @@ shipreport_render_text() {
     printf '\n'
   fi
 
+  # Cost + tick-timing (igor#612): omitted entirely for a report that never
+  # merged in a `metrics` key (a plain PR report, e.g. every existing test).
+  local metrics_lines; metrics_lines=$(_shipreport_metrics_lines <<<"$r")
+  if [ -n "$metrics_lines" ]; then
+    printf '%s\n\n' "$metrics_lines"
+  fi
+  local version_line; version_line=$(_shipreport_claude_version_line <<<"$r")
+  if [ -n "$version_line" ]; then
+    printf '%s\n\n' "$version_line"
+  fi
+
   printf -- '---\nDeploy failures are alerted separately, in real time, by the deploy barrier.\n'
 }
 
@@ -186,6 +301,19 @@ shipreport_render_html() {
     local ld
     ld=$(jq -r '.landed[] | "<li><strong>\(.repo)#\(.pr)</strong> \(.sha[0:8]) &mdash; \(.detail|@html)</li>"' <<<"$r")
     if [ -n "$ld" ]; then printf '<ul>%s</ul>' "$ld"; else printf '<p style="color:#888"><em>nothing landed</em></p>'; fi
+  fi
+
+  # Cost + tick-timing (igor#612): reuses the same line generator as
+  # shipreport_render_text (one source of truth for the numbers), wrapped
+  # in <pre> for the email. Omitted for a report that never merged in a
+  # `metrics` key.
+  local metrics_lines; metrics_lines=$(_shipreport_metrics_lines <<<"$r")
+  if [ -n "$metrics_lines" ]; then
+    printf '<pre style="white-space:pre-wrap;font-family:inherit;font-size:14px;margin:16px 0 0">%s</pre>' "$metrics_lines"
+  fi
+  local version_line; version_line=$(_shipreport_claude_version_line <<<"$r")
+  if [ -n "$version_line" ]; then
+    printf '<p style="color:#888;font-size:13px;margin:8px 0 0">%s</p>' "$version_line"
   fi
 
   printf '<hr style="border:none;border-top:1px solid #eee;margin:16px 0"><p style="color:#888;font-size:13px">Deploy failures are alerted separately, in real time, by the deploy barrier.</p>'

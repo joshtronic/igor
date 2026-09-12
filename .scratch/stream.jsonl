@@ -1,0 +1,2 @@
+{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}
+{"is_error":false,"duration_api_ms":100,"num_turns":3,"stop_reason":"end_turn","session_id":"abc","total_cost_usd":9.427110749999999,"usage":{"input_tokens":10,"output_tokens":20,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"modelUsage":{},"permission_denials":[],"terminal_reason":"x","fast_mode_state":"x","fast_mode_disabled_reason":null,"subtype":"success","errors":[],"type":"result","duration_ms":120,"uuid":"u1","model":"claude-sonnet-4-6"}

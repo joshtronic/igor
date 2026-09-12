@@ -38,6 +38,13 @@
 
 : "${AGENT_STATE_DIR:?AGENT_STATE_DIR must be set before sourcing lib/cost.sh}"
 
+# Fallback logger so this module is sourceable standalone (tests) and so
+# the new warn-once lines below (igor#612) work even if this is ever
+# sourced before tick.sh's own log() is defined.
+if ! declare -F log >/dev/null; then
+  log() { printf '[agent] %s\n' "$*" >&2; }
+fi
+
 COST_LEDGER_PATH="$AGENT_STATE_DIR/cost-ledger.jsonl"
 
 # Write one ledger line. If usd is "" we omit the field entirely;
@@ -82,12 +89,28 @@ cost_record_api() {
   _cost_write_line "$call_site" "$model" "$input" "$output" "$cache_create" "$cache_read" "" "api"
 }
 
+# Warn-once markers (igor#612): a broken parse here is a SILENT
+# multi-week data loss (seven weeks, undetected -- the charter case for
+# "no logging without visibility"). Each condition warns at most once
+# per process -- one tick.sh invocation may call cost_record_cli many
+# times (one per model call in the tick), and re-warning on every one
+# of them would just be a different kind of noise.
+_COST_WARNED_NO_STREAM_LOG=""
+_COST_WARNED_NO_RESULT_EVENT=""
+
 # Claude Code CLI call: pull the final "result" event from the
 # stream-json log. It contains both `usage` and `total_cost_usd`
 # (precomputed by the CLI, accounts for tool-use accounting). We
 # store the precomputed USD verbatim -- authoritative wins. Token
 # counts come along for the ride so reports can show breakdowns.
-# Best-effort: missing/malformed log silently skips.
+#
+# Parses as JSON (jq `select(.type == "result")`), NOT by grepping for
+# a `{"type":"result"` prefix -- key order in the CLI's result event is
+# not a contract (igor#612: a CLI update reordered it, `type` moved from
+# 1st to 15th key, the old text-anchored grep silently stopped matching
+# for seven weeks). Best-effort: a missing/malformed log still skips
+# recording (failing open is right -- a bad ledger write must never
+# break a tick), but now it says so instead of failing silently.
 #
 # Note: on a subscription login the CLI still computes total_cost_usd,
 # so the ledger keeps working -- the number is dollars-EQUIVALENT used
@@ -97,10 +120,22 @@ cost_record_api() {
 # (the `--output-format json` envelope claude_call records doesn't).
 cost_record_cli() {
   local call_site="$1" stream_log="$2" model_fallback="${3:-}"
-  [ -f "$stream_log" ] || return 0
+  if [ ! -f "$stream_log" ]; then
+    if [ -z "$_COST_WARNED_NO_STREAM_LOG" ]; then
+      log "cost: no stream log at $stream_log ($call_site) -- spend for this call was NOT recorded"
+      _COST_WARNED_NO_STREAM_LOG=1
+    fi
+    return 0
+  fi
   local result_line
-  result_line=$(grep -E '^\{"type":"result"' "$stream_log" 2>/dev/null | tail -1)
-  [ -n "$result_line" ] || return 0
+  result_line=$(jq -c 'select(.type == "result")' "$stream_log" 2>/dev/null | tail -1)
+  if [ -z "$result_line" ]; then
+    if [ -z "$_COST_WARNED_NO_RESULT_EVENT" ]; then
+      log "cost: no result event found in $stream_log ($call_site) -- spend for this call was NOT recorded (malformed or truncated log?)"
+      _COST_WARNED_NO_RESULT_EVENT=1
+    fi
+    return 0
+  fi
   local model input output cache_create cache_read usd
   model=$(jq -r '.model // empty' <<<"$result_line" 2>/dev/null)
   [ -n "$model" ] || model="${model_fallback:-${AGENT_MODEL:-unknown}}"
@@ -111,4 +146,35 @@ cost_record_cli() {
   usd=$(jq -r '.total_cost_usd // empty' <<<"$result_line" 2>/dev/null)
   [ -n "$usd" ] || usd=""
   _cost_write_line "$call_site" "$model" "$input" "$output" "$cache_create" "$cache_read" "$usd" "cli"
+}
+
+# cost_ledger_summary <since_iso> <until_iso> -- total spend + a per-call-site
+# breakdown for entries in [since, until). Used by the ship report (igor#612)
+# to show aggregate spend instead of leaving seven weeks of it unread again.
+#
+# Sums the authoritative `.usd` field only (the "cli" source, which is every
+# live call site as of igor#612 -- anthropic_call/cost_record_api has no live
+# call site, so a bare-API entry lacking `.usd` would undercount, but there
+# is currently nothing to undercount). has_data distinguishes a genuinely
+# quiet window from a missing/unreadable ledger -- the report must say "no
+# cost data recorded", never a bare $0.00 that reads the same as "checked,
+# spent nothing".
+cost_ledger_summary() {
+  local since="$1" until_="$2"
+  if [ ! -f "$COST_LEDGER_PATH" ]; then
+    printf '{"count":0,"has_data":false,"total_usd":0,"by_site":[]}'
+    return 0
+  fi
+  jq -cn --arg since "$since" --arg until "$until_" '
+    [inputs | select(.timestamp >= $since and .timestamp < $until)] as $rows
+    | {
+        count: ($rows | length),
+        has_data: ($rows | length > 0),
+        total_usd: ($rows | map(.usd // 0) | add // 0),
+        by_site: ($rows | group_by(.call_site)
+                  | map({site: .[0].call_site, usd: (map(.usd // 0) | add), count: length})
+                  | sort_by(-.usd))
+      }
+  ' "$COST_LEDGER_PATH" 2>/dev/null \
+    || printf '{"count":0,"has_data":false,"total_usd":0,"by_site":[]}'
 }
