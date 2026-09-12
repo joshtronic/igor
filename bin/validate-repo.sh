@@ -63,9 +63,11 @@ audit_one() {
   status=$?
   rm -rf "$tmp"
 
-  # validate_repo_local sets LANG_CI_REPORT as a side effect (igor#614);
-  # fold any "NO CI step" lines into the fleet-wide summary.
-  gaps=$(grep 'NO CI step' <<<"$LANG_CI_REPORT" | cut -d: -f1 | paste -sd, -)
+  # validate_repo_local sets LANG_CI_REPORT as a side effect (igor#614) and
+  # clears it first, so this reads THIS repo's gaps even when the clone turned
+  # out to be unreadable. Called bare above -- a command substitution would
+  # strand the report in a subshell and leave the summary permanently empty.
+  gaps=$(lang_ci_gap_list)
   [ -n "$gaps" ] && FLEET_LANG_GAPS="${FLEET_LANG_GAPS}${repo}: ${gaps}"$'\n'
 
   # Agent greenlight label -- repo metadata, so it's the one API read here and

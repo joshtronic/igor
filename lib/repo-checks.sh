@@ -246,14 +246,26 @@ check_lint_signal() {
 
 _RC_LANGS="go node python php rust shell"
 
+# A manifest (go.mod, package.json, ...) is a declaration -- one file is
+# enough. Python and shell have no manifest and are detected by extension, so
+# they need a floor: nearly every repo in the fleet carries a deploy.sh or a
+# one-off generator script, and reporting each of those as an uncovered
+# language would bury the gaps worth acting on (the untested Go module) under
+# fleet-wide noise.
+_RC_LANG_MIN_FILES=3
+
+rc_lang_file_count() {
+  git -C "$_RC_REPO_PATH" ls-tree -r --name-only "$_RC_REF" 2>/dev/null | grep -cE "$1"
+}
+
 rc_lang_present() {
   case "$1" in
     go)     rc_file_exists go.mod ;;
     node)   rc_file_exists package.json ;;
     php)    rc_file_exists composer.json ;;
     rust)   rc_file_exists Cargo.toml ;;
-    python) git -C "$_RC_REPO_PATH" ls-tree -r --name-only "$_RC_REF" 2>/dev/null | grep -qE '\.py$' ;;
-    shell)  git -C "$_RC_REPO_PATH" ls-tree -r --name-only "$_RC_REF" 2>/dev/null | grep -qE '\.sh$' ;;
+    python) [ "$(rc_lang_file_count '\.py$')" -ge "$_RC_LANG_MIN_FILES" ] ;;
+    shell)  [ "$(rc_lang_file_count '\.sh$')" -ge "$_RC_LANG_MIN_FILES" ] ;;
     *) return 1 ;;
   esac
 }
@@ -279,16 +291,28 @@ rc_pr_workflow_content() {
   done
 }
 
+# Installing a toolchain is not running it. `apt-get install python3` or
+# `npm ci` proves a runtime is present, not that anything is pointed at the
+# code -- counting those as coverage would report "ok" for the exact
+# installed-but-never-run shape this check exists to catch. Compound steps
+# (`npm ci && npm test`) are split on `&&` and `;` first, so dropping the
+# install half keeps the half that verifies.
+_RC_INSTALL_LINE='(apt|apt-get|yum|dnf|apk|brew)[[:space:]]+(install|add)|pip3?[[:space:]]+install|npm[[:space:]]+(ci|install)|(yarn|pnpm|composer|go|cargo|gem)[[:space:]]+(install|update)|uses:[[:space:]]*[^[:space:]]*setup-'
+
 rc_lang_ci_ok() {
   local lang="$1" content
-  content=$(rc_pr_workflow_content)
+  content=$(rc_pr_workflow_content | sed 's/&&/\n/g; s/;/\n/g' | grep -vE "$_RC_INSTALL_LINE") || true
   case "$lang" in
     go)     grep -qE 'go (build|test|vet)|golangci-lint' <<<"$content" ;;
-    node)   grep -qE 'npm (ci|run|test)|yarn |pnpm |jest|vitest|eslint' <<<"$content" ;;
-    python) grep -qE 'pytest|python3?[[:space:]]|tox' <<<"$content" ;;
-    php)    grep -qE 'composer |phpunit' <<<"$content" ;;
+    node)   grep -qE 'npm (run|test)|yarn |pnpm |jest|vitest|eslint' <<<"$content" ;;
+    python) grep -qE 'pytest|unittest|[[:space:]](tox|nox|ruff|mypy|flake8|pylint)([[:space:]]|$)|python3?[[:space:]]+[^[:space:]]*\.py' <<<"$content" ;;
+    php)    grep -qE 'composer[[:space:]]+(run|run-script|test|exec)|phpunit|phpstan|psalm|pest' <<<"$content" ;;
     rust)   grep -qE 'cargo (build|test|clippy)' <<<"$content" ;;
-    shell)  grep -qE 'shellcheck|shfmt|bats' <<<"$content" ;;
+    # A step that EXECUTES a script from the repo counts as much as a linter
+    # does -- igor's own CI runs `bin/check-sync.sh` (which runs every shell
+    # unit test) and no shellcheck, and calling that uncovered would be the
+    # report's first false positive on the repo producing it.
+    shell)  grep -qE 'shellcheck|shfmt|bats|[^[:space:]]*\.sh([[:space:]]|$)' <<<"$content" ;;
     *) return 1 ;;
   esac
 }
@@ -311,6 +335,15 @@ check_language_ci_coverage() {
   done
   LANG_CI_REPORT="$lines"
   return "$missing"
+}
+
+# lang_ci_gap_list -- the comma-joined language names with no CI step from the
+# LAST check_language_ci_coverage run; empty when every detected language is
+# covered. bin/validate-repo.sh folds this into its fleet-wide summary; it
+# lives here rather than inline there because that summary is the deliverable
+# of igor#614 and needs a test of its own.
+lang_ci_gap_list() {
+  grep 'NO CI step' <<<"$LANG_CI_REPORT" | cut -d: -f1 | paste -sd, - || true
 }
 
 check_ci_workflow() {
@@ -364,7 +397,13 @@ check_ci_workflow() {
 # checklist body never needs it.
 validate_repo_local() {
   # shellcheck disable=SC2034  # repo is signature-only, see above.
-  local repo="$1" path="$2" fail=0
+  local repo="$1" path="$2" fail=0 line lang
+
+  # LANG_CI_REPORT is read back by callers AFTER this returns (the fleet
+  # summary in bin/validate-repo.sh), so clear it before the indeterminate
+  # early return below -- otherwise a repo whose clone couldn't be read would
+  # be credited with the previous repo's gaps.
+  LANG_CI_REPORT=""
 
   # _gate  <status> <name> <hint> -- a hard requirement; a failure marks the
   #                                   repo not-ready (rc 1).
@@ -442,17 +481,15 @@ validate_repo_local() {
   # so a human can decide what to fix versus accept; see lib/repo-checks.sh
   # header comment for why this isn't a hard gate yet.
   check_language_ci_coverage
-  if [ -n "$LANG_CI_REPORT" ]; then
-    while IFS= read -r line; do
-      [ -z "$line" ] && continue
-      case "$line" in
-        *': ok')
-          printf -- '- [x] language CI coverage: %s (advisory)\n' "$line" ;;
-        *)
-          printf -- '- [ ] language CI coverage: %s (advisory -- report only, does not block work)\n' "$line" ;;
-      esac
-    done <<<"$LANG_CI_REPORT"
-  fi
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    lang="${line%%:*}"
+    case "$line" in
+      *': ok') _advise 0 "language CI coverage: \`$lang\`" ;;
+      *) _advise 1 "language CI coverage: \`$lang\`" \
+           "no \`pull_request\` workflow step runs \`$lang\` -- the code is in the repo but CI never exercises it" ;;
+    esac
+  done <<<"$LANG_CI_REPORT"
 
   [ "$fail" -eq 0 ]
 }
