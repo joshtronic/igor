@@ -54,6 +54,13 @@ CONTEXT_SKILLS=(
   site-work-directive
   sports-digest-directive
   now-directive
+  doctrine          # do_maintenance_for_repo (bin/tick.sh): the ticket-authoring
+                    # pass that writes the SECURITY/BUMPS/FINDINGS tickets
+  ticket-skeleton   # do_maintenance_for_repo (bin/tick.sh): same pass -- the
+                    # fixed spec shape for a ticket a future amnesiac worker
+                    # will read. Deliberately NOT on issue_system_prompt (the
+                    # worker-facing surface): a worker executing an assigned
+                    # ticket has no use for the rules on how to WRITE one.
 )
 
 # CONTEXT_DISTILLERY_PATH / CONTEXT_CACHE_DIR are overridable (tests
