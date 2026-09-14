@@ -93,7 +93,11 @@ unset CONTEXT_DISTILLERY_PATH
 
 echo "== context_unaccounted_skills: the REAL distillery clone, if one is reachable =="
 REAL_PATH="$(_context_distillery_path)"
-if [ -d "$REAL_PATH/.git" ]; then
+# The ref, not just the .git dir: context_unaccounted_skills fails OPEN, so a
+# clone that exists but can't answer `ls-tree origin/master` (never fetched,
+# corrupt objects) would otherwise report no drift and print a pass it never
+# actually earned. Unreadable ref -> the skip message owns it.
+if git -C "$REAL_PATH" rev-parse --verify -q origin/master >/dev/null 2>&1; then
   REAL_DRIFT=$(context_unaccounted_skills)
   if [ -z "$REAL_DRIFT" ]; then
     printf '  + %s\n' "every skill on distillery master is consumed or declined"
@@ -103,7 +107,7 @@ if [ -d "$REAL_PATH/.git" ]; then
     FAIL=$((FAIL + 1))
   fi
 else
-  echo "  (no distillery clone at $REAL_PATH -- skipping the real check)"
+  echo "  (no readable distillery clone at $REAL_PATH -- skipping the real check)"
 fi
 
 if [ "$FAIL" -eq 0 ]; then

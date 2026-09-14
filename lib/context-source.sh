@@ -64,31 +64,42 @@ CONTEXT_SKILLS=(
 )
 
 # Skills that exist on distillery master but are deliberately NOT sourced
-# into any igor prompt surface (igor#621 -- named here, not just absent,
-# so bin/test-skill-accounting.sh can tell "considered and declined" apart
-# from "nobody looked"). Each entry documents why inline.
+# into any igor prompt surface -- named here, with why, so the absence
+# reads as a decision rather than seven skills nobody looked at (igor#620
+# wrote these dispositions; igor#621 turned the list machine-readable so
+# bin/test-skill-accounting.sh can tell "considered and declined" apart
+# from "nobody looked").
 CONTEXT_SKILLS_UNSOURCED=(
-  ai-writing-tells    # recall-only catalog by its own SKILL.md; the
-                      # prompt-facing subset already ships in the `voice`
-                      # skill's Bans section
-  coding-standards    # no igor prompt surface sources a code-output style
-                      # guide today; issue work relies on each repo's own
-                      # CLAUDE.md/AGENTS.md instead (wired once, in the
-                      # igor#616 first attempt, and reverted along with it)
-  design              # no igor surface does full redesign/reskin work;
-                      # site-work-directive deliberately caps visual polish
-                      # smaller than this skill's charter
-  dossier-spec        # documents the AGENTS.md shape enforced entirely by
-                      # deterministic code (lib/dossier.sh, lib/automerge.sh);
-                      # no LLM prompt reads or writes a dossier
+  ai-writing-tells    # a recall-only catalog by its own SKILL.md ("nothing
+                      # here is loaded into a prompt"); the curated
+                      # prompt-facing subset already ships to every
+                      # voice-consuming surface via the `voice` skill's
+                      # Bans section
+  coding-standards    # its four rules (minimal touch, comment discipline,
+                      # TDD, verification honesty) already appear
+                      # near-verbatim on both consuming sides:
+                      # worker-contract (author) and review-directive
+                      # (reviewer). Wiring it too would just duplicate what's
+                      # already on both surfaces
+  design              # site-work-directive already scopes the weekly
+                      # site-work pass to small polish, explicitly NOT a
+                      # redesign/rewrite; design's charter (new UI,
+                      # redesigns, reskins) is bigger than what that surface
+                      # is allowed to do
+  dossier-spec        # the AGENTS.md dossier shape it documents is enforced
+                      # entirely by deterministic code (lib/dossier.sh,
+                      # lib/automerge.sh); no LLM prompt surface reads or
+                      # writes a dossier (the onboarding wizard that would is
+                      # still planned)
   pm-directive        # landed 2026-09-14 (distillery#43/#45); no igor
                       # surface runs a pre-flight spec-hardening pass yet --
                       # wiring one in is separate scope from this ticket
-  product-research    # no surface delegates a product goal to an agent; the
-                      # autonomous-CEO pass this replaces was retired in
-                      # igor#556
-  worker-permissions  # documents the static agent-settings.json for a
-                      # human/operator; not runtime prompt guidance
+  product-research    # no igor surface delegates a product goal to an agent;
+                      # the autonomous-CEO pass this replaces was retired
+                      # (igor#556)
+  worker-permissions  # documents the static agent-settings.json permission
+                      # profile for a human/operator to evaluate; no igor
+                      # surface makes tool-permission decisions at runtime
 )
 
 # CONTEXT_DISTILLERY_PATH / CONTEXT_CACHE_DIR are overridable (tests
