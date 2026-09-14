@@ -272,23 +272,14 @@ shipreport_metrics_build() {
 # must never be ambiguous between "nothing unresolved" and "the extraction
 # broke," so do_shipreport_tick always calls this, never skips the merge.
 #
-# igor#635: also bounds the section's size in two passes -- never silently,
-# per the issue ("a silent truncation is worse than a large report"):
-#   1. Per-item: a single item body over SHIPREPORT_JUDGMENT_ITEM_MAX_CHARS
-#      is shortened in place with a "[truncated, N more char(s)]" marker.
-#   2. Per-section: PR entries are walked in order and kept while their
-#      (possibly-shortened) item bytes fit in what is left of
-#      SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS. Greedy packing, not a prefix
-#      cut: an entry that does not fit is dropped WHOLE (never partially --
-#      an entry is either shown whole or not at all) and the walk continues,
-#      so a later, smaller entry that still fits is kept.
-# Both passes are tallied into a `judgment_trim` key the renderers turn into
-# an explicit notice -- entries_omitted/items_omitted/bytes_omitted for pass
-# 2, items_truncated/bytes_truncated for pass 1 -- so the reader always knows
-# when something didn't make it into the email, and roughly how much. The
-# pass-1 tally counts only items that survived pass 2: an item that was
-# shortened and then dropped with its entry is reported once, as omitted,
-# rather than in both halves of the notice.
+# igor#635: also bounds the section's size -- per-item first, then greedy
+# packing of whole PR entries into SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS. An
+# entry that doesn't fit is dropped WHOLE and the walk continues, so a later
+# smaller entry is still kept and no entry is ever shown half-rendered. Every
+# trim is tallied into `judgment_trim` and rendered as an explicit notice --
+# the issue's rule is that a silent truncation is worse than a large report.
+# The pass-1 tally counts only items that survived pass 2, so an item that was
+# shortened and then dropped with its entry is reported once, as omitted.
 shipreport_judgment_build() {
   local judgment_json="${1:-[]}"
   local item_max="${SHIPREPORT_JUDGMENT_ITEM_MAX_CHARS}" section_max="${SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS}"
@@ -308,7 +299,7 @@ shipreport_judgment_build() {
           | .truncated_bytes = ($blen - $imax)
         else . end;
 
-    ($jarr[0] | map(.items |= map(trunc_item($imax)))) as $capped
+    ($jarr[0] | map(.items = ((.items // []) | map(trunc_item($imax))))) as $capped
     | (reduce $capped[] as $pr (
         {kept: [], budget: $smax, entries_omitted: 0, items_omitted: 0, bytes_omitted: 0};
         ( [ $pr.items[] | (.body | length) ] | add // 0 ) as $prlen
@@ -337,6 +328,30 @@ shipreport_judgment_build() {
   # caller as a failure. Silence here must never read as "nothing unresolved".
   printf '%s' "$out"
   return "$rc"
+}
+
+# shipreport_merge_judgment <report_json> <judgment_json> -- folds
+# shipreport_judgment_build's output onto an already-built report.
+#
+# igor#635: this exists only because of the argv ceiling. `--argjson j
+# "$judgment"` cannot exec once the judgment object passes Linux's
+# MAX_ARG_STRLEN -- 32 pages, 131072 bytes, a PER-ARGUMENT limit far below
+# `getconf ARG_MAX` (2 MB here) -- and SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS
+# deliberately allows 200000, so the merge would die on exactly the busy day
+# the section is worth reading. Both documents go on jq's stdin instead, so
+# neither is ever an argv entry at any size.
+#
+# Unlike shipreport_merge_landed above, there is NO fallback to the unmerged
+# report: a dropped `judgment_items` key renders as an empty section, which
+# reads as "nothing unresolved" -- the ambiguity igor#610 exists to prevent.
+# A failed merge (either side unparseable or empty) returns nonzero for the
+# caller to log. The length check is what catches an empty side: jq treats
+# null as the identity for `+`, so a missing document would otherwise merge
+# to the report unchanged and succeed.
+shipreport_merge_judgment() {
+  printf '%s\n%s\n' "${1:-}" "${2:-}" \
+    | jq -cs 'if length == 2 then .[0] + .[1]
+              else error("judgment merge expected 2 documents, got \(length)") end'
 }
 
 # Shared jq defs for the metrics/version renderers below.
