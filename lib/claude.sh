@@ -318,7 +318,11 @@ claude_call() {
   local scratch envelope rc text err kind
   # Optional `model:effort` suffix (e.g. "claude-opus-4-8:high") sets the CLI
   # reasoning effort (igor#308). Model ids carry no colon, so the split is
-  # unambiguous; a bare model passes no --effort (unchanged behavior).
+  # unambiguous; a bare model passes no --effort (unchanged behavior). The
+  # suffix is passed through verbatim, so the accepted vocabulary is the CLI's
+  # own, not this harness's -- `claude --help` gives it as low, medium, high,
+  # xhigh, max. Callers that step an effort up or down (reviewer_effort,
+  # reviewer_retry_effort in bin/tick.sh) pick from that list.
   local -a effort_args=()
   case "$model" in
     *:*) effort_args=(--effort "${model##*:}"); model="${model%:*}" ;;
