@@ -23,8 +23,7 @@
 # shipreport_judgment_build wraps the per-PR items lib/review-corpus.sh's
 # review_corpus_judgment_items extracts (a non-APPROVE final verdict in full,
 # an APPROVE's "needs your judgment" section, or a dismissal never blessed by
-# a later APPROVE) into the MANDATORY `judgment_items` section every render
-# always shows, empty or not.
+# a later APPROVE) into the `judgment_items` key.
 
 # Fallback logger so this module is sourceable standalone (tests).
 if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*" >&2; }; fi
@@ -249,10 +248,9 @@ _shipreport_claude_version_line() {
 # _shipreport_judgment_lines <report_json on stdin> -- the body of the
 # JUDGMENT ITEMS section, one line per row. Grouped by repo (`group_by`
 # rather than relying on gather order, so the section reads the same
-# regardless of how do_shipreport_tick walked ANALYSIS_REPOS_JSON). Reads
-# `.judgment_items // []` -- see shipreport_judgment_build: this section is
-# MANDATORY, so a report that never merged the key in still renders as
-# "nothing unresolved" rather than going silent.
+# regardless of how do_shipreport_tick walked ANALYSIS_REPOS_JSON). The
+# `// []` default on a missing key is what makes the section mandatory --
+# see shipreport_judgment_build.
 _shipreport_judgment_lines() {
   jq -r '
     (.judgment_items // []) as $j
@@ -293,9 +291,8 @@ shipreport_render_text() {
   fi
   printf '\n'
 
-  # igor#610: MANDATORY section, unlike LANDED/metrics below -- always
-  # printed, empty or not, so silence here is never ambiguous between
-  # "nothing unresolved" and "the extraction broke."
+  # igor#610: printed unconditionally, unlike LANDED/metrics below (see
+  # shipreport_judgment_build).
   local jcount jn
   jcount=$(jq -r '[(.judgment_items // [])[].items[]?] | length' <<<"$r")
   jn=$(jq -r '.judgment_items // [] | length' <<<"$r")
@@ -364,9 +361,8 @@ shipreport_render_html() {
   inf=$(jq -r '.inflight[] | "<li><a href=\"\(.url)\">\(.repo)#\(.number)</a> &mdash; \(.title|@html)</li>"' <<<"$r")
   if [ -n "$inf" ]; then printf '<ul>%s</ul>' "$inf"; else printf '<p style="color:#888"><em>nothing in flight</em></p>'; fi
 
-  # Judgment items (igor#610): MANDATORY, unlike Landed/metrics below --
-  # always rendered, empty or not (see shipreport_judgment_build). Grouped
-  # by repo, same as the text renderer's _shipreport_judgment_lines.
+  # Judgment items (igor#610): rendered unconditionally, unlike
+  # Landed/metrics below (see shipreport_judgment_build).
   local jcount jn
   jcount=$(jq -r '[(.judgment_items // [])[].items[]?] | length' <<<"$r")
   jn=$(jq -r '.judgment_items // [] | length' <<<"$r")

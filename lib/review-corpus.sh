@@ -105,10 +105,14 @@ def is_boilerplate: test("^### ") or is_fixed_tail;
 # subsection headings stay -- a judgment item is reproduced for a human to
 # read, and a heading-less blob of every section run together is not
 # "verbatim" in any useful sense.
+#
+# The header test is DELEGATED to `classify` (a line, treated as a one-line
+# body) rather than restating its three regexes, so rewording a header is a
+# one-place change. Exact-matching a header rather than prefix-matching it
+# costs nothing here: the bodies this runs over are the ones `classify`
+# already recognized, so their header lines match it by construction.
 def is_chrome:
-  test("^### 🤖 Review — ")
-  or test("^### 🔧 Rework — ")
-  or test("^### 🧑‍⚖️ Rework — ")
+  ({ body: . } | classify | .kind) != "other"
   or is_fixed_tail;
 
 # A comment body with the artifact chrome dropped, order and blank-line

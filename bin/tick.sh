@@ -2060,18 +2060,28 @@ do_shipreport_tick() {
     # final review left anything unresolved.
     local pr_line pr_num pr_title pr_url comments pr_judgment appended
     while IFS= read -r pr_line; do
-      [ -z "$pr_line" ] && continue
+      [ -n "$pr_line" ] || continue
       pr_num=$(jq -r '.number' <<<"$pr_line")
       pr_title=$(jq -r '.title' <<<"$pr_line")
       pr_url=$(jq -r '.url' <<<"$pr_line")
-      comments=$(forgejo_pr_comments "$repo" "$pr_num" 2>/dev/null) || comments=''
+      # A fetch or extraction that FAILED is logged, matching the append
+      # failure below: an empty JUDGMENT ITEMS section reads as "nothing
+      # unresolved", so a PR that was never actually checked has to leave a
+      # trace rather than be indistinguishable from a clean one.
+      if ! comments=$(forgejo_pr_comments "$repo" "$pr_num" 2>/dev/null); then
+        log "shipreport: WARN comment fetch failed for ${repo}#${pr_num} -- judgment items not checked"
+        comments=''
+      fi
       # An EMPTY value, not just a failed call, has to become '[]' here:
       # review_corpus_judgment_items reads stdin when its argument is empty,
       # and stdin inside this loop is the process substitution feeding it --
       # so an empty-but-successful fetch would drain every remaining merged
       # PR into `cat` and silently end the loop.
       [ -n "$comments" ] || comments='[]'
-      pr_judgment=$(review_corpus_judgment_items "$comments" 2>/dev/null) || pr_judgment=''
+      if ! pr_judgment=$(review_corpus_judgment_items "$comments" 2>/dev/null); then
+        log "shipreport: WARN judgment extraction failed for ${repo}#${pr_num}"
+        pr_judgment=''
+      fi
       [ -n "$pr_judgment" ] || pr_judgment='[]'
       if [ "$(jq -r 'length' <<<"$pr_judgment" 2>/dev/null || echo 0)" != "0" ]; then
         appended=$(jq -c --arg repo "$repo" --argjson number "$pr_num" \

@@ -223,6 +223,12 @@ has "the gather loop was found in bin/tick.sh" "$GATHER" "review_corpus_judgment
 has "empty comments are coerced to [] before the call" "$GATHER" '[ -n "$comments" ] || comments='"'"'[]'"'"
 has "an empty judgment result is coerced too"          "$GATHER" '[ -n "$pr_judgment" ] || pr_judgment='"'"'[]'"'"
 has "a failed append is logged, not swallowed"         "$GATHER" "dropped judgment items"
+has "a failed comment fetch is logged, not swallowed"  "$GATHER" "comment fetch failed"
+has "a failed extraction is logged, not swallowed"     "$GATHER" "judgment extraction failed"
+# errexit-safe early-continue: `[ -z "$x" ] && continue` is exempt from
+# `set -e` (a non-final && element), but the file's convention is the `||`
+# form and it reads as safe without having to know that rule.
+has "the empty-line skip uses the || form"             "$GATHER" '[ -n "$pr_line" ] || continue'
 
 echo "== fully scripted: no model call in the module =="
 if grep -qE "claude_call|claude_run|anthropic_call" "$HERE/../lib/ship-report.sh"; then
