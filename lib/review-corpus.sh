@@ -61,7 +61,12 @@
 # finding a NUL -- which a heredoc never contains. The variable is still set;
 # without it, sourcing this file from a script under `set -e` would exit the
 # shell right here.
-read -r -d '' REVIEW_CORPUS_JQ <<'JQ_EOF' || true
+#
+# Split into DEFS (shared by review_corpus_trajectory AND
+# review_corpus_judgment_items below, igor#610) and the trajectory body
+# itself, so a second consumer of `classify`/`strip_boilerplate` doesn't
+# re-derive them.
+read -r -d '' REVIEW_CORPUS_DEFS <<'JQ_EOF' || true
 def strip_lead: sub("^\\s+"; "");
 
 def classify:
@@ -89,19 +94,31 @@ def is_boilerplate:
   or test("No code changes: the agent judged every point raised")
   or test("The rest of the findings were addressed in the commits");
 
+# A comment body with the fixed template scaffolding dropped, order and
+# blank-line structure otherwise untouched -- the model's own prose,
+# unsummarized. Used to render a judgment item "verbatim" (igor#610) and,
+# below, to build content_fingerprint's overlap set.
+def strip_boilerplate($body):
+  ($body // "" | split("\n"))
+  | map(select(is_boilerplate | not))
+  | join("\n")
+  | sub("^\\n+"; "")
+  | sub("\\n+$"; "");
+
 # The lines of a comment body that carry actual content: scaffolding dropped,
 # and short lines (< 8 chars trimmed) with it -- those are too easy to
 # "overlap" by accident ("ok.", "done").
 def content_fingerprint($body):
-  ($body // "" | split("\n"))
+  (strip_boilerplate($body) | split("\n"))
   | map(gsub("^\\s+|\\s+$"; ""))
   | map(select(length >= 8))
-  | map(select(is_boilerplate | not))
   | map(ascii_downcase)
   | unique;
 
 def intersects($a; $b): (($a - ($a - $b)) | length) > 0;
+JQ_EOF
 
+read -r -d '' REVIEW_CORPUS_JQ <<'JQ_EOF' || true
 ( [ .[] | {body: (.body // ""), created_at: (.created_at // "")} ] | sort_by(.created_at) ) as $sorted
 | ($sorted | map(. + classify)) as $tagged
 | ($tagged | map(select(.kind != "other"))) as $artifacts
@@ -157,7 +174,76 @@ review_corpus_trajectory() {
     true | false) ;;
     *) merged="unknown" ;;
   esac
-  jq -c --arg merged "$merged" "$REVIEW_CORPUS_JQ" <<<"$comments"
+  jq -c --arg merged "$merged" "${REVIEW_CORPUS_DEFS}${REVIEW_CORPUS_JQ}" <<<"$comments"
+}
+
+# The jq program backing review_corpus_judgment_items. Shares $sorted/$tagged
+# construction with REVIEW_CORPUS_JQ above but keeps `url` (Forgejo's
+# `html_url` on a comment object) alongside body/created_at, since a
+# judgment item is only useful to a human with a link back to its source.
+read -r -d '' REVIEW_CORPUS_JUDGMENT_JQ <<'JQ_EOF' || true
+( [ .[] | {body: (.body // ""), created_at: (.created_at // ""), url: (.html_url // "")} ]
+  | sort_by(.created_at) ) as $sorted
+| ($sorted | map(. + classify)) as $tagged
+| ($tagged | to_entries) as $entries
+| ($entries | map(select(.value.kind == "review"))) as $review_entries
+| (if ($review_entries | length) > 0 then $review_entries[-1] else null end) as $last_review
+| ($entries | map(select(.value.kind == "dismissal"))) as $dismissal_entries
+| ( $dismissal_entries | map(
+      .key as $idx
+      | .value as $d
+      | ( $entries[($idx + 1):] | map(select(.value.kind == "review") | .value.verdict) ) as $later_verdicts
+      | { d: $d, followed_by_approve: ($later_verdicts | any(. == "APPROVE")) }
+    )
+  ) as $dismissals
+| ( if $last_review != null and $last_review.value.verdict != "APPROVE"
+    then [ { kind: "review", verdict: $last_review.value.verdict,
+             comment_url: $last_review.value.url,
+             created_at: $last_review.value.created_at,
+             body: strip_boilerplate($last_review.value.body) } ]
+    else [] end )
+  + ( $dismissals
+      | map(select(.followed_by_approve | not))
+      | map(.d)
+      | map({ kind: "dismissal", verdict: null,
+              comment_url: .url, created_at,
+              body: strip_boilerplate(.body) }) )
+JQ_EOF
+
+# review_corpus_judgment_items [<comments_json>]
+#
+# igor#610: the judgment items a merged PR's final review left unresolved --
+# no human reads a non-binding COMMENT/REQUEST_CHANGES verdict once
+# auto-merge takes the shadow APPROVE as the merge signal, so the fleet
+# ship-report (lib/ship-report.sh) surfaces them explicitly instead.
+#
+# Two sources, both "unresolved" in the sense that nothing since has
+# addressed them:
+#   - the PR's LAST review artifact, when its verdict isn't APPROVE (a
+#     REQUEST_CHANGES/COMMENT the PR merged despite, e.g. after a rework-round
+#     cap escalated it to a human who then merged anyway);
+#   - any dismissal (lib/adjudication.sh: the rework agent argued a finding
+#     down instead of fixing it) that was never followed by a LATER review
+#     verdict of APPROVE -- a dismissal is the agent's argument, not a
+#     resolution, so it stays reportable until something actually blesses it.
+# Both can fire for the same PR: the finding the review raised, and the
+# agent's reasoning for not acting on it, are different things a human needs
+# to weigh side by side.
+#
+# Bodies come back through strip_boilerplate -- the fixed header/CI-line/
+# footer scaffolding dropped, the model's own prose otherwise untouched
+# (verbatim, not summarized). `comment_url` is "" when the source comment
+# carried no `html_url` (an older Forgejo, or a test fixture); callers fall
+# back to the PR's own url in that case.
+#
+# <comments_json> may be omitted to read from stdin, same convention as
+# review_corpus_trajectory. Order is NOT chronological -- the last-review
+# item (if any) always precedes any unresolved dismissals, since a reader
+# wants the finding before the argument against it.
+review_corpus_judgment_items() {
+  local comments="${1:-}"
+  [ -n "$comments" ] || comments=$(cat)
+  jq -c "${REVIEW_CORPUS_DEFS}${REVIEW_CORPUS_JUDGMENT_JQ}" <<<"$comments"
 }
 
 # The aggregation behind bin/review-scorecard.sh. It lives here, beside the

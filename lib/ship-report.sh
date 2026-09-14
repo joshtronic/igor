@@ -18,6 +18,12 @@
 # queue, shipreport_merge_landed folds it into a report as a `landed`
 # bucket. do_shipreport_tick calls these AFTER its own creds/hour/
 # sent-today gates, so the drain never fires outside a real send.
+#
+# igor#610: also where a merged PR's unresolved review judgment surfaces --
+# shipreport_judgment_build wraps the per-PR items lib/review-corpus.sh's
+# review_corpus_judgment_items extracts (a non-APPROVE final verdict, or a
+# dismissal never blessed by a later APPROVE) into the MANDATORY
+# `judgment_items` section every render always shows, empty or not.
 
 # Fallback logger so this module is sourceable standalone (tests).
 if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*" >&2; }; fi
@@ -128,6 +134,32 @@ shipreport_is_empty() {
 # Forgejo gathering, so this stays unit-testable off fixtures. Merge the
 # result into a report with `jq '. + $that'` -- it emits BOTH the `metrics`
 # and `claude_version` top-level keys the renderers below look for.
+
+# shipreport_judgment_build <judgment_json>
+# igor#610: 46.7% of review verdicts across the fleet are COMMENT -- the
+# plurality outcome, and the one that carries "needs your judgment" items
+# without blocking or triggering rework. Under auto-merge that content ships
+# unread. This wraps a pre-gathered array of per-PR judgment-item groups
+# (shape: [{repo, number, title, url, items: [...]}], one entry per merged
+# PR that has at least one item left by review_corpus_judgment_items,
+# lib/review-corpus.sh) into the `judgment_items` key merged onto a report.
+#
+# Pure merge, same split as shipreport_metrics_build: the Forgejo gathering
+# (fetching each merged PR's comment thread and running
+# review_corpus_judgment_items over it) lives in do_shipreport_tick, so this
+# stays unit-testable off fixtures.
+#
+# Unlike `landed`/`metrics` (optional bonus sections omitted when the caller
+# never merges them in), the renderers below treat `judgment_items` as a
+# MANDATORY section -- defaulting a missing key to `[]` and always printing
+# it, empty or not. The issue this closes is explicitly that silence here
+# must never be ambiguous between "nothing unresolved" and "the extraction
+# broke," so do_shipreport_tick always calls this, never skips the merge.
+shipreport_judgment_build() {
+  local judgment_json="${1:-[]}"
+  jq -cn --argjson j "${judgment_json:-[]}" '{judgment_items: $j}'
+}
+
 shipreport_metrics_build() {
   local cost_now="$1" cost_prev="$2" timing_now="$3" timing_prev="$4" claude_version="$5"
   jq -cn \
@@ -196,6 +228,31 @@ _shipreport_metrics_lines() {
 # line; a failed registry lookup says so explicitly rather than going dark
 # (igor#612: "a version check that silently stops is this whole ticket
 # happening again").
+# _shipreport_judgment_lines <report_json on stdin> -- the body of the
+# JUDGMENT ITEMS section, one line per row. Grouped by repo (`group_by`
+# rather than relying on gather order, so the section reads the same
+# regardless of how do_shipreport_tick walked ANALYSIS_REPOS_JSON). Reads
+# `.judgment_items // []` -- see shipreport_judgment_build: this section is
+# MANDATORY, so a report that never merged the key in still renders as
+# "nothing unresolved" rather than going silent.
+_shipreport_judgment_lines() {
+  jq -r '
+    (.judgment_items // []) as $j
+    | if ($j | length) == 0 then
+        "  (no unresolved judgment items)"
+      else
+        ( $j | group_by(.repo)[] | .[] |
+          "  * \(.repo)#\(.number)  \(.title)",
+          "    \(.url)",
+          ( .items[] |
+            "    [\(if .verdict then .verdict else "dismissed" end)] \(if .comment_url == "" then "(no direct link)" else .comment_url end)",
+            ( .body | split("\n") | map("      " + .) | join("\n") )
+          )
+        )
+      end
+  '
+}
+
 _shipreport_claude_version_line() {
   jq -r '
     if has("claude_version") then
@@ -234,6 +291,16 @@ shipreport_render_text() {
   else
     jq -r '.shipped[] | "  [\(if .gate == "human" then "you" else "shadow" end)]  \(.repo)#\(.number)  \(.title)"' <<<"$r"
   fi
+  printf '\n'
+
+  # igor#610: MANDATORY section, unlike LANDED/metrics below -- always
+  # printed, empty or not, so silence here is never ambiguous between
+  # "nothing unresolved" and "the extraction broke."
+  local jcount jn
+  jcount=$(jq -r '[(.judgment_items // [])[].items[]?] | length' <<<"$r")
+  jn=$(jq -r '.judgment_items // [] | length' <<<"$r")
+  printf -- '-- JUDGMENT ITEMS, unresolved (%s PR(s), %s item(s)) --\n' "$jn" "$jcount"
+  _shipreport_judgment_lines <<<"$r"
   printf '\n'
 
   printf -- '-- IN FLIGHT (%s) --\n' "$(jq -r '.inflight | length' <<<"$r")"
@@ -296,6 +363,27 @@ shipreport_render_html() {
   local inf
   inf=$(jq -r '.inflight[] | "<li><a href=\"\(.url)\">\(.repo)#\(.number)</a> &mdash; \(.title|@html)</li>"' <<<"$r")
   if [ -n "$inf" ]; then printf '<ul>%s</ul>' "$inf"; else printf '<p style="color:#888"><em>nothing in flight</em></p>'; fi
+
+  # Judgment items (igor#610): MANDATORY, unlike Landed/metrics below --
+  # always rendered, empty or not (see shipreport_judgment_build). Grouped
+  # by repo, same as the text renderer's _shipreport_judgment_lines.
+  local jcount jn
+  jcount=$(jq -r '[(.judgment_items // [])[].items[]?] | length' <<<"$r")
+  jn=$(jq -r '.judgment_items // [] | length' <<<"$r")
+  printf '<h3 style="border-bottom:1px solid #eee;padding-bottom:4px">&#9878; Judgment items, unresolved (%s PR(s), %s item(s))</h3>' \
+    "$jn" "$jcount"
+  local ji
+  ji=$(jq -r '
+    (.judgment_items // []) | group_by(.repo)[] | .[] |
+    "<li><a href=\"\(.url)\"><strong>\(.repo)#\(.number)</strong></a> &mdash; \(.title|@html)"
+    + ( [ .items[] |
+          "<div style=\"margin:4px 0 8px 16px\"><strong>[" + (if .verdict then .verdict else "dismissed" end) + "]</strong> "
+          + (if .comment_url == "" then "(no direct link)" else "<a href=\"" + .comment_url + "\">source</a>" end)
+          + "<pre style=\"white-space:pre-wrap;font-family:inherit;font-size:13px;margin:4px 0\">" + (.body|@html) + "</pre></div>"
+        ] | join("") )
+    + "</li>"
+  ' <<<"$r")
+  if [ -n "$ji" ]; then printf '<ul>%s</ul>' "$ji"; else printf '<p style="color:#888"><em>no unresolved judgment items</em></p>'; fi
 
   # Landed (igor#512): only shown when the caller merged one in via
   # shipreport_merge_landed -- omitted entirely for a plain PR report.

@@ -171,6 +171,44 @@ else
   printf '  + %s\n' "text: does not shout BEHIND when current"
 fi
 
+echo "== shipreport_judgment_build + rendering (igor#610) =="
+eq "judgment_build with no arg defaults to an empty array" "[]" "$(jq -c '.judgment_items' <<<"$(shipreport_judgment_build)")"
+
+NO_JUDGMENT_TEXT=$(shipreport_render_text <<<"$REPORT")
+has "text: JUDGMENT ITEMS section renders even when never merged in (mandatory)" \
+  "$NO_JUDGMENT_TEXT" "JUDGMENT ITEMS"
+has "text: says nothing unresolved when absent" \
+  "$NO_JUDGMENT_TEXT" "no unresolved judgment items"
+NO_JUDGMENT_HTML=$(shipreport_render_html <<<"$REPORT")
+has "html: Judgment items heading renders even when never merged in (mandatory)" \
+  "$NO_JUDGMENT_HTML" "Judgment items"
+has "html: says nothing unresolved when absent" \
+  "$NO_JUDGMENT_HTML" "no unresolved judgment items"
+
+JUDGMENT_JSON='[{"repo":"acme/x","number":12,"title":"Fix thing","url":"https://forge/acme/x/pulls/12","items":[
+  {"kind":"review","verdict":"REQUEST_CHANGES","comment_url":"https://forge/acme/x/pulls/12#issuecomment-1","created_at":"2026-01-01T00:00:00Z","body":"This silently drops errors on line 42."},
+  {"kind":"dismissal","verdict":null,"comment_url":"","created_at":"2026-01-01T01:00:00Z","body":"Dismissed: the caller already guards against it."}
+]}]'
+JUDGMENT=$(shipreport_judgment_build "$JUDGMENT_JSON")
+eq "judgment_build: one PR carried through" "1" "$(jq -r '.judgment_items | length' <<<"$JUDGMENT")"
+
+REPORT_WITH_JUDGMENT=$(jq -c --argjson j "$JUDGMENT" '. + $j' <<<"$REPORT")
+JTEXT=$(shipreport_render_text <<<"$REPORT_WITH_JUDGMENT")
+has "text: JUDGMENT ITEMS count in heading"  "$JTEXT" "1 PR(s), 2 item(s)"
+has "text: names the repo#PR"                "$JTEXT" "acme/x#12"
+has "text: shows the review's verdict"       "$JTEXT" "[REQUEST_CHANGES]"
+has "text: deep-links the review comment"    "$JTEXT" "issuecomment-1"
+has "text: body kept verbatim"               "$JTEXT" "This silently drops errors on line 42."
+has "text: shows a dismissal as unresolved"  "$JTEXT" "[dismissed]"
+has "text: dismissal reasoning kept verbatim" "$JTEXT" "Dismissed: the caller already guards against it."
+has "text: no direct link falls back to a plain note" "$JTEXT" "(no direct link)"
+
+JHTML=$(shipreport_render_html <<<"$REPORT_WITH_JUDGMENT")
+has "html: names the repo#PR"                "$JHTML" "acme/x#12"
+has "html: links the review comment"         "$JHTML" 'href="https://forge/acme/x/pulls/12#issuecomment-1"'
+has "html: shows the dismissal verdict badge" "$JHTML" "[dismissed]"
+has "html: body kept verbatim"               "$JHTML" "This silently drops errors on line 42."
+
 echo "== fully scripted: no model call in the module =="
 if grep -qE "claude_call|claude_run|anthropic_call" "$HERE/../lib/ship-report.sh"; then
   printf '  x %s\n' "ship-report.sh contains a model call"; FAIL=$((FAIL + 1))
