@@ -230,12 +230,10 @@ echo "== the delivery seam is the REAL email.sh, not a stub of it =="
 # makes is discarded -- the first cut of this block asserted against an empty
 # string and would have passed on a notifier that sent nothing at all.
 PAYLOAD_F="$TMPDIR_T/curl-payload.json"
+# igor#635: email_send now pipes the payload to curl's STDIN
+# (--data-binary @-), never argv (-d) -- so the stub reads it from there.
 curl() {
-  local a prev=""
-  for a in "$@"; do
-    [ "$prev" = "-d" ] && printf '%s' "$a" > "$PAYLOAD_F"
-    prev="$a"
-  done
+  cat >"$PAYLOAD_F"
   printf '{"data":{"succeeded":1,"failed":0}}'
 }
 PR_SHA=5555fff

@@ -37,6 +37,22 @@ _shipreport_state_file() { echo "${AGENT_STATE_DIR:-$HOME/.local/state/agent}/di
 # one transient SMTP2GO failure.
 SHIPREPORT_RETRY_COOLDOWN_SECS="${SHIPREPORT_RETRY_COOLDOWN_SECS:-900}"  # 15 min, mirrors sports
 
+# igor#635: the transport can now carry an email of any size (body goes on
+# curl's stdin, not argv -- see lib/email.sh), but a multi-megabyte report is
+# a *readability* failure even once it sends. These bound the judgment-items
+# section specifically, since it's the one section that embeds raw,
+# unbounded review/rework text. Measured on the 2026-09-14 window that
+# tripped the original ARG_MAX bug: 91 judgment-item bodies, 223 KB total --
+# averaging ~2.45 KB/item. ITEM_MAX_CHARS is ~3x that average, so a normal
+# item never gets touched and only a pathological single dump (a full diff
+# pasted into a review comment) gets shortened. SECTION_MAX_CHARS sits just
+# under that 223 KB day, so the exact day that caused the failure trims by a
+# small amount (proving the cap actually engages) while a normal, even fairly
+# busy, day renders in full. Char count is used as a byte-count
+# approximation (review text is ASCII-dominant); see shipreport_judgment_build.
+SHIPREPORT_JUDGMENT_ITEM_MAX_CHARS="${SHIPREPORT_JUDGMENT_ITEM_MAX_CHARS:-8000}"
+SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS="${SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS:-200000}"
+
 # jq fragment: normalize .shipreport to today, resetting if the day rolled.
 # shellcheck disable=SC2016  # $d is a jq --arg, not shell -- must not expand
 SHIPREPORT_ROLL='(if (.shipreport.date // "") == $d then .shipreport
@@ -255,9 +271,63 @@ shipreport_metrics_build() {
 # it, empty or not. The issue this closes is explicitly that silence here
 # must never be ambiguous between "nothing unresolved" and "the extraction
 # broke," so do_shipreport_tick always calls this, never skips the merge.
+#
+# igor#635: also bounds the section's size in two passes -- never silently,
+# per the issue ("a silent truncation is worse than a large report"):
+#   1. Per-item: a single item body over SHIPREPORT_JUDGMENT_ITEM_MAX_CHARS
+#      is shortened in place with a "[truncated, N more char(s)]" marker.
+#   2. Per-section: PR entries are kept, in order, while the running total of
+#      (possibly-shortened) item bytes stays under
+#      SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS; once a PR entry's items would
+#      push the total over budget, that entry and every one after it are
+#      dropped from `judgment_items` entirely (never partially -- an entry
+#      is either shown whole or not at all).
+# Both passes are tallied into a `judgment_trim` key the renderers turn into
+# an explicit notice -- entries_omitted/items_omitted/bytes_omitted for pass
+# 2, items_truncated/bytes_truncated for pass 1 -- so the reader always knows
+# when something didn't make it into the email, and roughly how much.
 shipreport_judgment_build() {
   local judgment_json="${1:-[]}"
-  jq -cn --argjson j "${judgment_json:-[]}" '{judgment_items: $j}'
+  local item_max="${SHIPREPORT_JUDGMENT_ITEM_MAX_CHARS}" section_max="${SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS}"
+  # igor#635: the array itself can carry the same >223 KB of raw comment
+  # text this whole issue is about -- --argjson would put it on jq's OWN
+  # argv (the same ARG_MAX cliff as curl's -d, one step upstream of it).
+  # --slurpfile instead takes a file PATH on argv and reads the content via
+  # a read(), same fix as email.sh's --rawfile for the html/text bodies.
+  local judgment_file; judgment_file=$(mktemp)
+  printf '%s' "${judgment_json:-[]}" >"$judgment_file"
+  jq -cn --slurpfile jarr "$judgment_file" --argjson imax "$item_max" --argjson smax "$section_max" '
+    def trunc_item($imax):
+      (.body | length) as $blen
+      | if $blen > $imax then
+          .body = (.body[0:$imax] + "\n... [truncated, " + (($blen - $imax) | tostring) + " more char(s) -- see the PR thread]")
+          | .truncated_bytes = ($blen - $imax)
+        else . end;
+
+    ($jarr[0] | map(.items |= map(trunc_item($imax)))) as $capped
+    | (reduce $capped[] as $pr (
+        {kept: [], budget: $smax, entries_omitted: 0, items_omitted: 0, bytes_omitted: 0};
+        ( [ $pr.items[] | (.body | length) ] | add // 0 ) as $prlen
+        | if $prlen <= .budget then
+            .kept += [$pr] | .budget -= $prlen
+          else
+            .entries_omitted += 1
+            | .items_omitted += ($pr.items | length)
+            | .bytes_omitted += $prlen
+          end
+      )) as $r
+    | {
+        judgment_items: [ $r.kept[] | .items |= map(del(.truncated_bytes)) ],
+        judgment_trim: {
+          entries_omitted: $r.entries_omitted,
+          items_omitted: $r.items_omitted,
+          bytes_omitted: $r.bytes_omitted,
+          items_truncated: ([$capped[].items[] | select(.truncated_bytes != null)] | length),
+          bytes_truncated: ([$capped[].items[] | (.truncated_bytes // 0)] | add // 0)
+        }
+      }
+  '
+  rm -f "$judgment_file"
 }
 
 # Shared jq defs for the metrics/version renderers below.
@@ -350,6 +420,27 @@ _shipreport_judgment_lines() {
   '
 }
 
+# _shipreport_judgment_trim_note <report_json on stdin> -- one line, or empty
+# when shipreport_judgment_build did no trimming (or the report never
+# merged in a `judgment_trim` key, e.g. every existing test fixture). Names
+# a count and a size for both trim passes -- see shipreport_judgment_build.
+_shipreport_judgment_trim_note() {
+  jq -r '
+    (.judgment_trim // {entries_omitted:0, items_omitted:0, bytes_omitted:0, items_truncated:0, bytes_truncated:0}) as $t
+    | [
+        (if $t.entries_omitted > 0 then
+           "\($t.entries_omitted) PR(s) / \($t.items_omitted) item(s) omitted (~\(($t.bytes_omitted/1000)|round) KB) -- see the PR threads directly"
+         else empty end),
+        (if $t.items_truncated > 0 then
+           "\($t.items_truncated) item body/bodies shortened (~\(($t.bytes_truncated/1000)|round) KB removed)"
+         else empty end)
+      ] as $parts
+    | if ($parts | length) == 0 then empty
+      else "  NOTE: " + ($parts | join("; ")) + " to keep this email a reasonable size."
+      end
+  '
+}
+
 # shipreport_render_text <report_json on stdin> -- plain-text email body (ASCII).
 shipreport_render_text() {
   local r; r=$(cat)
@@ -379,6 +470,10 @@ shipreport_render_text() {
   jn=$(jq -r '.judgment_items // [] | length' <<<"$r")
   printf -- '-- JUDGMENT ITEMS, unresolved (%s PR(s), %s item(s)) --\n' "$jn" "$jcount"
   _shipreport_judgment_lines <<<"$r"
+  local trim_note; trim_note=$(_shipreport_judgment_trim_note <<<"$r")
+  if [ -n "$trim_note" ]; then
+    printf '%s\n' "$trim_note"
+  fi
   printf '\n'
 
   printf -- '-- IN FLIGHT (%s) --\n' "$(jq -r '.inflight | length' <<<"$r")"
@@ -461,6 +556,10 @@ shipreport_render_html() {
     + "</li>"
   ' <<<"$r")
   if [ -n "$ji" ]; then printf '<ul>%s</ul>' "$ji"; else printf '<p style="color:#888"><em>no unresolved judgment items</em></p>'; fi
+  local trim_note; trim_note=$(_shipreport_judgment_trim_note <<<"$r")
+  if [ -n "$trim_note" ]; then
+    printf '<p style="color:#888;font-size:13px">%s</p>' "$(printf '%s' "$trim_note" | sed 's/^  //')"
+  fi
 
   # Landed (igor#512): only shown when the caller merged one in via
   # shipreport_merge_landed -- omitted entirely for a plain PR report.

@@ -275,6 +275,57 @@ has "a failed extraction is logged, not swallowed"     "$GATHER" "judgment extra
 # form and it reads as safe without having to know that rule.
 has "the empty-line skip uses the || form"             "$GATHER" '[ -n "$pr_line" ] || continue'
 
+echo "== shipreport_judgment_build: bounds a large judgment section (igor#635) =="
+# Mirrors the 2026-09-14 window that tripped the ARG_MAX bug: 91 judgment
+# bodies, 223 KB raw. One item per PR entry (91 entries), each body 2500
+# chars -- 227500 chars total, comfortably over
+# SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS's default of 200000.
+BIG_JUDGMENT_JSON=$(jq -cn '
+  [ range(0;91) | {
+      repo: ("acme/repo" + (. % 5 | tostring)),
+      number: (100 + .),
+      title: ("large review " + (.|tostring)),
+      url: ("https://forge/acme/pulls/" + (100 + .|tostring)),
+      items: [ { verdict: "COMMENT", comment_url: ("c" + (.|tostring)), body: ("x" * 2500) } ]
+    }
+  ]
+')
+RAW_BYTES=$(printf '%s' "$BIG_JUDGMENT_JSON" | jq -r '[.[].items[].body | length] | add')
+BIG_JUDGMENT=$(shipreport_judgment_build "$BIG_JUDGMENT_JSON")
+
+eq "91 raw item bodies total >200KB (sanity on the fixture itself)" "1" \
+  "$([ "$RAW_BYTES" -gt 200000 ] && echo 1 || echo 0)"
+
+KEPT=$(jq -r '.judgment_items | length' <<<"$BIG_JUDGMENT")
+OMITTED=$(jq -r '.judgment_trim.entries_omitted' <<<"$BIG_JUDGMENT")
+eq "some entries kept, some omitted (neither all-or-nothing)" "1" \
+  "$([ "$KEPT" -gt 0 ] && [ "$OMITTED" -gt 0 ] && echo 1 || echo 0)"
+eq "kept + omitted accounts for every entry" "91" "$((KEPT + OMITTED))"
+
+BIG_REPORT=$(printf '%s' "$ITEMS" | shipreport_build)
+# --slurpfile, not --argjson -- BIG_JUDGMENT is itself large enough to hit
+# the same argv cliff this whole test exists to catch (see igor#635).
+BIG_JUDGMENT_FILE=$(mktemp)
+printf '%s' "$BIG_JUDGMENT" >"$BIG_JUDGMENT_FILE"
+BIG_REPORT=$(jq -c --slurpfile jf "$BIG_JUDGMENT_FILE" '. + $jf[0]' <<<"$BIG_REPORT")
+rm -f "$BIG_JUDGMENT_FILE"
+BIG_TEXT=$(shipreport_render_text <<<"$BIG_REPORT")
+BIG_HTML=$(shipreport_render_html <<<"$BIG_REPORT")
+TEXT_BYTES=$(printf '%s' "$BIG_TEXT" | wc -c | tr -d '[:space:]')
+HTML_BYTES=$(printf '%s' "$BIG_HTML" | wc -c | tr -d '[:space:]')
+
+# Well under the raw 227500 chars of untrimmed body content -- proves the
+# cap actually shrank the email rather than merely relabeling it.
+eq "rendered text body is smaller than the raw judgment content" "1" \
+  "$([ "$TEXT_BYTES" -lt 220000 ] && echo 1 || echo 0)"
+eq "rendered html body is smaller than the raw judgment content" "1" \
+  "$([ "$HTML_BYTES" -lt 230000 ] && echo 1 || echo 0)"
+
+has "text trim notice names the omitted count" "$BIG_TEXT" "${OMITTED} PR(s)"
+has "html trim notice names the omitted count" "$BIG_HTML" "${OMITTED} PR(s)"
+has "text trim notice names an approximate size" "$BIG_TEXT" "KB"
+has "html trim notice names an approximate size" "$BIG_HTML" "KB"
+
 echo "== fully scripted: no model call in the module =="
 if grep -qE "claude_call|claude_run|anthropic_call" "$HERE/../lib/ship-report.sh"; then
   printf '  x %s\n' "ship-report.sh contains a model call"; FAIL=$((FAIL + 1))

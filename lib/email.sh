@@ -24,7 +24,7 @@ recipients_with_primary() {
     | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -
 }
 
-EMAIL_API="https://api.smtp2go.com/v3/email/send"
+EMAIL_API="${EMAIL_API:-https://api.smtp2go.com/v3/email/send}"
 
 # email_send <subject> <html_body> <text_body> <to_csv> [cc_csv]
 # to_csv / cc_csv are comma-separated address lists. Returns 0 if
@@ -41,15 +41,25 @@ email_send() {
     return 1
   fi
 
+  # igor#635: html/text can each run past ARG_MAX on their own (a large ship
+  # report), and jq's --arg puts its value on jq's OWN argv same as curl's -d
+  # did -- so a big body blew up the exec building the payload, before curl
+  # was ever reached. --rawfile takes a PATH on argv and reads the content
+  # via a read(), so neither body ever becomes an argv entry.
+  local html_file text_file
+  html_file=$(mktemp); text_file=$(mktemp)
+  printf '%s' "$html" >"$html_file"
+  printf '%s' "$text" >"$text_file"
   payload=$(jq -n \
     --arg key "$SMTP2GO_API_KEY" \
     --arg sender "$SMTP2GO_SENDER" \
     --arg subject "$subject" \
-    --arg html "$html" \
-    --arg text "$text" \
+    --rawfile html "$html_file" \
+    --rawfile text "$text_file" \
     --argjson to "$to_json" \
     '{api_key:$key, sender:$sender, to:$to, subject:$subject,
       html_body:$html, text_body:$text}')
+  rm -f "$html_file" "$text_file"
 
   if [ -n "$cc_csv" ]; then
     cc_json=$(printf '%s' "$cc_csv" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length>0))')
@@ -65,10 +75,14 @@ email_send() {
   # trip happened, SMTP2GO said no) log differently and both carry the
   # response body. Nothing but $payload ever carries the API key, and
   # $payload is never logged.
+  # igor#635: the payload goes to curl on STDIN (--data-binary @-), never as
+  # an argv entry -- a curl -d "$payload" made the kernel refuse to exec curl
+  # at all (E2BIG) once the payload passed ARG_MAX, before any request was
+  # attempted. Piping removes the ceiling for every email_send caller.
   local resp rc err_file curl_err http_code body
   err_file=$(mktemp)
-  resp=$(curl -sS -w '\n%{http_code}' -X POST -H "Content-Type: application/json" \
-    -d "$payload" "$EMAIL_API" 2>"$err_file")
+  resp=$(printf '%s' "$payload" | curl -sS -w '\n%{http_code}' -X POST -H "Content-Type: application/json" \
+    --data-binary @- "$EMAIL_API" 2>"$err_file")
   rc=$?
   curl_err=$(cat "$err_file" 2>/dev/null)
   rm -f "$err_file"
