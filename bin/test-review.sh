@@ -225,6 +225,12 @@ index 000..111 100644
 forgejo_repo_get_file_status() { printf 'missing\t'; }
 MISS=$(review_file_existence_facts acme/repo "$MISS_DIFF")
 has "a genuinely missing path is flagged NOT found" "$MISS" 'flow/missing.png`: NOT found on the default branch'
+# A "NOT found" line is default-branch scope, not proof of absence: the path may
+# be created at runtime, gitignored, added by an unmerged base in a stacked PR,
+# or not a file path at all (the candidate list is matched by shape).
+has "a NOT found line is qualified as necessary but not sufficient" "$MISS" "necessary but not sufficient"
+has "the caveat names the stacked-PR explanation"                   "$MISS" "unmerged base branch"
+has "the caveat names the runtime/gitignored explanations"           "$MISS" "gitignored"
 
 forgejo_repo_get_file_status() { printf 'error\t'; }
 ERR=$(review_file_existence_facts acme/repo "$MISS_DIFF")

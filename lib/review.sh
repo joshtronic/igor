@@ -222,8 +222,10 @@ ${eco_msg}"
 REVIEW_FILE_EXISTENCE_MAX=10
 
 # Path-like tokens on ADDED lines of the diff: a directory component, a
-# short extension, no spaces or URLs. Heuristic, not a parser -- a stray
-# match only costs one wasted existence check below, never a wrong answer.
+# short extension, no spaces or URLs. Heuristic, not a parser -- a stray match
+# (a Go module path, a scheme-less registry URL) costs a wasted existence check
+# below AND a spurious "NOT found" line, which is why that line is rendered as
+# necessary-but-not-sufficient grounding rather than as proof of absence.
 review_diff_referenced_paths() {
   local diff="$1"
   printf '%s\n' "$diff" \
@@ -263,7 +265,7 @@ review_file_existence_facts() {
     esac
   done <<<"$candidates"
   [ -n "$out" ] || return 0
-  printf '## Referenced-file existence facts\n\nPaths this diff'"'"'s text mentions but does not itself add or modify -- checked against the default branch, never the PR head (an unrelated, already-merged PR may have added the file, which is exactly what this diff not touching it would look like):\n%s\n\nA path this diff does not add is NOT proof it does not exist -- only a "NOT found" line above, or the diff itself removing/renaming the path, is. A BLOCKING verdict resting on a path being missing must be grounded in a "NOT found" line here; if the path is not covered above, say so explicitly and downgrade to a non-blocking judgment item instead of asserting absence.\n' "$out"
+  printf '## Referenced-file existence facts\n\nPaths this diff'"'"'s text mentions but does not itself add or modify -- checked against the default branch, never the PR head (an unrelated, already-merged PR may have added the file, which is exactly what this diff not touching it would look like):\n%s\n\nA path this diff does not add is NOT proof it does not exist. Neither is a "NOT found" line above, on its own: it means only "not present on the default branch", and that is equally true of a path created at runtime, a gitignored build artifact, a path added by an unmerged base branch in a stacked PR, and a token that is not a file path at all (the candidate list is matched by shape, so a module path or a registry URL can land here). So a "NOT found" line is necessary but not sufficient grounding for a BLOCKING verdict resting on absence: cite the line AND say which of those explanations you ruled out. Absent either the line or that reasoning, downgrade to a non-blocking judgment item instead of asserting absence.\n' "$out"
 }
 
 # -- Prior dismissals ----------------------------------------------
