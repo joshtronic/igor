@@ -205,6 +205,67 @@ ${eco_msg}"
   printf '%s\n' "$out"
 }
 
+# -- Referenced-file existence facts --------------------------------
+
+# igor#609: a diff that references a path (a flag, an import, a Makefile
+# target) without adding or modifying it gives the reviewer no way to tell
+# "this diff adds no X" apart from "X does not exist" -- and a finding of
+# that shape tends to get scored BLOCKING, since a genuinely missing file
+# usually is fatal. stonks PR #86 hit this: `cmd/macpack` hard-requires
+# `-icon`, the diff carried no `flow/icon.png` entry, and the reviewer
+# issued REQUEST_CHANGES on a file that had been on master for four hours.
+#
+# Bounded to REVIEW_FILE_EXISTENCE_MAX candidates so a pathological diff
+# (hundreds of dotted tokens) can't turn into hundreds of API calls --
+# silently capped, same as the test-script fetch above, since this section
+# adds grounding facts rather than promising to be exhaustive.
+REVIEW_FILE_EXISTENCE_MAX=10
+
+# Path-like tokens on ADDED lines of the diff: a directory component, a
+# short extension, no spaces or URLs. Heuristic, not a parser -- a stray
+# match only costs one wasted existence check below, never a wrong answer.
+review_diff_referenced_paths() {
+  local diff="$1"
+  printf '%s\n' "$diff" \
+    | grep -E '^\+' | grep -Ev '^\+\+\+' \
+    | grep -viE 'https?://|www\.' \
+    | grep -oE '[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9]{1,6}' \
+    | sort -u || true
+}
+
+# Markdown section: for paths the diff's own text mentions but does not
+# itself add/modify, whether they exist on the default branch. Checked
+# against the default branch only (see the trust-model note at the top of
+# this file) -- never the PR head -- so this stays inside the same safe-read
+# boundary review_test_runner_facts already relies on, and correctly answers
+# the igor#609 case: a file merged by an earlier, already-reviewed PR.
+review_file_existence_facts() {
+  local repo="$1" diff="$2"
+  local changed candidates path status out=""
+  changed=$(review_diff_changed_files "$diff")
+  candidates=$(review_diff_referenced_paths "$diff")
+  [ -n "$candidates" ] || return 0
+  if [ -n "$changed" ]; then
+    candidates=$(printf '%s\n' "$candidates" | grep -vFxf <(printf '%s\n' "$changed") || true)
+  fi
+  candidates=$(printf '%s\n' "$candidates" | head -n "$REVIEW_FILE_EXISTENCE_MAX")
+  [ -n "$candidates" ] || return 0
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    status=$(forgejo_repo_get_file_status "$repo" "$path" 2>/dev/null | cut -f1)
+    case "$status" in
+      found)   out="${out}
+- \`${path}\`: exists on the default branch" ;;
+      missing) out="${out}
+- \`${path}\`: NOT found on the default branch" ;;
+      *)       out="${out}
+- \`${path}\`: existence check failed (transient API error) -- unknown, not confirmed missing" ;;
+    esac
+  done <<<"$candidates"
+  [ -n "$out" ] || return 0
+  printf '## Referenced-file existence facts\n\nPaths this diff'"'"'s text mentions but does not itself add or modify -- checked against the default branch, never the PR head (an unrelated, already-merged PR may have added the file, which is exactly what this diff not touching it would look like):\n%s\n\nA path this diff does not add is NOT proof it does not exist -- only a "NOT found" line above, or the diff itself removing/renaming the path, is. A BLOCKING verdict resting on a path being missing must be grounded in a "NOT found" line here; if the path is not covered above, say so explicitly and downgrade to a non-blocking judgment item instead of asserting absence.\n' "$out"
+}
+
 # -- Prior dismissals ----------------------------------------------
 
 # All rounds' dismissal text, chars. Sized against its neighbours in the same
@@ -475,9 +536,10 @@ review_reassignment_feedback_section() {
 review_build_prompt() {
   local repo="$1" number="$2" sha="$3" ci="$4" title="$5" body="$6" diff="$7" truncated_note="$8"
   local bot="${9:-}"
-  local issue_section test_facts dismissals extra=""
+  local issue_section test_facts existence_facts dismissals extra=""
   issue_section=$(review_linked_issue_section "$repo" "$body")
   test_facts=$(review_test_runner_facts "$repo" "$diff")
+  existence_facts=$(review_file_existence_facts "$repo" "$diff")
   dismissals=$(review_dismissals_section "$repo" "$number" "$bot")
   # Command substitution strips trailing newlines, so the blank-line
   # separator is added explicitly rather than relied on from the section.
@@ -485,6 +547,9 @@ review_build_prompt() {
 
 "
   [ -n "$test_facts" ] && extra="${extra}${test_facts}
+
+"
+  [ -n "$existence_facts" ] && extra="${extra}${existence_facts}
 
 "
   [ -n "$dismissals" ] && extra="${extra}${dismissals}

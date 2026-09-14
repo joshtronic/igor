@@ -2,8 +2,9 @@
 # test-review.sh -- unit tests for lib/review.sh: the shadow reviewer's
 # extra context-gathering (igor#438) -- the linked issue's body and the
 # repo's test-runner facts, both folded into review_build_prompt. Skip-safe:
-# needs jq; exits 0 with a notice if absent. forgejo_get_issue and
-# forgejo_repo_get_file are stubbed per section -- no real API calls.
+# needs jq; exits 0 with a notice if absent. forgejo_get_issue,
+# forgejo_repo_get_file, and forgejo_repo_get_file_status are stubbed per
+# section -- no real API calls.
 set -uo pipefail
 
 command -v jq >/dev/null 2>&1 || { echo "test-review: jq absent -- skipping"; exit 0; }
@@ -26,7 +27,7 @@ echo "== the real Forgejo helpers exist before we stub them (igor#444) =="
 (
   # shellcheck source=../lib/forgejo.sh
   FORGEJO_URL=https://example.invalid FORGEJO_TOKEN=x . "$HERE/../lib/forgejo.sh" 2>/dev/null
-  for fn in forgejo_get_issue forgejo_repo_get_file; do
+  for fn in forgejo_get_issue forgejo_repo_get_file forgejo_repo_get_file_status; do
     if declare -F "$fn" >/dev/null; then printf '  + %s exists in lib/forgejo.sh\n' "$fn"
     else printf '  x %s MISSING -- review.sh would silently no-op\n' "$fn"; exit 1; fi
   done
@@ -162,6 +163,72 @@ forgejo_repo_get_file() { return 1; }   # no Makefile, no package.json, nothing 
 BARE=$(review_test_runner_facts acme/repo "$DIFF")
 has "still names the changed test file with zero repo signal" "$BARE" "bin/test-foo.sh"
 lacks "no Makefile section fabricated when none exists"        "$BARE" "Makefile"
+
+echo "== review_diff_referenced_paths: path-like tokens on ADDED lines only (igor#609) =="
+# Mirrors stonks PR #86: cmd/macpack's own source is unchanged by this diff,
+# but a newly-added line requires flow/icon.png -- a path this diff neither
+# adds nor modifies.
+REF_DIFF='diff --git a/cmd/macpack/main.go b/cmd/macpack/main.go
+index 000..111 100644
+--- a/cmd/macpack/main.go
++++ b/cmd/macpack/main.go
+@@ -1,2 +1,3 @@
+ flag.StringVar(&icon, "icon", "", "path to the icon")
++requireIcon("flow/icon.png")
++fmt.Println("https://example.com/not/a/path.png")'
+REFS=$(review_diff_referenced_paths "$REF_DIFF")
+has  "an added-line path is captured"       "$REFS" "flow/icon.png"
+lacks "a URL is filtered out"               "$REFS" "example.com"
+eq   "a context (unchanged) line's path is not captured" "" \
+     "$(review_diff_referenced_paths 'diff --git a/x b/x
+ unchanged/context.png')"
+
+echo "== review_file_existence_facts: grounds a blocking finding in default-branch truth (igor#609) =="
+# stonks PR #86: the diff added no flow/icon.png entry because it was already
+# on master (merged four hours earlier by a different PR) -- the reviewer had
+# no way to tell that apart from the file not existing at all, and issued a
+# false REQUEST_CHANGES.
+forgejo_repo_get_file_status() {
+  case "$2" in
+    flow/icon.png) printf 'found\t' ;;
+    *)             printf 'error\t' ;;
+  esac
+}
+EF=$(review_file_existence_facts acme/repo "$REF_DIFF")
+has  "a referenced path found on the default branch is reported"     "$EF" 'flow/icon.png`: exists on the default branch'
+has  "the section warns that diff-absence is not proof of non-existence" "$EF" "NOT proof it does not exist"
+eq   "a diff with no referenced paths -> no section" "" "$(review_file_existence_facts acme/repo "$NO_TEST_DIFF")"
+
+# A path the diff itself ADDS is proof enough on its own -- it must not be
+# re-flagged as merely "referenced" and sent through an existence check.
+ADDS_ITS_OWN='diff --git a/flow/icon.png b/flow/icon.png
+index 000..111 100644
+--- /dev/null
++++ b/flow/icon.png
+@@ -0,0 +1 @@
++binarydata
+diff --git a/cmd/macpack/main.go b/cmd/macpack/main.go
+index 000..111 100644
+--- a/cmd/macpack/main.go
++++ b/cmd/macpack/main.go
+@@ -1,2 +1,3 @@
++requireIcon("flow/icon.png")'
+eq "a path the diff itself adds is excluded from the candidate list -> no section" "" \
+   "$(review_file_existence_facts acme/repo "$ADDS_ITS_OWN")"
+
+MISS_DIFF='diff --git a/cmd/macpack/main.go b/cmd/macpack/main.go
+index 000..111 100644
+--- a/cmd/macpack/main.go
++++ b/cmd/macpack/main.go
+@@ -1,2 +1,3 @@
++requireIcon("flow/missing.png")'
+forgejo_repo_get_file_status() { printf 'missing\t'; }
+MISS=$(review_file_existence_facts acme/repo "$MISS_DIFF")
+has "a genuinely missing path is flagged NOT found" "$MISS" 'flow/missing.png`: NOT found on the default branch'
+
+forgejo_repo_get_file_status() { printf 'error\t'; }
+ERR=$(review_file_existence_facts acme/repo "$MISS_DIFF")
+has "a transport error reads as unknown, never confirmed missing" "$ERR" "unknown, not confirmed missing"
 
 echo "== review_build_prompt: acceptance test -- both facts land in the built prompt =="
 forgejo_get_issue() { printf '%s' '{"number":433,"title":"Requirement 6","body":"Requirement 6: do the thing."}'; }
