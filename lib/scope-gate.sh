@@ -107,3 +107,19 @@ scope_gate_sum_numstat() {
   done
   printf '%s\t%s\t%s\n' "$total" "$gen_lines" "$gen_files"
 }
+
+# scope_gate_format_status <changed> <max> -- a one-line, human-readable
+# budget report ("742/1000 non-test lines used (258 remaining)."), the same
+# phrasing bin/scope-budget.sh prints mid-run and bin/tick.sh injects into
+# the agent's prompt -- one wording so "the number" reads the same wherever
+# the agent sees it (igor#608). Never goes negative in the remaining count;
+# an overrun reads as "0 remaining, N over" instead.
+scope_gate_format_status() {
+  local changed="$1" max="$2" remaining
+  remaining=$(( max - changed ))
+  if [ "$remaining" -lt 0 ]; then
+    printf '%s/%s non-test lines used (0 remaining, %s over).' "$changed" "$max" "$(( -remaining ))"
+  else
+    printf '%s/%s non-test lines used (%s remaining).' "$changed" "$max" "$remaining"
+  fi
+}
