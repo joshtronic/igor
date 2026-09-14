@@ -101,6 +101,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/review.sh"
 # shellcheck source=lib/scope-gate.sh
 . "$AGENT_HOME/lib/scope-gate.sh"
+# shellcheck source=lib/split-ticket.sh
+. "$AGENT_HOME/lib/split-ticket.sh"
 # shellcheck source=lib/maintenance-checks.sh
 . "$AGENT_HOME/lib/maintenance-checks.sh"
 # shellcheck source=lib/browser-reap.sh
@@ -647,6 +649,25 @@ list_offlimits_violations() {
   # re-enabling the ban is a one-line revert of this function.
   : "${1:-}"   # base ref -- unused now (kept for signature stability)
   return 0
+}
+
+# pr_body_finalize_closing <body> <issue> -- <body> with its auto-close
+# keyword resolved for <issue>: ordinarily this appends "Closes #<issue>"
+# (pr_body_ensure_closes, #372); when THIS run split the ticket
+# (.agent/SPLIT_TICKET present -- bin/agent-split-ticket.sh, igor#608) any
+# closing keyword is neutralized to "Part of #<issue>" instead, so landing
+# the part that fits can never silently close a ticket whose remaining
+# scope moved to the follow-up issue recorded in the marker. Relative path,
+# so the caller must already be cd'd into the worktree (true of every
+# finalize call site below).
+pr_body_finalize_closing() {
+  local body="$1" issue="$2" followup
+  if [ -f "$SPLIT_TICKET_MARKER_FILE" ]; then
+    followup=$(split_ticket_read_followup "$(cat "$SPLIT_TICKET_MARKER_FILE")")
+    split_ticket_finalize_body "$body" "$issue" "$followup"
+  else
+    pr_body_ensure_closes "$body" "$issue"
+  fi
 }
 
 # Conflict-marker gate. When the harness stages a base-branch merge into
@@ -3825,6 +3846,14 @@ CONFLICT_EOF
     # pattern -- interpolated as a bare line in both heredoc branches below.
     PR_CI_FAILURE_MSG=$(forgejo_failing_ci_logs "$PR_REPO" "$PR_HEAD_SHA")
 
+    # igor#608: surface the runaway-diff guard's live budget on every rework
+    # round, not just at finalize -- stonks#73 grew 851 -> 933 -> 1036 lines
+    # across rework rounds and never re-blocked, because the gate only ran
+    # once, at PR-open. This is visibility only; the mechanical re-check
+    # before push (below, after the claude call) is what actually stops an
+    # over-budget round from shipping.
+    PR_SCOPE_NOTE="This repo enforces a runaway-diff guard: a branch over ${SCOPE_GATE_MAX_LINES} non-test changed lines is blocked before push. Current PR diff: $(cd "$PR_WORKTREE" && scope_gate_status_note "origin/${PR_BASE}") Check any time with \`bash \"\$AGENT_HOME/bin/scope-budget.sh\"\` from the worktree."
+
     # igor#476: a plain reassignment (BINDING_RC_BODY empty -- the last shadow
     # verdict was COMMENT, not REQUEST_CHANGES) hands the agent nothing
     # actionable, because PR_ISSUE_COMMENTS/PR_INLINE_COMMENTS/PR_REVIEW_BODIES
@@ -3884,6 +3913,7 @@ harness treats it as converged and hands the PR to the human with your reasoning
 attached, rather than as a failure.
 ${PR_MERGE_CONFLICT_MSG}
 ${PR_CI_FAILURE_MSG}
+${PR_SCOPE_NOTE}
 
 Base: ${PR_BASE}
 Branch: ${PR_HEAD}
@@ -3929,6 +3959,7 @@ unassigned -- assigned-to-you means it's your turn, unassigned means
 it's back in the human's court).
 ${PR_MERGE_CONFLICT_MSG}
 ${PR_CI_FAILURE_MSG}
+${PR_SCOPE_NOTE}
 
 If you genuinely have nothing to change -- for example the comments
 were questions you can answer in a reply rather than code, or the
@@ -4104,6 +4135,27 @@ Review requested so a human can resolve the conflict or re-trigger the agent." 2
   - ${PR_OFFLIMITS//$'\n'/$'\n'  - }
 
 Review requested so a human can review/discard." 2>/dev/null \
+          || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
+        forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
+        forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
+        (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || true
+        exit 0
+      fi
+
+      # Scope-gate re-check before push (igor#608). The finalize-time guard
+      # (lib/scope-gate.sh) only ever ran once, at PR-open -- stonks#73 grew
+      # 851 -> 933 -> 1036 non-test lines across rework rounds and never
+      # re-blocked, so a limit meant to catch a runaway branch stayed blind
+      # to one that grew past it during review. Same threshold, same
+      # exclusions, run again on the PR's WHOLE diff (not just this round's)
+      # every time a rework round adds commits.
+      PR_CHANGED=$(cd "$PR_WORKTREE" && scope_gate_changed_lines "origin/${PR_BASE}")
+      if [ "$PR_CHANGED" -gt "$SCOPE_GATE_MAX_LINES" ]; then
+        log "PR-review: rework pushed the branch to ${PR_CHANGED} non-test lines (over ${SCOPE_GATE_MAX_LINES}), refusing push and bouncing back to $FORGEJO_REVIEWER"
+        forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+          "The agent refused to push this round's revisions: rework grew the branch to **${PR_CHANGED} non-test changed lines**, over the runaway-diff guard (${SCOPE_GATE_MAX_LINES}, excluding test files, lockfiles, and \`dist\`/\`build\`). This did not fit at PR-open either, or it grew past the limit across rework rounds.
+
+Split the remaining scope into a follow-up issue and land only what fits, or trim this round's changes, then request review again." 2>/dev/null \
           || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
         forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
         forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
@@ -4631,7 +4683,7 @@ fi
 # starting the issue over from the base. The WIP PR's head ref is authoritative
 # for the branch name (in case the title-slug derivation ever changes). See
 # lib/checkpoint.sh.
-IS_RESUME=0; RESUME_PR=""; CHECKPOINT_N=0
+IS_RESUME=0; RESUME_PR=""; CHECKPOINT_N=0; RESUME_SPLIT=""
 CP_HISTORY=$(forgejo_bot_prs_for_issue "$FORGEJO_REPO" "$ISSUE_NUMBER" "$BOT_USER" 2>/dev/null || echo '[]')
 RESUME_PR=$(jq -r --arg wip "$CHECKPOINT_WIP_PREFIX" \
   '[.[] | select(.state == "open" and ((.title // "") | startswith($wip)))] | first | .number // empty' \
@@ -4641,7 +4693,13 @@ if [ -n "$RESUME_PR" ]; then
   RESUME_OBJ=$(forgejo_get_pr "$FORGEJO_REPO" "$RESUME_PR" 2>/dev/null || echo '{}')
   RESUME_HEAD=$(jq -r '.head.ref // empty' <<<"$RESUME_OBJ")
   [ -n "$RESUME_HEAD" ] && BRANCH="$RESUME_HEAD"
-  CHECKPOINT_N=$(checkpoint_read_count "$(jq -r '.body // ""' <<<"$RESUME_OBJ")")
+  RESUME_BODY=$(jq -r '.body // ""' <<<"$RESUME_OBJ")
+  CHECKPOINT_N=$(checkpoint_read_count "$RESUME_BODY")
+  # A prior run may have split this ticket before it checkpointed. That record
+  # lives in the PR body (the .agent/ marker file dies with the worktree), and
+  # is restored into the resumed worktree below -- without it the resumed run
+  # would file a second follow-up and close the original on merge.
+  RESUME_SPLIT=$(split_ticket_body_read "$RESUME_BODY")
 fi
 
 log "claiming ${FORGEJO_REPO}#${ISSUE_NUMBER}: ${ISSUE_TITLE}"
@@ -4737,7 +4795,7 @@ if [ "$IS_RESUME" = "1" ] && git rev-parse --verify --quiet "refs/remotes/origin
   git worktree add -B "$BRANCH" "$WORKTREE" "origin/${BRANCH}"
   log "worktree: resuming on origin/${BRANCH}"
 else
-  [ "$IS_RESUME" = "1" ] && { log "resume: origin/${BRANCH} gone -- starting fresh from ${PR_BASE}"; IS_RESUME=0; CHECKPOINT_N=0; RESUME_PR=""; }
+  [ "$IS_RESUME" = "1" ] && { log "resume: origin/${BRANCH} gone -- starting fresh from ${PR_BASE}"; IS_RESUME=0; CHECKPOINT_N=0; RESUME_PR=""; RESUME_SPLIT=""; }
   # Defense in depth (igor#496): about to carve BRANCH fresh from origin/PR_BASE,
   # and the later push is `--force-with-lease` -- which happily overwrites
   # whatever origin/$BRANCH currently holds once it's been fetched (the
@@ -4773,6 +4831,16 @@ else
 fi
 init_igor_scratch "$WORKTREE"
 
+# Re-materialize a prior run's split record in the fresh worktree (igor#608).
+# This is what makes "one split per issue" hold across a checkpoint -> resume:
+# agent-split-ticket.sh's declined check and pr_body_finalize_closing both read
+# this file, and both would otherwise behave as if the ticket had never been
+# split -- a second follow-up filed, and "Closes #<orig>" back on the PR.
+if [ -n "$RESUME_SPLIT" ]; then
+  printf '%s\n' "$RESUME_SPLIT" > "$WORKTREE/$SPLIT_TICKET_MARKER_FILE"
+  log "resume: issue already split to #${RESUME_SPLIT} -- marker restored"
+fi
+
 # -- Invoke Claude ---------------------------------------------
 
 cd "$WORKTREE"
@@ -4782,11 +4850,19 @@ cd "$WORKTREE"
 # by Claude Code from the worktree root.
 SYSTEM_PROMPT=$(issue_system_prompt)
 
+# Scope-gate visibility (igor#608): surface the live budget from turn one
+# instead of only at finalize, when a finished branch can do nothing but
+# get blocked. SCOPE_NOTE is recomputed on resume below (the diff has grown
+# since the checkpoint).
+SCOPE_NOTE="This repo enforces a runaway-diff guard: a branch over ${SCOPE_GATE_MAX_LINES} non-test changed lines is blocked at finalize and the worktree is discarded. Current branch: $(scope_gate_status_note "origin/${PR_BASE}") Check any time with \`bash \"\$AGENT_HOME/bin/scope-budget.sh\"\`. If you project the full issue won't fit, don't keep writing into this branch -- run \`bash \"\$AGENT_HOME/bin/agent-split-ticket.sh\" \"<title>\" \"<body>\"\` to file a follow-up issue for the deferred scope, then land only the part that fits (reference \"Part of #${ISSUE_NUMBER}\", not \"Closes #${ISSUE_NUMBER}\" -- the harness enforces that regardless once you've split)."
+
 USER_MSG=$(cat <<EOF
 You are working Forgejo issue #${ISSUE_NUMBER} in ${FORGEJO_REPO}.
 
 Title: ${ISSUE_TITLE}
 Labels: ${ISSUE_LABELS}
+
+${SCOPE_NOTE}
 
 Body:
 ${ISSUE_BODY}
@@ -4796,9 +4872,12 @@ EOF
 # On resume, tell Claude it's continuing paused work already committed on this
 # branch -- not starting over. Its own prior progress is in the git history.
 if [ "$IS_RESUME" = "1" ]; then
+  SCOPE_NOTE="This repo enforces a runaway-diff guard: a branch over ${SCOPE_GATE_MAX_LINES} non-test changed lines is blocked at finalize and the worktree is discarded. Current branch (already includes the prior checkpoint's commits): $(scope_gate_status_note "origin/${PR_BASE}") Check any time with \`bash \"\$AGENT_HOME/bin/scope-budget.sh\"\`. If you project the remaining work won't fit, don't keep writing into this branch -- run \`bash \"\$AGENT_HOME/bin/agent-split-ticket.sh\" \"<title>\" \"<body>\"\` to file a follow-up issue for the deferred scope, then land only the part that fits (reference \"Part of #${ISSUE_NUMBER}\", not \"Closes #${ISSUE_NUMBER}\" -- the harness enforces that regardless once you've split)."
   USER_MSG="You are RESUMING work on this issue that you started earlier but did not finish -- the prior run hit its per-tick turn limit and its work-in-progress is ALREADY COMMITTED on this branch (\`${BRANCH}\`) and checked out in this worktree. Do NOT start over.
 
 First run \`git log --oneline origin/${PR_BASE}..HEAD\` and \`git diff origin/${PR_BASE}...HEAD\` to see exactly what's already done, then continue from there toward completing the issue. Keep working on this same branch. When the issue is fully finished, make sure \`.agent/PR_BODY.md\` describes the WHOLE change (not just this session's part).
+
+${SCOPE_NOTE}
 
 ${USER_MSG}"
 fi
@@ -4920,6 +4999,12 @@ if { [ "$DISPOSITION" = "checkpoint" ] || { [ "$DISPOSITION" = "discard" ] && [ 
   fi
 
   # Ensure a draft (WIP) PR exists for the snapshot, then bump its counter.
+  # The split record rides along in the same body (igor#608): the worktree is
+  # about to be torn down, and the resumed run reads it back from there.
+  CP_SPLIT=""
+  if [ -f "$SPLIT_TICKET_MARKER_FILE" ]; then
+    CP_SPLIT=$(split_ticket_read_followup "$(cat "$SPLIT_TICKET_MARKER_FILE")") || CP_SPLIT=""
+  fi
   CP_PR="$RESUME_PR"
   [ -n "$CP_PR" ] || CP_PR=$(forgejo_find_pr_by_head "$FORGEJO_REPO" "$BRANCH")
   if [ -z "$CP_PR" ]; then
@@ -4929,13 +5014,18 @@ if { [ "$DISPOSITION" = "checkpoint" ] || { [ "$DISPOSITION" = "discard" ] && [ 
     else
       CP_BODY="Work-in-progress checkpoint. The agent hit its per-tick turn limit and snapshotted its progress here; it resumes automatically on the next tick. This PR is a draft (\`WIP:\`) -- the review and merge loops leave it alone until it's finished."
     fi
-    CP_BODY=$(pr_body_ensure_closes "$CP_BODY" "$ISSUE_NUMBER")
+    CP_BODY=$(pr_body_finalize_closing "$CP_BODY" "$ISSUE_NUMBER")
     CP_BODY=$(checkpoint_set_count "$CP_BODY" "$NEXT_N")
+    CP_BODY=$(split_ticket_body_set "$CP_BODY" "$CP_SPLIT")
     CP_PR=$(forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$CP_TITLE" "$CP_BODY")
     log "checkpoint: opened draft PR${CP_PR:+ #$CP_PR} (WIP; resuming next tick)"
   else
     CUR_BODY=$(forgejo_get_pr "$FORGEJO_REPO" "$CP_PR" 2>/dev/null | jq -r '.body // ""')
-    forgejo_edit_pr "$FORGEJO_REPO" "$CP_PR" --body "$(checkpoint_set_count "$CUR_BODY" "$NEXT_N")" \
+    CP_BODY=$(checkpoint_set_count "$CUR_BODY" "$NEXT_N")
+    # Only ever stamps; an empty CP_SPLIT leaves a marker an earlier
+    # checkpoint recorded in place rather than erasing it.
+    CP_BODY=$(split_ticket_body_set "$CP_BODY" "$CP_SPLIT")
+    forgejo_edit_pr "$FORGEJO_REPO" "$CP_PR" --body "$CP_BODY" \
       || log "warning: could not bump checkpoint counter on PR #$CP_PR"
   fi
 
@@ -5150,7 +5240,7 @@ A human needs to decide how to proceed -- address it, then remove \`Status/Block
         FINAL_BODY=$(git log "origin/${PR_BASE}..HEAD" --reverse --format='### %s%n%n%b%n')
       fi
       FINAL_BODY+=$(build_deps_section "$PR_BASE")
-      FINAL_BODY=$(pr_body_ensure_closes "$FINAL_BODY" "$ISSUE_NUMBER")
+      FINAL_BODY=$(pr_body_finalize_closing "$FINAL_BODY" "$ISSUE_NUMBER")
       if forgejo_edit_pr "$FORGEJO_REPO" "$EXISTING_PR" --title "$FINAL_TITLE" --body "$FINAL_BODY"; then
         log "checkpoint: finalized -- PR #$EXISTING_PR ready for review (WIP dropped)"
       else
@@ -5163,7 +5253,7 @@ A human needs to decide how to proceed -- address it, then remove \`Status/Block
       # issue (#372: #371 left #369 open). Guarantee it here, idempotently --
       # only edit when the keyword is actually missing.
       EX_BODY=$(printf '%s' "$EX_JSON" | jq -r '.body // ""')
-      EX_NEW=$(pr_body_ensure_closes "$EX_BODY" "$ISSUE_NUMBER")
+      EX_NEW=$(pr_body_finalize_closing "$EX_BODY" "$ISSUE_NUMBER")
       if [ "$EX_NEW" != "$EX_BODY" ]; then
         if forgejo_edit_pr "$FORGEJO_REPO" "$EXISTING_PR" --body "$EX_NEW"; then
           log "ensured 'Closes #$ISSUE_NUMBER' on existing PR #$EXISTING_PR (#372)"
@@ -5187,7 +5277,7 @@ A human needs to decide how to proceed -- address it, then remove \`Status/Block
       fi
     fi
     PR_BODY+=$(build_deps_section "$PR_BASE")
-    PR_BODY=$(pr_body_ensure_closes "$PR_BODY" "$ISSUE_NUMBER")
+    PR_BODY=$(pr_body_finalize_closing "$PR_BODY" "$ISSUE_NUMBER")
 
     NEW_PR_NUMBER=$(forgejo_open_pr "$FORGEJO_REPO" "$BRANCH" "$PR_BASE" "$PR_TITLE" "$PR_BODY")
     log "PR opened${NEW_PR_NUMBER:+ (#$NEW_PR_NUMBER)}"

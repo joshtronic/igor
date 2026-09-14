@@ -124,6 +124,47 @@ respective tools on the host; install or skip.
   turn-expensive AND over that line count will checkpoint through the turns
   and then block at finalize on scope -- the correct "human, split this"
   signal. Tests: `bin/test-checkpoint.sh`.
+- The runaway guard's blind spot -- it only ever ran at finalize, so the
+  agent discovered it was over budget only after the work was already
+  done and the worktree was about to be torn down -- is closed by two
+  additions (igor#608), both pure string logic over the same
+  `lib/scope-gate.sh` numstat/exclusions so the number reads the same
+  everywhere: **mid-run visibility** and **self-split**. Visibility:
+  `scope_gate_status_note` renders "N/1000 non-test lines used (M
+  remaining)" via `scope_gate_format_status` over
+  `scope_gate_changed_lines` -- the one place the diff spec lives, so no
+  mid-run read can drift from the finalize gate that actually blocks (all
+  `lib/scope-gate.sh`) -- and is injected into the issue-work prompt at
+  first dispatch, on every resume, and into every PR-review rework
+  round (so stonks#73's failure mode -- growing past the limit across
+  rework rounds while the gate only ever checked once, at PR-open --
+  is now also caught by a mechanical re-check before push, which
+  bounces the round back to `FORGEJO_REVIEWER` rather than shipping an
+  over-budget push); `bin/scope-budget.sh` gives the agent the same
+  read on demand mid-session. Self-split: `bin/agent-split-ticket.sh`
+  (paired with the pure string logic in `lib/split-ticket.sh`) lets the
+  agent, once it projects an overrun, file an `Agent`-labeled follow-up
+  issue for the deferred scope, comment the link back on the original,
+  and land only the part that fits -- one split per issue, recorded in
+  `.agent/SPLIT_TICKET`. That file is per-worktree scratch and a
+  checkpoint carves a fresh worktree, so the checkpoint mirrors it onto
+  the WIP PR's body (`<!-- agent-split=N -->`, `split_ticket_body_set`,
+  the same trick as `agent-checkpoints=N`) and the resume restores it --
+  without which a resumed run would file a second follow-up and close the
+  original on merge. The harness enforces the "never silently close an
+  oversized ticket" rule regardless of what the agent's own `PR_BODY.md`
+  says: `pr_body_finalize_closing` reads that marker at every finalize
+  call site (the checkpoint's own PR body included) and, when present,
+  routes the PR body through `split_ticket_finalize_body` instead of
+  `pr_body_ensure_closes` -- neutralizing any `Closes #<orig>` (or
+  Fixes/Resolves, any tense, colon form included, since Forgejo honors
+  `Closes: #N` too) into `Part of #<orig>` and guaranteeing a reference
+  to the follow-up, rather than trusting the agent to have written it
+  that way. The original issue stays open AND assigned to the bot:
+  `forgejo_find_claimable` excludes bot-assigned issues, so that is what
+  stops discovery re-claiming it and redoing the scope the follow-up now
+  owns -- a human closes it once the follow-up lands. Tests:
+  `bin/test-split-ticket.sh`, `bin/test-scope-gate.sh`.
 - Claude auth/usage health: every CLI call records ok/auth/limit
   under `.health` in `discretionary-state.json` (only auth and
   usage-limit failures count -- ordinary nonzero exits stay the

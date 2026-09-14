@@ -171,6 +171,13 @@ else
     "$(in_cwd "$BASE_TMP" scope_gate_base_generated_globs main:nope 2>/dev/null)"
 fi
 
+echo "== scope_gate_format_status: the shared wording for the mid-run budget note (igor#608) =="
+eq "under budget"     "382/1000 non-test lines used (618 remaining)." "$(scope_gate_format_status 382 1000)"
+eq "exactly at budget" "1000/1000 non-test lines used (0 remaining)." "$(scope_gate_format_status 1000 1000)"
+eq "over budget: remaining never goes negative, reports the overage instead" \
+  "1200/1000 non-test lines used (0 remaining, 200 over)." "$(scope_gate_format_status 1200 1000)"
+eq "zero used" "0/1000 non-test lines used (1000 remaining)." "$(scope_gate_format_status 0 1000)"
+
 if [ "$FAIL" -gt 0 ]; then
   printf '\n%d assertion(s) failed\n' "$FAIL"
   exit 1
