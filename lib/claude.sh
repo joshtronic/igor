@@ -282,6 +282,15 @@ claude_run_with_cost() {
 # Echoes the completion text; nonzero on any failure. strip_fences
 # (default "1") drops ``` fence lines, exactly like anthropic_call.
 #
+# The failure return code is the underlying `timeout`/`claude` process exit
+# code when there was one (notably 124 -- the process was killed for
+# outrunning timeout_secs), or 1 for a failure with no process code of its
+# own (an `is_error` envelope on an rc-0 invocation). Callers that only test
+# truthiness (`claude_call ... || ...`) see no change; a caller that wants to
+# tell a timeout apart from any other failure can check `$?` for 124
+# (igor#638 -- the shadow review does this to avoid retrying a timeout
+# identically).
+#
 # Invocation shape, and why each flag is there:
 #   - runs from an empty scratch dir so no CLAUDE.md is auto-loaded
 #     into the context (these prompts are tuned standalone -- voice
@@ -349,7 +358,12 @@ claude_call() {
       claude_health_record_failure "$kind" "$call_site: $(printf '%s' "$err" | head -c 200)"
     fi
     log "claude $call_site: failed (rc=$rc) -- $(printf '%s' "$err" | tr '\n' ' ' | head -c 200)"
-    return 1
+    # rc=0 here means the is_error envelope path -- no process code to report,
+    # so fall back to a plain failure. Otherwise propagate the real code
+    # (e.g. 124 from `timeout`) so a caller can distinguish a timeout from
+    # any other failure.
+    [ "$rc" -eq 0 ] && rc=1
+    return "$rc"
   fi
 
   printf '%s' "$envelope" > "$scratch/envelope.json"
