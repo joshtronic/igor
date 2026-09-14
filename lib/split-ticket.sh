@@ -57,8 +57,15 @@ split_ticket_body_set() {
 
 # split_ticket_read_followup <marker-file-content> -- the follow-up issue
 # number recorded in the marker file, or "" if unparseable.
+#
+# grep's rc1 on unparseable content is swallowed rather than returned:
+# bin/tick.sh runs under `set -euo pipefail` and pr_body_finalize_closing
+# assigns this into a variable, so a live rc would abort the finalize step on
+# a malformed marker instead of degrading to "no follow-up recorded".
 split_ticket_read_followup() {
-  printf '%s' "$1" | grep -oE '[0-9]+' | head -1
+  local n
+  n=$(printf '%s' "$1" | grep -oE '[0-9]+' | head -1) || n=""
+  printf '%s' "$n"
 }
 
 # split_ticket_followup_body <original_issue> <deferred_scope> -- the body
@@ -87,17 +94,25 @@ split_ticket_parent_comment() {
 #     what the agent's own PR_BODY.md happened to write. The separator
 #     mirrors what Forgejo/Gitea's own close-keyword matcher accepts: an
 #     OPTIONAL colon before the whitespace, so "Closes: #608" is caught too
-#     (it auto-closes on merge exactly like the bare form). The keyword's
-#     left edge is anchored on a non-alphanumeric so an embedded match
-#     ("precloses #608") is left alone rather than rewritten mid-word.
-#   - a "Part of #<original_issue>" reference is guaranteed present
+#     (it auto-closes on merge exactly like the bare form), and an OPTIONAL
+#     owner/repo before the "#", so the cross-repo form Forgejo also honors
+#     ("Closes joshtronic/igor#608") is neutralized rather than surviving as
+#     the one close syntax that slips through. That repo path is PRESERVED in
+#     the rewrite, so a reference to some other repo's #608 stays pointed
+#     where it was pointed. The keyword's left edge is anchored on a
+#     non-alphanumeric so an embedded match ("precloses #608") is left alone
+#     rather than rewritten mid-word.
+#   - a "Part of #<original_issue>" reference is guaranteed present -- the
+#     check is for the BARE form, so a cross-repo rewrite still gets one
+#     appended: "Part of other/repo#608" doesn't land a reader on the local
+#     ticket this PR was split from.
 #   - a note pointing at <followup_issue> is guaranteed present (skipped
 #     when <followup_issue> is empty, or already referenced)
 # Idempotent: re-running on already-finalized text changes nothing further.
 split_ticket_finalize_body() {
   local body="$1" orig="$2" followup="$3"
   body=$(printf '%s' "$body" | sed -E \
-    "s/(^|[^[:alnum:]])(close[sd]?|fix(e[sd])?|resolve[sd]?):?([[:space:]]+)#${orig}([^0-9]|\$)/\1Part of #${orig}\5/gI")
+    "s/(^|[^[:alnum:]])(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+([[:alnum:]._-]+\/[[:alnum:]._-]+)?#${orig}([^0-9]|\$)/\1Part of \4#${orig}\5/gI")
   if ! printf '%s' "$body" | grep -qiE "part of[[:space:]]+#${orig}([^0-9]|\$)"; then
     body=$(printf '%s\n\nPart of #%s' "$body" "$orig")
   fi

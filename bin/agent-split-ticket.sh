@@ -23,12 +23,15 @@
 # finalize step can find it and land the part that fits without
 # auto-closing the original.
 #
-# One split per issue: a second call refuses (exit 2) and points at the
+# One split per run: a second call refuses (exit 2) and points at the
 # already-filed follow-up, rather than filing a duplicate every time the
 # agent re-checks its budget. That holds across a turn-cap checkpoint too --
 # the marker file dies with the worktree, so bin/tick.sh mirrors it onto the
 # checkpoint PR's body (<!-- agent-split=N -->, lib/split-ticket.sh) and
-# restores it into the resumed worktree.
+# restores it into the resumed worktree. A DISCARDED run publishes nothing,
+# so the marker goes with it and a re-claim can file a second follow-up --
+# visible as a duplicate beside the first one's comment on the original
+# issue, which is a human's call to close, not lost work.
 #
 # Requires in environment (exported by tick.sh):
 #   ISSUE_NUMBER, FORGEJO_REPO, FORGEJO_URL, FORGEJO_TOKEN, AGENT_HOME

@@ -21,6 +21,15 @@ echo "== split_ticket_read_followup: parses the marker file's issue number =="
 eq "bare number"              "650" "$(split_ticket_read_followup '650')"
 eq "number with trailing newline" "650" "$(split_ticket_read_followup $'650\n')"
 eq "unparseable content -> empty" "" "$(split_ticket_read_followup 'nope')"
+# bin/tick.sh runs under `set -euo pipefail` and pr_body_finalize_closing
+# assigns this into a variable, where a nonzero rc aborts the whole finalize
+# step. A malformed marker must degrade to "no follow-up recorded", not kill
+# the ship. These assertions run the call under `set -e` because this test
+# file deliberately doesn't (`set -uo pipefail` above).
+( set -e; FU=$(split_ticket_read_followup 'nope'); [ -z "$FU" ] ); RC=$?
+eq "content with no digits doesn't trip the caller's set -e" "0" "$RC"
+( set -e; FU=$(split_ticket_read_followup ''); [ -z "$FU" ] ); RC=$?
+eq "empty content doesn't trip the caller's set -e" "0" "$RC"
 
 echo "== split_ticket_followup_body: carries the deferred scope + a back-reference =="
 FB=$(split_ticket_followup_body "608" "Do the deferred part.")
@@ -61,6 +70,14 @@ lacks "'precloses #608' isn't mangled into 'PrePart of'" \
   "$(split_ticket_finalize_body 'precloses #608' 608 '')" "prePart of"
 has "'#6080' doesn't satisfy the #608 'Part of' guarantee -- appended separately" \
   "$(split_ticket_finalize_body 'Closes #6080' 608 '')" "Part of #608"
+has "'Closes joshtronic/igor#608' -- the cross-repo form Forgejo also honors" \
+  "$(split_ticket_finalize_body 'Closes joshtronic/igor#608' 608 '')" "Part of joshtronic/igor#608"
+lacks "the cross-repo close keyword is neutralized, not left behind" \
+  "$(split_ticket_finalize_body 'Closes joshtronic/igor#608' 608 '')" "Closes joshtronic/igor#608"
+has "'Fixes: owner/repo#608' -- cross-repo plus the colon form" \
+  "$(split_ticket_finalize_body 'Fixes: owner/repo#608' 608 '')" "Part of owner/repo#608"
+has "a cross-repo reference doesn't satisfy the LOCAL 'Part of #608' guarantee" \
+  "$(split_ticket_finalize_body 'Closes joshtronic/igor#608' 608 '')" "Part of #608"
 
 echo "== split_ticket_finalize_body: guarantees 'Part of #<orig>' is present =="
 has "no closing keyword at all -> 'Part of' still appended" \

@@ -3688,6 +3688,12 @@ if [ -n "$REVIEW_PR" ]; then
       exit 0
     fi
 
+    # The rework prompt below advertises bin/scope-budget.sh, which guards its
+    # inputs with `: "${PR_BASE:?}"` -- unexported, the helper aborts the first
+    # time the agent runs it. Issue work exports this at its claim; this path
+    # is the other dispatch that names the helper.
+    export PR_BASE
+
     # Crash-loop break (igor#291): a rework that keeps dying mid-run -- the heavy
     # in-worktree test suite taking the tick down before a verdict -- must not be
     # re-attempted forever; it starves the whole downstream cascade. Count crashes
@@ -5256,9 +5262,9 @@ A human needs to decide how to proceed -- address it, then remove \`Status/Block
       EX_NEW=$(pr_body_finalize_closing "$EX_BODY" "$ISSUE_NUMBER")
       if [ "$EX_NEW" != "$EX_BODY" ]; then
         if forgejo_edit_pr "$FORGEJO_REPO" "$EXISTING_PR" --body "$EX_NEW"; then
-          log "ensured 'Closes #$ISSUE_NUMBER' on existing PR #$EXISTING_PR (#372)"
+          log "ensured the issue reference for #$ISSUE_NUMBER on existing PR #$EXISTING_PR (#372) -- 'Closes', or 'Part of' when this run split the ticket"
         else
-          log "warning: could not add closing keyword to PR #$EXISTING_PR"
+          log "warning: could not add the issue reference to PR #$EXISTING_PR"
         fi
       fi
     fi
