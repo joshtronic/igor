@@ -33,7 +33,7 @@ EMAIL_API="https://api.smtp2go.com/v3/email/send"
 # caller must not re-send the same report.
 email_send() {
   local subject="$1" html="$2" text="$3" to_csv="$4" cc_csv="${5:-}"
-  local to_json cc_json payload resp ok
+  local to_json cc_json payload ok
 
   to_json=$(printf '%s' "$to_csv" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length>0))')
   if [ "$(jq 'length' <<<"$to_json" 2>/dev/null || echo 0)" -eq 0 ]; then
@@ -58,17 +58,36 @@ email_send() {
     fi
   fi
 
-  resp=$(curl -fsS -X POST -H "Content-Type: application/json" \
-    -d "$payload" "$EMAIL_API" 2>/dev/null) || {
-      log "email: request to SMTP2GO failed"
-      return 1
-    }
+  # igor#633: no bare -f, no 2>/dev/null -- both used to throw away exactly
+  # the information needed to diagnose a failed send. -w appends the HTTP
+  # status on its own trailing line so a transport failure (curl itself
+  # errors, no round trip happened) and an HTTP-level rejection (a round
+  # trip happened, SMTP2GO said no) log differently and both carry the
+  # response body. Nothing but $payload ever carries the API key, and
+  # $payload is never logged.
+  local resp rc err_file curl_err http_code body
+  err_file=$(mktemp)
+  resp=$(curl -sS -w '\n%{http_code}' -X POST -H "Content-Type: application/json" \
+    -d "$payload" "$EMAIL_API" 2>"$err_file")
+  rc=$?
+  curl_err=$(cat "$err_file" 2>/dev/null)
+  rm -f "$err_file"
+  if [ "$rc" -ne 0 ]; then
+    log "email: request to SMTP2GO failed (curl exit ${rc}): ${curl_err:-no error output}"
+    return 1
+  fi
+  http_code=$(printf '%s' "$resp" | tail -n1)
+  body=$(printf '%s' "$resp" | sed '$d')
+  case "$http_code" in
+    2??) ;;
+    *) log "email: SMTP2GO HTTP ${http_code:-?}: ${body:-<empty body>}"; return 1 ;;
+  esac
 
   # Success shape: {"data":{"succeeded":N,"failed":M,...}}
-  ok=$(jq -r '.data.succeeded // 0' <<<"$resp" 2>/dev/null)
+  ok=$(jq -r '.data.succeeded // 0' <<<"$body" 2>/dev/null)
   if [ "${ok:-0}" -ge 1 ] 2>/dev/null; then
     return 0
   fi
-  log "email: SMTP2GO reported no delivery: $(jq -c '.data // .' <<<"$resp" 2>/dev/null || printf '%s' "$resp")"
+  log "email: SMTP2GO HTTP ${http_code} reported no delivery: $(jq -c '.data // .' <<<"$body" 2>/dev/null || printf '%s' "$body")"
   return 1
 }

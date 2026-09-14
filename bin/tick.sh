@@ -2009,6 +2009,9 @@ do_seo_tick() {
 # what shipped (tagged shadow vs human), what still needs them, what's in flight.
 # FULLY SCRIPTED (no model), so it sits ABOVE the health gate and sends even
 # during a Claude cooldown. Daily stamp under .shipreport; clear it to resend.
+# igor#633: the stamp is set only on an actual send (or a genuinely quiet
+# 24h) -- a failed send retries on a later tick, bounded by a per-day
+# failure cap + cooldown mirroring the sports digest's .sports.
 # Assembly/render/stamp live in lib/ship-report.sh; the Forgejo gathering is
 # here, like do_seo_tick's. Also drains lib/landed.sh's landed-verification
 # notes (igor#512) behind the same gates -- see the shipreport_landed_*
@@ -2028,6 +2031,21 @@ do_shipreport_tick() {
     return 1
   fi
   [ -n "${ANALYSIS_REPOS_JSON:-}" ] || return 1
+
+  # igor#633: bounded retry, mirroring the sports digest. A failure budget
+  # (checked before the cooldown so an abandoned day stops cheaply) and a
+  # cooldown between attempts -- otherwise a persistently failing send would
+  # re-attempt on every tick that reaches this stage for the rest of the day.
+  local shipreport_max_failures=5 shipreport_failures_n
+  shipreport_failures_n=$(shipreport_failures)
+  if [ "$shipreport_failures_n" -ge "$shipreport_max_failures" ]; then
+    log "shipreport: abandoned for today (${shipreport_failures_n}/${shipreport_max_failures} send failures; clear .shipreport in discretionary-state.json to retry)"
+    return 1
+  fi
+  if ! shipreport_retry_ready; then
+    return 1
+  fi
+  shipreport_mark_attempt  # start the cooldown clock for this attempt
 
   local since; since=$(date -u -d "-1 days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
                         || date -u -v-1d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
@@ -2160,10 +2178,19 @@ do_shipreport_tick() {
     # Drain only on a send that actually went out -- a failed email must leave
     # the notes queued so they ride the next report instead of vanishing.
     shipreport_landed_clear
+    shipreport_mark_sent
   else
-    log "warning: shipreport email failed (continuing); ${nld} landed note(s) stay queued"
+    # igor#633: NOT marking sent here -- a failed send must stay retryable
+    # (bounded by the failure cap + cooldown above) rather than losing the
+    # whole day's report silently. email_send has already logged the actual
+    # HTTP status/body for diagnosis.
+    shipreport_failures_n=$(shipreport_failure_inc)
+    if [ "$shipreport_failures_n" -ge "$shipreport_max_failures" ]; then
+      log "warning: shipreport email failed (${shipreport_failures_n}/${shipreport_max_failures} send failures -- giving up for today); ${nld} landed note(s) stay queued"
+    else
+      log "warning: shipreport email failed (${shipreport_failures_n}/${shipreport_max_failures} send failures -- will retry after cooldown); ${nld} landed note(s) stay queued"
+    fi
   fi
-  shipreport_mark_sent
   return 0
 }
 
