@@ -334,6 +334,11 @@ eq "without losing the report's own buckets"     "1 2"      "$(jq -r '[.shipped[
 no "an empty judgment side fails instead of merging to nothing" shipreport_merge_judgment "$BIG_REPORT" ""
 no "an unparseable judgment side fails too"                     shipreport_merge_judgment "$BIG_REPORT" 'not json at all'
 no "an empty report side fails too"                             shipreport_merge_judgment "" "$BIG_JUDGMENT"
+# A side that PARSES to null is the same silence wearing a disguise -- it
+# slurps to 2 documents, so only the type check catches it.
+no "a literal null judgment document fails too"                 shipreport_merge_judgment "$BIG_REPORT" 'null'
+no "a non-object judgment document fails too"                   shipreport_merge_judgment "$BIG_REPORT" '[1,2]'
+no "a literal null report side fails too"                       shipreport_merge_judgment 'null' "$BIG_JUDGMENT"
 
 # do_shipreport_tick's own merge (source-assertion, same rationale as the
 # igor#633 block above): the object must never reach jq's argv, and a failed
@@ -346,6 +351,23 @@ if printf '%s' "$MERGE_BLOCK" | grep -q -- '--argjson j'; then
 else
   printf '  + %s\n' "the tick never passes the judgment object on jq's argv"
 fi
+
+echo "== a failed judgment merge reads as UNKNOWN in the email, not as a clean day =="
+# The log line that separates "could not build it" from "nothing unresolved"
+# never reaches the person reading the report, so the report has to say it.
+CLEAN_REPORT=$(printf '%s' "$ITEMS" | shipreport_build)
+FLAGGED=$(shipreport_mark_judgment_error "$CLEAN_REPORT")
+eq "the flag rides on the report"                "true" "$(jq -r '.judgment_error' <<<"$FLAGGED")"
+eq "without disturbing the report's own buckets" "1 2"  "$(jq -r '[.shipped[].number]|join(" ")' <<<"$FLAGGED")"
+has "the text body says UNKNOWN" "$(shipreport_render_text <<<"$FLAGGED")" "UNKNOWN"
+has "the html body says UNKNOWN" "$(shipreport_render_html <<<"$FLAGGED")" "UNKNOWN"
+CLEAN_TEXT=$(shipreport_render_text <<<"$CLEAN_REPORT")
+has "an unflagged empty section still reads as nothing unresolved" "$CLEAN_TEXT" "(no unresolved judgment items)"
+case "$CLEAN_TEXT" in
+  *UNKNOWN*) printf '  x %s\n' "and never cries UNKNOWN on a genuinely quiet day"; FAIL=$((FAIL + 1)) ;;
+  *)         printf '  + %s\n' "and never cries UNKNOWN on a genuinely quiet day" ;;
+esac
+has "the tick flags the report when the merge fails" "$MERGE_BLOCK" "shipreport_mark_judgment_error"
 
 # A gather-side shape quirk must not take the whole section down: an errored
 # build renders empty, which reads as "nothing unresolved".

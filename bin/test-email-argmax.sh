@@ -21,6 +21,10 @@ export SMTP2GO_API_KEY="super-secret-key"
 export SMTP2GO_SENDER="bot@example.com"
 # Nothing listens here -- curl fails fast with ECONNREFUSED, no network needed.
 export EMAIL_API="http://127.0.0.1:1/v3/email/send"
+# A proxy in the runner's env would send curl somewhere that DOES answer, and
+# the connection-stage assertion below would go red for an unrelated reason.
+unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+export no_proxy='*' NO_PROXY='*'
 
 # shellcheck source=../lib/email.sh
 . "$HERE/../lib/email.sh"

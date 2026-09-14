@@ -344,14 +344,25 @@ shipreport_judgment_build() {
 # Unlike shipreport_merge_landed above, there is NO fallback to the unmerged
 # report: a dropped `judgment_items` key renders as an empty section, which
 # reads as "nothing unresolved" -- the ambiguity igor#610 exists to prevent.
-# A failed merge (either side unparseable or empty) returns nonzero for the
-# caller to log. The length check is what catches an empty side: jq treats
-# null as the identity for `+`, so a missing document would otherwise merge
-# to the report unchanged and succeed.
+# A failed merge (either side unparseable, empty, or not an object) returns
+# nonzero for the caller to log. Both guards exist because jq treats null as
+# the identity for `+`: the length check catches a side that is missing
+# entirely, the type check a side that parsed to a literal `null` (or any
+# non-object) -- either would otherwise merge to the report unchanged and
+# report success.
 shipreport_merge_judgment() {
   printf '%s\n%s\n' "${1:-}" "${2:-}" \
-    | jq -cs 'if length == 2 then .[0] + .[1]
-              else error("judgment merge expected 2 documents, got \(length)") end'
+    | jq -cs 'if length == 2 and all(.[]; type == "object") then .[0] + .[1]
+              else error("judgment merge expected 2 JSON objects, got \(length) document(s): \([.[] | type] | join(", "))") end'
+}
+
+# shipreport_mark_judgment_error <report_json> -- flag a report whose judgment
+# section could not be built or merged, so the EMAIL says so. Without it the
+# failure renders identically to a clean day ("no unresolved judgment items")
+# and only the harness log tells the two apart -- which puts the igor#610
+# ambiguity right back, in the one place the human actually reads.
+shipreport_mark_judgment_error() {
+  jq -c '. + {judgment_error: true}' <<<"${1:-}"
 }
 
 # Shared jq defs for the metrics/version renderers below.
@@ -429,7 +440,9 @@ _shipreport_claude_version_line() {
 _shipreport_judgment_lines() {
   jq -r '
     (.judgment_items // []) as $j
-    | if ($j | length) == 0 then
+    | if (.judgment_error // false) then
+        "  ERROR: this section could not be built -- read it as UNKNOWN, not as \"nothing unresolved\". The harness log has the failure."
+      elif ($j | length) == 0 then
         "  (no unresolved judgment items)"
       else
         ( $j | group_by(.repo)[] | .[] |
@@ -579,7 +592,12 @@ shipreport_render_html() {
         ] | join("") )
     + "</li>"
   ' <<<"$r")
-  if [ -n "$ji" ]; then printf '<ul>%s</ul>' "$ji"; else printf '<p style="color:#888"><em>no unresolved judgment items</em></p>'; fi
+  # Error branch first, matching _shipreport_judgment_lines: the flag means
+  # "do not trust this section", which outranks showing whatever survived.
+  if jq -e '.judgment_error // false' <<<"$r" >/dev/null 2>&1; then
+    printf '<p style="color:#b00"><strong>ERROR:</strong> this section could not be built &mdash; read it as UNKNOWN, not as &ldquo;nothing unresolved&rdquo;. The harness log has the failure.</p>'
+  elif [ -n "$ji" ]; then printf '<ul>%s</ul>' "$ji"
+  else printf '<p style="color:#888"><em>no unresolved judgment items</em></p>'; fi
   local trim_note; trim_note=$(_shipreport_judgment_trim_note <<<"$r")
   if [ -n "$trim_note" ]; then
     printf '<p style="color:#888;font-size:13px">%s</p>' "$(printf '%s' "$trim_note" | sed 's/^  //')"

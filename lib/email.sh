@@ -24,6 +24,11 @@ recipients_with_primary() {
     | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -
 }
 
+# Overridable so bin/test-email-argmax.sh can point a REAL curl at an
+# unroutable port (the ARG_MAX cliff is an exec-time limit a doubled curl
+# cannot reproduce). The env is already trusted with SMTP2GO_API_KEY itself,
+# so redirecting the endpoint reaches nothing a reader of that same env
+# could not already reach by calling the API directly.
 EMAIL_API="${EMAIL_API:-https://api.smtp2go.com/v3/email/send}"
 
 # email_send <subject> <html_body> <text_body> <to_csv> [cc_csv]
@@ -86,11 +91,17 @@ email_send() {
   # igor#635: the payload goes to curl on STDIN (--data-binary @-), never as
   # an argv entry -- a curl -d "$payload" made the kernel refuse to exec curl
   # at all (E2BIG) once the payload passed ARG_MAX, before any request was
-  # attempted. Piping removes the ceiling for every email_send caller.
+  # attempted. Feeding stdin removes the ceiling for every email_send caller
+  # (and takes the API key out of /proc/<pid>/cmdline as a side effect).
+  # The feed is a process substitution, not a pipeline, so $? is curl's OWN
+  # status: callers source this under `set -o pipefail`, and a server that
+  # answers mid-upload (a 413 on a large report is the obvious one) leaves
+  # curl exiting 0 with printf killed by SIGPIPE -- which as a pipeline reads
+  # as status 141 and buries the HTTP code that actually explains the refusal.
   local resp rc err_file curl_err http_code body
   err_file=$(mktemp)
-  resp=$(printf '%s' "$payload" | curl -sS -w '\n%{http_code}' -X POST -H "Content-Type: application/json" \
-    --data-binary @- "$EMAIL_API" 2>"$err_file")
+  resp=$(curl -sS -w '\n%{http_code}' -X POST -H "Content-Type: application/json" \
+    --data-binary @- "$EMAIL_API" 2>"$err_file" < <(printf '%s' "$payload"))
   rc=$?
   curl_err=$(cat "$err_file" 2>/dev/null)
   rm -f "$err_file"
