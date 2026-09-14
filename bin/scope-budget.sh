@@ -29,11 +29,7 @@ set -euo pipefail
 # shellcheck source=../lib/dossier.sh
 . "$AGENT_HOME/lib/dossier.sh"
 
-GENERATED_GLOBS=$(scope_gate_base_generated_globs "origin/${PR_BASE}")
-SUM=$(git diff --numstat "origin/${PR_BASE}..HEAD" -- . 2>/dev/null \
-  | scope_gate_sum_numstat "$GENERATED_GLOBS")
-CHANGED=$(cut -f1 <<<"$SUM")
-CHANGED=${CHANGED:-0}
+CHANGED=$(scope_gate_changed_lines "origin/${PR_BASE}")
 
 scope_gate_format_status "$CHANGED" "$SCOPE_GATE_MAX_LINES"
 echo

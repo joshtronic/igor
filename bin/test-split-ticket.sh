@@ -49,6 +49,16 @@ has "'resolved #608' -> neutralized (case-insensitive, past tense)" \
   "$(split_ticket_finalize_body 'resolved #608' 608 '')" "Part of #608"
 has "'#6080' -- the unrelated close keyword survives untouched" \
   "$(split_ticket_finalize_body 'Closes #6080' 608 '')" "Closes #6080"
+has "'Closes: #608' -- Forgejo honors the colon form, so it must be neutralized too" \
+  "$(split_ticket_finalize_body 'Closes: #608' 608 '')" "Part of #608"
+lacks "'Closes: #608' leaves no closing keyword behind" \
+  "$(split_ticket_finalize_body 'Closes: #608' 608 '')" "Closes:"
+has "'fixed:  #608' -- colon plus extra spacing, past tense" \
+  "$(split_ticket_finalize_body 'fixed:  #608' 608 '')" "Part of #608"
+has "'precloses #608' -- keyword embedded in a word is left alone" \
+  "$(split_ticket_finalize_body 'precloses #608' 608 '')" "precloses #608"
+lacks "'precloses #608' isn't mangled into 'PrePart of'" \
+  "$(split_ticket_finalize_body 'precloses #608' 608 '')" "prePart of"
 has "'#6080' doesn't satisfy the #608 'Part of' guarantee -- appended separately" \
   "$(split_ticket_finalize_body 'Closes #6080' 608 '')" "Part of #608"
 
@@ -73,6 +83,18 @@ Part of #608
 Remaining scope split to #650.' 608 650)
 FIRST_COUNT=$(printf '%s' "$ALREADY" | grep -oE '#650' | wc -l | tr -d ' ')
 eq "already-present follow-up reference isn't duplicated" "1" "$FIRST_COUNT"
+
+echo "== split_ticket_body_{set,read}: the split survives a checkpoint -> resume =="
+eq "no marker in the body -> empty" "" "$(split_ticket_body_read 'Nothing here.')"
+MARKED=$(split_ticket_body_set 'Did part of the thing.' 650)
+has "marker stamped into the body" "$MARKED" "<!-- agent-split=650 -->"
+has "the body itself is preserved" "$MARKED" "Did part of the thing."
+eq "round-trips through split_ticket_body_read" "650" "$(split_ticket_body_read "$MARKED")"
+REMARKED=$(split_ticket_body_set "$MARKED" 651)
+eq "re-stamping replaces rather than appends" "651" "$(split_ticket_body_read "$REMARKED")"
+lacks "the superseded marker is gone" "$REMARKED" "agent-split=650"
+eq "empty follow-up -> body unchanged" "Did part of the thing." \
+  "$(split_ticket_body_set 'Did part of the thing.' '')"
 
 if [ "$FAIL" -gt 0 ]; then
   printf '\n%d assertion(s) failed\n' "$FAIL"

@@ -23,6 +23,38 @@
 # shellcheck disable=SC2034  # read by bin/agent-split-ticket.sh and bin/tick.sh, which source this
 SPLIT_TICKET_MARKER_FILE=".agent/SPLIT_TICKET"
 
+# The same record carried on the checkpoint PR's body, mirroring
+# lib/checkpoint.sh's <!-- agent-checkpoints=N --> counter. The marker FILE is
+# per-worktree scratch (init_igor_scratch gitignores .agent/, and a
+# checkpoint -> resume carves a fresh worktree from the branch), so a run that
+# splits and then hits the turn cap would lose it: the resumed run would file a
+# SECOND follow-up and let pr_body_finalize_closing write "Closes #<orig>" back
+# onto the PR, closing the very ticket whose remaining scope moved elsewhere.
+# The PR body survives both, and is visible to a human.
+SPLIT_TICKET_BODY_TAG='agent-split'
+
+# split_ticket_body_read <pr_body> -- the follow-up issue number recorded in
+# <pr_body>'s split marker, or "" when there is none.
+split_ticket_body_read() {
+  local n
+  n=$(printf '%s' "$1" | grep -oE "${SPLIT_TICKET_BODY_TAG}=[0-9]+" | tail -1 \
+    | grep -oE '[0-9]+') || n=""
+  printf '%s' "$n"
+}
+
+# split_ticket_body_set <pr_body> <followup> -- <pr_body> carrying exactly one
+# split marker for <followup>: any existing marker LINE is dropped and a fresh
+# one appended. Line-oriented rather than a sed substitution so an arbitrary
+# '/', '&', or '|' in the body can't corrupt it (checkpoint_set_count's reason).
+# An empty <followup> returns the body unchanged -- nothing to record.
+split_ticket_body_set() {
+  local body="$1" followup="$2" stripped
+  [ -n "$followup" ] || { printf '%s' "$body"; return; }
+  stripped=$(printf '%s\n' "$body" \
+    | grep -vE "^[[:space:]]*<!-- ${SPLIT_TICKET_BODY_TAG}=[0-9]+ -->[[:space:]]*$") || true
+  printf '%s\n\n<!-- %s=%s -->\n' "$stripped" "$SPLIT_TICKET_BODY_TAG" "$followup"
+}
+
 # split_ticket_read_followup <marker-file-content> -- the follow-up issue
 # number recorded in the marker file, or "" if unparseable.
 split_ticket_read_followup() {
@@ -52,7 +84,12 @@ split_ticket_parent_comment() {
 #     targets <original_issue> is neutralized to a plain "Part of
 #     #<original_issue>" reference, so merging this PR can never silently
 #     close a ticket whose remaining scope lives elsewhere -- regardless of
-#     what the agent's own PR_BODY.md happened to write
+#     what the agent's own PR_BODY.md happened to write. The separator
+#     mirrors what Forgejo/Gitea's own close-keyword matcher accepts: an
+#     OPTIONAL colon before the whitespace, so "Closes: #608" is caught too
+#     (it auto-closes on merge exactly like the bare form). The keyword's
+#     left edge is anchored on a non-alphanumeric so an embedded match
+#     ("precloses #608") is left alone rather than rewritten mid-word.
 #   - a "Part of #<original_issue>" reference is guaranteed present
 #   - a note pointing at <followup_issue> is guaranteed present (skipped
 #     when <followup_issue> is empty, or already referenced)
@@ -60,7 +97,7 @@ split_ticket_parent_comment() {
 split_ticket_finalize_body() {
   local body="$1" orig="$2" followup="$3"
   body=$(printf '%s' "$body" | sed -E \
-    "s/(close[sd]?|fix(e[sd])?|resolve[sd]?)([[:space:]]+)#${orig}([^0-9]|\$)/Part of #${orig}\4/gI")
+    "s/(^|[^[:alnum:]])(close[sd]?|fix(e[sd])?|resolve[sd]?):?([[:space:]]+)#${orig}([^0-9]|\$)/\1Part of #${orig}\5/gI")
   if ! printf '%s' "$body" | grep -qiE "part of[[:space:]]+#${orig}([^0-9]|\$)"; then
     body=$(printf '%s\n\nPart of #%s' "$body" "$orig")
   fi

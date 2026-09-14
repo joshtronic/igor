@@ -123,3 +123,29 @@ scope_gate_format_status() {
     printf '%s/%s non-test lines used (%s remaining).' "$changed" "$max" "$remaining"
   fi
 }
+
+# scope_gate_changed_lines <base_ref> -- the counted (non-test, non-generated)
+# changed-line total for the CURRENT directory's branch against <base_ref>.
+# The single place the diff spec lives, so every mid-run read (igor#608 --
+# bin/scope-budget.sh, scope_gate_status_note, the PR-review rework re-check)
+# counts exactly what the finalize-time gate in bin/tick.sh counts. That gate
+# keeps its own scope_gate_sum_numstat call because it also reports the
+# generated-data exclusions this one discards; the diff spec must stay
+# identical between them (two-dot `<base>..HEAD`, pathspec `.`).
+scope_gate_changed_lines() {
+  local base_ref="$1" globs sum changed
+  globs=$(scope_gate_base_generated_globs "$base_ref")
+  sum=$(git diff --numstat "${base_ref}..HEAD" -- . 2>/dev/null | scope_gate_sum_numstat "$globs")
+  changed=$(cut -f1 <<<"$sum")
+  printf '%s' "${changed:-0}"
+}
+
+# scope_gate_status_note <base_ref> -- "<changed>/<max> non-test lines used
+# (<remaining> remaining)." for the current directory's branch against
+# <base_ref>. Injected into agent prompts (issue-work, resume, PR-review
+# rework) so the budget is visible DURING the run instead of only discovered
+# at finalize, after the worktree is already done (igor#608) --
+# bin/scope-budget.sh gives the agent the same read on demand mid-session.
+scope_gate_status_note() {
+  scope_gate_format_status "$(scope_gate_changed_lines "$1")" "$SCOPE_GATE_MAX_LINES"
+}
