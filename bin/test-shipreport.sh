@@ -209,6 +209,21 @@ has "html: links the review comment"         "$JHTML" 'href="https://forge/acme/
 has "html: shows the dismissal verdict badge" "$JHTML" "[dismissed]"
 has "html: body kept verbatim"               "$JHTML" "This silently drops errors on line 42."
 
+echo "== do_shipreport_tick guards an empty comment fetch before the call =="
+# Source-assertion, in the spirit of test-automerge-before-health-gate.sh.
+# review_corpus_judgment_items reads STDIN when its argument is empty, and
+# stdin inside do_shipreport_tick's merged-PR loop is the process
+# substitution feeding that loop -- so an empty-but-successful
+# forgejo_pr_comments would drain the remaining PRs into `cat` and end the
+# loop early with no log line. The `|| comments='[]'` fallback alone does
+# not cover that: it only fires on a NONZERO exit.
+TICK_SRC="$HERE/tick.sh"
+GATHER=$(sed -n '/local pr_line pr_num pr_title pr_url comments pr_judgment/,/^    done < <(jq -c/p' "$TICK_SRC")
+has "the gather loop was found in bin/tick.sh" "$GATHER" "review_corpus_judgment_items"
+has "empty comments are coerced to [] before the call" "$GATHER" '[ -n "$comments" ] || comments='"'"'[]'"'"
+has "an empty judgment result is coerced too"          "$GATHER" '[ -n "$pr_judgment" ] || pr_judgment='"'"'[]'"'"
+has "a failed append is logged, not swallowed"         "$GATHER" "dropped judgment items"
+
 echo "== fully scripted: no model call in the module =="
 if grep -qE "claude_call|claude_run|anthropic_call" "$HERE/../lib/ship-report.sh"; then
   printf '  x %s\n' "ship-report.sh contains a model call"; FAIL=$((FAIL + 1))

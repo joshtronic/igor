@@ -21,9 +21,10 @@
 #
 # igor#610: also where a merged PR's unresolved review judgment surfaces --
 # shipreport_judgment_build wraps the per-PR items lib/review-corpus.sh's
-# review_corpus_judgment_items extracts (a non-APPROVE final verdict, or a
-# dismissal never blessed by a later APPROVE) into the MANDATORY
-# `judgment_items` section every render always shows, empty or not.
+# review_corpus_judgment_items extracts (a non-APPROVE final verdict in full,
+# an APPROVE's "needs your judgment" section, or a dismissal never blessed by
+# a later APPROVE) into the MANDATORY `judgment_items` section every render
+# always shows, empty or not.
 
 # Fallback logger so this module is sourceable standalone (tests).
 if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*" >&2; }; fi
@@ -134,6 +135,25 @@ shipreport_is_empty() {
 # Forgejo gathering, so this stays unit-testable off fixtures. Merge the
 # result into a report with `jq '. + $that'` -- it emits BOTH the `metrics`
 # and `claude_version` top-level keys the renderers below look for.
+shipreport_metrics_build() {
+  local cost_now="$1" cost_prev="$2" timing_now="$3" timing_prev="$4" claude_version="$5"
+  jq -cn \
+    --argjson cn "$cost_now" --argjson cp "$cost_prev" \
+    --argjson tn "$timing_now" --argjson tp "$timing_prev" \
+    --argjson cv "$claude_version" \
+    '{
+       metrics: {
+         cost: { now: $cn, prev: $cp,
+                 delta_usd: (if $cn.has_data and $cp.has_data
+                             then ((($cn.total_usd - $cp.total_usd) * 100 | round) / 100)
+                             else null end) },
+         timing: { now: $tn, prev: $tp,
+                   delta_median_s: (if $tn.has_data and $tp.has_data
+                                    then ($tn.median_s - $tp.median_s) else null end) }
+       },
+       claude_version: $cv
+     }'
+}
 
 # shipreport_judgment_build <judgment_json>
 # igor#610: 46.7% of review verdicts across the fleet are COMMENT -- the
@@ -158,26 +178,6 @@ shipreport_is_empty() {
 shipreport_judgment_build() {
   local judgment_json="${1:-[]}"
   jq -cn --argjson j "${judgment_json:-[]}" '{judgment_items: $j}'
-}
-
-shipreport_metrics_build() {
-  local cost_now="$1" cost_prev="$2" timing_now="$3" timing_prev="$4" claude_version="$5"
-  jq -cn \
-    --argjson cn "$cost_now" --argjson cp "$cost_prev" \
-    --argjson tn "$timing_now" --argjson tp "$timing_prev" \
-    --argjson cv "$claude_version" \
-    '{
-       metrics: {
-         cost: { now: $cn, prev: $cp,
-                 delta_usd: (if $cn.has_data and $cp.has_data
-                             then ((($cn.total_usd - $cp.total_usd) * 100 | round) / 100)
-                             else null end) },
-         timing: { now: $tn, prev: $tp,
-                   delta_median_s: (if $tn.has_data and $tp.has_data
-                                    then ($tn.median_s - $tp.median_s) else null end) }
-       },
-       claude_version: $cv
-     }'
 }
 
 # Shared jq defs for the metrics/version renderers below.
@@ -228,6 +228,24 @@ _shipreport_metrics_lines() {
 # line; a failed registry lookup says so explicitly rather than going dark
 # (igor#612: "a version check that silently stops is this whole ticket
 # happening again").
+_shipreport_claude_version_line() {
+  jq -r '
+    if has("claude_version") then
+      (if .claude_version.checked_ok then
+         (if .claude_version.behind then
+            "Claude Code: " + .claude_version.installed + " -- BEHIND latest " + .claude_version.latest
+              + (if .claude_version.since_days != null
+                 then " (unchanged " + (.claude_version.since_days|tostring) + "d)" else "" end)
+          else
+            "Claude Code: " + .claude_version.installed + " (up to date)"
+          end)
+       else
+         "Claude Code: could not check (installed " + (.claude_version.installed // "unknown") + ")"
+       end)
+    else empty end
+  '
+}
+
 # _shipreport_judgment_lines <report_json on stdin> -- the body of the
 # JUDGMENT ITEMS section, one line per row. Grouped by repo (`group_by`
 # rather than relying on gather order, so the section reads the same
@@ -250,24 +268,6 @@ _shipreport_judgment_lines() {
           )
         )
       end
-  '
-}
-
-_shipreport_claude_version_line() {
-  jq -r '
-    if has("claude_version") then
-      (if .claude_version.checked_ok then
-         (if .claude_version.behind then
-            "Claude Code: " + .claude_version.installed + " -- BEHIND latest " + .claude_version.latest
-              + (if .claude_version.since_days != null
-                 then " (unchanged " + (.claude_version.since_days|tostring) + "d)" else "" end)
-          else
-            "Claude Code: " + .claude_version.installed + " (up to date)"
-          end)
-       else
-         "Claude Code: could not check (installed " + (.claude_version.installed // "unknown") + ")"
-       end)
-    else empty end
   '
 }
 
@@ -375,10 +375,10 @@ shipreport_render_html() {
   local ji
   ji=$(jq -r '
     (.judgment_items // []) | group_by(.repo)[] | .[] |
-    "<li><a href=\"\(.url)\"><strong>\(.repo)#\(.number)</strong></a> &mdash; \(.title|@html)"
+    "<li><a href=\"\(.url|@html)\"><strong>\(.repo)#\(.number)</strong></a> &mdash; \(.title|@html)"
     + ( [ .items[] |
           "<div style=\"margin:4px 0 8px 16px\"><strong>[" + (if .verdict then .verdict else "dismissed" end) + "]</strong> "
-          + (if .comment_url == "" then "(no direct link)" else "<a href=\"" + .comment_url + "\">source</a>" end)
+          + (if .comment_url == "" then "(no direct link)" else "<a href=\"" + (.comment_url|@html) + "\">source</a>" end)
           + "<pre style=\"white-space:pre-wrap;font-family:inherit;font-size:13px;margin:4px 0\">" + (.body|@html) + "</pre></div>"
         ] | join("") )
     + "</li>"

@@ -2058,19 +2058,31 @@ do_shipreport_tick() {
     # each PR that merged in this window, pull its comment thread and let
     # review_corpus_judgment_items (lib/review-corpus.sh) say whether its
     # final review left anything unresolved.
-    local pr_line pr_num pr_title pr_url comments pr_judgment
+    local pr_line pr_num pr_title pr_url comments pr_judgment appended
     while IFS= read -r pr_line; do
       [ -z "$pr_line" ] && continue
       pr_num=$(jq -r '.number' <<<"$pr_line")
       pr_title=$(jq -r '.title' <<<"$pr_line")
       pr_url=$(jq -r '.url' <<<"$pr_line")
-      comments=$(forgejo_pr_comments "$repo" "$pr_num" 2>/dev/null) || comments='[]'
-      pr_judgment=$(review_corpus_judgment_items "$comments" 2>/dev/null) || pr_judgment='[]'
-      if [ "$(jq -r 'length' <<<"${pr_judgment:-[]}" 2>/dev/null || echo 0)" != "0" ]; then
-        judgment_items=$(jq -c --arg repo "$repo" --argjson number "$pr_num" \
+      comments=$(forgejo_pr_comments "$repo" "$pr_num" 2>/dev/null) || comments=''
+      # An EMPTY value, not just a failed call, has to become '[]' here:
+      # review_corpus_judgment_items reads stdin when its argument is empty,
+      # and stdin inside this loop is the process substitution feeding it --
+      # so an empty-but-successful fetch would drain every remaining merged
+      # PR into `cat` and silently end the loop.
+      [ -n "$comments" ] || comments='[]'
+      pr_judgment=$(review_corpus_judgment_items "$comments" 2>/dev/null) || pr_judgment=''
+      [ -n "$pr_judgment" ] || pr_judgment='[]'
+      if [ "$(jq -r 'length' <<<"$pr_judgment" 2>/dev/null || echo 0)" != "0" ]; then
+        appended=$(jq -c --arg repo "$repo" --argjson number "$pr_num" \
             --arg title "$pr_title" --arg url "$pr_url" --argjson jitems "$pr_judgment" '
             . + [{repo:$repo, number:$number, title:$title, url:$url, items:$jitems}]' \
-          <<<"$judgment_items" 2>/dev/null) || true
+          <<<"$judgment_items" 2>/dev/null) || appended=''
+        if [ -n "$appended" ]; then
+          judgment_items="$appended"
+        else
+          log "shipreport: WARN dropped judgment items for ${repo}#${pr_num} (append failed)"
+        fi
       fi
     done < <(jq -c '.[]' <<<"${merged:-[]}" 2>/dev/null)
   done <<<"$ANALYSIS_REPOS_JSON"

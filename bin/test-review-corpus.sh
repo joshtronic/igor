@@ -2,7 +2,7 @@
 # Unit tests for lib/review-corpus.sh -- parsing a PR's comment thread into a
 # review-loop trajectory (igor#582), with no model in the loop.
 #
-# Eight behaviors are asserted, each picked because a parser that fakes it (a
+# Nine behaviors are asserted, each picked because a parser that fakes it (a
 # constant, a string-contains check with no anchoring) would still pass a
 # lazier test:
 #   1. a bare APPROVE trajectory
@@ -15,7 +15,10 @@
 #   7. the scorecard aggregation over a set of records -- verdict mix and
 #      percentages, both median branches, the zero-record path, and the
 #      unfetchable-PR caveat
-#   8. the file survives being sourced under `set -e`
+#   8. the unresolved judgment items of a merged PR (igor#610) -- including
+#      the APPROVE-carried "needs your judgment" section, which is the case
+#      auto-merge is most likely to ship past unread
+#   9. the file survives being sourced under `set -e`
 set -uo pipefail
 
 command -v jq >/dev/null 2>&1 || { echo "test-review-corpus: jq absent -- skipping"; exit 0; }
@@ -323,8 +326,42 @@ J6=$(jq -n -c --arg at "2026-01-01T00:00:00Z" --arg body "$(printf '%s\n\nCI for
 eq "absent html_url -> comment_url empty" "" "$(arr "$J6" | review_corpus_judgment_items | jq -r '.[0].comment_url')"
 
 echo "== judgment_items: reads from stdin when no argument given =="
-eq "stdin composes the same as an explicit argument" "$(arr "$J2" | review_corpus_judgment_items)" \
+eq "stdin composes the same as an explicit argument" \
+  "$(review_corpus_judgment_items "$(arr "$J2")")" \
   "$(arr "$J2" | review_corpus_judgment_items)"
+
+echo "== judgment_items: an APPROVE carrying a judgment section still reports it =="
+J7=$(mk_review "2026-01-01T00:00:00Z" APPROVE sha0004 success \
+  "$(printf '### Blocking (0)\n\nNone.\n\n### Needs your judgment (1)\n\n- The retry cap of 3 is a guess; confirm it matches the upstream timeout.\n\n### Verified clean\n\nEverything else.')" \
+  "u-approve-judgment")
+RESULT7=$(arr "$J7" | review_corpus_judgment_items)
+eq "one item from the APPROVE" "1" "$(jq -r 'length' <<<"$RESULT7")"
+eq "verdict is APPROVE"        "APPROVE" "$(jq -r '.[0].verdict' <<<"$RESULT7")"
+has_line() {  # has_line <label> <haystack> <needle>
+  case "$2" in *"$3"*) ok "$1" ;; *) bad "$1 (missing: $3)" ;; esac
+}
+has_line "carries the judgment heading" "$(jq -r '.[0].body' <<<"$RESULT7")" "Needs your judgment (1)"
+has_line "carries the judgment item"    "$(jq -r '.[0].body' <<<"$RESULT7")" "The retry cap of 3 is a guess"
+case "$(jq -r '.[0].body' <<<"$RESULT7")" in
+  *"Verified clean"* | *"Blocking"*) bad "APPROVE body is trimmed to the judgment section only" ;;
+  *) ok "APPROVE body is trimmed to the judgment section only" ;;
+esac
+
+echo "== judgment_items: an APPROVE with an EMPTY judgment section reports nothing =="
+J8=$(mk_review "2026-01-01T00:00:00Z" APPROVE sha0005 success \
+  "$(printf '### Needs your judgment\n\n### Verified clean\n\nAll of it.')" "u-approve-empty")
+eq "empty judgment section -> empty array" "[]" "$(arr "$J8" | review_corpus_judgment_items)"
+
+echo "== judgment_items: a judgment heading that counts itself out is not a row =="
+J8B=$(mk_review "2026-01-01T00:00:00Z" APPROVE sha0007 success \
+  "$(printf '### Needs your judgment (0)\n\nNone.\n\n### Verified clean\n\nAll of it.')" "u-approve-zero")
+eq "(0) heading -> empty array" "[]" "$(arr "$J8B" | review_corpus_judgment_items)"
+
+echo "== judgment_items: a non-APPROVE body keeps the model's own subsection headings =="
+J9=$(mk_review "2026-01-01T00:00:00Z" REQUEST_CHANGES sha0006 success \
+  "$(printf '### Blocking (1)\n\n- Drops errors on line 42.')" "u-rc-2")
+has_line "subsection heading survives strip_chrome" \
+  "$(arr "$J9" | review_corpus_judgment_items | jq -r '.[0].body')" "### Blocking (1)"
 
 # --- 9. sourcing under set -e ---------------------------------------------
 # `read -d ''` returns nonzero at EOF-without-a-NUL, which is every heredoc, so
