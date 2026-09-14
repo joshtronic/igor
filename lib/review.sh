@@ -226,12 +226,20 @@ REVIEW_FILE_EXISTENCE_MAX=10
 # (a Go module path, a scheme-less registry URL) costs a wasted existence check
 # below AND a spurious "NOT found" line, which is why that line is rendered as
 # necessary-but-not-sufficient grounding rather than as proof of absence.
+#
+# The `..` filter is a security boundary, not tidying: this text is UNTRUSTED
+# (a PR author writes the diff) and every survivor is interpolated into the
+# contents-API URL below, so a `../../` component would let a crafted diff
+# normalize the token-bearing GET onto a different endpoint. Shape alone admits
+# one -- dot and slash are both in the character class -- so it is excluded by
+# name.
 review_diff_referenced_paths() {
   local diff="$1"
   printf '%s\n' "$diff" \
     | grep -E '^\+' | grep -Ev '^\+\+\+' \
     | grep -viE 'https?://|www\.' \
     | grep -oE '[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9]{1,6}' \
+    | grep -Ev '(^|/)\.\.(/|$)' \
     | sort -u || true
 }
 
@@ -243,7 +251,7 @@ review_diff_referenced_paths() {
 # the igor#609 case: a file merged by an earlier, already-reviewed PR.
 review_file_existence_facts() {
   local repo="$1" diff="$2"
-  local changed candidates path status out=""
+  local changed candidates path raw status out=""
   changed=$(review_diff_changed_files "$diff")
   candidates=$(review_diff_referenced_paths "$diff")
   [ -n "$candidates" ] || return 0
@@ -254,7 +262,14 @@ review_file_existence_facts() {
   [ -n "$candidates" ] || return 0
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    status=$(forgejo_repo_get_file_status "$repo" "$path" 2>/dev/null | cut -f1)
+    # Same split as dossier_get_repo_status / automerge_require_human, and for
+    # the same reason: the helper's `found` content is the WHOLE decoded file,
+    # so anything line-oriented here (`cut -f1`, which echoes a delimiter-less
+    # line back verbatim) would fold the file's 2nd line onward into the status
+    # and drop an existing file into the `*` arm below -- reporting a transport
+    # error that never happened, for a file that demonstrably exists.
+    raw=$(forgejo_repo_get_file_status "$repo" "$path" 2>/dev/null) || raw=$'error\t'
+    status=${raw%%$'\t'*}
     case "$status" in
       found)   out="${out}
 - \`${path}\`: exists on the default branch" ;;

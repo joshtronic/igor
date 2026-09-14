@@ -199,6 +199,40 @@ has  "a referenced path found on the default branch is reported"     "$EF" 'flow
 has  "the section warns that diff-absence is not proof of non-existence" "$EF" "NOT proof it does not exist"
 eq   "a diff with no referenced paths -> no section" "" "$(review_file_existence_facts acme/repo "$NO_TEST_DIFF")"
 
+# The helper's contract is "<status>\t<content>", and the content is the WHOLE
+# decoded file -- so every real `found` payload past the first line is more
+# lines. Reading the status line-wise would echo those trailing lines back into
+# the status and land an existing file in the unknown bucket, which is the one
+# outcome this section exists to prevent (flow/icon.png is a PNG: binary, full
+# of \n bytes).
+forgejo_repo_get_file_status() {
+  case "$2" in
+    flow/icon.png) printf 'found\t\x89PNG\r\n\x1a\nIHDR\nmore binary\n' ;;
+    *)             printf 'error\t' ;;
+  esac
+}
+has "a found file whose content spans lines still reads as found" \
+    "$(review_file_existence_facts acme/repo "$REF_DIFF")" \
+    'flow/icon.png`: exists on the default branch'
+
+# The candidate list is built from UNTRUSTED diff text and each entry is
+# interpolated into an API URL, so a `..` component would let a crafted diff
+# steer the token-bearing GET off the repo's contents endpoint (curl normalizes
+# the traversal away before sending). Shape alone admits it -- dot and slash are
+# both in the character class -- so it has to be filtered explicitly.
+TRAVERSAL_DIFF='diff --git a/cmd/main.go b/cmd/main.go
+index 000..111 100644
+--- a/cmd/main.go
++++ b/cmd/main.go
+@@ -1,2 +1,3 @@
++load("../../../etc/passwd.txt")
++load("flow/../../secrets.json")
++load("flow/icon.png")'
+TRAV=$(review_diff_referenced_paths "$TRAVERSAL_DIFF")
+lacks "a leading-traversal path is not a candidate"  "$TRAV" "etc/passwd.txt"
+lacks "an interior-traversal path is not a candidate" "$TRAV" "secrets.json"
+has   "a normal path alongside them still is"         "$TRAV" "flow/icon.png"
+
 # A path the diff itself ADDS is proof enough on its own -- it must not be
 # re-flagged as merely "referenced" and sent through an existence check.
 ADDS_ITS_OWN='diff --git a/flow/icon.png b/flow/icon.png
