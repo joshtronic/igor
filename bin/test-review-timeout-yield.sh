@@ -9,9 +9,12 @@
 # nothing about the retry differed and the same un-reviewed head was picked
 # again. In thirty minutes the harness completed exactly one claim scan.
 #
-# The fix has two parts, both exercised here:
+# The fix has three parts, all exercised here:
 #   1. reviewer_retry_effort steps the effort DOWN after an in-tick timeout,
-#      so attempt 2 is a genuinely different (cheaper, faster) call.
+#      so attempt 2 is a genuinely different (cheaper, faster) call -- and a
+#      head that ALREADY timed out on an earlier tick skips that retry
+#      entirely, since a second budget can only re-confirm what the streak
+#      already says.
 #   2. A persistent per-head timeout streak yields the head after
 #      REVIEW_TIMEOUT_STREAK_CAP consecutive timeout-caused failures: further
 #      ticks skip it (no model call at all) until a new commit changes the
@@ -55,7 +58,8 @@ eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]";
 echo "== reviewer_retry_effort: steps down, never repeats the exact same rung =="
 eq "max steps down to high" "high" "$(reviewer_retry_effort max)"
 eq "high steps down to medium" "medium" "$(reviewer_retry_effort high)"
-eq "an already-stepped-down effort floors at medium" "medium" "$(reviewer_retry_effort medium)"
+eq "medium steps down to low" "low" "$(reviewer_retry_effort medium)"
+eq "low is the floor -- a step-DOWN helper never steps up" "low" "$(reviewer_retry_effort low)"
 
 echo "== review_timeout_yielded: pure cooldown-boundary checks =="
 TMP="$(mktemp -d)" || { echo "test-review-timeout-yield: mktemp unavailable -- skipping"; exit 0; }
@@ -176,7 +180,10 @@ reset_logs
 do_review_tick >"$TMP/out.log" 2>&1
 RC=$?
 eq "still returns non-zero" "1" "$RC"
-eq "both attempts were made again" "2" "$(claude_call_count)"
+# The in-tick retry exists to give a DIFFERENT call a chance. On a head that
+# already timed out last tick there is nothing left to learn from a second
+# 600s budget, so the walk to the cap costs 3 calls, not 4.
+eq "a head with a live streak gets ONE attempt, not two" "1" "$(claude_call_count)"
 eq "streak reached the cap" "2" "$(jq -r --arg k "$KEY" '.review[$k].timeout_streak' "$STATE")"
 YIELD_UNTIL=$(jq -r --arg k "$KEY" '.review[$k].timeout_yield_until' "$STATE")
 if [ "${YIELD_UNTIL:-0}" -gt "$(date +%s)" ]; then ok "a future cooldown was recorded"
@@ -205,7 +212,7 @@ jq --arg k "$KEY" '.review[$k].timeout_yield_until = 1' "$STATE" > "$TMP/state.n
 do_review_tick >"$TMP/out.log" 2>&1
 RC=$?
 eq "still returns non-zero" "1" "$RC"
-eq "the head IS re-tried once the cooldown lapses" "2" "$(claude_call_count)"
+eq "the head IS re-tried once the cooldown lapses -- at one call, not two" "1" "$(claude_call_count)"
 eq "streak keeps climbing" "3" "$(jq -r --arg k "$KEY" '.review[$k].timeout_streak' "$STATE")"
 YIELD_UNTIL=$(jq -r --arg k "$KEY" '.review[$k].timeout_yield_until' "$STATE")
 if [ "${YIELD_UNTIL:-0}" -gt "$(date +%s)" ]; then ok "the yield is re-armed for another cooldown"

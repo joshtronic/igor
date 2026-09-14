@@ -1198,13 +1198,19 @@ reviewer_effort() {
 # timeout (igor#638). A retry at the same effort and the same
 # REVIEW_CALL_TIMEOUT_SECS budget is doomed to the same timeout -- nothing
 # about the call changed, so nothing about the outcome would either. Step
-# down one rung instead: still a real review, but cheaper and faster, so the
-# second attempt has an actual chance of finishing inside the budget that
-# just failed it.
+# down instead: still a real review, but cheaper and faster, so the second
+# attempt has an actual chance of finishing inside the budget that just
+# failed it. `max` drops past `xhigh` to `high` on purpose -- the measured
+# gap that makes a retry viable is max~197s vs high~77s (see the budget note
+# below); one rung off `max` would be a rounding error against a 600s budget.
+# `low` is the floor and steps down to itself: unreachable from
+# reviewer_effort, which only emits high/max, but a step-DOWN helper that
+# silently steps UP is a trap for whoever widens that ladder next.
 reviewer_retry_effort() {
   case "${1:-high}" in
-    max) printf 'high' ;;
-    *) printf 'medium' ;;
+    max|xhigh) printf 'high' ;;
+    high) printf 'medium' ;;
+    *) printf 'low' ;;
   esac
 }
 
@@ -1236,9 +1242,16 @@ REVIEW_CALL_TIMEOUT_SECS=600
 # do_review_tick failures on the SAME head, the head is yielded: selection
 # skips it (no model call at all) until either a new commit changes the head
 # sha, or REVIEW_TIMEOUT_YIELD_COOLDOWN_SECS passes. 2 is deliberately low --
-# each counted failure already burns up to two attempts' worth of timeout
-# (minus whatever reviewer_retry_effort's step-down saves), so a higher cap
-# just multiplies the exact starvation this exists to bound.
+# the first counted failure burns two attempts' worth of timeout (minus
+# whatever reviewer_retry_effort's step-down saves) and every one after it
+# burns one, since do_review_tick drops to a single attempt on a head that
+# already has a streak. So the walk to the cap costs 3 calls, and a higher cap
+# just adds one full budget each -- multiplying the exact starvation this
+# exists to bound. Not 1, though: a single unlucky tick (a slow API moment, a
+# blip) would then suppress a PR's review for an hour and put an escalation
+# comment on it, and one tick's evidence can't tell a transient from a chronic
+# -- the same distinction logwatch's LOGWATCH_MIN_OCCURRENCES pre-pass exists
+# to draw.
 REVIEW_TIMEOUT_STREAK_CAP=2
 REVIEW_TIMEOUT_YIELD_COOLDOWN_SECS=3600
 
@@ -3394,9 +3407,13 @@ do_review_tick() {
   local raw parsed attempt verdict review_body snippet tail_snip call_rc had_timeout
   # igor#308: run the shadow review at an escalating effort -- flat "high"
   # during the rework loop, "max" for the final look before escalation.
-  local rev_rounds rev_effort
+  local rev_rounds rev_effort prior_timeouts
   rev_rounds=$(review_rework_rounds "$key")
   rev_effort=$(reviewer_effort "$rev_rounds")
+  # A head that ALREADY timed out on an earlier tick has answered the question
+  # the second attempt would ask, so it gets ONE budget this tick rather than
+  # two: attempt 1 confirms the streak, review_note_timeout_failure yields.
+  prior_timeouts=$(review_timeout_streak "$key" "$target_sha")
   parsed=""
   had_timeout=0
   for attempt in 1 2; do
@@ -3409,6 +3426,10 @@ do_review_tick() {
       if [ "$call_rc" -eq 124 ]; then
         had_timeout=1
         log "review: ${key} review call timed out (attempt $attempt, effort=${rev_effort})"
+        if [ "${prior_timeouts:-0}" -gt 0 ]; then
+          log "review: ${key} head ${target_sha:0:8} already timed out ${prior_timeouts}x on an earlier tick -- not spending a second budget on it this tick"
+          break
+        fi
         # A retry at the same effort and budget is doomed the same way --
         # step down so attempt 2 is an actually different, cheaper call
         # (igor#638), not an identical one.
@@ -3428,7 +3449,7 @@ do_review_tick() {
     log "review: ${key} unparseable response (attempt $attempt, ${#raw} chars; head: ${snippet:0:160} [...] tail: ${tail_snip})"
   done
   if [ -z "$parsed" ]; then
-    log "review: ${key} no parseable verdict after 2 attempts -- leaving head un-recorded (will retry next tick)"
+    log "review: ${key} no parseable verdict after ${attempt} attempt(s) -- leaving head un-recorded (will retry next tick)"
     [ "$had_timeout" -eq 1 ] && review_note_timeout_failure "$target_repo" "$target_num" "$key" "$target_sha"
     return 1
   fi
