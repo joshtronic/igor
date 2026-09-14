@@ -357,6 +357,17 @@ J8B=$(mk_review "2026-01-01T00:00:00Z" APPROVE sha0007 success \
   "$(printf '### Needs your judgment (0)\n\nNone.\n\n### Verified clean\n\nAll of it.')" "u-approve-zero")
 eq "(0) heading -> empty array" "[]" "$(arr "$J8B" | review_corpus_judgment_items)"
 
+echo "== judgment_items: a multi-item judgment section keeps its paragraph breaks =="
+# The section is reproduced for a human to read, so the blank lines BETWEEN
+# items are structure, not noise -- collapsing them runs a list of separate
+# findings together into one paragraph.
+J8C=$(mk_review "2026-01-01T00:00:00Z" APPROVE sha0008 success \
+  "$(printf '### Needs your judgment (2)\n\n- The retry cap of 3 is a guess.\n\n- The timeout is not configurable.\n\n### Verified clean\n\nAll of it.')" \
+  "u-approve-two")
+eq "interior blank lines survive, trailing ones do not" \
+  "$(printf '### Needs your judgment (2)\n\n- The retry cap of 3 is a guess.\n\n- The timeout is not configurable.')" \
+  "$(arr "$J8C" | review_corpus_judgment_items | jq -r '.[0].body')"
+
 echo "== judgment_items: a non-APPROVE body keeps the model's own subsection headings =="
 J9=$(mk_review "2026-01-01T00:00:00Z" REQUEST_CHANGES sha0006 success \
   "$(printf '### Blocking (1)\n\n- Drops errors on line 42.')" "u-rc-2")

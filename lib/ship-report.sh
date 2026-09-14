@@ -23,7 +23,8 @@
 # shipreport_judgment_build wraps the per-PR items lib/review-corpus.sh's
 # review_corpus_judgment_items extracts (a non-APPROVE final verdict in full,
 # an APPROVE's "needs your judgment" section, or a dismissal never blessed by
-# a later APPROVE) into the `judgment_items` key.
+# a later APPROVE) into the `judgment_items` key, alongside the
+# `judgment_unchecked` list of merged PRs whose threads could not be read.
 
 # Fallback logger so this module is sourceable standalone (tests).
 if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*" >&2; }; fi
@@ -154,7 +155,7 @@ shipreport_metrics_build() {
      }'
 }
 
-# shipreport_judgment_build <judgment_json>
+# shipreport_judgment_build <judgment_json> [<unchecked_json>]
 # igor#610: 46.7% of review verdicts across the fleet are COMMENT -- the
 # plurality outcome, and the one that carries "needs your judgment" items
 # without blocking or triggering rework. Under auto-merge that content ships
@@ -174,9 +175,16 @@ shipreport_metrics_build() {
 # it, empty or not. The issue this closes is explicitly that silence here
 # must never be ambiguous between "nothing unresolved" and "the extraction
 # broke," so do_shipreport_tick always calls this, never skips the merge.
+#
+# <unchecked_json> is the other half of that: the merged PRs whose threads
+# could not be read at all ([{repo, number, title, url, reason}], from
+# do_shipreport_tick's shipreport_gather_judgment). Those are NOT evidence of
+# a clean PR, so the renderers print them above the items and say the section
+# is incomplete -- a journal WARN is invisible to the person reading the email.
 shipreport_judgment_build() {
-  local judgment_json="${1:-[]}"
-  jq -cn --argjson j "${judgment_json:-[]}" '{judgment_items: $j}'
+  local judgment_json="${1:-[]}" unchecked_json="${2:-[]}"
+  jq -cn --argjson j "${judgment_json:-[]}" --argjson u "${unchecked_json:-[]}" \
+    '{judgment_items: $j, judgment_unchecked: $u}'
 }
 
 # Shared jq defs for the metrics/version renderers below.
@@ -250,22 +258,31 @@ _shipreport_claude_version_line() {
 # rather than relying on gather order, so the section reads the same
 # regardless of how do_shipreport_tick walked ANALYSIS_REPOS_JSON). The
 # `// []` default on a missing key is what makes the section mandatory --
-# see shipreport_judgment_build.
+# see shipreport_judgment_build. Unreadable PRs print FIRST, above whatever
+# was found: they qualify everything under them, so a reader who stops after
+# one line has still seen that the list is partial.
 _shipreport_judgment_lines() {
   jq -r '
     (.judgment_items // []) as $j
-    | if ($j | length) == 0 then
-        "  (no unresolved judgment items)"
-      else
-        ( $j | group_by(.repo)[] | .[] |
-          "  * \(.repo)#\(.number)  \(.title)",
-          "    \(.url)",
-          ( .items[] |
-            "    [\(if .verdict then .verdict else "dismissed" end)] \(if .comment_url == "" then "(no direct link)" else .comment_url end)",
-            ( .body | split("\n") | map("      " + .) | join("\n") )
+    | (.judgment_unchecked // []) as $u
+    | ( if ($u | length) == 0 then empty
+        else
+          "  !! \($u | length) merged PR(s) could not be checked -- this section is INCOMPLETE:",
+          ( $u[] | "     - \(.repo)#\(.number)  \(.title)  (\(.reason))" )
+        end ),
+      ( if ($j | length) == 0 then
+          ( if ($u | length) == 0 then "  (no unresolved judgment items)"
+            else "  (no unresolved judgment items among the PRs that could be checked)" end )
+        else
+          ( $j | group_by(.repo)[] | .[] |
+            "  * \(.repo)#\(.number)  \(.title)",
+            "    \(.url)",
+            ( .items[] |
+              "    [\(if .verdict then .verdict else "dismissed" end)] \(if .comment_url == "" then "(no direct link)" else .comment_url end)",
+              ( .body | split("\n") | map(if test("\\S") then "      " + . else . end) | join("\n") )
+            )
           )
-        )
-      end
+        end )
   '
 }
 
@@ -368,6 +385,16 @@ shipreport_render_html() {
   jn=$(jq -r '.judgment_items // [] | length' <<<"$r")
   printf '<h3 style="border-bottom:1px solid #eee;padding-bottom:4px">&#9878; Judgment items, unresolved (%s PR(s), %s item(s))</h3>' \
     "$jn" "$jcount"
+  local ju
+  ju=$(jq -r '
+    (.judgment_unchecked // [])
+    | if length == 0 then empty
+      else
+        "<p style=\"color:#b00;margin:0 0 4px\"><strong>\(length) merged PR(s) could not be checked &mdash; this section is incomplete:</strong></p><ul>"
+        + ([ .[] | "<li><a href=\"\(.url|@html)\">\(.repo)#\(.number)</a> &mdash; \(.title|@html) (\(.reason|@html))</li>" ] | join(""))
+        + "</ul>"
+      end' <<<"$r")
+  [ -z "$ju" ] || printf '%s' "$ju"
   local ji
   ji=$(jq -r '
     (.judgment_items // []) | group_by(.repo)[] | .[] |
@@ -379,7 +406,13 @@ shipreport_render_html() {
         ] | join("") )
     + "</li>"
   ' <<<"$r")
-  if [ -n "$ji" ]; then printf '<ul>%s</ul>' "$ji"; else printf '<p style="color:#888"><em>no unresolved judgment items</em></p>'; fi
+  if [ -n "$ji" ]; then
+    printf '<ul>%s</ul>' "$ji"
+  elif [ -n "$ju" ]; then
+    printf '<p style="color:#888"><em>no unresolved judgment items among the PRs that could be checked</em></p>'
+  else
+    printf '<p style="color:#888"><em>no unresolved judgment items</em></p>'
+  fi
 
   # Landed (igor#512): only shown when the caller merged one in via
   # shipreport_merge_landed -- omitted entirely for a plain PR report.

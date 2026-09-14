@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # test-shipreport.sh -- unit tests for lib/ship-report.sh: bucketing, the
 # shadow-vs-human gate tag, empty-window handling, the daily stamp round-trip,
-# and that the module makes NO model call (it's fully scripted). Skip-safe:
-# needs jq; exits 0 with a notice if absent, like the other bin/test-*.sh.
+# and that the module makes NO model call (it's fully scripted). Also drives
+# bin/tick.sh's shipreport_gather_judgment, lifted out and stubbed -- the one
+# part of igor#610 that isn't pure. Skip-safe: needs jq; exits 0 with a notice
+# if absent, like the other bin/test-*.sh.
 set -uo pipefail
 
 command -v jq >/dev/null 2>&1 || { echo "test-shipreport: jq absent -- skipping"; exit 0; }
@@ -209,26 +211,147 @@ has "html: links the review comment"         "$JHTML" 'href="https://forge/acme/
 has "html: shows the dismissal verdict badge" "$JHTML" "[dismissed]"
 has "html: body kept verbatim"               "$JHTML" "This silently drops errors on line 42."
 
-echo "== do_shipreport_tick guards an empty comment fetch before the call =="
-# Source-assertion, in the spirit of test-automerge-before-health-gate.sh.
-# review_corpus_judgment_items reads STDIN when its argument is empty, and
-# stdin inside do_shipreport_tick's merged-PR loop is the process
-# substitution feeding that loop -- so an empty-but-successful
-# forgejo_pr_comments would drain the remaining PRs into `cat` and end the
-# loop early with no log line. The `|| comments='[]'` fallback alone does
-# not cover that: it only fires on a NONZERO exit.
+echo "== judgment: a PR that could not be checked says so IN THE REPORT =="
+# The whole point of the section is that silence is unambiguous. A PR whose
+# comment thread never got read is not evidence of a clean PR, so it cannot be
+# reported the same way -- a WARN in the journal is not something the human
+# reading the email sees.
+eq "judgment_build: unchecked defaults to an empty array" "[]" \
+  "$(jq -c '.judgment_unchecked' <<<"$(shipreport_judgment_build)")"
+UNCHECKED_JSON='[{"repo":"acme/x","number":13,"title":"Unreadable","url":"https://forge/acme/x/pulls/13","reason":"comment fetch failed"}]'
+UNCHECKED_ONLY=$(shipreport_judgment_build '[]' "$UNCHECKED_JSON")
+eq "judgment_build: unchecked carried through" "1" \
+  "$(jq -r '.judgment_unchecked | length' <<<"$UNCHECKED_ONLY")"
+U_REPORT=$(jq -c --argjson j "$UNCHECKED_ONLY" '. + $j' <<<"$REPORT")
+UTEXT=$(shipreport_render_text <<<"$U_REPORT")
+has "text: flags the section as incomplete" "$UTEXT" "could not be checked"
+has "text: names the unchecked PR"          "$UTEXT" "acme/x#13"
+has "text: gives the reason"                "$UTEXT" "comment fetch failed"
+has "text: qualifies the nothing-found line rather than claiming a clean day" \
+  "$UTEXT" "among the PRs that could be checked"
+UHTML=$(shipreport_render_html <<<"$U_REPORT")
+has "html: flags the section as incomplete" "$UHTML" "could not be checked"
+has "html: names the unchecked PR"          "$UHTML" "acme/x#13"
+has "html: gives the reason"                "$UHTML" "comment fetch failed"
+
+echo "== forgejo_pr_comments: the helper the gather loop calls exists, with that signature =="
+# The gather loop's only network call. If the name or the argument order ever
+# drifts, bash returns 127, the `if !` swallows it, and the feature goes inert
+# while the email still reads "no unresolved judgment items" -- so pin both
+# against the real lib rather than against the stub two blocks below.
+if bash -c 'set -uo pipefail; . "$1/../lib/forgejo.sh"; declare -F forgejo_pr_comments >/dev/null' _ "$HERE"; then
+  printf '  + %s\n' "forgejo_pr_comments is defined by lib/forgejo.sh"
+else
+  printf '  x %s\n' "forgejo_pr_comments is not defined by lib/forgejo.sh"; FAIL=$((FAIL + 1))
+fi
+FJ_SIG=$(sed -n '/^forgejo_pr_comments() {$/,/^}$/p' "$HERE/../lib/forgejo.sh")
+has "it takes <repo> then <number>, the order the loop passes" \
+  "$FJ_SIG" 'local repo="$1" number="$2"'
+
+echo "== shipreport_gather_judgment: the real loop from bin/tick.sh, driven with stubs =="
+# Lift the function out of tick.sh and run it (the idiom bin/test-cascade.sh
+# uses for cascade_run). The loop is half of igor#610 and CI covered none of
+# it while this was a grep over source text.
 TICK_SRC="$HERE/tick.sh"
-GATHER=$(sed -n '/local pr_line pr_num pr_title pr_url comments pr_judgment/,/^    done < <(jq -c/p' "$TICK_SRC")
-has "the gather loop was found in bin/tick.sh" "$GATHER" "review_corpus_judgment_items"
-has "empty comments are coerced to [] before the call" "$GATHER" '[ -n "$comments" ] || comments='"'"'[]'"'"
-has "an empty judgment result is coerced too"          "$GATHER" '[ -n "$pr_judgment" ] || pr_judgment='"'"'[]'"'"
-has "a failed append is logged, not swallowed"         "$GATHER" "dropped judgment items"
-has "a failed comment fetch is logged, not swallowed"  "$GATHER" "comment fetch failed"
-has "a failed extraction is logged, not swallowed"     "$GATHER" "judgment extraction failed"
-# errexit-safe early-continue: `[ -z "$x" ] && continue` is exempt from
-# `set -e` (a non-final && element), but the file's convention is the `||`
-# form and it reads as safe without having to know that rule.
-has "the empty-line skip uses the || form"             "$GATHER" '[ -n "$pr_line" ] || continue'
+GATHER_SRC=$(sed -n '/^shipreport_gather_judgment() {$/,/^}$/p' "$TICK_SRC")
+if [ -z "$GATHER_SRC" ]; then
+  printf '  x %s\n' "could not extract shipreport_gather_judgment() from bin/tick.sh"
+  FAIL=$((FAIL + 1))
+else
+  eval "$GATHER_SRC"
+  # shellcheck source=../lib/review-corpus.sh
+  . "$HERE/../lib/review-corpus.sh"
+
+  # A file, not a variable: every call below is a command substitution, so a
+  # log sink in the shell's own memory would be written in the subshell and
+  # thrown away with it.
+  GATHER_LOG="$TMP/gather.log"; : >"$GATHER_LOG"
+  log() { printf '%s\n' "$*" >>"$GATHER_LOG"; }
+
+  # A copy of the harness's own review-comment template (bin/tick.sh), header
+  # and footer included, so the parser's header match is exercised rather than
+  # bypassed. bin/test-review-corpus.sh is where that header is pinned against
+  # source; here it just has to be real enough to parse.
+  REVIEW_BODY='### 🤖 Review — `REQUEST_CHANGES` _(automated)_
+
+CI for `abc12345`: **success**
+
+### Blocking (1)
+
+- Drops errors on line 42.
+
+---
+<sub>Independent review by the harness.</sub>
+<!-- review sha=abc12345 verdict=REQUEST_CHANGES ci=success -->'
+
+  # #12 reviews clean-ly; #13 fails to fetch; #14 returns an EMPTY body on a
+  # ZERO exit (the stdin-drain hazard: review_corpus_judgment_items reads stdin
+  # when its argument is empty, and stdin here is the process substitution
+  # feeding the loop, so an unguarded #14 swallows #15 and #16); #15 proves the
+  # loop survived it; #16 returns a non-array, which the extractor chokes on.
+  forgejo_pr_comments() {
+    case "$2" in
+      13) return 1 ;;
+      14) printf '' ;;
+      16) printf '{"message":"not an array"}' ;;
+      *) jq -n -c --arg b "$REVIEW_BODY" --arg u "c$2" \
+           '[{user:{login:"igor"}, created_at:"2026-01-01T00:00:00Z", html_url:$u, body:$b}]' ;;
+    esac
+  }
+  MERGED='[
+    {"repo":"acme/x","number":12,"title":"Fix thing","url":"u12"},
+    {"repo":"acme/x","number":13,"title":"Unreadable","url":"u13"},
+    {"repo":"acme/x","number":14,"title":"Empty thread","url":"u14"},
+    {"repo":"acme/x","number":15,"title":"After the empty one","url":"u15"},
+    {"repo":"acme/x","number":16,"title":"Garbage thread","url":"u16"}
+  ]'
+  GATHERED=$(shipreport_gather_judgment "acme/x" "$MERGED")
+  eq "items: only the PRs with unresolved findings" "12 15" \
+    "$(jq -r '[.items[].number] | join(" ")' <<<"$GATHERED")"
+  eq "the PR after an empty-but-successful fetch is still reached" "15" \
+    "$(jq -r '[.items[].number] | last' <<<"$GATHERED")"
+  eq "an empty thread yields no item and no unchecked entry" "0" \
+    "$(jq -r '[(.items[], .unchecked[]) | select(.number == 14)] | length' <<<"$GATHERED")"
+  eq "unchecked: the fetch failure and the extraction failure" "13 16" \
+    "$(jq -r '[.unchecked[].number] | join(" ")' <<<"$GATHERED")"
+  eq "unchecked carries a reason the report can print" "comment fetch failed" \
+    "$(jq -r '.unchecked[] | select(.number == 13) | .reason' <<<"$GATHERED")"
+  eq "an extraction failure is a distinct reason" "judgment extraction failed" \
+    "$(jq -r '.unchecked[] | select(.number == 16) | .reason' <<<"$GATHERED")"
+  eq "the PR's own metadata rides along for the report" "Fix thing u12" \
+    "$(jq -r '.items[] | select(.number == 12) | "\(.title) \(.url)"' <<<"$GATHERED")"
+  eq "the review verdict survives extraction" "REQUEST_CHANGES" \
+    "$(jq -r '.items[] | select(.number == 12) | .items[0].verdict' <<<"$GATHERED")"
+  has "the comment deep-link survives extraction" \
+    "$(jq -r '.items[] | select(.number == 12) | .items[0].comment_url' <<<"$GATHERED")" "c12"
+  has "a failed fetch is logged too, not only reported" \
+    "$(cat "$GATHER_LOG")" "comment fetch failed for acme/x#13"
+  has "a failed extraction is logged too" \
+    "$(cat "$GATHER_LOG")" "judgment extraction failed for acme/x#16"
+
+  # Accumulator threading: the tick calls this once per repo, so a second call
+  # must add to the first's result rather than replace it.
+  SECOND=$(shipreport_gather_judgment "acme/y" '[{"repo":"acme/y","number":20,"title":"Elsewhere","url":"u20"}]' "$GATHERED")
+  eq "a second repo's items are appended, not replaced" "12 15 20" \
+    "$(jq -r '[.items[].number] | join(" ")' <<<"$SECOND")"
+  eq "a second repo keeps the first's unchecked entries" "13 16" \
+    "$(jq -r '[.unchecked[].number] | join(" ")' <<<"$SECOND")"
+  eq "no merged PRs at all -> an empty gather, not an error" '{"items":[],"unchecked":[]}' \
+    "$(shipreport_gather_judgment "acme/x" '[]')"
+
+  # errexit-safe early-continue: `[ -z "$x" ] && continue` is exempt from
+  # `set -e` (a non-final && element), but the file's convention is the `||`
+  # form and it reads as safe without having to know that rule.
+  has "the empty-line skip uses the || form" "$GATHER_SRC" '[ -n "$pr_line" ] || continue'
+
+  unset -f forgejo_pr_comments
+fi
+
+echo "== do_shipreport_tick wires the gather into the report =="
+has "the tick calls the gather loop" \
+  "$(sed -n '/^do_shipreport_tick() {$/,/^}$/p' "$TICK_SRC")" "shipreport_gather_judgment"
+has "both halves of the gather reach shipreport_judgment_build" \
+  "$(sed -n '/^do_shipreport_tick() {$/,/^}$/p' "$TICK_SRC")" 'shipreport_judgment_build "$'
 
 echo "== fully scripted: no model call in the module =="
 if grep -qE "claude_call|claude_run|anthropic_call" "$HERE/../lib/ship-report.sh"; then

@@ -136,6 +136,11 @@ def strip_chrome($body):
 # A heading that counts itself out ("Needs your judgment (0)") is treated as
 # absent without reading what's under it, so the boilerplate "None." the
 # directive puts there doesn't become a daily report row.
+#
+# Blank lines INSIDE the section are kept -- a judgment list is several
+# separate findings, and collapsing the breaks between them runs them together
+# into one paragraph. Only the trailing run is dropped (an artifact of where
+# the next heading starts), the same trim strip_chrome applies.
 def judgment_section($body):
   ($body // "" | split("\n")) as $lines
   | ($lines | map(test("^#{1,6}\\s*needs your judgment"; "i")) | index(true)) as $start
@@ -145,8 +150,9 @@ def judgment_section($body):
       | ($rest | map(test("^#{1,6}\\s")) | index(true)) as $end
       | (if $end == null then $rest else $rest[0:$end] end)
       | map(select(is_fixed_tail | not))
-      | map(select(test("\\S")))
-      | if length == 0 then "" else ([$lines[$start]] + .) | join("\n") end
+      | if any(test("\\S")) | not then ""
+        else ([$lines[$start]] + .) | join("\n") | sub("\\n+$"; "")
+        end
     end;
 
 # The lines of a comment body that carry actual content: scaffolding dropped,
