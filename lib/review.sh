@@ -598,11 +598,16 @@ ${diff}
 # COMMENT previously reached nobody: the rework agent never reads comments on
 # its own, so the decision silently did nothing.
 #
-# The marker: a comment containing this literal string, from FORGEJO_REVIEWER
-# specifically -- not any commenter. That is a privilege boundary, not a
-# preference (the spike's first cut accepted any commenter and it lowered the
-# same bar Signal 2's manual reassignment already gates on write access). It
-# is honoured only when it is NEWER than the bot's own latest comment on the
+# The marker: a comment carrying this literal string ON A LINE OF ITS OWN
+# (whitespace-trimmed), from FORGEJO_REVIEWER specifically -- not any
+# commenter. That is a privilege boundary, not a preference (the spike's
+# first cut accepted any commenter and it lowered the same bar Signal 2's
+# manual reassignment already gates on write access). The own-line anchor
+# (igor#627) exists because a bare substring match fires on any comment that
+# merely MENTIONS the marker -- a review discussing this feature, a
+# code-fenced example, a quoted prior comment -- so a discussion of the
+# mechanism itself was indistinguishable from an actual adjudication. It is
+# honoured only when it is NEWER than the bot's own latest comment on the
 # PR, so a historical marker from an already-answered round cannot re-trigger
 # once the bot has spoken since -- the bot's every rework round posts at
 # least one comment (the audit trail, or a no-commits note), which is what
@@ -630,7 +635,26 @@ review_adjudication_pending() {
     return 1
   fi
   if ! result=$(jq -r --arg bot "$bot" --arg reviewer "$reviewer" --arg marker "$REVIEW_ADJUDICATION_MARKER" '
-      def is_marker: (.body // "") | contains($marker);
+      def trimline: gsub("^\\s+|\\s+$";"");
+      def is_fence_line: trimline | startswith("```");
+      # Strip fenced code blocks before anchoring -- a comment SHOWING the
+      # marker as a syntax example (igor#627) would otherwise still match
+      # the own-line anchor below, since the example line has nothing else
+      # on it either.
+      def strip_fences:
+        split("\n")
+        | reduce .[] as $line ({in_fence: false, out: []};
+            ($line | is_fence_line) as $isfence
+            | if .in_fence then
+                (if $isfence then {in_fence: false, out: .out} else {in_fence: true, out: .out} end)
+              else
+                (if $isfence then {in_fence: true, out: .out} else {in_fence: false, out: (.out + [$line])} end)
+              end)
+        | .out | join("\n");
+      # The marker must occupy a trimmed line of its own, not merely appear
+      # somewhere in the body -- a review discussing this feature, or a
+      # quoted prior comment (its line prefixed with "> "), no longer counts.
+      def is_marker: (.body // "") | strip_fences | split("\n") | any(trimline == $marker);
       ( [.[]? | select(.user.login == $bot)] | sort_by(.created_at) | last.created_at ) as $bot_last
       | [ .[]? | select(.user.login == $reviewer and is_marker)
             | select($bot_last == null or .created_at > $bot_last) ]

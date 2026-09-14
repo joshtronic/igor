@@ -759,6 +759,55 @@ PENDING=$(review_adjudication_pending acme/x 1 igor joshtronic)
 has "the marker comment's own body surfaces" "$PENDING" "correlation buffer"
 unset -f forgejo_pr_comments
 
+# igor#627: a comment that merely MENTIONS the marker inline -- discussing
+# the mechanism, not invoking it -- must NOT trigger a reassignment.
+forgejo_pr_comments() {
+  jq -n '[{user:{login:"joshtronic"}, created_at:"2026-09-01T00:00:00Z",
+           body:"This review never writes the literal <!-- adjudication --> marker, see the second item."}]'
+}
+if review_adjudication_pending acme/x 1 igor joshtronic >/dev/null 2>&1; then
+  printf '  x an inline mention of the marker must NOT trigger\n'; FAIL=$((FAIL + 1))
+else
+  printf '  + an inline mention of the marker must NOT trigger\n'
+fi
+unset -f forgejo_pr_comments
+
+# igor#627: the marker quoted inside a fenced code block -- an example, not
+# an instruction -- must NOT trigger either.
+forgejo_pr_comments() {
+  jq -n '[{user:{login:"joshtronic"}, created_at:"2026-09-01T00:00:00Z",
+           body:"Here is the marker syntax:\n\n```\n<!-- adjudication -->\n```\n\nDo not literally use it here."}]'
+}
+if review_adjudication_pending acme/x 1 igor joshtronic >/dev/null 2>&1; then
+  printf '  x the marker inside a fenced code block must NOT trigger\n'; FAIL=$((FAIL + 1))
+else
+  printf '  + the marker inside a fenced code block must NOT trigger\n'
+fi
+unset -f forgejo_pr_comments
+
+# igor#627: a quoted prior comment -- its marker line prefixed with the
+# Markdown blockquote "> " -- is quotation, not a fresh invocation.
+forgejo_pr_comments() {
+  jq -n '[{user:{login:"joshtronic"}, created_at:"2026-09-01T00:00:00Z",
+           body:"replying to your earlier comment:\n> <!-- adjudication -->\nthat was about the old finding, ignore it"}]'
+}
+if review_adjudication_pending acme/x 1 igor joshtronic >/dev/null 2>&1; then
+  printf '  x a quoted marker line (blockquoted) must NOT trigger\n'; FAIL=$((FAIL + 1))
+else
+  printf '  + a quoted marker line (blockquoted) must NOT trigger\n'
+fi
+unset -f forgejo_pr_comments
+
+# igor#627: the marker on its own line, with incidental surrounding
+# whitespace, still counts -- the anchor is a trimmed-line match.
+forgejo_pr_comments() {
+  jq -n '[{user:{login:"joshtronic"}, created_at:"2026-09-01T00:00:00Z",
+           body:"answer\n\n  <!-- adjudication -->  "}]'
+}
+PENDING3=$(review_adjudication_pending acme/x 1 igor joshtronic)
+has "the marker on its own line with surrounding whitespace still fires" "$PENDING3" "answer"
+unset -f forgejo_pr_comments
+
 # Privilege boundary (decision 5): the identical marker from anyone OTHER
 # than the configured reviewer must NOT count. This is the negative test the
 # spec calls mandatory -- accepting any commenter lets a lower-privileged
