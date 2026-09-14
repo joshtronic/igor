@@ -63,6 +63,38 @@ CONTEXT_SKILLS=(
                     # ticket has no use for the rules on how to WRITE one.
 )
 
+# Distillery skills that exist on origin/master but are deliberately NOT
+# in CONTEXT_SKILLS above -- named here, with why, so the absence reads
+# as a decision rather than six skills nobody looked at (igor#620):
+#   product-research   -- no igor surface delegates a product goal to an
+#                         agent; the autonomous-CEO pass this replaces
+#                         was retired (igor#556).
+#   coding-standards   -- its four rules (minimal touch, comment
+#                         discipline, TDD, verification honesty) already
+#                         appear near-verbatim on both consuming sides:
+#                         worker-contract (author) and review-directive
+#                         (reviewer). Wiring it too would just duplicate
+#                         what's already on both surfaces.
+#   worker-permissions -- documents the static agent-settings.json
+#                         permission profile for a human/operator to
+#                         evaluate; no igor surface makes tool-permission
+#                         decisions at runtime.
+#   dossier-spec       -- the AGENTS.md dossier shape it documents is
+#                         enforced entirely by deterministic code
+#                         (lib/dossier.sh, lib/automerge.sh); no LLM
+#                         prompt surface reads or writes a dossier (the
+#                         onboarding wizard that would is still planned).
+#   ai-writing-tells   -- a recall-only catalog by its own SKILL.md
+#                         ("nothing here is loaded into a prompt"); the
+#                         curated prompt-facing subset already ships to
+#                         every voice-consuming surface via the `voice`
+#                         skill's Bans section.
+#   design             -- site-work-directive already scopes the weekly
+#                         site-work pass to small polish, explicitly NOT
+#                         a redesign/rewrite; design's charter (new UI,
+#                         redesigns, reskins) is bigger than what that
+#                         surface is allowed to do.
+
 # CONTEXT_DISTILLERY_PATH / CONTEXT_CACHE_DIR are overridable (tests
 # point them at fixtures); real runs default under AGENT_STATE_DIR.
 _context_distillery_path() {
