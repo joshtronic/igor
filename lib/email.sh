@@ -46,7 +46,7 @@ email_send() {
   # did -- so a big body blew up the exec building the payload, before curl
   # was ever reached. --rawfile takes a PATH on argv and reads the content
   # via a read(), so neither body ever becomes an argv entry.
-  local html_file text_file
+  local html_file text_file jq_rc=0
   html_file=$(mktemp); text_file=$(mktemp)
   printf '%s' "$html" >"$html_file"
   printf '%s' "$text" >"$text_file"
@@ -58,8 +58,16 @@ email_send() {
     --rawfile text "$text_file" \
     --argjson to "$to_json" \
     '{api_key:$key, sender:$sender, to:$to, subject:$subject,
-      html_body:$html, text_body:$text}')
+      html_body:$html, text_body:$text}') || jq_rc=$?
+  # Guarded rather than bare so the temp files are removed on the failure
+  # path too -- under a caller's `set -e` a failing jq would otherwise abort
+  # the function mid-way and leak both in a long-running tick loop. An empty
+  # payload must also never reach curl as if it were a real body.
   rm -f "$html_file" "$text_file"
+  if [ "$jq_rc" -ne 0 ] || [ -z "$payload" ]; then
+    log "email: failed to build the JSON payload (jq exit ${jq_rc})"
+    return 1
+  fi
 
   if [ -n "$cc_csv" ]; then
     cc_json=$(printf '%s' "$cc_csv" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length>0))')

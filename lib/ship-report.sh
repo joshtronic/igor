@@ -276,16 +276,19 @@ shipreport_metrics_build() {
 # per the issue ("a silent truncation is worse than a large report"):
 #   1. Per-item: a single item body over SHIPREPORT_JUDGMENT_ITEM_MAX_CHARS
 #      is shortened in place with a "[truncated, N more char(s)]" marker.
-#   2. Per-section: PR entries are kept, in order, while the running total of
-#      (possibly-shortened) item bytes stays under
-#      SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS; once a PR entry's items would
-#      push the total over budget, that entry and every one after it are
-#      dropped from `judgment_items` entirely (never partially -- an entry
-#      is either shown whole or not at all).
+#   2. Per-section: PR entries are walked in order and kept while their
+#      (possibly-shortened) item bytes fit in what is left of
+#      SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS. Greedy packing, not a prefix
+#      cut: an entry that does not fit is dropped WHOLE (never partially --
+#      an entry is either shown whole or not at all) and the walk continues,
+#      so a later, smaller entry that still fits is kept.
 # Both passes are tallied into a `judgment_trim` key the renderers turn into
 # an explicit notice -- entries_omitted/items_omitted/bytes_omitted for pass
 # 2, items_truncated/bytes_truncated for pass 1 -- so the reader always knows
-# when something didn't make it into the email, and roughly how much.
+# when something didn't make it into the email, and roughly how much. The
+# pass-1 tally counts only items that survived pass 2: an item that was
+# shortened and then dropped with its entry is reported once, as omitted,
+# rather than in both halves of the notice.
 shipreport_judgment_build() {
   local judgment_json="${1:-[]}"
   local item_max="${SHIPREPORT_JUDGMENT_ITEM_MAX_CHARS}" section_max="${SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS}"
@@ -296,7 +299,8 @@ shipreport_judgment_build() {
   # a read(), same fix as email.sh's --rawfile for the html/text bodies.
   local judgment_file; judgment_file=$(mktemp)
   printf '%s' "${judgment_json:-[]}" >"$judgment_file"
-  jq -cn --slurpfile jarr "$judgment_file" --argjson imax "$item_max" --argjson smax "$section_max" '
+  local out rc=0
+  out=$(jq -cn --slurpfile jarr "$judgment_file" --argjson imax "$item_max" --argjson smax "$section_max" '
     def trunc_item($imax):
       (.body | length) as $blen
       | if $blen > $imax then
@@ -322,12 +326,17 @@ shipreport_judgment_build() {
           entries_omitted: $r.entries_omitted,
           items_omitted: $r.items_omitted,
           bytes_omitted: $r.bytes_omitted,
-          items_truncated: ([$capped[].items[] | select(.truncated_bytes != null)] | length),
-          bytes_truncated: ([$capped[].items[] | (.truncated_bytes // 0)] | add // 0)
+          items_truncated: ([$r.kept[].items[] | select(.truncated_bytes != null)] | length),
+          bytes_truncated: ([$r.kept[].items[] | (.truncated_bytes // 0)] | add // 0)
         }
       }
-  '
+  ') || rc=$?
   rm -f "$judgment_file"
+  # The temp file is cleaned up before the status is handed back, but the
+  # status IS jq's, not rm's -- a malformed judgment_json has to reach the
+  # caller as a failure. Silence here must never read as "nothing unresolved".
+  printf '%s' "$out"
+  return "$rc"
 }
 
 # Shared jq defs for the metrics/version renderers below.

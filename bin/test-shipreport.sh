@@ -314,12 +314,63 @@ BIG_HTML=$(shipreport_render_html <<<"$BIG_REPORT")
 TEXT_BYTES=$(printf '%s' "$BIG_TEXT" | wc -c | tr -d '[:space:]')
 HTML_BYTES=$(printf '%s' "$BIG_HTML" | wc -c | tr -d '[:space:]')
 
-# Well under the raw 227500 chars of untrimmed body content -- proves the
-# cap actually shrank the email rather than merely relabeling it.
-eq "rendered text body is smaller than the raw judgment content" "1" \
-  "$([ "$TEXT_BYTES" -lt 220000 ] && echo 1 || echo 0)"
-eq "rendered html body is smaller than the raw judgment content" "1" \
-  "$([ "$HTML_BYTES" -lt 230000 ] && echo 1 || echo 0)"
+# The honest baseline for "the cap shrank the email" is the SAME report
+# rendered with the caps lifted -- a hardcoded byte threshold can sit above
+# the untrimmed size and pass on a render that trimmed nothing. Subshell, so
+# the raised caps don't leak into the checks below.
+UNTRIMMED_JUDGMENT=$(SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS=99999999 \
+  SHIPREPORT_JUDGMENT_ITEM_MAX_CHARS=99999999 \
+  shipreport_judgment_build "$BIG_JUDGMENT_JSON")
+eq "the lifted-cap baseline keeps every entry" "91" \
+  "$(jq -r '.judgment_items | length' <<<"$UNTRIMMED_JUDGMENT")"
+UNTRIMMED_FILE=$(mktemp)
+printf '%s' "$UNTRIMMED_JUDGMENT" >"$UNTRIMMED_FILE"
+UNTRIMMED_REPORT=$(jq -c --slurpfile jf "$UNTRIMMED_FILE" '. + $jf[0]' <<<"$(printf '%s' "$ITEMS" | shipreport_build)")
+rm -f "$UNTRIMMED_FILE"
+UNTRIMMED_TEXT_BYTES=$(shipreport_render_text <<<"$UNTRIMMED_REPORT" | wc -c | tr -d '[:space:]')
+UNTRIMMED_HTML_BYTES=$(shipreport_render_html <<<"$UNTRIMMED_REPORT" | wc -c | tr -d '[:space:]')
+
+eq "rendered text body is smaller than the same report rendered untrimmed" "1" \
+  "$([ "$TEXT_BYTES" -lt "$UNTRIMMED_TEXT_BYTES" ] && echo 1 || echo 0)"
+eq "rendered html body is smaller than the same report rendered untrimmed" "1" \
+  "$([ "$HTML_BYTES" -lt "$UNTRIMMED_HTML_BYTES" ] && echo 1 || echo 0)"
+
+# And bounded in absolute terms by the cap itself plus the renderer's own
+# chrome, derived from SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS rather than
+# hardcoded. Text chrome is a per-line indent (~8 KB here); HTML adds tags
+# and escaping per line, so it gets a larger allowance -- large enough that
+# the html bound sits just ABOVE the raw content size, which is why the
+# untrimmed comparison above is the one that proves the trim did anything.
+eq "text body is bounded by the section cap plus text rendering overhead" "1" \
+  "$([ "$TEXT_BYTES" -lt $((SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS + 20000)) ] && echo 1 || echo 0)"
+eq "text body is smaller than the raw judgment content" "1" \
+  "$([ "$TEXT_BYTES" -lt "$RAW_BYTES" ] && echo 1 || echo 0)"
+eq "html body is bounded by the section cap plus html rendering overhead" "1" \
+  "$([ "$HTML_BYTES" -lt $((SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS + 30000)) ] && echo 1 || echo 0)"
+
+# The temp file the --slurpfile call needs must not swallow jq's status: a
+# malformed judgment_json has to reach do_shipreport_tick as a failure, or
+# an empty section reads as "nothing unresolved" (the ambiguity igor#610
+# exists to prevent).
+ok "a well-formed build returns 0"                         shipreport_judgment_build "$BIG_JUDGMENT_JSON"
+no "a malformed judgment_json propagates jq's failure"     shipreport_judgment_build 'not json at all'
+
+# An item shortened by pass 1 whose entry is then dropped whole by pass 2 is
+# reported once, as omitted -- not in both halves of the notice.
+DOUBLE_COUNT_JSON=$(jq -cn '
+  [ range(0;2) | {
+      repo: "acme/dbl", number: (1 + .), title: "t", url: "u",
+      items: [ { verdict: "COMMENT", comment_url: "c", body: ("z" * 600) } ]
+    }
+  ]
+')
+DOUBLE_TRIM=$(SHIPREPORT_JUDGMENT_ITEM_MAX_CHARS=100 \
+  SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS=200 \
+  shipreport_judgment_build "$DOUBLE_COUNT_JSON")
+eq "one entry kept, one omitted"                    "1" "$(jq -r '.judgment_items | length' <<<"$DOUBLE_TRIM")"
+eq "the omitted entry is counted as omitted"        "1" "$(jq -r '.judgment_trim.entries_omitted' <<<"$DOUBLE_TRIM")"
+eq "and not ALSO counted as shortened"              "1" "$(jq -r '.judgment_trim.items_truncated' <<<"$DOUBLE_TRIM")"
+eq "its shortened bytes are not double-reported"    "500" "$(jq -r '.judgment_trim.bytes_truncated' <<<"$DOUBLE_TRIM")"
 
 has "text trim notice names the omitted count" "$BIG_TEXT" "${OMITTED} PR(s)"
 has "html trim notice names the omitted count" "$BIG_HTML" "${OMITTED} PR(s)"

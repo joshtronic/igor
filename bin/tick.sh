@@ -2152,7 +2152,9 @@ do_shipreport_tick() {
   # igor#610: unconditional, unlike landed_notes above -- judgment_items is a
   # MANDATORY section (shipreport_judgment_build), so every report carries
   # it whether or not this window's merged PRs left anything unresolved.
-  local judgment; judgment=$(shipreport_judgment_build "$judgment_items")
+  local judgment
+  judgment=$(shipreport_judgment_build "$judgment_items") \
+    || log "shipreport: judgment build failed -- the section will render empty (it should not)"
   report=$(jq -c --argjson j "$judgment" '. + $j' <<<"$report" 2>/dev/null || printf '%s' "$report")
 
   if shipreport_is_empty "$report"; then
