@@ -167,6 +167,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/deferred.sh"
 # shellcheck source=lib/logwatch.sh
 . "$AGENT_HOME/lib/logwatch.sh"
+# shellcheck source=lib/emailwatch.sh
+. "$AGENT_HOME/lib/emailwatch.sh"
 
 # Children invocations (agent-* helper scripts) share our tick id
 # so cost-ledger entries from child processes group with the
@@ -2951,6 +2953,161 @@ do_logwatch_tick() {
   return 0
 }
 
+# -- Daily email liveness check (igor#636) -----------------------
+#
+# Every safeguard on the daily-email path (shipreport's #633 retry/cooldown,
+# sports' failure cap) asks "did this call fail?" Nothing asked "did the
+# thing happen?" -- on 2026-09-14 the ship report died at exec time with
+# E2BIG, curl never ran, the failure was stamped .shipreport.sent=true
+# anyway, and the only trace was a `warning:` line a human happened to
+# notice. do_emailwatch_tick is the once-daily dead-man's-switch that would
+# have caught it: it cross-checks each daily sender's OWN "sent" stamp
+# against an INDEPENDENT signal (that sender's own success log line -- see
+# emailwatch_verdict in lib/emailwatch.sh), and it never uses email to
+# report a problem with email -- the alarm is a Forgejo issue on
+# AUTOMERGE_SELF_REPO, an entirely different transport.
+#
+# Non-model (journalctl + jq + the Forgejo API only), so it's safe to run
+# even during a Claude health cooldown -- see the do_emailwatch_tick calls
+# in the claude_health_blocked / context_seeded fallback branches below,
+# mirroring do_shipreport_tick's.
+#
+# Known surfaces -- the SAME opt-in gate their own do_<x>_tick checks (an
+# unconfigured surface is correctly never expected to carry a stamp), and
+# the journal line(s) ONLY that surface's own success path writes. Both
+# shipreport and sports treat a genuinely quiet day as success too (both
+# call their own *_mark_sent for it), so each gets two patterns.
+emailwatch_shipreport_opted_in() {
+  [ -n "${PRIMARY_RECIPIENTS:-}" ] && [ -n "${SMTP2GO_API_KEY:-}" ] && [ -n "${SMTP2GO_SENDER:-}" ]
+}
+emailwatch_sports_opted_in() {
+  [ -n "${PRIMARY_RECIPIENTS:-}" ] && [ -n "${SPORTS_LEAGUES:-}" ] \
+    && [ -n "${SMTP2GO_API_KEY:-}" ] && [ -n "${SMTP2GO_SENDER:-}" ]
+}
+
+# Surfaces retired from active sending but whose stamp may still linger in
+# discretionary-state.json -- skipped with a log line (no alarm), not
+# silently dropped (an enumerated surface with no registry entry at all,
+# below, still alarms loudly) and not endlessly re-alarmed on a key nothing
+# can ever refresh. igor#636: .market predates the shipreport/sports split
+# and moved to the stonks repo; a repo-wide grep found no code left in THIS
+# repo that still writes it. If that ever changes, drop it from this list
+# and give it a case in do_emailwatch_tick below.
+EMAILWATCH_RETIRED_SURFACES="market"
+
+# emailwatch_alarm <title> <body> -- file (deduped, once per window day per
+# title) a Forgejo issue on AUTOMERGE_SELF_REPO and assign it to
+# FORGEJO_REVIEWER. This is the ONLY channel do_emailwatch_tick uses -- never
+# email, since the condition being detected is "the email path is broken"
+# and an alert down that same path would prove nothing.
+emailwatch_alarm() {
+  local title="$1" body="$2" marker repo existing num
+  repo="$AUTOMERGE_SELF_REPO"
+  marker="<!-- agent:emailwatch $(emailwatch_window_day) ${title} -->"
+  existing=$(forgejo_find_marked_issue "$repo" "$BOT_USER" "$marker" 2>/dev/null) \
+    || { log "warning: emailwatch: can't check existing alarm on $repo (API error) -- filing anyway"; existing=""; }
+  if [ -n "$existing" ] && [ "$existing" != "null" ] \
+     && [ "$(jq -r '.state' <<<"$existing" 2>/dev/null)" = "open" ]; then
+    log "emailwatch: already alarmed today for '${title}' (#$(jq -r '.number' <<<"$existing")) -- not refiling"
+    return 0
+  fi
+  num=$(forgejo_open_issue "$repo" "[emailwatch] ${title}" "${body}
+
+${marker}") \
+    || { log "warning: emailwatch: issue open failed on $repo (continuing)"; return 0; }
+  forgejo_assign "$repo" "$num" "$FORGEJO_REVIEWER" 2>/dev/null \
+    || log "warning: emailwatch: could not assign ${repo}#${num} to $FORGEJO_REVIEWER"
+  log "emailwatch: filed ${repo}#${num}: ${title}"
+}
+
+# emailwatch_check <surface> <journal> <success_pattern...> -- resolve one
+# surface's stamp against emailwatch_verdict (lib/emailwatch.sh) and alarm
+# on anything but "ok".
+emailwatch_check() {
+  local surface="$1" journal="$2"; shift 2
+  local sent date_field verdict window_day
+  window_day=$(emailwatch_window_day)
+  sent=$(emailwatch_surface_sent "$surface")
+  date_field=$(emailwatch_surface_date "$surface")
+  verdict=$(emailwatch_verdict "$sent" "$date_field" "$window_day" "$journal" "$@")
+  case "$verdict" in
+    ok)
+      log "emailwatch: ${surface} for ${window_day} -- ok"
+      ;;
+    no-evidence)
+      emailwatch_alarm "${surface}: stamped sent with no matching success line" \
+"\`.${surface}\` in discretionary-state.json claims sent=true for ${window_day}, but agent.service's journal for that day has no line matching this surface's own success pattern. This is the exact shape of the 2026-09-14 E2BIG incident: the send failed after (or while) the stamp was written, or the stamp is simply wrong. Check \`journalctl --user -u agent.service --since '${window_day} 00:00' --until '$(date +%F) 00:00' | grep ${surface}:\` on the host."
+      ;;
+    not-run)
+      emailwatch_alarm "${surface}: did not send for ${window_day}" \
+"\`.${surface}\` in discretionary-state.json does not show a completed send for ${window_day} (stamp date: \`${date_field:-<none>}\`, sent: \`${sent}\`). Either the surface never attempted (stamp missing or stale from an earlier day) or it attempted and never completed (abandoned after its failure cap, or blocked all day). If this surface is intentionally unconfigured here, this check shouldn't have run at all -- see emailwatch_${surface}_opted_in in bin/tick.sh."
+      ;;
+  esac
+}
+
+do_emailwatch_tick() {
+  if emailwatch_done_today; then
+    return 1
+  fi
+  # Attempted = done for today's window, BEFORE any alarm is filed -- slot
+  # semantics matching logwatch_mark_done, so a crash mid-pass doesn't
+  # retry-storm the rest of the day.
+  emailwatch_mark_done
+
+  if ! command -v journalctl >/dev/null 2>&1; then
+    emailwatch_alarm "journalctl unavailable" \
+      "emailwatch cannot verify daily-email liveness on this host: journalctl is not installed or not on PATH. This check is a dead-man's switch -- its own inability to read the evidence must not read as \"all clear\"."
+    return 0
+  fi
+
+  local sf; sf=$(discretionary_state_file)
+  if [ ! -f "$sf" ] || ! jq -e . "$sf" >/dev/null 2>&1; then
+    emailwatch_alarm "state file unreadable" \
+      "emailwatch could not read or parse ${sf}. Every daily-email stamp lives there -- without it this check has no evidence to verify against, and that absence must not read as \"all clear\"."
+    return 0
+  fi
+
+  local win_start win_end journal
+  win_start="$(emailwatch_window_day) 00:00:00"
+  win_end="$(date +%F) 00:00:00"
+  journal=$(journalctl --user -u agent.service --since "$win_start" --until "$win_end" \
+    --no-pager 2>/dev/null | grep -v '^-- No entries --$') || true
+
+  # Union of what's actually stamped (catches a NEW surface nobody taught
+  # emailwatch about yet) and the known registry (catches a surface whose
+  # stamp was removed or never written at all -- "job never ran" must
+  # alarm even though a vanished key can never be discovered by
+  # enumeration alone).
+  local surfaces; surfaces=$(printf '%s\nshipreport\nsports\n' "$(emailwatch_surfaces)" | sed '/^$/d' | sort -u)
+
+  local surface
+  while IFS= read -r surface; do
+    [ -n "$surface" ] || continue
+    case "$surface" in
+      shipreport)
+        emailwatch_shipreport_opted_in || continue
+        emailwatch_check shipreport "$journal" 'shipreport: sent \(' 'shipreport: quiet 24h'
+        ;;
+      sports)
+        emailwatch_sports_opted_in || continue
+        emailwatch_check sports "$journal" 'sports: emailed digest for' \
+          'sports: no events or headlines across all leagues -- quiet day, no digest'
+        ;;
+      *)
+        if case " $EMAILWATCH_RETIRED_SURFACES " in *" $surface "*) true ;; *) false ;; esac; then
+          log "emailwatch: ${surface} is a known-retired surface -- skipping"
+        else
+          emailwatch_alarm "${surface}: unregistered daily-email surface" \
+"discretionary-state.json has a day-keyed \`.${surface}\` sent-stamp that emailwatch does not know how to verify. Either teach it that surface's success-log pattern (see emailwatch_check in bin/tick.sh), or if the surface is retired, add \"${surface}\" to EMAILWATCH_RETIRED_SURFACES."
+        fi
+        ;;
+    esac
+  done <<<"$surfaces"
+
+  log "emailwatch: reviewed $(emailwatch_window_day)"
+  return 0
+}
+
 # -- Shadow code review (non-binding) ---------------------------
 #
 # A step toward auto-merge. Convention-driven, NO env knob (like
@@ -3520,6 +3677,7 @@ if claude_health_blocked; then
   log "claude health: backoff active (kind=$(claude_health_kind)) -- skipping all model work this tick"
   do_seo_tick || true
   do_shipreport_tick || true
+  do_emailwatch_tick || true
   exit 0
 fi
 
@@ -3540,6 +3698,7 @@ if ! context_seeded; then
   context_bootstrap_alert || true
   do_seo_tick || true
   do_shipreport_tick || true
+  do_emailwatch_tick || true
   exit 0
 fi
 
@@ -4540,7 +4699,7 @@ fi
 # passes in this same tick write their own keys, and a whole-file write from a
 # stale in-memory copy would silently drop them.
 
-CASCADE_STAGES="review maintenance seo shipreport sports feedback logwatch deferred"
+CASCADE_STAGES="review maintenance seo shipreport emailwatch sports feedback logwatch deferred"
 
 cascade_state_file_read() {
   local f; f=$(discretionary_state_file)
@@ -4646,6 +4805,18 @@ fi
 # via PRIMARY_RECIPIENTS + SMTP2GO; no-ops before 07:00 local or once today's
 # already sent. Once-daily; the safety valve for shadow-review auto-merge.
 if cascade_run shipreport; then
+  exit 0
+fi
+
+# Daily email liveness check (igor#636). Scripted (no model), so it ALSO
+# runs in the health-blocked branch above. Reviews YESTERDAY once daily
+# (same day-boundary discipline as logwatch): cross-checks each daily
+# sender's own "sent" stamp in discretionary-state.json against an
+# independent signal (that sender's own success log line), and alarms via
+# a Forgejo issue on AUTOMERGE_SELF_REPO -- never email, since the
+# condition being detected is "the email path is broken." See
+# do_emailwatch_tick and lib/emailwatch.sh.
+if cascade_run emailwatch; then
   exit 0
 fi
 
