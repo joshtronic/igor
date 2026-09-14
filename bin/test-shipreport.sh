@@ -58,6 +58,22 @@ no "sent_today: fresh -> not sent"  shipreport_sent_today
 shipreport_mark_sent
 ok "sent_today: after mark -> sent" shipreport_sent_today
 
+echo "== igor#633: failed send is NOT stamped sent, and retries are bounded =="
+rm -f "$AGENT_STATE_DIR/discretionary-state.json"
+eq "failures: fresh -> 0"           "0" "$(shipreport_failures)"
+ok "retry_ready: no attempt yet -> ready" shipreport_retry_ready
+shipreport_mark_attempt
+no "retry_ready: right after an attempt -> not ready (inside cooldown)" shipreport_retry_ready
+eq "failure_inc: bumps to 1"        "1" "$(shipreport_failure_inc)"
+no "sent_today: a failure alone never stamps sent" shipreport_sent_today
+eq "failure_inc: bumps to 2"        "2" "$(shipreport_failure_inc)"
+eq "failures: reads back 2"         "2" "$(shipreport_failures)"
+# A success after failures still stamps sent (mark_sent overwrites the
+# whole day's record, clearing the failure count along with it).
+shipreport_mark_sent
+ok "sent_today: mark_sent after failures -> sent" shipreport_sent_today
+eq "failures: cleared by a subsequent mark_sent" "0" "$(shipreport_failures)"
+
 echo "== landed-note drain (igor#512): read / merge / is_empty / clear =="
 eq "landed_read: nothing queued -> empty array" "[]" "$(shipreport_landed_read)"
 MERGED_EMPTY=$(shipreport_merge_landed '{"needs_you":[],"shipped":[],"inflight":[]}' "[]")
@@ -208,6 +224,35 @@ has "html: names the repo#PR"                "$JHTML" "acme/x#12"
 has "html: links the review comment"         "$JHTML" 'href="https://forge/acme/x/pulls/12#issuecomment-1"'
 has "html: shows the dismissal verdict badge" "$JHTML" "[dismissed]"
 has "html: body kept verbatim"               "$JHTML" "This silently drops errors on line 42."
+
+echo "== igor#633: do_shipreport_tick wires the bounded retry correctly =="
+# Source-assertion (do_shipreport_tick does live Forgejo/cost/timing I/O,
+# so it isn't safely invocable in a unit test -- same rationale as the
+# existing guard test below). Extract the whole function body like
+# bin/test-cost.sh does, then assert the control-flow shape rather than
+# just grepping isolated strings, so a mark_sent call accidentally moved
+# into the wrong branch would be caught.
+TICK_SRC="$HERE/tick.sh"
+FN=$(awk '/^do_shipreport_tick\(\) \{/,/^\}/' "$TICK_SRC")
+has "the function was found in bin/tick.sh" "$FN" "do_shipreport_tick"
+has "checks the failure cap before the cooldown" "$FN" '"$shipreport_failures_n" -ge "$shipreport_max_failures"'
+has "starts the cooldown clock before gathering" "$FN" "shipreport_mark_attempt"
+
+# The send outcome's if/else: mark_sent only on success, failure_inc only
+# on failure, and mark_sent must NOT appear in the failure branch.
+SEND_BLOCK=$(printf '%s\n' "$FN" | sed -n '/if email_send /,/^  fi/p')
+has "the email_send if/else was found"          "$SEND_BLOCK" "email_send"
+has "success branch drains landed notes"        "$SEND_BLOCK" "shipreport_landed_clear"
+has "success branch marks sent"                 "$SEND_BLOCK" "shipreport_mark_sent"
+has "failure branch bumps the failure counter"  "$SEND_BLOCK" "shipreport_failure_inc"
+FAIL_BRANCH=$(printf '%s\n' "$SEND_BLOCK" | sed -n '/else/,/^  fi/p')
+if printf '%s' "$FAIL_BRANCH" | grep -q "shipreport_mark_sent"; then
+  printf '  x %s\n' "failure branch never calls shipreport_mark_sent (igor#633's exact bug)"; FAIL=$((FAIL + 1))
+else
+  printf '  + %s\n' "failure branch never calls shipreport_mark_sent (igor#633's exact bug)"
+fi
+has "failure branch logs a distinct message once the cap is hit" "$FAIL_BRANCH" "giving up for today"
+has "failure branch logs a distinct message while still retrying" "$FAIL_BRANCH" "will retry after cooldown"
 
 echo "== do_shipreport_tick guards an empty comment fetch before the call =="
 # Source-assertion, in the spirit of test-automerge-before-health-gate.sh.

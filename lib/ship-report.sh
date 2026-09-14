@@ -30,6 +30,18 @@ if ! declare -F log >/dev/null; then log() { printf '[agent] %s\n' "$*" >&2; }; 
 
 _shipreport_state_file() { echo "${AGENT_STATE_DIR:-$HOME/.local/state/agent}/discretionary-state.json"; }
 
+# igor#633: .shipreport is day-keyed like the sports digest's .sports --
+# { date, sent, failures, last_attempt } -- so a failed send can retry on a
+# later tick (bounded by a cooldown + failure cap) instead of being stamped
+# sent regardless of outcome, which lost the whole day's report silently on
+# one transient SMTP2GO failure.
+SHIPREPORT_RETRY_COOLDOWN_SECS="${SHIPREPORT_RETRY_COOLDOWN_SECS:-900}"  # 15 min, mirrors sports
+
+# jq fragment: normalize .shipreport to today, resetting if the day rolled.
+# shellcheck disable=SC2016  # $d is a jq --arg, not shell -- must not expand
+SHIPREPORT_ROLL='(if (.shipreport.date // "") == $d then .shipreport
+                  else {date:$d, sent:false, failures:0, last_attempt:0} end)'
+
 # shipreport_sent_today -- exit 0 if today's report already went out (daily stamp
 # under .shipreport, mirroring the sports digest's .sports).
 shipreport_sent_today() {
@@ -40,7 +52,9 @@ shipreport_sent_today() {
     && [ "$(jq -r '.shipreport.sent // false' "$sf" 2>/dev/null)" = "true" ]
 }
 
-# shipreport_mark_sent -- stamp today done. Clear .shipreport to force a resend.
+# shipreport_mark_sent -- stamp today done (and implicitly clear today's
+# failure count, since it replaces the whole day's record). Clear
+# .shipreport to force a resend.
 shipreport_mark_sent() {
   local sf tmp today
   sf=$(_shipreport_state_file); today=$(date +%F)
@@ -51,6 +65,73 @@ shipreport_mark_sent() {
   else
     rm -f "$tmp"
   fi
+}
+
+# shipreport_failures -- echo today's failed-send count (0 if unset or the
+# day rolled). Read-only -- the cap that consumes it lives in
+# do_shipreport_tick.
+shipreport_failures() {
+  local sf today n
+  sf=$(_shipreport_state_file)
+  [ -f "$sf" ] || { echo 0; return; }
+  today=$(date +%F)
+  n=$(jq -r --arg d "$today" \
+    'if (.shipreport.date // "") == $d then (.shipreport.failures // 0) else 0 end' \
+    "$sf" 2>/dev/null)
+  [ -n "$n" ] && [ "$n" != "null" ] || n=0
+  echo "$n"
+}
+
+# shipreport_mark_attempt -- stamp last_attempt=now (resetting on a day
+# rollover). Called once per send attempt, before the Forgejo gathering --
+# it's what the retry cooldown reads.
+shipreport_mark_attempt() {
+  local sf tmp today now
+  sf=$(_shipreport_state_file); today=$(date +%F); now=$(date +%s)
+  [ -f "$sf" ] || echo '{}' > "$sf"
+  tmp=$(mktemp)
+  if jq --arg d "$today" --argjson now "$now" \
+      ".shipreport = ($SHIPREPORT_ROLL | .last_attempt = \$now)" \
+      "$sf" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$sf"
+  else
+    rm -f "$tmp"
+  fi
+}
+
+# shipreport_retry_ready -- true when it's OK to attempt the send again
+# today: either no attempt yet, or the cooldown since the last attempt has
+# elapsed.
+shipreport_retry_ready() {
+  local sf today last now
+  sf=$(_shipreport_state_file)
+  [ -f "$sf" ] || return 0
+  today=$(date +%F)
+  last=$(jq -r --arg d "$today" \
+    'if (.shipreport.date // "") == $d then (.shipreport.last_attempt // 0) else 0 end' \
+    "$sf" 2>/dev/null)
+  [ -n "$last" ] && [ "$last" != "null" ] || last=0
+  now=$(date +%s)
+  [ "$((now - last))" -ge "$SHIPREPORT_RETRY_COOLDOWN_SECS" ]
+}
+
+# shipreport_failure_inc -- bump today's failed-send count and echo the new
+# value. Deliberately does NOT touch `sent` -- a failed send must stay
+# retryable until do_shipreport_tick's cap gives up for the day.
+shipreport_failure_inc() {
+  local sf tmp today n
+  sf=$(_shipreport_state_file); today=$(date +%F)
+  [ -f "$sf" ] || echo '{}' > "$sf"
+  tmp=$(mktemp)
+  if jq --arg d "$today" ".shipreport = ($SHIPREPORT_ROLL | .failures += 1)" \
+      "$sf" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$sf"
+  else
+    rm -f "$tmp"
+  fi
+  n=$(jq -r '.shipreport.failures' "$sf" 2>/dev/null)
+  [ -n "$n" ] && [ "$n" != "null" ] || n=0
+  echo "$n"
 }
 
 # shipreport_landed_read -- echoes the JSON array of landed-verification
