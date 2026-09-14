@@ -63,7 +63,7 @@ else
   . "$HERE/lib/claude.sh"
 
   CAPTURED=$(claude_call "test-model" "review" 100 "sys" "usr" 0 5 2>"$STUB/err") && RC=0 || RC=$?
-  eq "claude_call reports failure" "1" "$RC"
+  eq "claude_call reports failure via the stub's own exit code (igor#638)" "42" "$RC"
   eq "the caller's captured value is EMPTY, not a log line" "" "$CAPTURED"
   case "$(cat "$STUB/err")" in
     *"claude review: failed"*) ok "the failure reason lands on stderr where the journal sees it" ;;

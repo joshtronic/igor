@@ -44,7 +44,7 @@ OUT=$(
   '
 )
 RC="${OUT%% *}"; SECS="${OUT##* }"
-eq "a call that outruns its budget fails" "1" "$RC"
+eq "a call that outruns its budget fails with the timeout's own rc (igor#638)" "124" "$RC"
 if [ "$SECS" -le 6 ]; then ok "and is killed at the budget, not 30s later (${SECS}s)"
 else bad "and is killed at the budget, not 30s later (took ${SECS}s)"; fi
 if grep -q 'rc=124' "$STUB/err"; then
