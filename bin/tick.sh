@@ -3607,10 +3607,11 @@ fi
 # A reviewer routinely escalates a "your call" judgment item to a human, who
 # used to answer it as a plain PR comment -- which reached nobody, since the
 # rework agent never reads comments except when one of the two signals below
-# reopens the PR. A comment containing the literal marker <!-- adjudication -->
-# from FORGEJO_REVIEWER (and only from them -- see review_adjudication_pending)
-# reassigns the PR to the bot right here, BEFORE Signal 2 runs below, so a
-# marker posted since the last tick is picked up THIS tick rather than next.
+# reopens the PR. A comment carrying the literal marker <!-- adjudication -->
+# on a line of its own, from FORGEJO_REVIEWER (and only from them -- see
+# review_adjudication_pending), reassigns the PR to the bot right here, BEFORE
+# Signal 2 runs below, so a marker posted since the last tick is picked up
+# THIS tick rather than next.
 # Deliberately not a third parallel rework path: it produces exactly the
 # state Signal 2 already handles.
 review_adjudication_scan "$VALIDATED_REPOS_JSON" "$BOT_USER" "${FORGEJO_REVIEWER:-}"

@@ -516,15 +516,26 @@ ${diff}
 # COMMENT previously reached nobody: the rework agent never reads comments on
 # its own, so the decision silently did nothing.
 #
-# The marker: a comment containing this literal string, from FORGEJO_REVIEWER
-# specifically -- not any commenter. That is a privilege boundary, not a
-# preference (the spike's first cut accepted any commenter and it lowered the
-# same bar Signal 2's manual reassignment already gates on write access). It
-# is honoured only when it is NEWER than the bot's own latest comment on the
-# PR, so a historical marker from an already-answered round cannot re-trigger
-# once the bot has spoken since -- the bot's every rework round posts at
-# least one comment (the audit trail, or a no-commits note), which is what
-# retires a marker without needing separate state.
+# The marker: a comment carrying this literal string ON A LINE OF ITS OWN,
+# from FORGEJO_REVIEWER specifically -- not any commenter. That is a privilege
+# boundary, not a preference (the spike's first cut accepted any commenter and
+# it lowered the same bar Signal 2's manual reassignment already gates on
+# write access).
+#
+# Own-line, not a bare substring: a substring match fires on any reviewer
+# comment that merely QUOTES the marker -- prose explaining the feature, a
+# review discussing this very code -- and each false positive costs a full
+# rework round. The known remaining gap is a fenced code block whose sole
+# content is the marker, which still reads as its own line; tracking fences
+# costs more than the one spurious round it would save.
+#
+# It is honoured only when it is NEWER than the bot's own latest comment on
+# the PR, so a historical marker from an already-answered round cannot
+# re-trigger. review_adjudication_scan posts that retiring comment itself at
+# pickup time rather than relying on a later rework round to do it -- see
+# there for why. created_at is compared as a STRING, sound for the `...Z` form
+# Forgejo emits today; the same reasoning (and the same caveat) as
+# review_reassignment_feedback_section above.
 REVIEW_ADJUDICATION_MARKER='<!-- adjudication -->'
 
 # review_adjudication_pending <repo> <number> <bot> <reviewer>
@@ -548,7 +559,9 @@ review_adjudication_pending() {
     return 1
   fi
   if ! result=$(jq -r --arg bot "$bot" --arg reviewer "$reviewer" --arg marker "$REVIEW_ADJUDICATION_MARKER" '
-      def is_marker: (.body // "") | contains($marker);
+      def is_marker: (.body // "") | split("\n")
+                     | map(sub("^[ \t]+"; "") | sub("[ \t\r]+$"; ""))
+                     | any(. == $marker);
       ( [.[]? | select(.user.login == $bot)] | sort_by(.created_at) | last.created_at ) as $bot_last
       | [ .[]? | select(.user.login == $reviewer and is_marker)
             | select($bot_last == null or .created_at > $bot_last) ]
@@ -589,9 +602,29 @@ review_adjudication_scan() {
     while read -r pr_num; do
       [ -z "$pr_num" ] && continue
       if review_adjudication_pending "$repo_full" "$pr_num" "$bot" "$reviewer" >/dev/null; then
-        log "PR-review: ${repo_full}#${pr_num} -- human adjudication marker from ${reviewer}, reassigning to ${bot}"
-        forgejo_assign "$repo_full" "$pr_num" "$bot" 2>/dev/null \
-          || log "warning: review: could not reassign ${repo_full}#${pr_num} for adjudication pickup"
+        # Acknowledge BEFORE assigning, and only assign if the acknowledgment
+        # landed. A marker is retired by a bot comment newer than it, so
+        # something must post one or the next tick reassigns the same PR
+        # again -- an unbounded loop at one rework model call per tick, which
+        # the shadow reviewer's 3-round cap does not bound (that counter lives
+        # in review state and this path never touches it). Leaving that to a
+        # later rework round would make the bound depend on every one of its
+        # exit paths posting a comment, each of which is best-effort. Posting
+        # it here is the bound, and failing to post is a SKIP: the marker
+        # stays live and the next tick retries, the same fail-closed contract
+        # review_adjudication_pending uses for a fetch blip.
+        if forgejo_comment "$repo_full" "$pr_num" \
+"### ⚖️ Adjudication picked up _(automated)_
+
+${reviewer}'s adjudication comment above reassigned this PR to ${bot}. The next rework round reads it with the rest of this PR's conversation.
+
+<!-- audit:adjudication reviewer=${reviewer} -->" 2>/dev/null; then
+          log "PR-review: ${repo_full}#${pr_num} -- human adjudication marker from ${reviewer}, reassigning to ${bot}"
+          forgejo_assign "$repo_full" "$pr_num" "$bot" 2>/dev/null \
+            || log "warning: review: could not reassign ${repo_full}#${pr_num} for adjudication pickup"
+        else
+          log "warning: review: ${repo_full}#${pr_num} -- adjudication acknowledgment comment failed; not reassigning this tick"
+        fi
       fi
     done < <(jq -r '.[].number' <<<"$prs" 2>/dev/null)
   done <<<"$validated_json"

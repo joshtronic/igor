@@ -652,6 +652,31 @@ PENDING=$(review_adjudication_pending acme/x 1 igor joshtronic)
 has "the marker comment's own body surfaces" "$PENDING" "correlation buffer"
 unset -f forgejo_pr_comments
 
+# The marker must sit on a line of its OWN. A bare substring match fires on
+# any reviewer comment that merely QUOTES the marker -- prose explaining the
+# feature, a review discussing this very code -- and each false positive costs
+# a full rework round.
+forgejo_pr_comments() {
+  jq -n '[{user:{login:"joshtronic"}, created_at:"2026-09-01T00:00:00Z",
+           body:"post a comment containing <!-- adjudication --> and the bot picks it up"}]'
+}
+if review_adjudication_pending acme/x 1 igor joshtronic >/dev/null 2>&1; then
+  printf '  x a marker quoted INLINE in prose must NOT count\n'; FAIL=$((FAIL + 1))
+else
+  printf '  + a marker quoted INLINE in prose must NOT count\n'
+fi
+unset -f forgejo_pr_comments
+
+# Own-line, but indented or CRLF-terminated: Forgejo hands back whatever the
+# web form submitted, which is routinely CRLF.
+forgejo_pr_comments() {
+  jq -n '[{user:{login:"joshtronic"}, created_at:"2026-09-01T00:00:00Z",
+           body:"use the buffer\r\n\r\n  <!-- adjudication -->  \r\n"}]'
+}
+PENDING_WS=$(review_adjudication_pending acme/x 1 igor joshtronic)
+has "an indented, CRLF-terminated marker line still counts" "$PENDING_WS" "use the buffer"
+unset -f forgejo_pr_comments
+
 # Privilege boundary (decision 5): the identical marker from anyone OTHER
 # than the configured reviewer must NOT count. This is the negative test the
 # spec calls mandatory -- accepting any commenter lets a lower-privileged
@@ -727,8 +752,22 @@ unset -f forgejo_pr_comments
 
 echo "== review_adjudication_scan: reassigns a qualifying PR, reuses Signal 2 =="
 
+# The real helpers the scan is coded against -- read, not sourced, same
+# rationale as the forgejo_pr_comments check above (igor#444). Every scan
+# assertion below stubs them, so an arity or name change would leave the scan
+# a permanent no-op with this suite still green.
+LIST_SRC=$(sed -n '/^forgejo_list_open_bot_prs() {/,/^}/p' "$HERE/../lib/forgejo.sh")
+has "the real forgejo_list_open_bot_prs takes a repo arg" "$LIST_SRC" 'repo="$1"'
+has "...and a user arg"                                   "$LIST_SRC" 'user="$2"'
+has "...and answers objects carrying .number"             "$LIST_SRC" '{number, title'
+COMMENT_SRC=$(sed -n '/^forgejo_comment() {/,/^}/p' "$HERE/../lib/forgejo.sh")
+has "the real forgejo_comment takes a repo arg"   "$COMMENT_SRC" 'repo="$1"'
+has "...and a number arg"                         "$COMMENT_SRC" 'number="$2"'
+
 ASSIGNED=""
+COMMENTED=""
 forgejo_assign() { ASSIGNED="${ASSIGNED}$1#$2->$3;"; }
+forgejo_comment() { COMMENTED="${COMMENTED}$1#$2:$3;"; }
 forgejo_list_open_bot_prs() { jq -n '[{number: 7, title: "t", head: "h"}]'; }
 forgejo_pr_comments() {
   jq -n '[{user:{login:"joshtronic"}, created_at:"2026-09-01T00:00:00Z",
@@ -736,15 +775,39 @@ forgejo_pr_comments() {
 }
 review_adjudication_scan '{"full_name":"acme/x"}' igor joshtronic
 eq "a qualifying PR is reassigned to the bot" "acme/x#7->igor;" "$ASSIGNED"
-unset -f forgejo_assign forgejo_list_open_bot_prs forgejo_pr_comments
+# The acknowledgment is what RETIRES the marker: review_adjudication_pending
+# only honours a marker newer than the bot's latest comment, so posting one at
+# pickup time bounds the loop here rather than depending on every downstream
+# rework exit path to post something.
+has "the pickup posts a bot acknowledgment" "$COMMENTED" "acme/x#7:"
+has "...naming the reviewer whose marker fired it" "$COMMENTED" "joshtronic"
+unset -f forgejo_assign forgejo_comment forgejo_list_open_bot_prs forgejo_pr_comments
 
+# Fail closed on the acknowledgment: without a bot comment newer than the
+# marker, the marker stays newest and the next tick reassigns again -- an
+# unbounded rework loop, one model call per tick. Skip instead and retry.
 ASSIGNED=""
 forgejo_assign() { ASSIGNED="${ASSIGNED}$1#$2->$3;"; }
+forgejo_comment() { return 1; }
+forgejo_list_open_bot_prs() { jq -n '[{number: 7, title: "t", head: "h"}]'; }
+forgejo_pr_comments() {
+  jq -n '[{user:{login:"joshtronic"}, created_at:"2026-09-01T00:00:00Z",
+           body:"answer\n\n<!-- adjudication -->"}]'
+}
+review_adjudication_scan '{"full_name":"acme/x"}' igor joshtronic 2>/dev/null
+eq "a failed acknowledgment does NOT reassign" "" "$ASSIGNED"
+unset -f forgejo_assign forgejo_comment forgejo_list_open_bot_prs forgejo_pr_comments
+
+ASSIGNED=""
+COMMENTED=""
+forgejo_assign() { ASSIGNED="${ASSIGNED}$1#$2->$3;"; }
+forgejo_comment() { COMMENTED="${COMMENTED}$1#$2;"; }
 forgejo_list_open_bot_prs() { jq -n '[{number: 7, title: "t", head: "h"}]'; }
 forgejo_pr_comments() { jq -n '[{user:{login:"joshtronic"}, created_at:"2026-09-01T00:00:00Z", body:"no marker here"}]'; }
 review_adjudication_scan '{"full_name":"acme/x"}' igor joshtronic
 eq "a PR with no pending marker is left alone" "" "$ASSIGNED"
-unset -f forgejo_assign forgejo_list_open_bot_prs forgejo_pr_comments
+eq "...and gets no acknowledgment comment either" "" "$COMMENTED"
+unset -f forgejo_assign forgejo_comment forgejo_list_open_bot_prs forgejo_pr_comments
 
 ASSIGNED="called"
 forgejo_assign() { ASSIGNED="${ASSIGNED}$1#$2->$3;"; }
@@ -758,6 +821,7 @@ unset -f forgejo_assign
 # second: a scan that reads just the first line, or that assumes an array, fails.
 ASSIGNED=""
 forgejo_assign() { ASSIGNED="${ASSIGNED}$1#$2->$3;"; }
+forgejo_comment() { :; }
 forgejo_list_open_bot_prs() { jq -n '[{number: 7, title: "t", head: "h"}]'; }
 forgejo_pr_comments() {
   case "$1" in
@@ -768,7 +832,7 @@ forgejo_pr_comments() {
 }
 review_adjudication_scan "$(printf '%s\n%s\n' '{"full_name":"acme/first"}' '{"full_name":"acme/second"}')" igor joshtronic
 eq "iterates the newline-delimited stream, reassigning only the 2nd repo's PR" "acme/second#7->igor;" "$ASSIGNED"
-unset -f forgejo_assign forgejo_list_open_bot_prs forgejo_pr_comments
+unset -f forgejo_assign forgejo_comment forgejo_list_open_bot_prs forgejo_pr_comments
 
 echo "== bin/tick.sh: the adjudication scan is wired in (source assertions) =="
 if grep -q 'review_adjudication_scan "\$VALIDATED_REPOS_JSON" "\$BOT_USER" "\${FORGEJO_REVIEWER:-}"' "$TICK"; then
