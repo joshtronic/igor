@@ -3225,22 +3225,37 @@ review_apply_verdict() {
 # Called when a review call exhausted both attempts and at least one of them
 # timed out. Bumps the persistent per-head timeout streak; once it reaches
 # REVIEW_TIMEOUT_STREAK_CAP, yields the head (selection skips it for
-# REVIEW_TIMEOUT_YIELD_COOLDOWN_SECS) and surfaces it to the human ONCE via a
+# REVIEW_TIMEOUT_YIELD_COOLDOWN_SECS) and surfaces it to the human via a
 # PR comment + review request -- the same channel review_route_into_rework
 # already uses for its own escalations, so this is one more case of an
 # existing pattern rather than a new one (igor#638).
+#
+# The yield is a backoff, not a permanent skip: the cooldown lapses, the head
+# is selected again, and a head that is permanently doomed hits the cap again.
+# So the escalation is deduped against a per-head marker -- one comment per
+# head, not one per cooldown. Scoped to the sha because a NEW commit that also
+# times out is news, not a repeat.
 review_note_timeout_failure() {
-  local repo="$1" number="$2" key="$3" sha="$4" streak
+  local repo="$1" number="$2" key="$3" sha="$4" streak marker seen
   streak=$(( $(review_timeout_streak "$key" "$sha") + 1 ))
   if [ "$streak" -ge "$REVIEW_TIMEOUT_STREAK_CAP" ]; then
     review_set_timeout_yield "$key" "$sha" "$streak" "$(( $(date +%s) + REVIEW_TIMEOUT_YIELD_COOLDOWN_SECS ))"
     log "review: ${key} head ${sha:0:8} timed out ${streak} times running -- yielding for ${REVIEW_TIMEOUT_YIELD_COOLDOWN_SECS}s"
-    if [ -n "${FORGEJO_REVIEWER:-}" ]; then
-      forgejo_comment "$repo" "$number" \
-        "Igor's shadow review has timed out ${streak} times in a row on this head (\`${sha:0:8}\`) without producing a verdict. Backing off from re-reviewing it for a while so it stops crowding out the rest of the fleet -- if this keeps happening on new commits too, the diff may need a human look directly." 2>/dev/null \
-        || log "warning: review: timeout-escalation comment failed on ${key}"
-      review_request_human "$repo" "$number" "review timed out ${streak}x"
+    marker="<!-- review-timeout-yield sha=${sha} -->"
+    seen=$(forgejo_pr_has_comment_containing "$repo" "$number" "${BOT_USER:-}" "$marker" 2>/dev/null || echo 0)
+    if [ "${seen:-0}" -gt 0 ] 2>/dev/null; then
+      log "review: ${key} head ${sha:0:8} already escalated for repeated timeouts -- yielding quietly"
+      return 0
     fi
+    # Not gated on FORGEJO_REVIEWER: review_request_human self-gates on it, and
+    # gating the comment too would leave a repo with no configured reviewer
+    # with nothing but a journal line.
+    forgejo_comment "$repo" "$number" \
+      "Igor's shadow review has timed out ${streak} times in a row on this head (\`${sha:0:8}\`) without producing a verdict. Backing off from re-reviewing it for a while so it stops crowding out the rest of the fleet -- if this keeps happening on new commits too, the diff may need a human look directly.
+
+${marker}" 2>/dev/null \
+      || log "warning: review: timeout-escalation comment failed on ${key}"
+    review_request_human "$repo" "$number" "review timed out ${streak}x"
   else
     review_set_timeout_streak "$key" "$sha" "$streak"
     log "review: ${key} head ${sha:0:8} timeout streak now ${streak}/${REVIEW_TIMEOUT_STREAK_CAP}"
@@ -3385,8 +3400,11 @@ do_review_tick() {
   parsed=""
   had_timeout=0
   for attempt in 1 2; do
-    raw=$(claude_call "${AGENT_MODEL_REVIEW}:${rev_effort}" "review" 8000 "$directive" "$user" 0 "$REVIEW_CALL_TIMEOUT_SECS")
-    call_rc=$?
+    # `|| call_rc=$?` rather than a bare assignment + `$?`: this file runs
+    # under `set -e`, and a bare failing assignment would abort the whole tick
+    # -- worse starvation than the bug this guards against.
+    call_rc=0
+    raw=$(claude_call "${AGENT_MODEL_REVIEW}:${rev_effort}" "review" 8000 "$directive" "$user" 0 "$REVIEW_CALL_TIMEOUT_SECS") || call_rc=$?
     if [ "$call_rc" -ne 0 ]; then
       if [ "$call_rc" -eq 124 ]; then
         had_timeout=1

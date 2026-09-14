@@ -15,7 +15,8 @@
 #   2. A persistent per-head timeout streak yields the head after
 #      REVIEW_TIMEOUT_STREAK_CAP consecutive timeout-caused failures: further
 #      ticks skip it (no model call at all) until a new commit changes the
-#      head sha, or the cooldown lapses -- and a human is notified once.
+#      head sha, or the cooldown lapses -- and a human is notified once per
+#      head, not once per lapsed cooldown.
 #
 # Same lifting pattern as test-review-ci-staleness.sh: do_review_tick lives
 # inline in bin/tick.sh (top-level side-effecting code), so each function
@@ -102,6 +103,8 @@ NUM=9
 KEY="${REPO}#${NUM}"
 HEAD_SHA="deadbeef01"
 HEAD_SHA2="deadbeef02"
+HEAD_SHA3="deadbeef03"
+HEAD_SHA4="deadbeef04"
 # shellcheck disable=SC2034
 ANALYSIS_REPOS_JSON="{\"full_name\":\"$REPO\"}"
 
@@ -109,9 +112,10 @@ maintenance_repo_validated() { return 0; }
 forgejo_list_open_bot_prs() { printf '[{"number":%s}]' "$NUM"; }
 forgejo_get_pr() { printf '{"head":{"sha":"%s"},"title":"a pr"}' "$CURRENT_HEAD_SHA"; }
 checkpoint_is_wip() { return 1; }
-forgejo_pr_has_comment_containing() { echo 0; }
 forgejo_commit_status() { printf 'success'; }
-forgejo_pr_diff() { printf 'diff --git a/foo b/foo\nindex 000..111 100644\n--- a/foo\n+++ b/foo\n@@ -0,0 +1 @@\n+hi\n'; }
+# Content varies with the head so each sha has its own patch-id -- otherwise the
+# base-merge dedup treats a later head as "same net diff" and skips it.
+forgejo_pr_diff() { printf 'diff --git a/foo b/foo\nindex 000..111 100644\n--- a/foo\n+++ b/foo\n@@ -0,0 +1 @@\n+hi %s\n' "$CURRENT_HEAD_SHA"; }
 context_surface() { printf 'directive'; }
 review_build_prompt() { printf 'prompt'; }
 review_rework_rounds() { echo 0; }
@@ -122,9 +126,24 @@ review_request_human() { printf '%s\n' "$3" >> "$REQUEST_HUMAN_LOG"; return 0; }
 CLAUDE_CALL_LOG="$TMP/claude_calls.log"
 COMMENT_LOG="$TMP/comments.log"
 REQUEST_HUMAN_LOG="$TMP/request_human.log"
+# COMMENT_LOG is per-block (reset between scenarios); PR_COMMENTS_LOG is the
+# PR's whole comment history, never reset -- what the harness's own dedup reads
+# back over. A marker posted in one scenario has to still be findable in the
+# next, or the re-escalation check below would pass vacuously.
+PR_COMMENTS_LOG="$TMP/pr_comments.log"
+: > "$PR_COMMENTS_LOG"
 reset_logs() { : > "$CLAUDE_CALL_LOG"; : > "$COMMENT_LOG"; : > "$REQUEST_HUMAN_LOG"; }
 claude_call_count() { wc -l < "$CLAUDE_CALL_LOG" | tr -d ' '; }
-forgejo_comment() { printf '%s\n' "$3" >> "$COMMENT_LOG"; return 0; }
+forgejo_comment() {
+  printf '%s\n' "$3" >> "$COMMENT_LOG"
+  printf '%s\n' "$3" >> "$PR_COMMENTS_LOG"
+  return 0
+}
+forgejo_pr_has_comment_containing() {
+  local n
+  n=$(grep -cF -- "$4" "$PR_COMMENTS_LOG" 2>/dev/null) || n=0
+  printf '%s\n' "$n"
+}
 
 # Always-times-out stub: `timeout` itself exits 124 on kill, and claude_call
 # now propagates that real rc (igor#638) instead of collapsing it to a flat 1
@@ -176,6 +195,24 @@ eq "returns non-zero (nothing to review this tick)" "1" "$RC"
 eq "claude_call was NOT invoked -- the doomed head cost nothing this tick" "0" "$(claude_call_count)"
 eq "no duplicate escalation comment/request while yielded" "" "$(cat "$COMMENT_LOG")$(cat "$REQUEST_HUMAN_LOG")"
 
+echo "== do_review_tick: once the cooldown lapses the head is re-tried, but the escalation does NOT repeat =="
+# The yield is a backoff, not a permanent skip: after
+# REVIEW_TIMEOUT_YIELD_COOLDOWN_SECS the head is selectable again and, on a
+# permanently-timing-out head, hits the cap again. Without a dedup that is one
+# comment + one review request per cooldown, forever.
+reset_logs
+jq --arg k "$KEY" '.review[$k].timeout_yield_until = 1' "$STATE" > "$TMP/state.next" && mv "$TMP/state.next" "$STATE"
+do_review_tick >"$TMP/out.log" 2>&1
+RC=$?
+eq "still returns non-zero" "1" "$RC"
+eq "the head IS re-tried once the cooldown lapses" "2" "$(claude_call_count)"
+eq "streak keeps climbing" "3" "$(jq -r --arg k "$KEY" '.review[$k].timeout_streak' "$STATE")"
+YIELD_UNTIL=$(jq -r --arg k "$KEY" '.review[$k].timeout_yield_until' "$STATE")
+if [ "${YIELD_UNTIL:-0}" -gt "$(date +%s)" ]; then ok "the yield is re-armed for another cooldown"
+else bad "the yield is re-armed for another cooldown: got [$YIELD_UNTIL]"; fi
+eq "no SECOND escalation comment for the same head" "" "$(cat "$COMMENT_LOG")"
+eq "and no second review request either" "" "$(cat "$REQUEST_HUMAN_LOG")"
+
 echo "== do_review_tick: a new commit (new head sha) lifts the yield immediately, and a normal review still works =="
 reset_logs
 CURRENT_HEAD_SHA="$HEAD_SHA2"
@@ -186,6 +223,36 @@ eq "a normal review on the new head succeeds (same verdict path as always)" "0" 
 eq "exactly one call -- a healthy review needs no retry" "1" "$(claude_call_count)"
 eq "the new head's verdict was recorded" "APPROVE" "$(jq -r --arg k "$KEY" '.review[$k].verdict' "$STATE")"
 eq "the timeout streak is clear after a successful review" "0" "$(jq -r --arg k "$KEY" '.review[$k].timeout_streak' "$STATE")"
+
+echo "== do_review_tick: with no FORGEJO_REVIEWER configured the PR comment still surfaces the yield =="
+# Only the review REQUEST needs a reviewer name (review_request_human self-gates
+# on it). Gating the comment too would leave a repo with no configured reviewer
+# with nothing but a journal line -- which is the trace igor#638 was filed over.
+# shellcheck disable=SC2034  # read by the eval'd review_note_timeout_failure
+FORGEJO_REVIEWER=""
+CURRENT_HEAD_SHA="$HEAD_SHA3"
+claude_call() { claude_call_always_times_out "$@"; }
+reset_logs
+do_review_tick >"$TMP/out.log" 2>&1
+do_review_tick >"$TMP/out.log" 2>&1
+eq "the cap is still reached on the new head" "2" "$(jq -r --arg k "$KEY" '.review[$k].timeout_streak' "$STATE")"
+case "$(cat "$COMMENT_LOG")" in
+  *"timed out 2 times"*) ok "the escalation comment is posted anyway" ;;
+  *) bad "the escalation comment is posted anyway: got [$(cat "$COMMENT_LOG")]" ;;
+esac
+
+echo "== do_review_tick is errexit-safe: a failing review call returns, it does not abort the shell =="
+# bin/tick.sh runs under `set -euo pipefail`. do_review_tick happens to be
+# invoked from `if cascade_run review`, which suppresses errexit for its whole
+# dynamic extent -- but that is the caller's accident, not this function's
+# property. A bare failing `raw=$(claude_call ...)` would kill the entire tick
+# on the first timeout, which is worse starvation than the bug being fixed.
+CURRENT_HEAD_SHA="$HEAD_SHA4"
+reset_logs
+( set -e; do_review_tick ) >"$TMP/out.log" 2>&1
+RC=$?
+eq "returns 1 under errexit, not the timeout rc of an aborted shell" "1" "$RC"
+eq "and both attempts still ran" "2" "$(claude_call_count)"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-review-timeout-yield: all checks passed"
