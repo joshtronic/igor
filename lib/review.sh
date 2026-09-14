@@ -570,6 +570,12 @@ review_adjudication_pending() {
 # reassignment (Signal 2, bin/tick.sh) already handles, so the marker's
 # content reaches the agent through the existing comment feeds without any
 # further plumbing.
+#
+# validated_repos_json is a NEWLINE-DELIMITED STREAM of repo objects, one per
+# line -- NOT a JSON array (built that way in tick.sh, consumed the same way by
+# Signal 1 directly below the call site and by maintenance_repo_validated). So
+# `.full_name` runs per object; `.[]?` would error on a stream. Multi-repo
+# iteration is pinned in test-review.sh.
 review_adjudication_scan() {
   local validated_json="$1" bot="${2:-}" reviewer="${3:-}"
   if [ -z "$bot" ] || [ -z "$reviewer" ]; then

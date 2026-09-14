@@ -129,14 +129,6 @@ else
   bad "the correction is applied ABOVE the commits/no-commits split (read ${READ_AT:-?}, split ${PR_NEW_AT:-?})"
 fi
 
-# Ordering: reading after the worktree is torn down would silently never fire.
-FINAL_RM=$(grep -n 'git worktree remove --force "\$PR_WORKTREE"' "$TICK" | tail -1 | cut -d: -f1)
-if [ -n "$READ_AT" ] && [ -n "$FINAL_RM" ] && [ "$READ_AT" -lt "$FINAL_RM" ]; then
-  ok "the correction is read BEFORE the worktree is removed (read ${READ_AT} < rm ${FINAL_RM})"
-else
-  bad "the correction is read BEFORE the worktree is removed (read ${READ_AT:-?}, rm ${FINAL_RM:-?})"
-fi
-
 # Ordering, the other end: the reset has to precede the read, or it clears the
 # correction it was supposed to be guarding.
 RESET_AT=$(grep -n 'pr_body_correction_reset "\$PR_WORKTREE"' "$TICK" | tail -1 | cut -d: -f1)
@@ -144,6 +136,19 @@ if [ -n "$READ_AT" ] && [ -n "$RESET_AT" ] && [ "$RESET_AT" -lt "$READ_AT" ]; th
   ok "the reset runs BEFORE the read (reset ${RESET_AT} < read ${READ_AT})"
 else
   bad "the reset runs BEFORE the read (reset ${RESET_AT:-?}, read ${READ_AT:-?})"
+fi
+
+# Ordering: reading after the worktree is torn down would silently never fire.
+# The post-run flow has several teardown sites (one per exit path), so this
+# anchors on the EARLIEST one after the reset, not the last -- a read that sits
+# above the final `git worktree remove` can still sit below an earlier one, and
+# that exit path would drop the correction with nothing to show for it.
+FIRST_RM=$(grep -n 'git worktree remove --force "\$PR_WORKTREE"' "$TICK" | cut -d: -f1 \
+  | awk -v reset="${RESET_AT:-0}" '$1 > reset { print; exit }')
+if [ -n "$READ_AT" ] && [ -n "$FIRST_RM" ] && [ "$READ_AT" -lt "$FIRST_RM" ]; then
+  ok "the correction is read BEFORE any post-run worktree teardown (read ${READ_AT} < first rm ${FIRST_RM})"
+else
+  bad "the correction is read BEFORE any post-run worktree teardown (read ${READ_AT:-?}, first rm ${FIRST_RM:-?})"
 fi
 
 # The file is written INSIDE the repo the agent is committing to, so the claim

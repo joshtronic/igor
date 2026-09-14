@@ -752,6 +752,24 @@ review_adjudication_scan '{"full_name":"acme/x"}' '' joshtronic
 eq "no bot user -> scan is a no-op" "called" "$ASSIGNED"
 unset -f forgejo_assign
 
+# The production shape of VALIDATED_REPOS_JSON is a NEWLINE-DELIMITED STREAM of
+# repo objects with a trailing newline, not a JSON array -- a single-object stub
+# passes whether or not the loop actually iterates. Two repos, marker only on the
+# second: a scan that reads just the first line, or that assumes an array, fails.
+ASSIGNED=""
+forgejo_assign() { ASSIGNED="${ASSIGNED}$1#$2->$3;"; }
+forgejo_list_open_bot_prs() { jq -n '[{number: 7, title: "t", head: "h"}]'; }
+forgejo_pr_comments() {
+  case "$1" in
+    acme/second) jq -n '[{user:{login:"joshtronic"}, created_at:"2026-09-01T00:00:00Z",
+                          body:"answer\n\n<!-- adjudication -->"}]' ;;
+    *) jq -n '[{user:{login:"joshtronic"}, created_at:"2026-09-01T00:00:00Z", body:"no marker"}]' ;;
+  esac
+}
+review_adjudication_scan "$(printf '%s\n%s\n' '{"full_name":"acme/first"}' '{"full_name":"acme/second"}')" igor joshtronic
+eq "iterates the newline-delimited stream, reassigning only the 2nd repo's PR" "acme/second#7->igor;" "$ASSIGNED"
+unset -f forgejo_assign forgejo_list_open_bot_prs forgejo_pr_comments
+
 echo "== bin/tick.sh: the adjudication scan is wired in (source assertions) =="
 if grep -q 'review_adjudication_scan "\$VALIDATED_REPOS_JSON" "\$BOT_USER" "\${FORGEJO_REVIEWER:-}"' "$TICK"; then
   printf '  + the tick calls review_adjudication_scan with the validated set, bot, and reviewer\n'
