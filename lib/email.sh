@@ -24,7 +24,12 @@ recipients_with_primary() {
     | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -
 }
 
-EMAIL_API="https://api.smtp2go.com/v3/email/send"
+# Overridable so bin/test-email-argmax.sh can point a REAL curl at an
+# unroutable port (the ARG_MAX cliff is an exec-time limit a doubled curl
+# cannot reproduce). The env is already trusted with SMTP2GO_API_KEY itself,
+# so redirecting the endpoint reaches nothing a reader of that same env
+# could not already reach by calling the API directly.
+EMAIL_API="${EMAIL_API:-https://api.smtp2go.com/v3/email/send}"
 
 # email_send <subject> <html_body> <text_body> <to_csv> [cc_csv]
 # to_csv / cc_csv are comma-separated address lists. Returns 0 if
@@ -41,15 +46,33 @@ email_send() {
     return 1
   fi
 
+  # igor#635: html/text can each run past ARG_MAX on their own (a large ship
+  # report), and jq's --arg puts its value on jq's OWN argv same as curl's -d
+  # did -- so a big body blew up the exec building the payload, before curl
+  # was ever reached. --rawfile takes a PATH on argv and reads the content
+  # via a read(), so neither body ever becomes an argv entry.
+  local html_file text_file jq_rc=0
+  html_file=$(mktemp); text_file=$(mktemp)
+  printf '%s' "$html" >"$html_file"
+  printf '%s' "$text" >"$text_file"
   payload=$(jq -n \
     --arg key "$SMTP2GO_API_KEY" \
     --arg sender "$SMTP2GO_SENDER" \
     --arg subject "$subject" \
-    --arg html "$html" \
-    --arg text "$text" \
+    --rawfile html "$html_file" \
+    --rawfile text "$text_file" \
     --argjson to "$to_json" \
     '{api_key:$key, sender:$sender, to:$to, subject:$subject,
-      html_body:$html, text_body:$text}')
+      html_body:$html, text_body:$text}') || jq_rc=$?
+  # Guarded rather than bare so the temp files are removed on the failure
+  # path too -- under a caller's `set -e` a failing jq would otherwise abort
+  # the function mid-way and leak both in a long-running tick loop. An empty
+  # payload must also never reach curl as if it were a real body.
+  rm -f "$html_file" "$text_file"
+  if [ "$jq_rc" -ne 0 ] || [ -z "$payload" ]; then
+    log "email: failed to build the JSON payload (jq exit ${jq_rc})"
+    return 1
+  fi
 
   if [ -n "$cc_csv" ]; then
     cc_json=$(printf '%s' "$cc_csv" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length>0))')
@@ -65,10 +88,20 @@ email_send() {
   # trip happened, SMTP2GO said no) log differently and both carry the
   # response body. Nothing but $payload ever carries the API key, and
   # $payload is never logged.
+  # igor#635: the payload goes to curl on STDIN (--data-binary @-), never as
+  # an argv entry -- a curl -d "$payload" made the kernel refuse to exec curl
+  # at all (E2BIG) once the payload passed ARG_MAX, before any request was
+  # attempted. Feeding stdin removes the ceiling for every email_send caller
+  # (and takes the API key out of /proc/<pid>/cmdline as a side effect).
+  # The feed is a process substitution, not a pipeline, so $? is curl's OWN
+  # status: callers source this under `set -o pipefail`, and a server that
+  # answers mid-upload (a 413 on a large report is the obvious one) leaves
+  # curl exiting 0 with printf killed by SIGPIPE -- which as a pipeline reads
+  # as status 141 and buries the HTTP code that actually explains the refusal.
   local resp rc err_file curl_err http_code body
   err_file=$(mktemp)
   resp=$(curl -sS -w '\n%{http_code}' -X POST -H "Content-Type: application/json" \
-    -d "$payload" "$EMAIL_API" 2>"$err_file")
+    --data-binary @- "$EMAIL_API" 2>"$err_file" < <(printf '%s' "$payload"))
   rc=$?
   curl_err=$(cat "$err_file" 2>/dev/null)
   rm -f "$err_file"

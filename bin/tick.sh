@@ -2076,7 +2076,7 @@ do_shipreport_tick() {
     # each PR that merged in this window, pull its comment thread and let
     # review_corpus_judgment_items (lib/review-corpus.sh) say whether its
     # final review left anything unresolved.
-    local pr_line pr_num pr_title pr_url comments pr_judgment appended
+    local pr_line pr_num pr_title pr_url comments pr_judgment appended pj_file
     while IFS= read -r pr_line; do
       [ -n "$pr_line" ] || continue
       pr_num=$(jq -r '.number' <<<"$pr_line")
@@ -2102,10 +2102,15 @@ do_shipreport_tick() {
       fi
       [ -n "$pr_judgment" ] || pr_judgment='[]'
       if [ "$(jq -r 'length' <<<"$pr_judgment" 2>/dev/null || echo 0)" != "0" ]; then
+        # igor#635: --slurpfile, not --argjson -- one PR's extracted judgment
+        # is raw review text and can pass the per-argument exec limit on its
+        # own. The accumulator it merges into already goes on stdin.
+        pj_file=$(mktemp); printf '%s' "$pr_judgment" >"$pj_file"
         appended=$(jq -c --arg repo "$repo" --argjson number "$pr_num" \
-            --arg title "$pr_title" --arg url "$pr_url" --argjson jitems "$pr_judgment" '
-            . + [{repo:$repo, number:$number, title:$title, url:$url, items:$jitems}]' \
+            --arg title "$pr_title" --arg url "$pr_url" --slurpfile jitems "$pj_file" '
+            . + [{repo:$repo, number:$number, title:$title, url:$url, items:$jitems[0]}]' \
           <<<"$judgment_items" 2>/dev/null) || appended=''
+        rm -f "$pj_file"
         if [ -n "$appended" ]; then
           judgment_items="$appended"
         else
@@ -2152,8 +2157,17 @@ do_shipreport_tick() {
   # igor#610: unconditional, unlike landed_notes above -- judgment_items is a
   # MANDATORY section (shipreport_judgment_build), so every report carries
   # it whether or not this window's merged PRs left anything unresolved.
-  local judgment; judgment=$(shipreport_judgment_build "$judgment_items")
-  report=$(jq -c --argjson j "$judgment" '. + $j' <<<"$report" 2>/dev/null || printf '%s' "$report")
+  local judgment merged_report flagged_report
+  judgment=$(shipreport_judgment_build "$judgment_items") \
+    || log "shipreport: judgment build failed -- the section will render as UNKNOWN"
+  if merged_report=$(shipreport_merge_judgment "$report" "$judgment"); then
+    report="$merged_report"
+  else
+    log "shipreport: WARN judgment merge failed -- the section will render as UNKNOWN"
+    if flagged_report=$(shipreport_mark_judgment_error "$report"); then
+      report="$flagged_report"
+    fi
+  fi
 
   if shipreport_is_empty "$report"; then
     log "shipreport: quiet 24h -- nothing to report (stamping done)"

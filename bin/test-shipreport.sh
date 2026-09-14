@@ -268,12 +268,178 @@ has "the gather loop was found in bin/tick.sh" "$GATHER" "review_corpus_judgment
 has "empty comments are coerced to [] before the call" "$GATHER" '[ -n "$comments" ] || comments='"'"'[]'"'"
 has "an empty judgment result is coerced too"          "$GATHER" '[ -n "$pr_judgment" ] || pr_judgment='"'"'[]'"'"
 has "a failed append is logged, not swallowed"         "$GATHER" "dropped judgment items"
+has "one PR's judgment reaches jq by file, not argv"   "$GATHER" "--slurpfile jitems"
 has "a failed comment fetch is logged, not swallowed"  "$GATHER" "comment fetch failed"
 has "a failed extraction is logged, not swallowed"     "$GATHER" "judgment extraction failed"
 # errexit-safe early-continue: `[ -z "$x" ] && continue` is exempt from
 # `set -e` (a non-final && element), but the file's convention is the `||`
 # form and it reads as safe without having to know that rule.
 has "the empty-line skip uses the || form"             "$GATHER" '[ -n "$pr_line" ] || continue'
+
+echo "== shipreport_judgment_build: bounds a large judgment section (igor#635) =="
+# Mirrors the 2026-09-14 window that tripped the ARG_MAX bug: 91 judgment
+# bodies, 223 KB raw. One item per PR entry (91 entries), each body 2500
+# chars -- 227500 chars total, comfortably over
+# SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS's default of 200000.
+BIG_JUDGMENT_JSON=$(jq -cn '
+  [ range(0;91) | {
+      repo: ("acme/repo" + (. % 5 | tostring)),
+      number: (100 + .),
+      title: ("large review " + (.|tostring)),
+      url: ("https://forge/acme/pulls/" + (100 + .|tostring)),
+      items: [ { verdict: "COMMENT", comment_url: ("c" + (.|tostring)), body: ("x" * 2500) } ]
+    }
+  ]
+')
+RAW_BYTES=$(printf '%s' "$BIG_JUDGMENT_JSON" | jq -r '[.[].items[].body | length] | add')
+BIG_JUDGMENT=$(shipreport_judgment_build "$BIG_JUDGMENT_JSON")
+
+eq "91 raw item bodies total >200KB (sanity on the fixture itself)" "1" \
+  "$([ "$RAW_BYTES" -gt 200000 ] && echo 1 || echo 0)"
+
+KEPT=$(jq -r '.judgment_items | length' <<<"$BIG_JUDGMENT")
+OMITTED=$(jq -r '.judgment_trim.entries_omitted' <<<"$BIG_JUDGMENT")
+eq "some entries kept, some omitted (neither all-or-nothing)" "1" \
+  "$([ "$KEPT" -gt 0 ] && [ "$OMITTED" -gt 0 ] && echo 1 || echo 0)"
+eq "kept + omitted accounts for every entry" "91" "$((KEPT + OMITTED))"
+
+echo "== shipreport_merge_judgment: merges past the per-argument exec limit =="
+# The OTHER half of igor#635. A trimmed judgment object is still capped at
+# SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS (200000), and Linux caps a SINGLE
+# argv entry at MAX_ARG_STRLEN (32 pages = 131072 bytes) independently of
+# `getconf ARG_MAX` -- so the old `jq --argjson j "$judgment"` merge failed
+# to exec on exactly the busy day the section is worth reading, and the
+# `|| printf '%s' "$report"` fallback then sent the report with a silently
+# empty JUDGMENT ITEMS section and no trim notice.
+JUDGMENT_BYTES=$(printf '%s' "$BIG_JUDGMENT" | wc -c | tr -d '[:space:]')
+eq "the built judgment object is over the 131072-byte per-argument limit" "1" \
+  "$([ "$JUDGMENT_BYTES" -gt 131072 ] && echo 1 || echo 0)"
+# Kernel probe, not an assertion: MAX_ARG_STRLEN is Linux-specific, so a
+# platform without it (macOS bounds a single arg by ARG_MAX only) must not
+# turn this suite red -- the merge is required to work either way.
+if jq -cn --argjson j "$BIG_JUDGMENT" '$j | length' >/dev/null 2>&1; then
+  printf '  = this kernel execs a %s-byte argv entry; cliff not reproducible here\n' "$JUDGMENT_BYTES"
+else
+  printf '  + an --argjson merge of this object cannot exec here (the cliff is real)\n'
+fi
+BIG_REPORT=$(printf '%s' "$ITEMS" | shipreport_build)
+ok "merging it returns 0"  shipreport_merge_judgment "$BIG_REPORT" "$BIG_JUDGMENT"
+BIG_REPORT=$(shipreport_merge_judgment "$BIG_REPORT" "$BIG_JUDGMENT")
+eq "the merged report carries every kept entry"  "$KEPT"    "$(jq -r '.judgment_items | length' <<<"$BIG_REPORT")"
+eq "and the trim tally rides along"              "$OMITTED" "$(jq -r '.judgment_trim.entries_omitted' <<<"$BIG_REPORT")"
+eq "without losing the report's own buckets"     "1 2"      "$(jq -r '[.shipped[].number]|join(" ")' <<<"$BIG_REPORT")"
+# jq treats null as the identity for `+`, so a missing side would otherwise
+# merge to the report unchanged and report success -- the exact silence
+# igor#610 forbids. Both must be failures the caller can log.
+no "an empty judgment side fails instead of merging to nothing" shipreport_merge_judgment "$BIG_REPORT" ""
+no "an unparseable judgment side fails too"                     shipreport_merge_judgment "$BIG_REPORT" 'not json at all'
+no "an empty report side fails too"                             shipreport_merge_judgment "" "$BIG_JUDGMENT"
+# A side that PARSES to null is the same silence wearing a disguise -- it
+# slurps to 2 documents, so only the type check catches it.
+no "a literal null judgment document fails too"                 shipreport_merge_judgment "$BIG_REPORT" 'null'
+no "a non-object judgment document fails too"                   shipreport_merge_judgment "$BIG_REPORT" '[1,2]'
+no "a literal null report side fails too"                       shipreport_merge_judgment 'null' "$BIG_JUDGMENT"
+
+# do_shipreport_tick's own merge (source-assertion, same rationale as the
+# igor#633 block above): the object must never reach jq's argv, and a failed
+# merge must log rather than fall back to the unmerged report.
+MERGE_BLOCK=$(printf '%s\n' "$FN" | sed -n '/judgment=\$(shipreport_judgment_build/,/^  fi/p')
+has "the tick merges through shipreport_merge_judgment" "$MERGE_BLOCK" "shipreport_merge_judgment"
+has "a failed merge is logged, not swallowed"           "$MERGE_BLOCK" "judgment merge failed"
+if printf '%s' "$MERGE_BLOCK" | grep -q -- '--argjson j'; then
+  printf '  x %s\n' "the tick never passes the judgment object on jq's argv"; FAIL=$((FAIL + 1))
+else
+  printf '  + %s\n' "the tick never passes the judgment object on jq's argv"
+fi
+
+echo "== a failed judgment merge reads as UNKNOWN in the email, not as a clean day =="
+# The log line that separates "could not build it" from "nothing unresolved"
+# never reaches the person reading the report, so the report has to say it.
+CLEAN_REPORT=$(printf '%s' "$ITEMS" | shipreport_build)
+FLAGGED=$(shipreport_mark_judgment_error "$CLEAN_REPORT")
+eq "the flag rides on the report"                "true" "$(jq -r '.judgment_error' <<<"$FLAGGED")"
+eq "without disturbing the report's own buckets" "1 2"  "$(jq -r '[.shipped[].number]|join(" ")' <<<"$FLAGGED")"
+has "the text body says UNKNOWN" "$(shipreport_render_text <<<"$FLAGGED")" "UNKNOWN"
+has "the html body says UNKNOWN" "$(shipreport_render_html <<<"$FLAGGED")" "UNKNOWN"
+CLEAN_TEXT=$(shipreport_render_text <<<"$CLEAN_REPORT")
+has "an unflagged empty section still reads as nothing unresolved" "$CLEAN_TEXT" "(no unresolved judgment items)"
+case "$CLEAN_TEXT" in
+  *UNKNOWN*) printf '  x %s\n' "and never cries UNKNOWN on a genuinely quiet day"; FAIL=$((FAIL + 1)) ;;
+  *)         printf '  + %s\n' "and never cries UNKNOWN on a genuinely quiet day" ;;
+esac
+has "the tick flags the report when the merge fails" "$MERGE_BLOCK" "shipreport_mark_judgment_error"
+
+# A gather-side shape quirk must not take the whole section down: an errored
+# build renders empty, which reads as "nothing unresolved".
+NO_ITEMS=$(shipreport_judgment_build '[{"repo":"acme/x","number":1,"title":"t","url":"u"}]')
+eq "an entry with no items key still builds" "1" "$(jq -r '.judgment_items | length' <<<"$NO_ITEMS")"
+eq "and its items default to empty"          "0" "$(jq -r '.judgment_items[0].items | length' <<<"$NO_ITEMS")"
+
+BIG_TEXT=$(shipreport_render_text <<<"$BIG_REPORT")
+BIG_HTML=$(shipreport_render_html <<<"$BIG_REPORT")
+TEXT_BYTES=$(printf '%s' "$BIG_TEXT" | wc -c | tr -d '[:space:]')
+HTML_BYTES=$(printf '%s' "$BIG_HTML" | wc -c | tr -d '[:space:]')
+
+# The honest baseline for "the cap shrank the email" is the SAME report
+# rendered with the caps lifted -- a hardcoded byte threshold can sit above
+# the untrimmed size and pass on a render that trimmed nothing. Subshell, so
+# the raised caps don't leak into the checks below.
+UNTRIMMED_JUDGMENT=$(SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS=99999999 \
+  SHIPREPORT_JUDGMENT_ITEM_MAX_CHARS=99999999 \
+  shipreport_judgment_build "$BIG_JUDGMENT_JSON")
+eq "the lifted-cap baseline keeps every entry" "91" \
+  "$(jq -r '.judgment_items | length' <<<"$UNTRIMMED_JUDGMENT")"
+UNTRIMMED_REPORT=$(shipreport_merge_judgment "$(printf '%s' "$ITEMS" | shipreport_build)" "$UNTRIMMED_JUDGMENT")
+UNTRIMMED_TEXT_BYTES=$(shipreport_render_text <<<"$UNTRIMMED_REPORT" | wc -c | tr -d '[:space:]')
+UNTRIMMED_HTML_BYTES=$(shipreport_render_html <<<"$UNTRIMMED_REPORT" | wc -c | tr -d '[:space:]')
+
+eq "rendered text body is smaller than the same report rendered untrimmed" "1" \
+  "$([ "$TEXT_BYTES" -lt "$UNTRIMMED_TEXT_BYTES" ] && echo 1 || echo 0)"
+eq "rendered html body is smaller than the same report rendered untrimmed" "1" \
+  "$([ "$HTML_BYTES" -lt "$UNTRIMMED_HTML_BYTES" ] && echo 1 || echo 0)"
+
+# And bounded in absolute terms by the cap itself plus the renderer's own
+# chrome, derived from SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS rather than
+# hardcoded. Text chrome is a per-line indent (~8 KB here); HTML adds tags
+# and escaping per line, so it gets a larger allowance -- large enough that
+# the html bound sits just ABOVE the raw content size, which is why the
+# untrimmed comparison above is the one that proves the trim did anything.
+eq "text body is bounded by the section cap plus text rendering overhead" "1" \
+  "$([ "$TEXT_BYTES" -lt $((SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS + 20000)) ] && echo 1 || echo 0)"
+eq "text body is smaller than the raw judgment content" "1" \
+  "$([ "$TEXT_BYTES" -lt "$RAW_BYTES" ] && echo 1 || echo 0)"
+eq "html body is bounded by the section cap plus html rendering overhead" "1" \
+  "$([ "$HTML_BYTES" -lt $((SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS + 30000)) ] && echo 1 || echo 0)"
+
+# The temp file the --slurpfile call needs must not swallow jq's status: a
+# malformed judgment_json has to reach do_shipreport_tick as a failure, or
+# an empty section reads as "nothing unresolved" (the ambiguity igor#610
+# exists to prevent).
+ok "a well-formed build returns 0"                         shipreport_judgment_build "$BIG_JUDGMENT_JSON"
+no "a malformed judgment_json propagates jq's failure"     shipreport_judgment_build 'not json at all'
+
+# An item shortened by pass 1 whose entry is then dropped whole by pass 2 is
+# reported once, as omitted -- not in both halves of the notice.
+DOUBLE_COUNT_JSON=$(jq -cn '
+  [ range(0;2) | {
+      repo: "acme/dbl", number: (1 + .), title: "t", url: "u",
+      items: [ { verdict: "COMMENT", comment_url: "c", body: ("z" * 600) } ]
+    }
+  ]
+')
+DOUBLE_TRIM=$(SHIPREPORT_JUDGMENT_ITEM_MAX_CHARS=100 \
+  SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS=200 \
+  shipreport_judgment_build "$DOUBLE_COUNT_JSON")
+eq "one entry kept, one omitted"                    "1" "$(jq -r '.judgment_items | length' <<<"$DOUBLE_TRIM")"
+eq "the omitted entry is counted as omitted"        "1" "$(jq -r '.judgment_trim.entries_omitted' <<<"$DOUBLE_TRIM")"
+eq "and not ALSO counted as shortened"              "1" "$(jq -r '.judgment_trim.items_truncated' <<<"$DOUBLE_TRIM")"
+eq "its shortened bytes are not double-reported"    "500" "$(jq -r '.judgment_trim.bytes_truncated' <<<"$DOUBLE_TRIM")"
+
+has "text trim notice names the omitted count" "$BIG_TEXT" "${OMITTED} PR(s)"
+has "html trim notice names the omitted count" "$BIG_HTML" "${OMITTED} PR(s)"
+OMITTED_KB=$(jq -r '(.judgment_trim.bytes_omitted / 1000) | round' <<<"$BIG_REPORT")
+has "text trim notice names the approximate size" "$BIG_TEXT" "(~${OMITTED_KB} KB)"
+has "html trim notice names the approximate size" "$BIG_HTML" "(~${OMITTED_KB} KB)"
 
 echo "== fully scripted: no model call in the module =="
 if grep -qE "claude_call|claude_run|anthropic_call" "$HERE/../lib/ship-report.sh"; then

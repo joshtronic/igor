@@ -37,6 +37,22 @@ _shipreport_state_file() { echo "${AGENT_STATE_DIR:-$HOME/.local/state/agent}/di
 # one transient SMTP2GO failure.
 SHIPREPORT_RETRY_COOLDOWN_SECS="${SHIPREPORT_RETRY_COOLDOWN_SECS:-900}"  # 15 min, mirrors sports
 
+# igor#635: the transport can now carry an email of any size (body goes on
+# curl's stdin, not argv -- see lib/email.sh), but a multi-megabyte report is
+# a *readability* failure even once it sends. These bound the judgment-items
+# section specifically, since it's the one section that embeds raw,
+# unbounded review/rework text. Measured on the 2026-09-14 window that
+# tripped the original ARG_MAX bug: 91 judgment-item bodies, 223 KB total --
+# averaging ~2.45 KB/item. ITEM_MAX_CHARS is ~3x that average, so a normal
+# item never gets touched and only a pathological single dump (a full diff
+# pasted into a review comment) gets shortened. SECTION_MAX_CHARS sits just
+# under that 223 KB day, so the exact day that caused the failure trims by a
+# small amount (proving the cap actually engages) while a normal, even fairly
+# busy, day renders in full. Char count is used as a byte-count
+# approximation (review text is ASCII-dominant); see shipreport_judgment_build.
+SHIPREPORT_JUDGMENT_ITEM_MAX_CHARS="${SHIPREPORT_JUDGMENT_ITEM_MAX_CHARS:-8000}"
+SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS="${SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS:-200000}"
+
 # jq fragment: normalize .shipreport to today, resetting if the day rolled.
 # shellcheck disable=SC2016  # $d is a jq --arg, not shell -- must not expand
 SHIPREPORT_ROLL='(if (.shipreport.date // "") == $d then .shipreport
@@ -255,9 +271,98 @@ shipreport_metrics_build() {
 # it, empty or not. The issue this closes is explicitly that silence here
 # must never be ambiguous between "nothing unresolved" and "the extraction
 # broke," so do_shipreport_tick always calls this, never skips the merge.
+#
+# igor#635: also bounds the section's size -- per-item first, then greedy
+# packing of whole PR entries into SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS. An
+# entry that doesn't fit is dropped WHOLE and the walk continues, so a later
+# smaller entry is still kept and no entry is ever shown half-rendered. Every
+# trim is tallied into `judgment_trim` and rendered as an explicit notice --
+# the issue's rule is that a silent truncation is worse than a large report.
+# The pass-1 tally counts only items that survived pass 2, so an item that was
+# shortened and then dropped with its entry is reported once, as omitted.
 shipreport_judgment_build() {
   local judgment_json="${1:-[]}"
-  jq -cn --argjson j "${judgment_json:-[]}" '{judgment_items: $j}'
+  local item_max="${SHIPREPORT_JUDGMENT_ITEM_MAX_CHARS}" section_max="${SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS}"
+  # igor#635: the array itself can carry the same >223 KB of raw comment
+  # text this whole issue is about -- --argjson would put it on jq's OWN
+  # argv (the same ARG_MAX cliff as curl's -d, one step upstream of it).
+  # --slurpfile instead takes a file PATH on argv and reads the content via
+  # a read(), same fix as email.sh's --rawfile for the html/text bodies.
+  local judgment_file; judgment_file=$(mktemp)
+  printf '%s' "${judgment_json:-[]}" >"$judgment_file"
+  local out rc=0
+  out=$(jq -cn --slurpfile jarr "$judgment_file" --argjson imax "$item_max" --argjson smax "$section_max" '
+    def trunc_item($imax):
+      (.body | length) as $blen
+      | if $blen > $imax then
+          .body = (.body[0:$imax] + "\n... [truncated, " + (($blen - $imax) | tostring) + " more char(s) -- see the PR thread]")
+          | .truncated_bytes = ($blen - $imax)
+        else . end;
+
+    ($jarr[0] | map(.items = ((.items // []) | map(trunc_item($imax))))) as $capped
+    | (reduce $capped[] as $pr (
+        {kept: [], budget: $smax, entries_omitted: 0, items_omitted: 0, bytes_omitted: 0};
+        ( [ $pr.items[] | (.body | length) ] | add // 0 ) as $prlen
+        | if $prlen <= .budget then
+            .kept += [$pr] | .budget -= $prlen
+          else
+            .entries_omitted += 1
+            | .items_omitted += ($pr.items | length)
+            | .bytes_omitted += $prlen
+          end
+      )) as $r
+    | {
+        judgment_items: [ $r.kept[] | .items |= map(del(.truncated_bytes)) ],
+        judgment_trim: {
+          entries_omitted: $r.entries_omitted,
+          items_omitted: $r.items_omitted,
+          bytes_omitted: $r.bytes_omitted,
+          items_truncated: ([$r.kept[].items[] | select(.truncated_bytes != null)] | length),
+          bytes_truncated: ([$r.kept[].items[] | (.truncated_bytes // 0)] | add // 0)
+        }
+      }
+  ') || rc=$?
+  rm -f "$judgment_file"
+  # The temp file is cleaned up before the status is handed back, but the
+  # status IS jq's, not rm's -- a malformed judgment_json has to reach the
+  # caller as a failure. Silence here must never read as "nothing unresolved".
+  printf '%s' "$out"
+  return "$rc"
+}
+
+# shipreport_merge_judgment <report_json> <judgment_json> -- folds
+# shipreport_judgment_build's output onto an already-built report.
+#
+# igor#635: this exists only because of the argv ceiling. `--argjson j
+# "$judgment"` cannot exec once the judgment object passes Linux's
+# MAX_ARG_STRLEN -- 32 pages, 131072 bytes, a PER-ARGUMENT limit far below
+# `getconf ARG_MAX` (2 MB here) -- and SHIPREPORT_JUDGMENT_SECTION_MAX_CHARS
+# deliberately allows 200000, so the merge would die on exactly the busy day
+# the section is worth reading. Both documents go on jq's stdin instead, so
+# neither is ever an argv entry at any size.
+#
+# Unlike shipreport_merge_landed above, there is NO fallback to the unmerged
+# report: a dropped `judgment_items` key renders as an empty section, which
+# reads as "nothing unresolved" -- the ambiguity igor#610 exists to prevent.
+# A failed merge (either side unparseable, empty, or not an object) returns
+# nonzero for the caller to log. Both guards exist because jq treats null as
+# the identity for `+`: the length check catches a side that is missing
+# entirely, the type check a side that parsed to a literal `null` (or any
+# non-object) -- either would otherwise merge to the report unchanged and
+# report success.
+shipreport_merge_judgment() {
+  printf '%s\n%s\n' "${1:-}" "${2:-}" \
+    | jq -cs 'if length == 2 and all(.[]; type == "object") then .[0] + .[1]
+              else error("judgment merge expected 2 JSON objects, got \(length) document(s): \([.[] | type] | join(", "))") end'
+}
+
+# shipreport_mark_judgment_error <report_json> -- flag a report whose judgment
+# section could not be built or merged, so the EMAIL says so. Without it the
+# failure renders identically to a clean day ("no unresolved judgment items")
+# and only the harness log tells the two apart -- which puts the igor#610
+# ambiguity right back, in the one place the human actually reads.
+shipreport_mark_judgment_error() {
+  jq -c '. + {judgment_error: true}' <<<"${1:-}"
 }
 
 # Shared jq defs for the metrics/version renderers below.
@@ -335,7 +440,9 @@ _shipreport_claude_version_line() {
 _shipreport_judgment_lines() {
   jq -r '
     (.judgment_items // []) as $j
-    | if ($j | length) == 0 then
+    | if (.judgment_error // false) then
+        "  ERROR: this section could not be built -- read it as UNKNOWN, not as \"nothing unresolved\". The harness log has the failure."
+      elif ($j | length) == 0 then
         "  (no unresolved judgment items)"
       else
         ( $j | group_by(.repo)[] | .[] |
@@ -346,6 +453,27 @@ _shipreport_judgment_lines() {
             ( .body | split("\n") | map("      " + .) | join("\n") )
           )
         )
+      end
+  '
+}
+
+# _shipreport_judgment_trim_note <report_json on stdin> -- one line, or empty
+# when shipreport_judgment_build did no trimming (or the report never
+# merged in a `judgment_trim` key, e.g. every existing test fixture). Names
+# a count and a size for both trim passes -- see shipreport_judgment_build.
+_shipreport_judgment_trim_note() {
+  jq -r '
+    (.judgment_trim // {entries_omitted:0, items_omitted:0, bytes_omitted:0, items_truncated:0, bytes_truncated:0}) as $t
+    | [
+        (if $t.entries_omitted > 0 then
+           "\($t.entries_omitted) PR(s) / \($t.items_omitted) item(s) omitted (~\(($t.bytes_omitted/1000)|round) KB) -- see the PR threads directly"
+         else empty end),
+        (if $t.items_truncated > 0 then
+           "\($t.items_truncated) item body/bodies shortened (~\(($t.bytes_truncated/1000)|round) KB removed)"
+         else empty end)
+      ] as $parts
+    | if ($parts | length) == 0 then empty
+      else "  NOTE: " + ($parts | join("; ")) + " to keep this email a reasonable size."
       end
   '
 }
@@ -379,6 +507,10 @@ shipreport_render_text() {
   jn=$(jq -r '.judgment_items // [] | length' <<<"$r")
   printf -- '-- JUDGMENT ITEMS, unresolved (%s PR(s), %s item(s)) --\n' "$jn" "$jcount"
   _shipreport_judgment_lines <<<"$r"
+  local trim_note; trim_note=$(_shipreport_judgment_trim_note <<<"$r")
+  if [ -n "$trim_note" ]; then
+    printf '%s\n' "$trim_note"
+  fi
   printf '\n'
 
   printf -- '-- IN FLIGHT (%s) --\n' "$(jq -r '.inflight | length' <<<"$r")"
@@ -460,7 +592,16 @@ shipreport_render_html() {
         ] | join("") )
     + "</li>"
   ' <<<"$r")
-  if [ -n "$ji" ]; then printf '<ul>%s</ul>' "$ji"; else printf '<p style="color:#888"><em>no unresolved judgment items</em></p>'; fi
+  # Error branch first, matching _shipreport_judgment_lines: the flag means
+  # "do not trust this section", which outranks showing whatever survived.
+  if jq -e '.judgment_error // false' <<<"$r" >/dev/null 2>&1; then
+    printf '<p style="color:#b00"><strong>ERROR:</strong> this section could not be built &mdash; read it as UNKNOWN, not as &ldquo;nothing unresolved&rdquo;. The harness log has the failure.</p>'
+  elif [ -n "$ji" ]; then printf '<ul>%s</ul>' "$ji"
+  else printf '<p style="color:#888"><em>no unresolved judgment items</em></p>'; fi
+  local trim_note; trim_note=$(_shipreport_judgment_trim_note <<<"$r")
+  if [ -n "$trim_note" ]; then
+    printf '<p style="color:#888;font-size:13px">%s</p>' "$(printf '%s' "$trim_note" | sed 's/^  //')"
+  fi
 
   # Landed (igor#512): only shown when the caller merged one in via
   # shipreport_merge_landed -- omitted entirely for a plain PR report.
