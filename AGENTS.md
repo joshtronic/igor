@@ -9,7 +9,9 @@ when no prompt cache is seeded.
 MANDATORY: security-review my own diff before exit -- the full
 contract is the Distillery's worker-contract skill.
 
-Helpers: `agent-block.sh`, `agent-report.sh`, `agent-ask.sh`.
+Helpers: `agent-block.sh`, `agent-report.sh`, `agent-ask.sh`,
+`agent-split-ticket.sh` (the last one is invoked by path, not bare
+name -- it is not on the permission profile's bare-name allowlist).
 
 <!-- OUTCOME: pr -->
 <!-- OUTCOME: report -->
