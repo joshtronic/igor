@@ -630,6 +630,145 @@ else
   printf '  + the RC-binding prompt does not interpolate it (always empty there)\n'
 fi
 
+echo "== review_adjudication_pending: igor#607 -- human adjudication marker =="
+
+# No marker comment at all -> nothing pending, even with unrelated chatter.
+forgejo_pr_comments() {
+  jq -n '[{user:{login:"joshtronic"}, created_at:"2026-09-01T00:00:00Z", body:"looks fine to me"}]'
+}
+if review_adjudication_pending acme/x 1 igor joshtronic >/dev/null 2>&1; then
+  printf '  x no marker at all -> nothing pending\n'; FAIL=$((FAIL + 1))
+else
+  printf '  + no marker at all -> nothing pending\n'
+fi
+unset -f forgejo_pr_comments
+
+# The core case: the reviewer posts the marker, nothing from the bot since.
+forgejo_pr_comments() {
+  jq -n '[{user:{login:"joshtronic"}, created_at:"2026-09-01T00:00:00Z",
+           body:"Use the correlation buffer, not lossless capture, for this one.\n\n<!-- adjudication -->"}]'
+}
+PENDING=$(review_adjudication_pending acme/x 1 igor joshtronic)
+has "the marker comment's own body surfaces" "$PENDING" "correlation buffer"
+unset -f forgejo_pr_comments
+
+# Privilege boundary (decision 5): the identical marker from anyone OTHER
+# than the configured reviewer must NOT count. This is the negative test the
+# spec calls mandatory -- accepting any commenter lets a lower-privileged
+# party drive the bot.
+forgejo_pr_comments() {
+  jq -n '[{user:{login:"random-commenter"}, created_at:"2026-09-01T00:00:00Z",
+           body:"ship it as-is\n\n<!-- adjudication -->"}]'
+}
+if review_adjudication_pending acme/x 1 igor joshtronic >/dev/null 2>&1; then
+  printf '  x a marker from a non-reviewer account must NOT count\n'; FAIL=$((FAIL + 1))
+else
+  printf '  + a marker from a non-reviewer account must NOT count\n'
+fi
+unset -f forgejo_pr_comments
+
+# Ordering (decision 6): a marker OLDER than the bot's own latest comment on
+# the PR must not re-trigger -- the bot has already answered it.
+forgejo_pr_comments() {
+  jq -n '[{user:{login:"joshtronic"}, created_at:"2026-09-01T00:00:00Z",
+           body:"do the thing\n\n<!-- adjudication -->"},
+          {user:{login:"igor"}, created_at:"2026-09-01T01:00:00Z",
+           body:"pushed a fix"}]'
+}
+if review_adjudication_pending acme/x 1 igor joshtronic >/dev/null 2>&1; then
+  printf '  x a marker older than the bot'"'"'s latest comment must NOT re-trigger\n'; FAIL=$((FAIL + 1))
+else
+  printf '  + a marker older than the bot'"'"'s latest comment must NOT re-trigger\n'
+fi
+unset -f forgejo_pr_comments
+
+# But a marker NEWER than the bot's latest comment -- a fresh answer to a
+# fresh escalation -- must fire again.
+forgejo_pr_comments() {
+  jq -n '[{user:{login:"igor"}, created_at:"2026-09-01T00:00:00Z",
+           body:"pushed a fix"},
+          {user:{login:"joshtronic"}, created_at:"2026-09-01T01:00:00Z",
+           body:"one more thing needs to change\n\n<!-- adjudication -->"}]'
+}
+PENDING2=$(review_adjudication_pending acme/x 1 igor joshtronic)
+has "a fresh marker after the bot's last comment fires" "$PENDING2" "one more thing"
+unset -f forgejo_pr_comments
+
+# Missing bot/reviewer args -> no pending (can't evaluate a privilege check
+# with an unknown reviewer identity).
+if review_adjudication_pending acme/x 1 '' joshtronic >/dev/null 2>&1; then
+  printf '  x no bot user -> nothing pending\n'; FAIL=$((FAIL + 1))
+else
+  printf '  + no bot user -> nothing pending\n'
+fi
+if review_adjudication_pending acme/x 1 igor '' >/dev/null 2>&1; then
+  printf '  x no reviewer user -> nothing pending\n'; FAIL=$((FAIL + 1))
+else
+  printf '  + no reviewer user -> nothing pending\n'
+fi
+
+# Fetch failure and malformed payloads fail CLOSED -- a transport blip must
+# never be misread as "reassign this PR."
+forgejo_pr_comments() { return 1; }
+if review_adjudication_pending acme/x 1 igor joshtronic >/dev/null 2>&1; then
+  printf '  x a comment-fetch failure must fail closed\n'; FAIL=$((FAIL + 1))
+else
+  printf '  + a comment-fetch failure must fail closed\n'
+fi
+unset -f forgejo_pr_comments
+
+forgejo_pr_comments() { printf '{"message":"not an array"}'; }
+if review_adjudication_pending acme/x 1 igor joshtronic >/dev/null 2>&1; then
+  printf '  x a non-array payload must fail closed\n'; FAIL=$((FAIL + 1))
+else
+  printf '  + a non-array payload must fail closed\n'
+fi
+unset -f forgejo_pr_comments
+
+echo "== review_adjudication_scan: reassigns a qualifying PR, reuses Signal 2 =="
+
+ASSIGNED=""
+forgejo_assign() { ASSIGNED="${ASSIGNED}$1#$2->$3;"; }
+forgejo_list_open_bot_prs() { jq -n '[{number: 7, title: "t", head: "h"}]'; }
+forgejo_pr_comments() {
+  jq -n '[{user:{login:"joshtronic"}, created_at:"2026-09-01T00:00:00Z",
+           body:"answer\n\n<!-- adjudication -->"}]'
+}
+review_adjudication_scan '{"full_name":"acme/x"}' igor joshtronic
+eq "a qualifying PR is reassigned to the bot" "acme/x#7->igor;" "$ASSIGNED"
+unset -f forgejo_assign forgejo_list_open_bot_prs forgejo_pr_comments
+
+ASSIGNED=""
+forgejo_assign() { ASSIGNED="${ASSIGNED}$1#$2->$3;"; }
+forgejo_list_open_bot_prs() { jq -n '[{number: 7, title: "t", head: "h"}]'; }
+forgejo_pr_comments() { jq -n '[{user:{login:"joshtronic"}, created_at:"2026-09-01T00:00:00Z", body:"no marker here"}]'; }
+review_adjudication_scan '{"full_name":"acme/x"}' igor joshtronic
+eq "a PR with no pending marker is left alone" "" "$ASSIGNED"
+unset -f forgejo_assign forgejo_list_open_bot_prs forgejo_pr_comments
+
+ASSIGNED="called"
+forgejo_assign() { ASSIGNED="${ASSIGNED}$1#$2->$3;"; }
+review_adjudication_scan '{"full_name":"acme/x"}' '' joshtronic
+eq "no bot user -> scan is a no-op" "called" "$ASSIGNED"
+unset -f forgejo_assign
+
+echo "== bin/tick.sh: the adjudication scan is wired in (source assertions) =="
+if grep -q 'review_adjudication_scan "\$VALIDATED_REPOS_JSON" "\$BOT_USER" "\${FORGEJO_REVIEWER:-}"' "$TICK"; then
+  printf '  + the tick calls review_adjudication_scan with the validated set, bot, and reviewer\n'
+else
+  printf '  x the tick calls review_adjudication_scan with the validated set, bot, and reviewer\n'; FAIL=$((FAIL + 1))
+fi
+# It must run BEFORE Signal 2's assignment-dance pickup, or a same-tick
+# reassignment would only be picked up a tick late.
+SCAN_AT=$(grep -n 'review_adjudication_scan "\$VALIDATED_REPOS_JSON"' "$TICK" | head -1 | cut -d: -f1)
+SIGNAL2_AT=$(grep -n 'Signal 2: assignment dance' "$TICK" | head -1 | cut -d: -f1)
+if [ -n "$SCAN_AT" ] && [ -n "$SIGNAL2_AT" ] && [ "$SCAN_AT" -lt "$SIGNAL2_AT" ]; then
+  printf '  + the scan runs BEFORE Signal 2 so a same-tick reassignment is picked up immediately (scan %s < signal2 %s)\n' "$SCAN_AT" "$SIGNAL2_AT"
+else
+  printf '  x the scan runs BEFORE Signal 2 so a same-tick reassignment is picked up immediately (scan %s, signal2 %s)\n' "${SCAN_AT:-?}" "${SIGNAL2_AT:-?}"; FAIL=$((FAIL + 1))
+fi
+eq "the marker matches REVIEW_ADJUDICATION_MARKER" "<!-- adjudication -->" "$REVIEW_ADJUDICATION_MARKER"
+
 if [ "$FAIL" -eq 0 ]; then
   echo "test-review: all checks passed"
 else

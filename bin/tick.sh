@@ -139,6 +139,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/reviewnotify.sh"
 # shellcheck source=lib/adjudication.sh
 . "$AGENT_HOME/lib/adjudication.sh"
+# shellcheck source=lib/pr-body-correction.sh
+. "$AGENT_HOME/lib/pr-body-correction.sh"
 # shellcheck source=lib/seo-analysis.sh
 . "$AGENT_HOME/lib/seo-analysis.sh"
 # espn.sh's fetches go through request_get, so this must load first.
@@ -3579,6 +3581,19 @@ fi
 # Disabled when FORGEJO_REVIEWER is unset (testing / solo runs without
 # a reviewer configured).
 
+# -- Human adjudication marker -> reassignment (igor#607) -------
+#
+# A reviewer routinely escalates a "your call" judgment item to a human, who
+# used to answer it as a plain PR comment -- which reached nobody, since the
+# rework agent never reads comments except when one of the two signals below
+# reopens the PR. A comment containing the literal marker <!-- adjudication -->
+# from FORGEJO_REVIEWER (and only from them -- see review_adjudication_pending)
+# reassigns the PR to the bot right here, BEFORE Signal 2 runs below, so a
+# marker posted since the last tick is picked up THIS tick rather than next.
+# Deliberately not a third parallel rework path: it produces exactly the
+# state Signal 2 already handles.
+review_adjudication_scan "$VALIDATED_REPOS_JSON" "$BOT_USER" "${FORGEJO_REVIEWER:-}"
+
 REVIEW_PR=""
 REVIEW_PR_TRIGGER=""
 
@@ -3720,6 +3735,9 @@ if [ -n "$REVIEW_PR" ]; then
     # after it means THIS round dismissed something rather than a previous
     # round's reasoning surviving at the same worktree path.
     adjudication_reset "$PR_WORKTREE"
+    # Same truncate-before-run discipline for a stale PR-body correction
+    # (igor#607) at the same worktree path.
+    pr_body_correction_reset "$PR_WORKTREE"
 
     # Stage the base branch INTO the PR branch before handing it over.
     #
@@ -3903,6 +3921,19 @@ ${PR_ISSUE_COMMENTS:-(no issue-level comments on this PR)}
 
 ${PR_INLINE_COMMENTS:-(no inline review comments on this PR)}
 
+## Correcting the PR description
+
+The "PR body" above is authored and owned by the harness, not you -- you
+cannot edit it directly, and writing \`.agent/PR_BODY.md\` here does nothing
+(that file only seeds a brand-new PR's description at open time; it is not
+read on a reopened one). If a finding says the DESCRIPTION itself is wrong --
+a checked box that no longer matches the diff, a claim the code doesn't make
+true -- write the corrected, FULL replacement body (not a diff, not just the
+changed part) to \`.agent/pr_body_correction.md\` in this worktree. The
+harness applies it verbatim to the PR and posts a confirmation comment. This
+works even when the round makes no code changes at all: fixing an inaccurate
+description is a complete, valid outcome on its own.
+
 ## How to address review feedback
 
 **MAKE SURGICAL EDITS, NOT REWRITES.** This PR exists to refine,
@@ -3959,6 +3990,19 @@ ${PR_ISSUE_COMMENTS:-(no issue-level comments on this PR)}
 ## Inline review comments (file/line-tied)
 
 ${PR_INLINE_COMMENTS:-(no inline review comments on this PR)}
+
+## Correcting the PR description
+
+The "PR body" above is authored and owned by the harness, not you -- you
+cannot edit it directly, and writing \`.agent/PR_BODY.md\` here does nothing
+(that file only seeds a brand-new PR's description at open time; it is not
+read on a reopened one). If a finding says the DESCRIPTION itself is wrong --
+a checked box that no longer matches the diff, a claim the code doesn't make
+true -- write the corrected, FULL replacement body (not a diff, not just the
+changed part) to \`.agent/pr_body_correction.md\` in this worktree. The
+harness applies it verbatim to the PR and posts a confirmation comment. This
+works even when the round makes no code changes at all: fixing an inaccurate
+description is a complete, valid outcome on its own.
 
 ## How to address review feedback
 
@@ -4052,6 +4096,21 @@ EOF
       log "PR-review: harness-commit subject: $PR_AUTO_SUBJECT"
       (cd "$PR_WORKTREE" && git commit --quiet -m "$PR_AUTO_SUBJECT") \
         || log "warning: harness commit failed"
+    fi
+
+    # PR-body correction (igor#607): applies regardless of whether this round
+    # also produced commits -- "the description was wrong" is often the
+    # round's ONLY outcome (stonks#81, #104, #121). Deliberately sits above
+    # the commits/no-commits split below so both paths get it exactly once.
+    if PR_BODY_FIX=$(pr_body_correction_read "$PR_WORKTREE"); then
+      if forgejo_edit_pr "$PR_REPO" "$PR_NUMBER" --body "$PR_BODY_FIX"; then
+        log "PR-review: applied a PR-body correction from .agent/pr_body_correction.md"
+        forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+          "$(pr_body_correction_comment)" 2>/dev/null \
+          || log "warning: PR-body-correction confirmation comment failed on ${PR_REPO}#${PR_NUMBER}"
+      else
+        log "warning: PR-review: forgejo_edit_pr failed applying the body correction on ${PR_REPO}#${PR_NUMBER}"
+      fi
     fi
 
     PR_NEW=$(git rev-list --count "origin/${PR_HEAD}..HEAD" 2>/dev/null || echo 0)
