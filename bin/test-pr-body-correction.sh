@@ -13,6 +13,10 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=../lib/pr-body-correction.sh
 . "$HERE/lib/pr-body-correction.sh"
+# shellcheck source=../lib/review.sh
+. "$HERE/lib/review.sh"
+# shellcheck source=../lib/checkpoint.sh
+. "$HERE/lib/checkpoint.sh"
 
 FAIL=0
 ok()  { printf '  + %s\n' "$1"; }
@@ -59,6 +63,27 @@ COMMENT=$(pr_body_correction_comment)
 has "it says the description was corrected" "$COMMENT" "description"
 has "it says this was automated" "$COMMENT" "automated"
 
+echo "== the harness's own 'Closes #N' guarantee survives a correction =="
+# The agent is told to write a FULL replacement body, so it can drop the
+# "Closes #N" line the harness appended at open time (#372) and the issue
+# silently stops auto-closing on merge. The harness re-applies its own
+# guarantee to the replacement rather than trusting the prompt to say so.
+OLD_BODY=$'## What this PR does\n\n- [x] feat: thing\n\nCloses #607'
+NEW_BODY=$'## What this PR does\n\n- [x] fix: thing, accurately this time'
+
+FIXED=$(pr_body_ensure_closes "$NEW_BODY" "$(review_closed_issue_number "$OLD_BODY")")
+has "a dropped trailer is restored from the body being replaced" "$FIXED" "Closes #607"
+has "and the agent's corrected text is kept verbatim" "$FIXED" "accurately this time"
+
+KEPT=$(pr_body_ensure_closes "$NEW_BODY"$'\n\nCloses #607' "$(review_closed_issue_number "$OLD_BODY")")
+eq "a trailer the agent kept is not duplicated" "1" "$(grep -c 'Closes #607' <<<"$KEPT")"
+
+NONE=$(pr_body_ensure_closes "$NEW_BODY" "$(review_closed_issue_number 'names no issue at all')")
+case "$NONE" in
+  *Closes*) bad "a PR that closes no issue gains no trailer" ;;
+  *)        ok  "a PR that closes no issue gains no trailer" ;;
+esac
+
 echo "== bin/tick.sh: the wiring (source assertions) =="
 # These read the source rather than driving it: the branch lives inline in the
 # PR-review flow, which needs a worktree, a repo, and a model call to reach.
@@ -75,6 +100,19 @@ else bad "the post-run flow consults the correction file"; fi
 if grep -q 'forgejo_edit_pr "\$PR_REPO" "\$PR_NUMBER" --body "\$PR_BODY_FIX"' "$TICK"; then
   ok "a correction is applied via forgejo_edit_pr"
 else bad "a correction is applied via forgejo_edit_pr"; fi
+
+if grep -qF 'pr_body_ensure_closes "$PR_BODY_FIX" "$(review_closed_issue_number "$PR_BODY")"' "$TICK"; then
+  ok "the replacement body is put through pr_body_ensure_closes first"
+else bad "the replacement body is put through pr_body_ensure_closes first"; fi
+
+# ...and that has to happen BEFORE the PATCH, not after it.
+ENSURE_AT=$(grep -nF 'pr_body_ensure_closes "$PR_BODY_FIX"' "$TICK" | head -1 | cut -d: -f1)
+EDIT_AT=$(grep -n 'forgejo_edit_pr "\$PR_REPO" "\$PR_NUMBER" --body "\$PR_BODY_FIX"' "$TICK" | head -1 | cut -d: -f1)
+if [ -n "$ENSURE_AT" ] && [ -n "$EDIT_AT" ] && [ "$ENSURE_AT" -lt "$EDIT_AT" ]; then
+  ok "the trailer is restored BEFORE the PATCH (ensure ${ENSURE_AT} < edit ${EDIT_AT})"
+else
+  bad "the trailer is restored BEFORE the PATCH (ensure ${ENSURE_AT:-?}, edit ${EDIT_AT:-?})"
+fi
 
 if grep -q 'pr_body_correction_comment' "$TICK"; then
   ok "a confirmation comment is posted"

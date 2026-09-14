@@ -4103,6 +4103,13 @@ EOF
     # round's ONLY outcome (stonks#81, #104, #121). Deliberately sits above
     # the commits/no-commits split below so both paths get it exactly once.
     if PR_BODY_FIX=$(pr_body_correction_read "$PR_WORKTREE"); then
+      # The agent writes a FULL replacement, so it can drop the "Closes #N"
+      # line the harness appended when it opened the PR -- after which a merge
+      # silently stops closing the issue (#372). Re-apply the harness's own
+      # guarantee to the replacement, keyed off the issue the body being
+      # REPLACED names, rather than trusting the prompt to make it sacred.
+      # Idempotent: a trailer the agent kept is not doubled.
+      PR_BODY_FIX=$(pr_body_ensure_closes "$PR_BODY_FIX" "$(review_closed_issue_number "$PR_BODY")")
       if forgejo_edit_pr "$PR_REPO" "$PR_NUMBER" --body "$PR_BODY_FIX"; then
         log "PR-review: applied a PR-body correction from .agent/pr_body_correction.md"
         forgejo_comment "$PR_REPO" "$PR_NUMBER" \
