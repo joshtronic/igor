@@ -99,6 +99,8 @@ unset env_file_hint
 . "$AGENT_HOME/lib/repo-checks.sh"
 # shellcheck source=lib/review.sh
 . "$AGENT_HOME/lib/review.sh"
+# shellcheck source=lib/review-corpus.sh
+. "$AGENT_HOME/lib/review-corpus.sh"
 # shellcheck source=lib/scope-gate.sh
 . "$AGENT_HOME/lib/scope-gate.sh"
 # shellcheck source=lib/split-ticket.sh
@@ -2029,7 +2031,7 @@ do_shipreport_tick() {
 
   local since; since=$(date -u -d "-1 days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
                         || date -u -v-1d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
-  local items='[]' line repo reqh merged open
+  local items='[]' judgment_items='[]' line repo reqh merged open
   while IFS= read -r line; do
     repo=$(jq -r '.full_name // empty' <<<"$line" 2>/dev/null); [ -n "$repo" ] || continue
     # Read the carve-out flag directly (no dependency on the auto-merge module).
@@ -2049,6 +2051,50 @@ do_shipreport_tick() {
             | {repo:$repo, number, title, url:.html_url, state:"open", gate:"", require_human:$rh} ]' 2>/dev/null) \
       || open='[]'
     items=$(jq -c --argjson m "${merged:-[]}" --argjson o "${open:-[]}" '. + $m + $o' <<<"$items" 2>/dev/null || printf '%s' "$items")
+
+    # igor#610: auto-merge takes a shadow APPROVE as the merge signal, so
+    # nobody reads a non-binding COMMENT/REQUEST_CHANGES verdict or a
+    # dismissed-but-unresolved finding once a PR has already merged. For
+    # each PR that merged in this window, pull its comment thread and let
+    # review_corpus_judgment_items (lib/review-corpus.sh) say whether its
+    # final review left anything unresolved.
+    local pr_line pr_num pr_title pr_url comments pr_judgment appended
+    while IFS= read -r pr_line; do
+      [ -n "$pr_line" ] || continue
+      pr_num=$(jq -r '.number' <<<"$pr_line")
+      pr_title=$(jq -r '.title' <<<"$pr_line")
+      pr_url=$(jq -r '.url' <<<"$pr_line")
+      # A fetch or extraction that FAILED is logged, matching the append
+      # failure below: an empty JUDGMENT ITEMS section reads as "nothing
+      # unresolved", so a PR that was never actually checked has to leave a
+      # trace rather than be indistinguishable from a clean one.
+      if ! comments=$(forgejo_pr_comments "$repo" "$pr_num" 2>/dev/null); then
+        log "shipreport: WARN comment fetch failed for ${repo}#${pr_num} -- judgment items not checked"
+        comments=''
+      fi
+      # An EMPTY value, not just a failed call, has to become '[]' here:
+      # review_corpus_judgment_items reads stdin when its argument is empty,
+      # and stdin inside this loop is the process substitution feeding it --
+      # so an empty-but-successful fetch would drain every remaining merged
+      # PR into `cat` and silently end the loop.
+      [ -n "$comments" ] || comments='[]'
+      if ! pr_judgment=$(review_corpus_judgment_items "$comments" 2>/dev/null); then
+        log "shipreport: WARN judgment extraction failed for ${repo}#${pr_num}"
+        pr_judgment=''
+      fi
+      [ -n "$pr_judgment" ] || pr_judgment='[]'
+      if [ "$(jq -r 'length' <<<"$pr_judgment" 2>/dev/null || echo 0)" != "0" ]; then
+        appended=$(jq -c --arg repo "$repo" --argjson number "$pr_num" \
+            --arg title "$pr_title" --arg url "$pr_url" --argjson jitems "$pr_judgment" '
+            . + [{repo:$repo, number:$number, title:$title, url:$url, items:$jitems}]' \
+          <<<"$judgment_items" 2>/dev/null) || appended=''
+        if [ -n "$appended" ]; then
+          judgment_items="$appended"
+        else
+          log "shipreport: WARN dropped judgment items for ${repo}#${pr_num} (append failed)"
+        fi
+      fi
+    done < <(jq -c '.[]' <<<"${merged:-[]}" 2>/dev/null)
   done <<<"$ANALYSIS_REPOS_JSON"
 
   # igor#512: drain any landed-verification notes (lib/landed.sh) queued
@@ -2085,24 +2131,32 @@ do_shipreport_tick() {
   metrics=$(shipreport_metrics_build "$cost_now" "$cost_prev" "$timing_now" "$timing_prev" "$claude_ver")
   report=$(jq -c --argjson m "$metrics" '. + $m' <<<"$report" 2>/dev/null || printf '%s' "$report")
 
+  # igor#610: unconditional, unlike landed_notes above -- judgment_items is a
+  # MANDATORY section (shipreport_judgment_build), so every report carries
+  # it whether or not this window's merged PRs left anything unresolved.
+  local judgment; judgment=$(shipreport_judgment_build "$judgment_items")
+  report=$(jq -c --argjson j "$judgment" '. + $j' <<<"$report" 2>/dev/null || printf '%s' "$report")
+
   if shipreport_is_empty "$report"; then
     log "shipreport: quiet 24h -- nothing to report (stamping done)"
     shipreport_mark_sent
     return 0
   fi
 
-  local ns nsh nif nld html text subject recipients
+  local ns nsh nif nld nji html text subject recipients
   ns=$(jq -r '.needs_you | length' <<<"$report")
   nsh=$(jq -r '.shipped | length' <<<"$report")
   nif=$(jq -r '.inflight | length' <<<"$report")
   nld=$(jq -r '.landed | length' <<<"$report")   # absent key -> null|length -> 0
+  nji=$(jq -r '[(.judgment_items // [])[].items[]?] | length' <<<"$report")
   html=$(shipreport_render_html <<<"$report")
   text=$(shipreport_render_text <<<"$report")
   subject="[Ship Report] $(date +%F) -- ${nsh} shipped, ${ns} need you, ${nif} in flight"
   [ "$nld" = "0" ] || subject+=", ${nld} landed"
+  [ "$nji" = "0" ] || subject+=", ${nji} judgment item(s)"
   recipients=$(recipients_with_primary "${SHIPREPORT_RECIPIENTS:-}")
   if email_send "$subject" "$html" "$text" "$recipients"; then
-    log "shipreport: sent (${nsh} shipped, ${ns} needs-you, ${nif} in-flight, ${nld} landed) to $recipients"
+    log "shipreport: sent (${nsh} shipped, ${ns} needs-you, ${nif} in-flight, ${nld} landed, ${nji} judgment item(s)) to $recipients"
     # Drain only on a send that actually went out -- a failed email must leave
     # the notes queued so they ride the next report instead of vanishing.
     shipreport_landed_clear

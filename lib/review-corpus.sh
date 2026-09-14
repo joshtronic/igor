@@ -61,7 +61,12 @@
 # finding a NUL -- which a heredoc never contains. The variable is still set;
 # without it, sourcing this file from a script under `set -e` would exit the
 # shell right here.
-read -r -d '' REVIEW_CORPUS_JQ <<'JQ_EOF' || true
+#
+# Split into DEFS (shared by review_corpus_trajectory AND
+# review_corpus_judgment_items below, igor#610) and the trajectory body
+# itself, so a second consumer of `classify`/`is_fixed_tail` doesn't
+# re-derive them.
+read -r -d '' REVIEW_CORPUS_DEFS <<'JQ_EOF' || true
 def strip_lead: sub("^\\s+"; "");
 
 def classify:
@@ -78,20 +83,77 @@ def classify:
       { kind: "other" }
     end;
 
-# One line of the fixed template scaffolding shared by every artifact of a
-# kind, as opposed to a line carrying the model's own prose.
-def is_boilerplate:
-  test("^### ")
-  or test("^CI for `")
+# The fixed template lines every artifact of a kind carries regardless of
+# what the model wrote: the CI status line, the separator, the HTML footer,
+# and the two fixed adjudication tail sentences.
+def is_fixed_tail:
+  test("^CI for `")
   or test("^---$")
   or test("^<!--")
   or test("^<sub>")
   or test("No code changes: the agent judged every point raised")
   or test("The rest of the findings were addressed in the commits");
 
+# Scaffolding for FINGERPRINT purposes: is_fixed_tail plus every `### `
+# heading. Deliberately coarse -- the model's own subsection headings
+# ("### Blocking (3)") repeat across unrelated artifacts too, so counting
+# them as content would make two unrelated reviews "overlap" on a heading.
+def is_boilerplate: test("^### ") or is_fixed_tail;
+
+# Scaffolding for RENDERING purposes (igor#610): is_fixed_tail plus only the
+# three artifact HEADER lines `classify` recognizes. The model's own
+# subsection headings stay -- a judgment item is reproduced for a human to
+# read, and a heading-less blob of every section run together is not
+# "verbatim" in any useful sense.
+#
+# The header test is DELEGATED to `classify` (a line, treated as a one-line
+# body) rather than restating its three regexes, so rewording a header is a
+# one-place change. Exact-matching a header rather than prefix-matching it
+# costs nothing here: the bodies this runs over are the ones `classify`
+# already recognized, so their header lines match it by construction.
+def is_chrome:
+  ({ body: . } | classify | .kind) != "other"
+  or is_fixed_tail;
+
+# A comment body with the artifact chrome dropped, order and blank-line
+# structure otherwise untouched -- the model's own prose, unsummarized.
+def strip_chrome($body):
+  ($body // "" | split("\n"))
+  | map(select(is_chrome | not))
+  | join("\n")
+  | sub("^\\n+"; "")
+  | sub("\\n+$"; "");
+
+# The "needs your judgment" subsection of a review body (heading line
+# included), or "" when there isn't one with any content under it.
+#
+# That heading text comes from the review directive, which is served from the
+# Distillery rather than this repo, so the match is loose -- any heading
+# level, case-insensitive -- and a miss degrades to "" (the review
+# contributes nothing) rather than to a wrong slice. The section ends at the
+# next heading of any level, or at the end of the body.
+#
+# A heading that counts itself out ("Needs your judgment (0)") is treated as
+# absent without reading what's under it, so the boilerplate "None." the
+# directive puts there doesn't become a daily report row.
+def judgment_section($body):
+  ($body // "" | split("\n")) as $lines
+  | ($lines | map(test("^#{1,6}\\s*needs your judgment"; "i")) | index(true)) as $start
+  | if $start == null or ($lines[$start] | test("\\(0\\)")) then ""
+    else
+      ($lines[($start + 1):]) as $rest
+      | ($rest | map(test("^#{1,6}\\s")) | index(true)) as $end
+      | (if $end == null then $rest else $rest[0:$end] end)
+      | map(select(is_fixed_tail | not))
+      | map(select(test("\\S")))
+      | if length == 0 then "" else ([$lines[$start]] + .) | join("\n") end
+    end;
+
 # The lines of a comment body that carry actual content: scaffolding dropped,
 # and short lines (< 8 chars trimmed) with it -- those are too easy to
-# "overlap" by accident ("ok.", "done").
+# "overlap" by accident ("ok.", "done"). Trimming happens BEFORE the
+# is_boilerplate filter so an indented `---` or `<sub>` still reads as
+# scaffolding.
 def content_fingerprint($body):
   ($body // "" | split("\n"))
   | map(gsub("^\\s+|\\s+$"; ""))
@@ -101,7 +163,9 @@ def content_fingerprint($body):
   | unique;
 
 def intersects($a; $b): (($a - ($a - $b)) | length) > 0;
+JQ_EOF
 
+read -r -d '' REVIEW_CORPUS_JQ <<'JQ_EOF' || true
 ( [ .[] | {body: (.body // ""), created_at: (.created_at // "")} ] | sort_by(.created_at) ) as $sorted
 | ($sorted | map(. + classify)) as $tagged
 | ($tagged | map(select(.kind != "other"))) as $artifacts
@@ -157,7 +221,90 @@ review_corpus_trajectory() {
     true | false) ;;
     *) merged="unknown" ;;
   esac
-  jq -c --arg merged "$merged" "$REVIEW_CORPUS_JQ" <<<"$comments"
+  jq -c --arg merged "$merged" "${REVIEW_CORPUS_DEFS}${REVIEW_CORPUS_JQ}" <<<"$comments"
+}
+
+# The jq program backing review_corpus_judgment_items. Shares $sorted/$tagged
+# construction with REVIEW_CORPUS_JQ above but keeps `url` (Forgejo's
+# `html_url` on a comment object) alongside body/created_at, since a
+# judgment item is only useful to a human with a link back to its source.
+read -r -d '' REVIEW_CORPUS_JUDGMENT_JQ <<'JQ_EOF' || true
+( [ .[] | {body: (.body // ""), created_at: (.created_at // ""), url: (.html_url // "")} ]
+  | sort_by(.created_at) ) as $sorted
+| ($sorted | map(. + classify)) as $tagged
+| ($tagged | to_entries) as $entries
+| ($entries | map(select(.value.kind == "review"))) as $review_entries
+| (if ($review_entries | length) > 0 then $review_entries[-1] else null end) as $last_review
+| ($entries | map(select(.value.kind == "dismissal"))) as $dismissal_entries
+| ( $dismissal_entries | map(
+      .key as $idx
+      | .value as $d
+      | ( $entries[($idx + 1):] | map(select(.value.kind == "review") | .value.verdict) ) as $later_verdicts
+      | { d: $d, followed_by_approve: ($later_verdicts | any(. == "APPROVE")) }
+    )
+  ) as $dismissals
+| ( if $last_review == null then []
+    elif $last_review.value.verdict != "APPROVE"
+    then [ { kind: "review", verdict: $last_review.value.verdict,
+             comment_url: $last_review.value.url,
+             created_at: $last_review.value.created_at,
+             body: strip_chrome($last_review.value.body) } ]
+    else judgment_section($last_review.value.body) as $sec
+      | if $sec == "" then []
+        else [ { kind: "review", verdict: "APPROVE",
+                 comment_url: $last_review.value.url,
+                 created_at: $last_review.value.created_at,
+                 body: $sec } ]
+        end
+    end )
+  + ( $dismissals
+      | map(select(.followed_by_approve | not))
+      | map(.d)
+      | map({ kind: "dismissal", verdict: null,
+              comment_url: .url, created_at,
+              body: strip_chrome(.body) }) )
+JQ_EOF
+
+# review_corpus_judgment_items [<comments_json>]
+#
+# igor#610: the judgment items a merged PR's final review left unresolved --
+# no human reads a non-binding COMMENT/REQUEST_CHANGES verdict once
+# auto-merge takes the shadow APPROVE as the merge signal, so the fleet
+# ship-report (lib/ship-report.sh) surfaces them explicitly instead.
+#
+# Two sources, both "unresolved" in the sense that nothing since has
+# addressed them:
+#   - the PR's LAST review artifact. A non-APPROVE verdict (a
+#     REQUEST_CHANGES/COMMENT the PR merged despite, e.g. after a rework-round
+#     cap escalated it to a human who then merged anyway) contributes its
+#     whole body. An APPROVE contributes only its "needs your judgment"
+#     section, if it has one with content: APPROVE is the verdict auto-merge
+#     actually merges on, so a judgment item raised there is the LEAST likely
+#     of any to be read -- but the rest of an APPROVE review is by definition
+#     the reviewer saying it's fine, and reprinting that daily would bury the
+#     part that isn't.
+#   - any dismissal (lib/adjudication.sh: the rework agent argued a finding
+#     down instead of fixing it) that was never followed by a LATER review
+#     verdict of APPROVE -- a dismissal is the agent's argument, not a
+#     resolution, so it stays reportable until something actually blesses it.
+# Both can fire for the same PR: the finding the review raised, and the
+# agent's reasoning for not acting on it, are different things a human needs
+# to weigh side by side.
+#
+# Bodies come back through strip_chrome -- the artifact header/CI-line/footer
+# scaffolding dropped, the model's own prose and its own subsection headings
+# otherwise untouched (verbatim, not summarized). `comment_url` is "" when the
+# source comment carried no `html_url` (an older Forgejo, or a test fixture);
+# callers fall back to the PR's own url in that case.
+#
+# <comments_json> may be omitted to read from stdin, same convention as
+# review_corpus_trajectory. Order is NOT chronological -- the last-review
+# item (if any) always precedes any unresolved dismissals, since a reader
+# wants the finding before the argument against it.
+review_corpus_judgment_items() {
+  local comments="${1:-}"
+  [ -n "$comments" ] || comments=$(cat)
+  jq -c "${REVIEW_CORPUS_DEFS}${REVIEW_CORPUS_JUDGMENT_JQ}" <<<"$comments"
 }
 
 # The aggregation behind bin/review-scorecard.sh. It lives here, beside the

@@ -2,7 +2,7 @@
 # Unit tests for lib/review-corpus.sh -- parsing a PR's comment thread into a
 # review-loop trajectory (igor#582), with no model in the loop.
 #
-# Eight behaviors are asserted, each picked because a parser that fakes it (a
+# Nine behaviors are asserted, each picked because a parser that fakes it (a
 # constant, a string-contains check with no anchoring) would still pass a
 # lazier test:
 #   1. a bare APPROVE trajectory
@@ -15,7 +15,10 @@
 #   7. the scorecard aggregation over a set of records -- verdict mix and
 #      percentages, both median branches, the zero-record path, and the
 #      unfetchable-PR caveat
-#   8. the file survives being sourced under `set -e`
+#   8. the unresolved judgment items of a merged PR (igor#610) -- including
+#      the APPROVE-carried "needs your judgment" section, which is the case
+#      auto-merge is most likely to ship past unread
+#   9. the file survives being sourced under `set -e`
 set -uo pipefail
 
 command -v jq >/dev/null 2>&1 || { echo "test-review-corpus: jq absent -- skipping"; exit 0; }
@@ -50,8 +53,9 @@ eq "dismissal header extracted" '### 🧑‍⚖️ Rework — findings dismissed
 
 # --- fixture builders --------------------------------------------------
 
-mk_comment() {  # mk_comment <created_at> <body>
-  jq -n -c --arg at "$1" --arg body "$2" '{user: {login: "igor"}, created_at: $at, body: $body}'
+mk_comment() {  # mk_comment <created_at> <body> [<html_url>]
+  jq -n -c --arg at "$1" --arg body "$2" --arg url "${3:-}" \
+    '{user: {login: "igor"}, created_at: $at, body: $body, html_url: $url}'
 }
 
 # The harness's header lines carry the shell placeholder they interpolate at
@@ -59,11 +63,11 @@ mk_comment() {  # mk_comment <created_at> <body>
 review_header()  { printf '%s' "${REAL_REVIEW_HEADER_LINE/'${verdict}'/$1}"; }
 rework_header()  { printf '%s' "${REAL_REWORK_HEADER_LINE/'${PR_REWORK_ROUND}'/$1}"; }
 
-mk_review() {  # mk_review <created_at> <verdict> <sha> <ci> <text>
+mk_review() {  # mk_review <created_at> <verdict> <sha> <ci> <text> [<html_url>]
   local body
   body=$(printf '%s\n\nCI for `%s`: **%s**\n\n%s\n\n---\n<sub>note</sub>\n<!-- review sha=%s verdict=%s ci=%s -->' \
     "$(review_header "$2")" "$3" "$4" "$5" "$3" "$2" "$4")
-  mk_comment "$1" "$body"
+  mk_comment "$1" "$body" "${6:-}"
 }
 
 mk_rework() {  # mk_rework <created_at> <round>
@@ -73,7 +77,7 @@ mk_rework() {  # mk_rework <created_at> <round>
   mk_comment "$1" "$body"
 }
 
-mk_dismissal() {  # mk_dismissal <created_at> <text> <converged: true|false>
+mk_dismissal() {  # mk_dismissal <created_at> <text> <converged: true|false> [<html_url>]
   local body tail_
   if [ "$3" = "true" ]; then
     tail_="No code changes: the agent judged every point raised not to need one. Nothing further happens on its own, so it is yours -- either the reasoning holds and you merge, or it does not and you say so."
@@ -82,7 +86,7 @@ mk_dismissal() {  # mk_dismissal <created_at> <text> <converged: true|false>
   fi
   body=$(printf '%s\n\n%s\n\n---\n\n%s\n<!-- adjudication:dismissed -->' \
     "$REAL_DISMISS_HEADER_LINE" "$2" "$tail_")
-  mk_comment "$1" "$body"
+  mk_comment "$1" "$body" "${4:-}"
 }
 
 arr() { jq -s -c '.' <<<"$(printf '%s\n' "$@")"; }  # arr <comment-json>... -> JSON array
@@ -275,15 +279,99 @@ eq "no unfetchable PRs -> no excluded line at all" "" "$(line 'could not be fetc
 S=$(review_corpus_scorecard "$RECORDS" 3)
 eq "the excluded count defaults to 0 when the caller omits it" "" "$(line 'could not be fetched')"
 
-# --- 8. sourcing under set -e ---------------------------------------------
+# --- 8. review_corpus_judgment_items (igor#610) ---------------------------
+
+echo "== judgment_items: bare APPROVE -> nothing unresolved =="
+J1=$(mk_review "2026-01-01T00:00:00Z" APPROVE abcd1234 success "Looks good." "u-approve")
+eq "APPROVE only -> empty array" "[]" "$(arr "$J1" | review_corpus_judgment_items)"
+
+echo "== judgment_items: REQUEST_CHANGES, no rework after -> the review itself is the item =="
+J2=$(mk_review "2026-01-01T00:00:00Z" REQUEST_CHANGES sha0001 success "This silently drops errors on line 42." "u-rc")
+RESULT=$(arr "$J2" | review_corpus_judgment_items)
+eq "one item"                  "1"               "$(jq -r 'length' <<<"$RESULT")"
+eq "kind is review"            "review"          "$(jq -r '.[0].kind' <<<"$RESULT")"
+eq "verdict carried through"   "REQUEST_CHANGES" "$(jq -r '.[0].verdict' <<<"$RESULT")"
+eq "comment_url from html_url" "u-rc"            "$(jq -r '.[0].comment_url' <<<"$RESULT")"
+eq "body verbatim, scaffolding stripped" "This silently drops errors on line 42." "$(jq -r '.[0].body' <<<"$RESULT")"
+
+echo "== judgment_items: REQUEST_CHANGES -> rework -> APPROVE -> resolved, nothing to show =="
+J3RW=$(mk_rework "2026-01-01T01:00:00Z" 1)
+J3AP=$(mk_review "2026-01-01T02:00:00Z" APPROVE sha0002 success "LGTM now." "u-approve-2")
+eq "fixed by rework -> empty array" "[]" "$(arr "$J2" "$J3RW" "$J3AP" | review_corpus_judgment_items)"
+
+echo "== judgment_items: dismissal with no later review -- both the finding and the dismissal show =="
+J4D=$(mk_dismissal "2026-01-01T01:30:00Z" "Not a real bug: the caller already guards against it." false "u-dismiss")
+RESULT4=$(arr "$J2" "$J4D" | review_corpus_judgment_items)
+eq "two items (the review + the dismissal)" "2" "$(jq -r 'length' <<<"$RESULT4")"
+eq "first item is the original review"  "review"    "$(jq -r '.[0].kind' <<<"$RESULT4")"
+eq "second item is the dismissal"       "dismissal" "$(jq -r '.[1].kind' <<<"$RESULT4")"
+eq "dismissal verdict is null"          "null"      "$(jq -r '.[1].verdict' <<<"$RESULT4")"
+eq "dismissal comment_url from html_url" "u-dismiss" "$(jq -r '.[1].comment_url' <<<"$RESULT4")"
+eq "dismissal body verbatim, scaffolding stripped" \
+  "Not a real bug: the caller already guards against it." "$(jq -r '.[1].body' <<<"$RESULT4")"
+
+echo "== judgment_items: dismissal followed by a LATER approve -> resolved, nothing to show =="
+J5AP=$(mk_review "2026-01-01T03:00:00Z" APPROVE sha0003 success "Fine now." "u-approve-3")
+eq "dismissal blessed by a later APPROVE -> empty array" "[]" \
+  "$(arr "$J2" "$J4D" "$J5AP" | review_corpus_judgment_items)"
+
+echo "== judgment_items: no artifacts at all -> empty array, never an error =="
+eq "no comments" "[]" "$(printf '[]' | review_corpus_judgment_items)"
+H_ONLY=$(mk_comment "2026-01-01T00:00:00Z" "Thanks, taking a look.")
+eq "human-only thread" "[]" "$(arr "$H_ONLY" | review_corpus_judgment_items)"
+
+echo "== judgment_items: missing html_url on a comment -> comment_url is an empty string =="
+J6=$(jq -n -c --arg at "2026-01-01T00:00:00Z" --arg body "$(printf '%s\n\nCI for `sha`: **REQUEST_CHANGES**\n\nNo url on this one.\n\n---\n<sub>note</sub>\n<!-- review sha=sha verdict=REQUEST_CHANGES ci=success -->' "$(review_header REQUEST_CHANGES)")" \
+  '{user: {login: "igor"}, created_at: $at, body: $body}')
+eq "absent html_url -> comment_url empty" "" "$(arr "$J6" | review_corpus_judgment_items | jq -r '.[0].comment_url')"
+
+echo "== judgment_items: reads from stdin when no argument given =="
+eq "stdin composes the same as an explicit argument" \
+  "$(review_corpus_judgment_items "$(arr "$J2")")" \
+  "$(arr "$J2" | review_corpus_judgment_items)"
+
+echo "== judgment_items: an APPROVE carrying a judgment section still reports it =="
+J7=$(mk_review "2026-01-01T00:00:00Z" APPROVE sha0004 success \
+  "$(printf '### Blocking (0)\n\nNone.\n\n### Needs your judgment (1)\n\n- The retry cap of 3 is a guess; confirm it matches the upstream timeout.\n\n### Verified clean\n\nEverything else.')" \
+  "u-approve-judgment")
+RESULT7=$(arr "$J7" | review_corpus_judgment_items)
+eq "one item from the APPROVE" "1" "$(jq -r 'length' <<<"$RESULT7")"
+eq "verdict is APPROVE"        "APPROVE" "$(jq -r '.[0].verdict' <<<"$RESULT7")"
+has_line() {  # has_line <label> <haystack> <needle>
+  case "$2" in *"$3"*) ok "$1" ;; *) bad "$1 (missing: $3)" ;; esac
+}
+has_line "carries the judgment heading" "$(jq -r '.[0].body' <<<"$RESULT7")" "Needs your judgment (1)"
+has_line "carries the judgment item"    "$(jq -r '.[0].body' <<<"$RESULT7")" "The retry cap of 3 is a guess"
+case "$(jq -r '.[0].body' <<<"$RESULT7")" in
+  *"Verified clean"* | *"Blocking"*) bad "APPROVE body is trimmed to the judgment section only" ;;
+  *) ok "APPROVE body is trimmed to the judgment section only" ;;
+esac
+
+echo "== judgment_items: an APPROVE with an EMPTY judgment section reports nothing =="
+J8=$(mk_review "2026-01-01T00:00:00Z" APPROVE sha0005 success \
+  "$(printf '### Needs your judgment\n\n### Verified clean\n\nAll of it.')" "u-approve-empty")
+eq "empty judgment section -> empty array" "[]" "$(arr "$J8" | review_corpus_judgment_items)"
+
+echo "== judgment_items: a judgment heading that counts itself out is not a row =="
+J8B=$(mk_review "2026-01-01T00:00:00Z" APPROVE sha0007 success \
+  "$(printf '### Needs your judgment (0)\n\nNone.\n\n### Verified clean\n\nAll of it.')" "u-approve-zero")
+eq "(0) heading -> empty array" "[]" "$(arr "$J8B" | review_corpus_judgment_items)"
+
+echo "== judgment_items: a non-APPROVE body keeps the model's own subsection headings =="
+J9=$(mk_review "2026-01-01T00:00:00Z" REQUEST_CHANGES sha0006 success \
+  "$(printf '### Blocking (1)\n\n- Drops errors on line 42.')" "u-rc-2")
+has_line "subsection heading survives strip_chrome" \
+  "$(arr "$J9" | review_corpus_judgment_items | jq -r '.[0].body')" "### Blocking (1)"
+
+# --- 9. sourcing under set -e ---------------------------------------------
 # `read -d ''` returns nonzero at EOF-without-a-NUL, which is every heredoc, so
 # an unguarded `read -r -d '' VAR <<EOF` at file scope exits any shell that
 # sources this file under `set -e`. Both current callers use `set -uo pipefail`
 # and never noticed; the next one would have.
 
 echo "== sourcing under set -e =="
-if bash -c 'set -euo pipefail; . "$1/lib/review-corpus.sh"; [ -n "$REVIEW_CORPUS_JQ" ] && [ -n "$REVIEW_SCORECARD_JQ" ]' _ "$HERE"; then
-  ok "sourced under set -e with both jq programs set"
+if bash -c 'set -euo pipefail; . "$1/lib/review-corpus.sh"; [ -n "$REVIEW_CORPUS_DEFS" ] && [ -n "$REVIEW_CORPUS_JQ" ] && [ -n "$REVIEW_CORPUS_JUDGMENT_JQ" ] && [ -n "$REVIEW_SCORECARD_JQ" ]' _ "$HERE"; then
+  ok "sourced under set -e with every jq program set"
 else
   bad "sourcing under set -e aborted or left a jq program empty"
 fi
