@@ -63,6 +63,34 @@ CONTEXT_SKILLS=(
                     # ticket has no use for the rules on how to WRITE one.
 )
 
+# Skills that exist on distillery master but are deliberately NOT sourced
+# into any igor prompt surface (igor#621 -- named here, not just absent,
+# so bin/test-skill-accounting.sh can tell "considered and declined" apart
+# from "nobody looked"). Each entry documents why inline.
+CONTEXT_SKILLS_UNSOURCED=(
+  ai-writing-tells    # recall-only catalog by its own SKILL.md; the
+                      # prompt-facing subset already ships in the `voice`
+                      # skill's Bans section
+  coding-standards    # no igor prompt surface sources a code-output style
+                      # guide today; issue work relies on each repo's own
+                      # CLAUDE.md/AGENTS.md instead (wired once, in the
+                      # igor#616 first attempt, and reverted along with it)
+  design              # no igor surface does full redesign/reskin work;
+                      # site-work-directive deliberately caps visual polish
+                      # smaller than this skill's charter
+  dossier-spec        # documents the AGENTS.md shape enforced entirely by
+                      # deterministic code (lib/dossier.sh, lib/automerge.sh);
+                      # no LLM prompt reads or writes a dossier
+  pm-directive        # landed 2026-09-14 (distillery#43/#45); no igor
+                      # surface runs a pre-flight spec-hardening pass yet --
+                      # wiring one in is separate scope from this ticket
+  product-research    # no surface delegates a product goal to an agent; the
+                      # autonomous-CEO pass this replaces was retired in
+                      # igor#556
+  worker-permissions  # documents the static agent-settings.json for a
+                      # human/operator; not runtime prompt guidance
+)
+
 # CONTEXT_DISTILLERY_PATH / CONTEXT_CACHE_DIR are overridable (tests
 # point them at fixtures); real runs default under AGENT_STATE_DIR.
 _context_distillery_path() {
@@ -71,6 +99,42 @@ _context_distillery_path() {
 
 _context_cache_root() {
   printf '%s' "${CONTEXT_CACHE_DIR:-${AGENT_STATE_DIR:-$HOME/.local/state/agent}/context}"
+}
+
+# _context_master_skills -- skill names on the distillery clone's
+# origin/master skills/ tree (one per SKILL.md found). An unreadable clone
+# lists nothing rather than erroring, matching context_skill_body's own
+# fail-open-on-missing-clone posture.
+_context_master_skills() {
+  git -C "$(_context_distillery_path)" ls-tree -r --name-only origin/master -- skills 2>/dev/null \
+    | sed -n -E 's#^skills/([^/]+)/SKILL\.md$#\1#p' \
+    | sort -u
+}
+
+_context_in_list() {
+  local needle="$1" item
+  shift
+  for item in "$@"; do
+    [ "$item" = "$needle" ] && return 0
+  done
+  return 1
+}
+
+# context_unaccounted_skills -- names on distillery master that are
+# neither consumed (CONTEXT_SKILLS) nor deliberately declined
+# (CONTEXT_SKILLS_UNSOURCED). Pure and read-only, with no bin/tick.sh call
+# site -- this is CI-test plumbing for bin/test-skill-accounting.sh
+# (igor#621), never a runtime gate. An unreadable distillery clone yields
+# no master skills, so this reports nothing rather than flagging drift it
+# can't actually see.
+context_unaccounted_skills() {
+  local skill
+  while IFS= read -r skill; do
+    [ -z "$skill" ] && continue
+    _context_in_list "$skill" "${CONTEXT_SKILLS[@]}" && continue
+    _context_in_list "$skill" "${CONTEXT_SKILLS_UNSOURCED[@]}" && continue
+    printf '%s\n' "$skill"
+  done < <(_context_master_skills)
 }
 
 # context_skill_body <skill-name>
