@@ -508,3 +508,91 @@ ${extra}## Unified diff${truncated_note}
 ${diff}
 \`\`\`"
 }
+
+# -- Human adjudication marker -------------------------------------
+
+# igor#607: a review routinely escalates a "your call" judgment item to a
+# human -- the reviewer says so explicitly. A human answering that AS A PR
+# COMMENT previously reached nobody: the rework agent never reads comments on
+# its own, so the decision silently did nothing.
+#
+# The marker: a comment containing this literal string, from FORGEJO_REVIEWER
+# specifically -- not any commenter. That is a privilege boundary, not a
+# preference (the spike's first cut accepted any commenter and it lowered the
+# same bar Signal 2's manual reassignment already gates on write access). It
+# is honoured only when it is NEWER than the bot's own latest comment on the
+# PR, so a historical marker from an already-answered round cannot re-trigger
+# once the bot has spoken since -- the bot's every rework round posts at
+# least one comment (the audit trail, or a no-commits note), which is what
+# retires a marker without needing separate state.
+REVIEW_ADJUDICATION_MARKER='<!-- adjudication -->'
+
+# review_adjudication_pending <repo> <number> <bot> <reviewer>
+#
+# Echoes the qualifying marker comment's body and returns 0 when a human
+# adjudication is waiting to be picked up. Returns 1 (no output) when there
+# is none, INCLUDING on a fetch failure or a malformed payload -- fail
+# closed, same contract as review_reassignment_feedback_section: a transport
+# blip must never be mistaken for "reassign this PR to the bot."
+review_adjudication_pending() {
+  local repo="$1" number="$2" bot="${3:-}" reviewer="${4:-}" raw result
+  if [ -z "$bot" ] || [ -z "$reviewer" ]; then
+    return 1
+  fi
+  if ! raw=$(forgejo_pr_comments "$repo" "$number" 2>/dev/null); then
+    log "warning: review: could not fetch comments for ${repo}#${number} -- adjudication check skipped"
+    return 1
+  fi
+  if ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw"; then
+    log "warning: review: comments for ${repo}#${number} were not a JSON array -- adjudication check skipped"
+    return 1
+  fi
+  if ! result=$(jq -r --arg bot "$bot" --arg reviewer "$reviewer" --arg marker "$REVIEW_ADJUDICATION_MARKER" '
+      def is_marker: (.body // "") | contains($marker);
+      ( [.[]? | select(.user.login == $bot)] | sort_by(.created_at) | last.created_at ) as $bot_last
+      | [ .[]? | select(.user.login == $reviewer and is_marker)
+            | select($bot_last == null or .created_at > $bot_last) ]
+      | sort_by(.created_at) | last
+      | if . == null then "" else .body end
+    ' <<<"$raw" 2>/dev/null); then
+    log "warning: review: could not evaluate the adjudication marker for ${repo}#${number}"
+    return 1
+  fi
+  [ -n "$result" ] || return 1
+  printf '%s' "$result"
+}
+
+# review_adjudication_scan <validated_repos_json> <bot> <reviewer>
+#
+# Runs review_adjudication_pending over every open bot PR in the validated
+# set and reassigns a qualifying one to the bot -- deliberately NOT a
+# parallel rework path: this only produces the same state a human's manual
+# reassignment (Signal 2, bin/tick.sh) already handles, so the marker's
+# content reaches the agent through the existing comment feeds without any
+# further plumbing.
+#
+# validated_repos_json is a NEWLINE-DELIMITED STREAM of repo objects, one per
+# line -- NOT a JSON array (built that way in tick.sh, consumed the same way by
+# Signal 1 directly below the call site and by maintenance_repo_validated). So
+# `.full_name` runs per object; `.[]?` would error on a stream. Multi-repo
+# iteration is pinned in test-review.sh.
+review_adjudication_scan() {
+  local validated_json="$1" bot="${2:-}" reviewer="${3:-}"
+  if [ -z "$bot" ] || [ -z "$reviewer" ]; then
+    return 0
+  fi
+  local repo_line repo_full prs pr_num
+  while IFS= read -r repo_line; do
+    [ -z "$repo_line" ] && continue
+    repo_full=$(jq -r '.full_name' <<<"$repo_line")
+    prs=$(forgejo_list_open_bot_prs "$repo_full" "$bot" 2>/dev/null || echo '[]')
+    while read -r pr_num; do
+      [ -z "$pr_num" ] && continue
+      if review_adjudication_pending "$repo_full" "$pr_num" "$bot" "$reviewer" >/dev/null; then
+        log "PR-review: ${repo_full}#${pr_num} -- human adjudication marker from ${reviewer}, reassigning to ${bot}"
+        forgejo_assign "$repo_full" "$pr_num" "$bot" 2>/dev/null \
+          || log "warning: review: could not reassign ${repo_full}#${pr_num} for adjudication pickup"
+      fi
+    done < <(jq -r '.[].number' <<<"$prs" 2>/dev/null)
+  done <<<"$validated_json"
+}
