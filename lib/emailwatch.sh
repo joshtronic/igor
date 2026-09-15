@@ -114,21 +114,29 @@ emailwatch_surface_sent() {
 }
 
 # emailwatch_verdict <sent> <stamp_date> <window_day> <journal> <pattern...>
-# Pure decision, no IO. Three outcomes, printed to stdout:
+# Pure decision, no IO. The journal is checked FIRST, independently of the
+# stamp: a single-slot stamp holds only the MOST RECENT date, so by the
+# time this runs (today, reviewing yesterday) it has often already moved
+# on to today's own send even though yesterday sent cleanly -- the stamp
+# alone can never be trusted to veto journal evidence it no longer
+# describes (igor#644, the igor#641/#642 false alarms). Three outcomes,
+# printed to stdout:
 #
-#   not-run     the stamp doesn't cover the window day at all -- either it
-#               was never written (removed, or a surface that's never
-#               attempted), it's stale/frozen from an earlier day (an
-#               opted-out surface whose date just never advances again --
-#               see .market), or it covers the window day but sent is
-#               still false (attempted, never completed: abandoned after
-#               the failure cap, or a gate blocked it all day).
-#   no-evidence the stamp claims sent=true for the window day, but nothing
-#               in <journal> matches ANY <pattern> -- the 2026-09-14 case
-#               exactly: a lying stamp.
-#   ok          the stamp claims sent=true for the window day AND at least
-#               one <pattern> is found in <journal> -- an independent
-#               signal backs the stamp.
+#   ok          at least one <pattern> is found in <journal> -- independent
+#               evidence the surface sent (or genuinely had nothing to
+#               report) for the window day, regardless of what the stamp
+#               currently says.
+#   no-evidence no <pattern> in <journal>, but the stamp claims sent=true
+#               for the window day -- the 2026-09-14 case exactly: a lying
+#               stamp with no independent backing.
+#   not-run     no <pattern> in <journal>, and the stamp doesn't cover the
+#               window day at all -- either it was never written (removed,
+#               or a surface that's never attempted), it's stale/frozen
+#               from an earlier day (an opted-out surface whose date just
+#               never advances again -- see .market), or it covers the
+#               window day but sent is still false (attempted, never
+#               completed: abandoned after the failure cap, or a gate
+#               blocked it all day).
 #
 # Deliberately takes >= 2 patterns from callers in practice: a sender's
 # success path covers BOTH "sent an email" and "genuinely nothing to
@@ -137,10 +145,6 @@ emailwatch_surface_sent() {
 emailwatch_verdict() {
   local sent="$1" stamp_date="$2" window_day="$3" journal="$4"
   shift 4
-  if [ "$stamp_date" != "$window_day" ] || [ "$sent" != "true" ]; then
-    echo "not-run"
-    return 0
-  fi
   local pat
   for pat in "$@"; do
     if grep -qE "$pat" <<<"$journal"; then
@@ -148,5 +152,9 @@ emailwatch_verdict() {
       return 0
     fi
   done
-  echo "no-evidence"
+  if [ "$stamp_date" = "$window_day" ] && [ "$sent" = "true" ]; then
+    echo "no-evidence"
+    return 0
+  fi
+  echo "not-run"
 }

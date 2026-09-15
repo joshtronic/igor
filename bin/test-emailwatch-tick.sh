@@ -175,6 +175,20 @@ EOF
 do_emailwatch_tick >/dev/null 2>"$TMP/err2b.log"
 eq "a genuinely quiet day raises no alarm" "0" "$(issues_opened_count)"
 
+echo "== the stamp has moved on to today's send by the time this runs -- yesterday's evidence still clears it (igor#641/#642) =="
+# The false-alarm shape from the ticket: today's send already overwrote the
+# single-slot stamp before this tick ran, so .shipreport.date is TODAY, not
+# the window day -- yet the window day's own journal line is right there.
+reset_state
+TODAY=$(date +%F)
+JOURNAL_FIXTURE="Sep 13 07:01:00 h tick.sh[1]: [agent] shipreport: sent (21 shipped, 0 needs-you, 5 in-flight, 2 landed) to josh@example.com"
+cat > "$AGENT_STATE_DIR/discretionary-state.json" <<EOF
+{"shipreport": {"date": "$TODAY", "sent": true, "failures": 0}}
+EOF
+do_emailwatch_tick >/dev/null 2>"$TMP/err_moved_on.log"
+eq "a stamp that's moved on to today raises no alarm when yesterday's journal line is present" "0" \
+  "$(issues_opened_count)"
+
 echo "== sports, configured exactly as do_sports_tick requires -- is actually checked =="
 reset_state
 # Read only by the eval'd emailwatch_sports_opted_in -- static analysis can't
