@@ -1196,6 +1196,26 @@ reviewer_effort() {
   if [ "${rounds:-0}" -ge 3 ]; then printf 'max'; else printf 'high'; fi
 }
 
+# reviewer_retry_effort <effort> -- the effort for the IN-TICK retry after a
+# timeout (igor#638). A retry at the same effort and the same
+# REVIEW_CALL_TIMEOUT_SECS budget is doomed to the same timeout -- nothing
+# about the call changed, so nothing about the outcome would either. Step
+# down instead: still a real review, but cheaper and faster, so the second
+# attempt has an actual chance of finishing inside the budget that just
+# failed it. `max` drops past `xhigh` to `high` on purpose -- the measured
+# gap that makes a retry viable is max~197s vs high~77s (see the budget note
+# below); one rung off `max` would be a rounding error against a 600s budget.
+# `low` is the floor and steps down to itself: unreachable from
+# reviewer_effort, which only emits high/max, but a step-DOWN helper that
+# silently steps UP is a trap for whoever widens that ladder next.
+reviewer_retry_effort() {
+  case "${1:-high}" in
+    max|xhigh) printf 'high' ;;
+    high) printf 'medium' ;;
+    *) printf 'low' ;;
+  esac
+}
+
 # Wall-clock budget for one shadow-review call. claude_call's default is 300s,
 # which the escalated ladder above outgrows (igor#453). Measured on igor#455,
 # same PR, consecutive rounds:
@@ -1213,6 +1233,107 @@ reviewer_effort() {
 # sports digest already uses for its long call. Hardcoded rather than an env
 # knob: one operator, one right answer.
 REVIEW_CALL_TIMEOUT_SECS=600
+
+# -- Review timeout yield (igor#638) ------------------------------
+#
+# A timeout is not a normal review failure: it costs the full
+# REVIEW_CALL_TIMEOUT_SECS budget per attempt, and since review is the FIRST
+# cascade stage, that cost is paid by the whole fleet, not just the one PR.
+# A head that keeps timing out gains nothing from being retried identically
+# forever, so after REVIEW_TIMEOUT_STREAK_CAP consecutive timeout-caused
+# do_review_tick failures on the SAME head, the head is yielded: selection
+# skips it (no model call at all) until either a new commit changes the head
+# sha, or REVIEW_TIMEOUT_YIELD_COOLDOWN_SECS passes. 2 is deliberately low --
+# the first counted failure burns two attempts' worth of timeout (minus
+# whatever reviewer_retry_effort's step-down saves) and every one after it
+# burns one, since do_review_tick drops to a single attempt on a head that
+# already has a streak. So the walk to the cap costs 3 calls, and a higher cap
+# just adds one full budget each -- multiplying the exact starvation this
+# exists to bound. Not 1, though: a single unlucky tick (a slow API moment, a
+# blip) would then suppress a PR's review for an hour and put an escalation
+# comment on it, and one tick's evidence can't tell a transient from a chronic
+# -- the same distinction logwatch's LOGWATCH_MIN_OCCURRENCES pre-pass exists
+# to draw.
+REVIEW_TIMEOUT_STREAK_CAP=2
+REVIEW_TIMEOUT_YIELD_COOLDOWN_SECS=3600
+
+# review_timeout_streak <key> <sha> -- consecutive timeout-caused failures
+# recorded against this exact head. Scoped to sha: a streak counted against
+# an older head (superseded by a new commit) never carries over and counts
+# as 0 against the new one -- "a new head" is one of the two ways igor#638
+# says a yield must lift.
+review_timeout_streak() {
+  local key="$1" sha="$2" state_file stored_sha n
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || { echo 0; return; }
+  stored_sha=$(jq -r --arg k "$key" '.review[$k].timeout_sha // ""' "$state_file" 2>/dev/null)
+  [ "$stored_sha" = "$sha" ] || { echo 0; return; }
+  n=$(jq -r --arg k "$key" '.review[$k].timeout_streak // 0' "$state_file" 2>/dev/null)
+  [ -n "$n" ] && [ "$n" != "null" ] || n=0
+  echo "$n"
+}
+
+# Record streak <n> against <sha> without yielding (below the cap).
+review_set_timeout_streak() {
+  local key="$1" sha="$2" n="$3" state_file tmp
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  if jq --arg k "$key" --arg s "$sha" --argjson n "$n" \
+    '.review //= {} | .review[$k].timeout_sha = $s | .review[$k].timeout_streak = $n' \
+    "$state_file" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$state_file"
+  else
+    rm -f "$tmp"
+  fi
+}
+
+# Record streak <n> against <sha> AND yield it until <until_epoch> -- the cap
+# was reached.
+review_set_timeout_yield() {
+  local key="$1" sha="$2" n="$3" until_epoch="$4" state_file tmp
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || echo '{}' > "$state_file"
+  tmp=$(mktemp)
+  if jq --arg k "$key" --arg s "$sha" --argjson n "$n" --argjson u "$until_epoch" \
+    '.review //= {} | .review[$k].timeout_sha = $s | .review[$k].timeout_streak = $n
+     | .review[$k].timeout_yield_until = $u' \
+    "$state_file" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$state_file"
+  else
+    rm -f "$tmp"
+  fi
+}
+
+# review_timeout_yielded <key> <sha> <now> -- true while this exact head is
+# still inside its post-cap cooldown. A yield recorded against a different
+# (older) sha never applies, which is the sha-scoping above doing its job.
+review_timeout_yielded() {
+  local key="$1" sha="$2" now="$3" state_file stored_sha until_epoch
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || return 1
+  stored_sha=$(jq -r --arg k "$key" '.review[$k].timeout_sha // ""' "$state_file" 2>/dev/null)
+  [ "$stored_sha" = "$sha" ] || return 1
+  until_epoch=$(jq -r --arg k "$key" '.review[$k].timeout_yield_until // 0' "$state_file" 2>/dev/null)
+  [ -n "$until_epoch" ] && [ "$until_epoch" != "null" ] || until_epoch=0
+  [ "$now" -lt "$until_epoch" ]
+}
+
+# Clear the timeout streak/yield for a PR (a review call on this head
+# succeeded). Leaves every other .review field untouched.
+review_clear_timeout_streak() {
+  local key="$1" state_file tmp
+  state_file=$(discretionary_state_file)
+  [ -f "$state_file" ] || return 0
+  tmp=$(mktemp)
+  if jq --arg k "$key" \
+    '.review //= {} | .review[$k].timeout_streak = 0 | .review[$k].timeout_yield_until = 0' \
+    "$state_file" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$state_file"
+  else
+    rm -f "$tmp"
+  fi
+}
 
 # worker_effort <rework_rounds> -- reasoning effort for the bot's PR rework
 # at this round (igor#308). Climbs each pass -- try harder as the problem
@@ -3269,6 +3390,48 @@ review_apply_verdict() {
   esac
 }
 
+# review_note_timeout_failure <repo> <number> <key> <sha>
+#
+# Called when a review call exhausted both attempts and at least one of them
+# timed out. Bumps the persistent per-head timeout streak; once it reaches
+# REVIEW_TIMEOUT_STREAK_CAP, yields the head (selection skips it for
+# REVIEW_TIMEOUT_YIELD_COOLDOWN_SECS) and surfaces it to the human via a
+# PR comment + review request -- the same channel review_route_into_rework
+# already uses for its own escalations, so this is one more case of an
+# existing pattern rather than a new one (igor#638).
+#
+# The yield is a backoff, not a permanent skip: the cooldown lapses, the head
+# is selected again, and a head that is permanently doomed hits the cap again.
+# So the escalation is deduped against a per-head marker -- one comment per
+# head, not one per cooldown. Scoped to the sha because a NEW commit that also
+# times out is news, not a repeat.
+review_note_timeout_failure() {
+  local repo="$1" number="$2" key="$3" sha="$4" streak marker seen
+  streak=$(( $(review_timeout_streak "$key" "$sha") + 1 ))
+  if [ "$streak" -ge "$REVIEW_TIMEOUT_STREAK_CAP" ]; then
+    review_set_timeout_yield "$key" "$sha" "$streak" "$(( $(date +%s) + REVIEW_TIMEOUT_YIELD_COOLDOWN_SECS ))"
+    log "review: ${key} head ${sha:0:8} timed out ${streak} times running -- yielding for ${REVIEW_TIMEOUT_YIELD_COOLDOWN_SECS}s"
+    marker="<!-- review-timeout-yield sha=${sha} -->"
+    seen=$(forgejo_pr_has_comment_containing "$repo" "$number" "${BOT_USER:-}" "$marker" 2>/dev/null || echo 0)
+    if [ "${seen:-0}" -gt 0 ] 2>/dev/null; then
+      log "review: ${key} head ${sha:0:8} already escalated for repeated timeouts -- yielding quietly"
+      return 0
+    fi
+    # Not gated on FORGEJO_REVIEWER: review_request_human self-gates on it, and
+    # gating the comment too would leave a repo with no configured reviewer
+    # with nothing but a journal line.
+    forgejo_comment "$repo" "$number" \
+      "Igor's shadow review has timed out ${streak} times in a row on this head (\`${sha:0:8}\`) without producing a verdict. Backing off from re-reviewing it for a while so it stops crowding out the rest of the fleet -- if this keeps happening on new commits too, the diff may need a human look directly.
+
+${marker}" 2>/dev/null \
+      || log "warning: review: timeout-escalation comment failed on ${key}"
+    review_request_human "$repo" "$number" "review timed out ${streak}x"
+  else
+    review_set_timeout_streak "$key" "$sha" "$streak"
+    log "review: ${key} head ${sha:0:8} timeout streak now ${streak}/${REVIEW_TIMEOUT_STREAK_CAP}"
+  fi
+}
+
 do_review_tick() {
   # Find the first open bot PR -- across the VALIDATED set -- whose live
   # head hasn't been reviewed yet. Unvalidated repos (not ready for
@@ -3276,8 +3439,9 @@ do_review_tick() {
   # so it's just bot footprint on a not-ready repo.
   # One review per tick; first un-reviewed head wins, then we exit the
   # cascade like every other pass.
-  local repo_line repo prs pr_num pr_json head_sha key reviewed_sha
+  local repo_line repo prs pr_num pr_json head_sha key reviewed_sha now
   local target_repo="" target_num="" target_sha="" target_json="" target_ci=""
+  now=$(date +%s)
   while IFS= read -r repo_line; do
     [ -n "$target_repo" ] && break
     [ -z "$repo_line" ] && continue
@@ -3297,6 +3461,14 @@ do_review_tick() {
       key="${repo}#${pr_num}"
       reviewed_sha=$(review_reviewed_sha "$key")
       [ "$reviewed_sha" = "$head_sha" ] && continue
+      # A head that has timed out REVIEW_TIMEOUT_STREAK_CAP times running is
+      # yielded -- skip it without a model call so a doomed head can't keep
+      # costing the whole fleet its cascade tick (igor#638). Falls through to
+      # the next candidate PR, same as any other skip in this loop.
+      if review_timeout_yielded "$key" "$head_sha" "$now"; then
+        log "review: ${repo}#${pr_num} head ${head_sha:0:8} yielded after repeated timeouts -- waiting"
+        continue
+      fi
       # Wait for CI to settle before reviewing: a pending build can't be
       # assessed, and reviewing now burns the head on a useless "CI pending,
       # re-run" verdict. Skip this candidate; re-check it (or a now-ready one)
@@ -3328,6 +3500,7 @@ do_review_tick() {
   if [ "$old_count" -gt 0 ] || [ "$new_count" -gt 0 ]; then
     log "review: ${key} head ${target_sha:0:8} already carries a verdict comment -- reconciling state"
     review_record "$key" "$target_sha" "unknown" "unknown" "$(date +%s)"
+    review_clear_timeout_streak "$key"
     return 1
   fi
 
@@ -3388,18 +3561,41 @@ do_review_tick() {
   # output budget -- size ~5x expected so a long think can't truncate
   # the head off the result (which surfaces as a flaky parse failure).
   # strip_fences=0: the body is markdown prose, not a JSON envelope.
-  local raw parsed attempt verdict review_body snippet tail_snip
+  local raw parsed attempt verdict review_body snippet tail_snip call_rc had_timeout
   # igor#308: run the shadow review at an escalating effort -- flat "high"
   # during the rework loop, "max" for the final look before escalation.
-  local rev_rounds rev_effort
+  local rev_rounds rev_effort prior_timeouts
   rev_rounds=$(review_rework_rounds "$key")
   rev_effort=$(reviewer_effort "$rev_rounds")
+  # A head that ALREADY timed out on an earlier tick has answered the question
+  # the second attempt would ask, so it gets ONE budget this tick rather than
+  # two: attempt 1 confirms the streak, review_note_timeout_failure yields.
+  prior_timeouts=$(review_timeout_streak "$key" "$target_sha")
   parsed=""
+  had_timeout=0
   for attempt in 1 2; do
-    raw=$(claude_call "${AGENT_MODEL_REVIEW}:${rev_effort}" "review" 8000 "$directive" "$user" 0 "$REVIEW_CALL_TIMEOUT_SECS") || {
-      log "review: ${key} review call failed (attempt $attempt)"
+    # `|| call_rc=$?` rather than a bare assignment + `$?`: this file runs
+    # under `set -e`, and a bare failing assignment would abort the whole tick
+    # -- worse starvation than the bug this guards against.
+    call_rc=0
+    raw=$(claude_call "${AGENT_MODEL_REVIEW}:${rev_effort}" "review" 8000 "$directive" "$user" 0 "$REVIEW_CALL_TIMEOUT_SECS") || call_rc=$?
+    if [ "$call_rc" -ne 0 ]; then
+      if [ "$call_rc" -eq 124 ]; then
+        had_timeout=1
+        log "review: ${key} review call timed out (attempt $attempt, effort=${rev_effort})"
+        if [ "${prior_timeouts:-0}" -gt 0 ]; then
+          log "review: ${key} head ${target_sha:0:8} already timed out ${prior_timeouts}x on an earlier tick -- not spending a second budget on it this tick"
+          break
+        fi
+        # A retry at the same effort and budget is doomed the same way --
+        # step down so attempt 2 is an actually different, cheaper call
+        # (igor#638), not an identical one.
+        rev_effort=$(reviewer_retry_effort "$rev_effort")
+      else
+        log "review: ${key} review call failed (attempt $attempt, rc=$call_rc)"
+      fi
       continue
-    }
+    fi
     if parsed=$(review_parse_response "$raw"); then
       break
     fi
@@ -3410,7 +3606,8 @@ do_review_tick() {
     log "review: ${key} unparseable response (attempt $attempt, ${#raw} chars; head: ${snippet:0:160} [...] tail: ${tail_snip})"
   done
   if [ -z "$parsed" ]; then
-    log "review: ${key} no parseable verdict after 2 attempts -- leaving head un-recorded (will retry next tick)"
+    log "review: ${key} no parseable verdict after ${attempt} attempt(s) -- leaving head un-recorded (will retry next tick)"
+    [ "$had_timeout" -eq 1 ] && review_note_timeout_failure "$target_repo" "$target_num" "$key" "$target_sha"
     return 1
   fi
 
@@ -3433,6 +3630,7 @@ ${review_body}
 
   if forgejo_comment "$target_repo" "$target_num" "$comment"; then
     review_record "$key" "$target_sha" "$verdict" "$ci" "$(date +%s)" "$patch_id"
+    review_clear_timeout_streak "$key"
     forgejo_log_time "$target_repo" "$target_num" "$elapsed" 2>/dev/null \
       || log "warning: review: could not log time on ${key}"
     log "review: ${key} head ${target_sha:0:8} -> ${verdict} (ci=${ci}, ${elapsed}s)"
