@@ -18,7 +18,9 @@ log() { :; }
 . "$HERE/lib/claude-version.sh"
 
 FAIL=0
-eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
+PASS=0
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 
 stub_bin() {
   mkdir -p "$TMP/bin"

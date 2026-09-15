@@ -25,12 +25,11 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 . "$HERE/lib/reviewnotify.sh"
 
 FAIL=0
+PASS=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
-eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
-has() {  # <desc> <haystack> <needle>
-  case "$2" in *"$3"*) ok "$1" ;; *) bad "$1: [$2] does not contain [$3]" ;; esac
-}
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 
 echo "== dedup: the key is repo#number + head sha =="
 SEEN='{"review_notified":{"joshtronic/igor#42":"abc123"}}'

@@ -24,13 +24,15 @@ command -v jq >/dev/null 2>&1 || { echo "test-logwatch: jq not installed -- skip
 . "$HERE/lib/logwatch.sh"
 
 FAIL=0
+PASS=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
 yes() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d (rc0 expected)"; fi; }
 no()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$d (rc!=0 expected)"; else ok "$d"; fi; }
-eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
-has()    { case "$2" in *"$3"*) ok "$1";; *) bad "$1: missing [$3]";; esac; }
-hasnt()  { case "$2" in *"$3"*) bad "$1: unexpected [$3]";; *) ok "$1";; esac; }
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
+# hasnt() was a same-bug twin of lacks() under a different name: it also
+# vacuously passed on an empty fixture (igor#626). Call sites renamed below.
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -119,8 +121,8 @@ Jul 03 09:15:00 host agent[1]: health: auth alert emailed to ops@example.com
 EOF
 )"
 STRIPPED=$(logwatch_strip_backoff_noise "$MIXED")
-hasnt "noise lines removed from mixed journal" "$STRIPPED" "backoff active (kind=auth)"
-hasnt "health-alert-emailed line removed from mixed journal" "$STRIPPED" "alert emailed"
+lacks "noise lines removed from mixed journal" "$STRIPPED" "backoff active (kind=auth)"
+lacks "health-alert-emailed line removed from mixed journal" "$STRIPPED" "alert emailed"
 has   "unrelated failure survives noise-stripping" "$STRIPPED" "unbound variable in do_seo_tick"
 
 echo "== full test matrix (igor#340) -- mapped onto do_logwatch_tick's decision (see bin/tick.sh) =="

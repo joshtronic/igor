@@ -35,9 +35,11 @@ for fn in review_reviewed_sha review_reviewed_patchid review_reviewed_ci \
 done
 
 FAIL=0
+PASS=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
-eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 
 echo "== review_ci_became_success: the pure decision (unit) =="
 if review_ci_became_success failure success; then ok "failure -> success is a flip"

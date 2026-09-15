@@ -16,10 +16,10 @@ log() { :; }   # tick.sh provides log() at runtime; no-op here
 # shellcheck source=lib/seo-analysis.sh
 . "$HERE/lib/seo-analysis.sh"
 
-fails=0
-ok()  { printf '  + %s\n' "$1"; }
-bad() { printf '  x %s\n' "$1"; fails=$((fails + 1)); }
-eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
+FAIL=0
+PASS=0
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 
 # -- Stubs for the two forgejo helpers the resolver composes ----------------
 STUB_REPOS='[{"full_name":"joshtronic/sharktank.co"},{"full_name":"joshtronic/igor"}]'
@@ -64,8 +64,8 @@ stub_cfg() { case "$1" in
 eq "agent.json without .seo -> empty" "" \
    "$(seo_agentic_repo_for sharktank.co)"
 
-if [ "$fails" -eq 0 ]; then
+if [ "$FAIL" -eq 0 ]; then
   echo "test-seo-agentic: all checks passed"; exit 0
 else
-  echo "test-seo-agentic: $fails check(s) failed"; exit 1
+  echo "test-seo-agentic: $FAIL check(s) failed"; exit 1
 fi

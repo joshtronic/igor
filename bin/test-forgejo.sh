@@ -14,10 +14,9 @@ export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
 . "$HERE/../lib/forgejo.sh"
 
 FAIL=0
-eq() {  # <desc> <expected> <actual>
-  if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"
-  else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi
-}
+PASS=0
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 
 # _fj must pass fail-fast timeouts so a brief git.example.com blip can't wedge a
 # tick (igor#395): a --max-time 30 with no --connect-timeout once hung a tick

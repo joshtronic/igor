@@ -25,9 +25,11 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 TICK="$HERE/bin/tick.sh"
 
 FAIL=0
+PASS=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
-eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 
 # The tokens the SHIPPING parser accepts. Pinned here so the parser's own
 # fail-closed behaviour is covered in CI, where no directive text is reachable.

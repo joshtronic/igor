@@ -28,9 +28,11 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)
 . "$HERE/lib/review-corpus.sh"
 
 FAIL=0
+PASS=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
-eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 
 # The three header lines the harness actually posts, pulled straight from
 # source. Every fixture below is BUILT from these rather than retyping them,

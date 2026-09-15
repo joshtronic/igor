@@ -12,7 +12,9 @@ for t in date mkdir cp find basename rm; do
 done
 
 FAIL=0
-eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
+PASS=0
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 
 TMP=$(mktemp -d) || { echo "test-crashlog: mktemp unavailable -- skipping"; exit 0; }
 trap 'rm -rf "$TMP"' EXIT

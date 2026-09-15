@@ -15,7 +15,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/../lib/google-auth.sh"
 
 FAIL=0
-eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
+PASS=0
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 no() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (rc!=0 expected)\n' "$d"; FAIL=$((FAIL + 1)); else printf '  + %s\n' "$d"; fi; }
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT

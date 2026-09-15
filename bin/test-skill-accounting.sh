@@ -28,7 +28,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/../lib/context-source.sh"
 
 FAIL=0
-eq() { local d="$1" want="$2" got="$3"; if [ "$want" = "$got" ]; then printf '  + %s\n' "$d"; else printf '  x %s (want %q got %q)\n' "$d" "$want" "$got"; FAIL=$((FAIL + 1)); fi; }
+PASS=0
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 
 TMPROOT="$(mktemp -d)"
 trap 'rm -rf "$TMPROOT"' EXIT

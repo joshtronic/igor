@@ -20,9 +20,11 @@ command -v jq >/dev/null 2>&1 || { echo "test-review-scorecard: jq absent -- ski
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 
 FAIL=0
+PASS=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
-eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 
 # The review header as production posts it, so a fixture comment is recognized
 # for the same reason a real one is (see bin/test-review-corpus.sh).

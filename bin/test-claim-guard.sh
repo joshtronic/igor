@@ -35,7 +35,9 @@ export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
 TMPROOT="$(mktemp -d)"; trap 'rm -rf "$TMPROOT"' EXIT
 
 FAIL=0
-eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
+PASS=0
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 
 echo "== forgejo_open_pr_covers_issue: branch-name signal (author-independent) =="
 # forgejo_open_prs walks pages until one comes back empty, so every _fj stub

@@ -26,10 +26,9 @@ export AGENT_STATE_DIR="$TMP_STATE"
 . "$HERE/../lib/request.sh"
 
 FAIL=0
-eq() {  # <desc> <expected> <actual>
-  if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"
-  else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi
-}
+PASS=0
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 
 # -- curl double ------------------------------------------------------
 # Scripted per-call via parallel arrays, indexed by call number (0-based,

@@ -20,10 +20,9 @@ trap 'rm -f "$URL_LOG"' EXIT
 . "$HERE/../lib/espn.sh"
 
 FAIL=0
-eq() {  # <desc> <expected> <actual>
-  if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"
-  else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi
-}
+PASS=0
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 
 # -- request_get double ------------------------------------------------
 # Logs every URL it is handed to a FILE: espn_scoreboard's stdout is

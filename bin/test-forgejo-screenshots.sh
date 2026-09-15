@@ -13,7 +13,9 @@ export FORGEJO_TOKEN="test-token"
 . "$HERE/../lib/forgejo.sh"
 
 FAIL=0
-eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
+PASS=0
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 rc() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected rc %s got %s\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
 
 TMP="$(mktemp -d)"

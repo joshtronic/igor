@@ -26,7 +26,9 @@ MAINT_TRIAGE_MARKER="<!-- agent:maint-triage -->"
 MAINT_BUMPS_MARKER="<!-- agent:maint-bumps -->"
 
 FAIL=0
-eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
+PASS=0
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 ne() { if [ "$2" != "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected != [%s]\n' "$1" "$2"; FAIL=$((FAIL + 1)); fi; }
 
 TMP=$(mktemp -d) || { echo "test-maint-fp: mktemp unavailable -- skipping"; exit 0; }

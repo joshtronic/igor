@@ -39,9 +39,11 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/ideation-pipeline.sh"
 
 FAIL=0
+PASS=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
-eq()  { local d="$1" want="$2" got="$3"; if [ "$want" = "$got" ]; then ok "$d"; else bad "$d (want $(printf '%q' "$want") got $(printf '%q' "$got"))"; fi; }
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 contains() { local d="$1" needle="$2" haystack="$3"; case "$haystack" in *"$needle"*) ok "$d" ;; *) bad "$d (expected to find $(printf '%q' "$needle"))" ;; esac; }
 not_contains() { local d="$1" needle="$2" haystack="$3"; case "$haystack" in *"$needle"*) bad "$d (did not expect to find $(printf '%q' "$needle"))" ;; *) ok "$d" ;; esac; }
 

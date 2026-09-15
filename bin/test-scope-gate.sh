@@ -11,9 +11,11 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/../lib/scope-gate.sh"
 
 FAIL=0
+PASS=0
 ok() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  + %s\n' "$d"; else printf '  x %s (expected rc0)\n' "$d"; FAIL=$((FAIL + 1)); fi; }
 no() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (expected rc!=0)\n' "$d"; FAIL=$((FAIL + 1)); else printf '  + %s\n' "$d"; fi; }
-eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 # total_of/gen_lines_of/gen_files_of -- pull one field out of
 # scope_gate_sum_numstat's "<total>\t<gen-lines>\t<gen-files>" output.
 total_of() { cut -f1; }

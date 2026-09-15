@@ -16,10 +16,11 @@ export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
 . "$HERE/lib/needsyou.sh"
 
 FAIL=0
+PASS=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
-eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
-has() { case "$2" in *"$3"*) ok "$1";; *) bad "$1: [$2] lacks [$3]";; esac; }
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 rc0() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d (expected rc 0)"; fi; }
 rcn() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$d (expected nonzero)"; else ok "$d"; fi; }
 

@@ -20,9 +20,11 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/reading-pipeline.sh"
 
 FAIL=0
+PASS=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
-eq()  { local d="$1" want="$2" got="$3"; if [ "$want" = "$got" ]; then ok "$d"; else bad "$d (want $(printf '%q' "$want") got $(printf '%q' "$got"))"; fi; }
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 
 lift() {
   local fn="$1" src

@@ -22,7 +22,9 @@ log() { :; }
 . "$HERE/lib/tick-timing.sh"
 
 FAIL=0
-eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
+PASS=0
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 
 echo "== tick_timing_summary: no ledger file -> no data, not an error =="
 S0=$(tick_timing_summary "2020-01-01T00:00:00Z" "2099-01-01T00:00:00Z")
