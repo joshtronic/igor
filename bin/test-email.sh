@@ -24,10 +24,11 @@ trap 'rm -f "$LOG_FILE" "$PAYLOAD_F" "$ARGV_F"' EXIT
 log() { printf '%s\n' "$*" >>"$LOG_FILE"; }
 
 FAIL=0
+PASS=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
-eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
-has() { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1: [$2] lacks [$3]" ;; esac; }
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 
 export SMTP2GO_API_KEY="super-secret-key"
 export SMTP2GO_SENDER="bot@example.com"

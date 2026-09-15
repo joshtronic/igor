@@ -67,8 +67,8 @@ PASS=0
 pass() { PASS=$((PASS + 1)); printf '  + %s\n' "$1"; }
 ok()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$d"; else printf '  x %s (expected rc0)\n' "$d"; FAIL=$((FAIL + 1)); fi; }
 no()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (expected rc!=0)\n' "$d"; FAIL=$((FAIL + 1)); else pass "$d"; fi; }
-eq()  { if [ "$2" = "$3" ]; then pass "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
-has() { case "$2" in *"$3"*) pass "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 
 # Fixture repos. All but DOSSIER_REPO are on the legacy agent.json
 # `.landed.kind` path -- which is what the fleet actually has on disk today.

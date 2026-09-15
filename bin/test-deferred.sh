@@ -13,8 +13,9 @@ for t in jq sed; do
 done
 
 FAIL=0
-eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
-has() { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
+PASS=0
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 
 GATE='some intro text
 <!-- gate

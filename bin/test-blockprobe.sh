@@ -18,8 +18,9 @@ export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
 command -v jq >/dev/null 2>&1 || { echo "test-blockprobe: jq unavailable -- skipping"; exit 0; }
 
 FAIL=0
-eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
-has() { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
+PASS=0
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 
 # _issues_payload <number> <body> -- one fake issues-list response, JSON
 # built via jq so an embedded newline/quote in <body> can never produce

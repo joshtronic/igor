@@ -29,12 +29,14 @@ log() { :; }   # tick.sh provides log() at runtime; no-op here
 ga_access_token() { printf 'fake-token'; }
 
 FAIL=0
+PASS=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
-eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
-has()    { case "$2" in *"$3"*) ok "$1";; *) bad "$1: missing [$3]";; esac; }
-hasnt()  { case "$2" in *"$3"*) bad "$1: unexpected [$3]";; *) ok "$1";; esac; }
 no() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$d (rc!=0 expected)"; else ok "$d"; fi; }
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
+# hasnt() was a same-bug twin of lacks() under a different name: it also
+# vacuously passed on an empty fixture (igor#626). Call sites renamed below.
 
 echo "== ga_property_for_domain =="
 
@@ -135,8 +137,8 @@ md_ga=$(seo_render_markdown <<<"$report_ga")
 html_no_ga=$(seo_render_html <<<"$report_default")
 html_ga=$(seo_render_html <<<"$report_ga")
 
-hasnt "no GA property: markdown has no GA section" "$md_no_ga" "On-site behavior"
-hasnt "no GA property: html has no GA section"     "$html_no_ga" "On-site behavior"
+lacks "no GA property: markdown has no GA section" "$md_no_ga" "On-site behavior"
+lacks "no GA property: html has no GA section"     "$html_no_ga" "On-site behavior"
 has   "with GA: markdown section header"    "$md_ga" "## On-site behavior (GA)"
 has   "with GA: markdown sessions"          "$md_ga" "1000 sessions"
 has   "with GA: markdown engagement rate"   "$md_ga" "65% engagement rate"
