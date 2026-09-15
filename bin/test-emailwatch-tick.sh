@@ -117,6 +117,22 @@ journalctl() { printf '%s\n' "$JOURNAL_FIXTURE"; }
 
 YEST=$(date -d '-1 days' +%F 2>/dev/null || date -v-1d +%F)
 
+echo "== each emailwatch opt-in gate names the same env vars as the sender's own gate =="
+# Drift either way is a defect: a gate stricter than the sender's files a
+# fresh "did not send" issue every day for a surface that is correctly
+# unconfigured; a looser one is a silent blind spot on a surface that IS
+# sending. Compare the env vars named in each do_<x>_tick's leading opt-in
+# `if` against those in emailwatch_<x>_opted_in, so an edit to either side
+# fails here rather than on a live host.
+gate_vars() { grep -oE '[A-Z][A-Z0-9_]+' | sort -u | paste -sd, -; }
+sender_gate_vars() {
+  extract_fn "do_$1_tick" | awk '/^  if /{f=1} f{print} f && /^  fi$/{exit}' | gate_vars
+}
+for surface in shipreport sports; do
+  eq "emailwatch_${surface}_opted_in matches do_${surface}_tick's gate" \
+    "$(sender_gate_vars "$surface")" "$(extract_fn "emailwatch_${surface}_opted_in" | gate_vars)"
+done
+
 echo "== the 2026-09-14 case: stamped sent, no matching success line -> alarms via Forgejo =="
 reset_state
 PRIMARY_RECIPIENTS="a@b.com"; SMTP2GO_API_KEY="k"; SMTP2GO_SENDER="s@b.com"
@@ -158,6 +174,50 @@ cat > "$AGENT_STATE_DIR/discretionary-state.json" <<EOF
 EOF
 do_emailwatch_tick >/dev/null 2>"$TMP/err2b.log"
 eq "a genuinely quiet day raises no alarm" "0" "$(issues_opened_count)"
+
+echo "== sports, configured exactly as do_sports_tick requires -- is actually checked =="
+reset_state
+# Read only by the eval'd emailwatch_sports_opted_in -- static analysis can't
+# see through the eval.
+# shellcheck disable=SC2034
+SPORTS_LEAGUES="baseball/mlb"
+unset SPORTS_RECIPIENTS
+JOURNAL_FIXTURE=""
+cat > "$AGENT_STATE_DIR/discretionary-state.json" <<EOF
+{"shipreport": {"date": "$YEST", "sent": true}}
+EOF
+do_emailwatch_tick >/dev/null 2>"$TMP/err_sports1.log"
+has "sports with no stamp alarms" "$(issues_opened)" "sports: did not send for"
+
+echo "== sports success lines, verbatim from do_sports_tick's own log calls -- no alarm =="
+for line in "sports: emailed digest for 2026-09-13 (3 new concepts) to a@b.com" \
+            "sports: no events or headlines across all leagues -- quiet day, no digest"; do
+  reset_state
+  JOURNAL_FIXTURE="Sep 14 03:01:00 h tick.sh[1]: [agent] $line"
+  cat > "$AGENT_STATE_DIR/discretionary-state.json" <<EOF
+{"sports": {"date": "$YEST", "sent": true}, "shipreport": {"date": "$YEST", "sent": true}}
+EOF
+  JOURNAL_FIXTURE="$JOURNAL_FIXTURE
+Sep 14 07:03:01 h tick.sh[1]: [agent] shipreport: quiet 24h -- nothing to report (stamping done)"
+  do_emailwatch_tick >/dev/null 2>"$TMP/err_sports2.log"
+  eq "\"${line%% (*}\" backs the sports stamp" "0" "$(issues_opened_count)"
+done
+
+echo "== SPORTS_RECIPIENTS is additive, not the opt-in: alone it configures nothing =="
+# do_sports_tick gates on PRIMARY_RECIPIENTS and folds SPORTS_RECIPIENTS in as
+# extra subscribers (recipients_with_primary, lib/email.sh), so a host with
+# only the latter set is NOT sending -- and emailwatch must not alarm about it.
+reset_state
+unset PRIMARY_RECIPIENTS
+# Set precisely to prove it is NOT consulted -- hence unused here, by design.
+# shellcheck disable=SC2034
+SPORTS_RECIPIENTS="extra@b.com"
+JOURNAL_FIXTURE=""
+echo '{}' > "$AGENT_STATE_DIR/discretionary-state.json"
+do_emailwatch_tick >/dev/null 2>"$TMP/err_sports3.log"
+eq "SPORTS_RECIPIENTS alone raises no alarm for either surface" "0" "$(issues_opened_count)"
+PRIMARY_RECIPIENTS="a@b.com"
+unset SPORTS_LEAGUES SPORTS_RECIPIENTS
 
 echo "== the stamp removed entirely (job never ran) -> alarms =="
 reset_state
@@ -225,8 +285,20 @@ echo "== state file unreadable -- alarms instead of reading as 'all clear' =="
 reset_state
 printf '{not valid json' > "$AGENT_STATE_DIR/discretionary-state.json"
 do_emailwatch_tick >/dev/null 2>"$TMP/err8.log"
+RC8=$?
 eq "unparseable state -> exactly one alarm" "1" "$(issues_opened_count)"
 has "names the actual gap" "$(issues_opened)" "state file unreadable"
+# The day-stamp lives in the very file that's corrupt, so emailwatch_mark_done
+# can't land and every subsequent tick re-enters this pass. Returning 0 here
+# would make `if cascade_run emailwatch; then exit 0; fi` end each of those
+# ticks, starving sports/feedback/logwatch/deferred until a human repairs the
+# file. It yields the cascade instead; the alarm's per-day dedup is what keeps
+# the repeat from refiling.
+eq "yields the cascade rather than monopolising every tick (rc1)" "1" "$RC8"
+FIND_MARKED_RESULT='{"number": 7, "state": "open"}'
+do_emailwatch_tick >/dev/null 2>"$TMP/err8b.log"
+eq "the repeat tick files nothing new" "1" "$(issues_opened_count)"
+FIND_MARKED_RESULT=""
 
 echo "== dedup: an already-open alarm for today is not refiled =="
 reset_state

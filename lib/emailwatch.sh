@@ -34,8 +34,15 @@ if ! declare -F log >/dev/null; then
   log() { printf '[agent] %s\n' "$*" >&2; }
 fi
 
+# Defers to bin/tick.sh's own definition when sourced there, so enumeration
+# and do_emailwatch_tick's parseability guard can never read different files;
+# the literal is the standalone-test fallback, same pattern as log above.
 _emailwatch_state_file() {
-  printf '%s/discretionary-state.json' "${AGENT_STATE_DIR:-$HOME/.local/state/agent}"
+  if declare -F discretionary_state_file >/dev/null; then
+    discretionary_state_file
+  else
+    printf '%s/discretionary-state.json' "${AGENT_STATE_DIR:-$HOME/.local/state/agent}"
+  fi
 }
 
 # emailwatch_window_day -- the day under review: yesterday, whole and closed.

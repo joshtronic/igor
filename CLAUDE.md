@@ -272,9 +272,10 @@ respective tools on the host; install or skip.
   share `email.sh`, gating on `SMTP2GO_API_KEY` + `SMTP2GO_SENDER`
   (renamed from `SEO_SENDER_EMAIL`); change the code's email vars and the
   host `.env` must change in lockstep or those emails break.
-- The sports digest (`do_sports_tick`) is opt-in via `SPORTS_RECIPIENTS` +
-  `SPORTS_LEAGUES` + SMTP2GO and is another email sibling -- but the FIRST
-  that uses the model (scripted ESPN fetch via `lib/espn.sh`, ONE
+- The sports digest (`do_sports_tick`) is opt-in via `PRIMARY_RECIPIENTS` +
+  `SPORTS_LEAGUES` + SMTP2GO (`SPORTS_RECIPIENTS` only ADDS subscribers on
+  top of `PRIMARY_RECIPIENTS` -- it gates nothing) and is another email
+  sibling -- but the FIRST that uses the model (scripted ESPN fetch via `lib/espn.sh`, ONE
   `claude_call` distill on `AGENT_MODEL`), so unlike SEO it sits
   below the health gate and goes dark during a Claude cooldown. Daily,
   7 days a week, first tick after 03:00 (window-completeness like

@@ -3185,7 +3185,12 @@ do_emailwatch_tick() {
   if [ ! -f "$sf" ] || ! jq -e . "$sf" >/dev/null 2>&1; then
     emailwatch_alarm "state file unreadable" \
       "emailwatch could not read or parse ${sf}. Every daily-email stamp lives there -- without it this check has no evidence to verify against, and that absence must not read as \"all clear\"."
-    return 0
+    # The day-stamp lives in the file that's unreadable, so emailwatch_mark_done
+    # above could not land and every later tick re-enters this pass. Return
+    # non-zero so `if cascade_run emailwatch` falls through: returning 0 would
+    # end each of those ticks here and starve everything below this stage until
+    # a human repairs the file. The alarm's per-day dedup absorbs the repeat.
+    return 1
   fi
 
   local win_start win_end journal
@@ -5007,21 +5012,17 @@ if cascade_run shipreport; then
 fi
 
 # Daily email liveness check (igor#636). Scripted (no model), so it ALSO
-# runs in the health-blocked branch above. Reviews YESTERDAY once daily
-# (same day-boundary discipline as logwatch): cross-checks each daily
-# sender's own "sent" stamp in discretionary-state.json against an
-# independent signal (that sender's own success log line), and alarms via
-# a Forgejo issue on AUTOMERGE_SELF_REPO -- never email, since the
-# condition being detected is "the email path is broken." See
-# do_emailwatch_tick and lib/emailwatch.sh.
+# runs in the health-blocked branch above. Rationale and mechanics live on
+# do_emailwatch_tick and in lib/emailwatch.sh.
 if cascade_run emailwatch; then
   exit 0
 fi
 
 # Daily sports digest (7 days a week, first tick after 03:00 -- by
 # then even west-coast games are final and recapped). Opt-in via
-# SPORTS_RECIPIENTS + SPORTS_LEAGUES + SMTP2GO; no-ops when
-# unconfigured or once today's already sent. ESPN fetch is scripted,
+# PRIMARY_RECIPIENTS + SPORTS_LEAGUES + SMTP2GO (SPORTS_RECIPIENTS only ADDS
+# subscribers -- it gates nothing); no-ops when unconfigured or once today's
+# already sent. ESPN fetch is scripted,
 # but the distill is a model call -- so unlike the scripted SEO pass this
 # one sits below the health gate and goes dark with the rest of the model
 # work during a cooldown.
