@@ -92,6 +92,22 @@ eq "date matches but sent is false -> not-run (attempted, never completed)" "not
 eq "an unrelated journal line never satisfies the pattern" "no-evidence" \
   "$(emailwatch_verdict true "$YEST" "$YEST" "Sep 14 03:00:01 h tick.sh[1]: [agent] sports: emailed digest for 2026-09-13 (2 new concepts) to a@b.com" 'shipreport: sent \(' 'shipreport: quiet 24h')"
 
+echo "== emailwatch_verdict: the stamp has moved on to today, but the window day's own journal evidence still backs it (igor#644) =="
+# This is the igor#641/#642 false alarm exactly: by the time this check
+# runs, today's send has already overwritten the single-slot stamp, so
+# stamp_date != window_day. The journal for the window day still has the
+# success line and must win -- the stamp's silence on a day it no longer
+# describes must never veto real evidence.
+TODAY=$(date +%F)
+eq "stamp has moved on to today, journal for the window day matches -> ok" "ok" \
+  "$(emailwatch_verdict true "$TODAY" "$YEST" "Sep 13 07:01:00 h tick.sh[1]: [agent] shipreport: sent (21 shipped, 0 needs-you, 5 in-flight, 2 landed) to josh@example.com" 'shipreport: sent \(' 'shipreport: quiet 24h')"
+
+eq "a genuinely missed day: stamp moved on AND journal silent -> not-run" "not-run" \
+  "$(emailwatch_verdict true "$TODAY" "$YEST" "" 'shipreport: sent \(' 'shipreport: quiet 24h')"
+
+eq "a lying stamp still alarms: stamp covers the window day, journal silent -> no-evidence" "no-evidence" \
+  "$(emailwatch_verdict true "$YEST" "$YEST" "" 'shipreport: sent \(' 'shipreport: quiet 24h')"
+
 if [ "$FAIL" -eq 0 ]; then
   echo "test-emailwatch: all checks passed"
 else
