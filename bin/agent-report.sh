@@ -40,7 +40,7 @@ BODY="${1:?usage: agent-report.sh \"<body>\"}"
 : "${AGENT_HOME:?AGENT_HOME not set}"
 
 # shellcheck source=../lib/forgejo.sh
-. "$AGENT_HOME/lib/forgejo.sh"
+. "$AGENT_HOME/lib/gitlab.sh"
 
 forgejo_comment "$FORGEJO_REPO" "$ISSUE_NUMBER" "$BODY"
 

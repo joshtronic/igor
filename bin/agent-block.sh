@@ -68,7 +68,7 @@ PROBE_REF="${3:-}"
 : "${AGENT_HOME:?AGENT_HOME not set}"
 
 # shellcheck source=../lib/forgejo.sh
-. "$AGENT_HOME/lib/forgejo.sh"
+. "$AGENT_HOME/lib/gitlab.sh"
 # shellcheck source=../lib/blockprobe.sh
 . "$AGENT_HOME/lib/blockprobe.sh"
 

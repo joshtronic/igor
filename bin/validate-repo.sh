@@ -21,7 +21,7 @@ if [ -f "$AGENT_HOME/.env" ]; then
 fi
 
 # shellcheck source=../lib/forgejo.sh
-. "$AGENT_HOME/lib/forgejo.sh"
+. "$AGENT_HOME/lib/gitlab.sh"
 # shellcheck source=../lib/dossier.sh
 . "$AGENT_HOME/lib/dossier.sh"
 # shellcheck source=../lib/repo-checks.sh

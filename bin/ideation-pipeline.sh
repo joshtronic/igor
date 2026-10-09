@@ -96,7 +96,7 @@ WEBSITE_PATH="${WEBSITE_PATH:-$AGENT_STATE_DIR/repos/${WEBSITE_REPO}}"
 # -- libs -------------------------------------------------------
 
 # shellcheck source=../lib/forgejo.sh
-. "$AGENT_HOME/lib/forgejo.sh"
+. "$AGENT_HOME/lib/gitlab.sh"
 # shellcheck source=../lib/cost.sh
 . "$AGENT_HOME/lib/cost.sh"
 # shellcheck source=../lib/claude.sh

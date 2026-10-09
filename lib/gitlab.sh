@@ -37,6 +37,34 @@
 : "${GITLAB_URL:?GITLAB_URL must be set}"
 : "${GITLAB_TOKEN:?GITLAB_TOKEN must be set}"
 
+# -- Compatibility aliases -------------------------------------------------
+#
+# The harness refers to forge config by its FORGEJO_* names in ~200 places
+# (FORGEJO_REVIEWER alone is 120). Those names are aliased to the GitLab values
+# here rather than renamed at every call site, for the same reason the
+# forgejo_* FUNCTION names were kept: the cutover stays a small, reviewable
+# diff instead of a 200-site sed that touches every file in the repo.
+#
+# This is naming debt, deliberately taken, and it is the SECOND layer of it in
+# this file. Renaming both layers is a follow-up, not a cutover-night change.
+#
+# FORGEJO_REVIEWER is NOT set here -- it comes from .env and happens to be the
+# same username on both forges (joshtronic), so there is nothing to translate.
+# FORGEJO_HOST is only read to derive an ssh target (bin/validate.sh) and for
+# diagnostics (bin/doctor.sh); the clone URLs come from gl_clone_url below.
+FORGEJO_URL="$GITLAB_URL"
+FORGEJO_TOKEN="$GITLAB_TOKEN"
+FORGEJO_HOST="${GITLAB_HOST:-gitlab.com}"
+export FORGEJO_URL FORGEJO_TOKEN FORGEJO_HOST
+
+# gl_clone_url <owner/repo> -- the git URL the harness clones and fetches with.
+# HTTPS with the token embedded, not SSH: one credential serves both git and
+# the API, there is no deploy key to manage, and it avoids the port/IPv6
+# handling the Forgejo host needed. Callers must not log the result verbatim.
+gl_clone_url() {
+  printf 'https://oauth2:%s@%s/%s.git' "$GITLAB_TOKEN" "${GITLAB_HOST:-gitlab.com}" "$1"
+}
+
 # bin/tick.sh defines log() before sourcing this; bin/agent-*.sh and the unit
 # tests may not. Same fallback shape as lib/forgejo.sh.
 if ! declare -F log >/dev/null; then

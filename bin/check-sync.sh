@@ -178,11 +178,17 @@ check_sync() {
   for entry in bin/*.sh; do
     case "$entry" in bin/test-*.sh | bin/check-sync.sh) continue ;; esac
     reach=$(sourced_libs "$entry")
-    # lib/forgejo.sh is excluded from the CALLER scan on purpose: it holds the
+    # The forge ADAPTER is excluded from the CALLER scan on purpose: it holds the
     # definitions, and its one internal call is inside forgejo_open_pr -- which is
     # exactly what we're tracking. Counting it would drag in every read-only
-    # helper that merely talks to Forgejo.
-    callers=$(printf '%s\n' "$reach" | grep -v '^lib/forgejo\.sh$' | tr '\n' ' ')
+    # helper that merely talks to the forge.
+    #
+    # Both adapters are excluded. lib/gitlab.sh is the live one since the GitLab
+    # cutover; lib/forgejo.sh is still in the tree (and still under test) so it
+    # stays listed. Add any future adapter here too -- miss it and every entry
+    # point that merely READS from the forge starts failing this check, because
+    # the file holding the definitions is itself counted as a caller.
+    callers=$(printf '%s\n' "$reach" | grep -vE '^lib/(forgejo|gitlab)\.sh$' | tr '\n' ' ')
     [ -n "${callers// /}" ] || continue
     # shellcheck disable=SC2086  # deliberate word-split: $callers is a file list
     if ! grep -hE '(forgejo_request_review|forgejo_open_pr)' $callers 2>/dev/null \

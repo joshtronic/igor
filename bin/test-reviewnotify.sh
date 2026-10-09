@@ -277,6 +277,10 @@ echo "== the hook is actually wired into forgejo_request_review =="
 # lib/forgejo.sh never called the notifier at all. So drive the REAL function
 # with only _forgejo_post_reviewers -- its documented test seam -- stubbed.
 export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+# lib/gitlab.sh is the live adapter since the GitLab cutover and fail-fasts
+# on its own env, so the suite must set both: the FORGEJO_* names above are
+# still read by the code under test via the compat aliases.
+export GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
 # shellcheck source=../lib/forgejo.sh
 . "$HERE/lib/forgejo.sh"
 
