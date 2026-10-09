@@ -48,6 +48,10 @@ chmod +x "$TMP/bin/curl"
 PATH="$TMP/bin:$PATH"
 
 export FORGEJO_URL="https://forgejo.example.test"
+# lib/gitlab.sh is the live adapter since the GitLab cutover and fail-fasts
+# on its own env, so the suite must set both: the FORGEJO_* names above are
+# still read by the code under test via the compat aliases.
+export GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
 export FORGEJO_TOKEN="test-token"
 export CURL_STUB_COUNT="$TMP/curl-count"
 # shellcheck source=../lib/forgejo.sh

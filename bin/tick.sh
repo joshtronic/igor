@@ -87,8 +87,8 @@ unset env_file_hint
 
 # -- Library ----------------------------------------------------
 
-# shellcheck source=lib/forgejo.sh
-. "$AGENT_HOME/lib/forgejo.sh"
+# shellcheck source=lib/gitlab.sh
+. "$AGENT_HOME/lib/gitlab.sh"
 # shellcheck source=lib/context-source.sh
 . "$AGENT_HOME/lib/context-source.sh"
 # shellcheck source=lib/checkpoint.sh
@@ -390,13 +390,17 @@ repo_path_for() { echo "$AGENT_REPO_ROOT/$1"; }
 # FORGEJO_HOST in "host" form (default port 22) or "host:port"
 # form (non-default port via ssh:// URL syntax). The shorthand
 # git@host:path syntax can't express ports; ssh:// can.
+# The git URL the harness clones and fetches with. Kept under its original
+# name so the ~dozen call sites are untouched, but it now delegates to
+# gl_clone_url (lib/gitlab.sh), which emits HTTPS-with-token rather than SSH:
+# one credential serves git and the API, there is no deploy key to manage, and
+# the Forgejo host's non-standard port / IPv6 handling goes away.
+#
+# The returned URL CONTAINS THE TOKEN. Never log it verbatim -- the existing
+# callers pass it straight to `git clone`, which is why this stayed a function
+# rather than a variable.
 ssh_clone_url() {
-  local repo="$1"
-  if [[ "$FORGEJO_HOST" == *:* ]]; then
-    echo "ssh://git@${FORGEJO_HOST}/${repo}.git"
-  else
-    echo "git@${FORGEJO_HOST}:${repo}.git"
-  fi
+  gl_clone_url "$1"
 }
 
 # Create the .agent/ scratch dir inside a worktree and drop a local

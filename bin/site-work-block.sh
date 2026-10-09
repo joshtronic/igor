@@ -98,7 +98,7 @@ LIVE=0
 DIRECTIVE=""
 
 # shellcheck source=../lib/forgejo.sh
-. "$AGENT_HOME/lib/forgejo.sh"
+. "$AGENT_HOME/lib/gitlab.sh"
 # shellcheck source=../lib/context-source.sh
 . "$AGENT_HOME/lib/context-source.sh"
 # shellcheck source=../lib/cost.sh

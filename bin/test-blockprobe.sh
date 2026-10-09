@@ -10,6 +10,11 @@ set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+export GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
+# lib/gitlab.sh is the live adapter since the GitLab cutover and fail-fasts
+# on its own env, so the suite must set both: the FORGEJO_* names above are
+# still read by the code under test via the compat aliases.
+export GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
 # shellcheck source=../lib/forgejo.sh
 . "$HERE/lib/forgejo.sh"
 # shellcheck source=../lib/blockprobe.sh
@@ -789,6 +794,7 @@ echo "== the two cross-library helpers PRINT their result (not an exit status) =
 # stubs the scenarios above installed.
 _real_helper_contract() (
   export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+  export GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
   export AUTOMERGE_SELF_REPO="joshtronic/igor"   # required, no default (igor#558)
   # shellcheck source=../lib/forgejo.sh
   . "$HERE/lib/forgejo.sh"

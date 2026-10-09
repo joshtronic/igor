@@ -127,7 +127,7 @@ if [ -z "${FORGEJO_URL:-}" ] || [ -z "${FORGEJO_TOKEN:-}" ]; then
 fi
 
 # shellcheck source=../lib/forgejo.sh
-. "$AGENT_HOME/lib/forgejo.sh"
+. "$AGENT_HOME/lib/gitlab.sh"
 
 bot=$(forgejo_whoami 2>/dev/null || echo "")
 if [ -n "$bot" ]; then

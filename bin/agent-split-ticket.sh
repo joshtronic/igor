@@ -64,7 +64,7 @@ BODY="${2:?usage: agent-split-ticket.sh \"<title>\" \"<body>\"}"
 : "${AGENT_HOME:?AGENT_HOME not set}"
 
 # shellcheck source=../lib/forgejo.sh
-. "$AGENT_HOME/lib/forgejo.sh"
+. "$AGENT_HOME/lib/gitlab.sh"
 # shellcheck source=../lib/split-ticket.sh
 . "$AGENT_HOME/lib/split-ticket.sh"
 

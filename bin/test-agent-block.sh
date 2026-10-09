@@ -41,7 +41,10 @@ export COMMENT_CAP="$TMP/comment.json"
 export BODY_PATCH_CAP="$TMP/body-patch.json"
 export ASSIGN_CAP="$TMP/assign.json"
 export LABEL_CAP="$TMP/label.json"
-export ISSUE_FIXTURE='{"number":42,"body":"Original issue text: do the thing."}'
+# GitLab-shaped: _gl_issue_shim maps iid -> number and description -> body, so
+# a Forgejo-shaped fixture (number/body) would pass through unshimmed and every
+# downstream read of .body would be empty.
+export ISSUE_FIXTURE='{"iid":42,"description":"Original issue text: do the thing."}'
 
 # Stub curl at the transport layer -- lib/forgejo.sh's `_fj` is real, so this
 # exercises the actual request shapes agent-block.sh's calls produce. Args
@@ -54,17 +57,26 @@ curl() {
     [ "${args[$i]}" = "-X" ] && method="${args[$((i + 1))]}"
     [ "${args[$i]}" = "-d" ] && data="${args[$((i + 1))]}"
   done
+  # GitLab API shapes, not Forgejo's. The differences that matter here:
+  #   comments      -> /notes
+  #   label add     -> PUT /issues/:iid with add_labels= (NOT /issues/:iid/labels,
+  #                    and NOT a bare labels=, which would replace the whole set)
+  #   body edit     -> PUT with description= (not PATCH with body=)
+  #   unassign      -> PUT with assignee_ids= (numeric, not logins)
+  # All three writes land on the SAME path and method, so they are told apart by
+  # payload rather than by URL the way the Forgejo stub could.
   case "$url" in
-    */issues/42/comments) printf '%s' "$data" >"$COMMENT_CAP"; printf '{}' ;;
-    */issues/42/labels)   printf '%s' "$data" >"$LABEL_CAP"; printf '{}' ;;
-    */labels)             printf '[{"id":1,"name":"Status/Blocked"}]' ;;
+    */issues/42/notes)    printf '%s' "$data" >"$COMMENT_CAP"; printf '{}' ;;
+    */users\?username=*)  printf '[{"id":7,"username":"igorbot"}]' ;;
+    */labels*)            printf '[{"id":1,"name":"Status/Blocked"}]' ;;
     */issues/42)
       case "$method" in
         GET) [ -n "${ISSUE_GET_FAIL:-}" ] && return 22; printf '%s' "$ISSUE_FIXTURE" ;;
-        PATCH)
+        PUT)
           case "$data" in
-            *'"body"'*)       printf '%s' "$data" >"$BODY_PATCH_CAP" ;;
-            *'"assignees"'*)  printf '%s' "$data" >"$ASSIGN_CAP" ;;
+            *'"add_labels"'*)    printf '%s' "$data" >"$LABEL_CAP" ;;
+            *'"description"'*)   printf '%s' "$data" >"$BODY_PATCH_CAP" ;;
+            *'"assignee_ids"'*)  printf '%s' "$data" >"$ASSIGN_CAP" ;;
           esac
           printf '{}'
           ;;
@@ -86,7 +98,8 @@ echo "== agent-block.sh: end-to-end, real script + stubbed transport (igor#434) 
 (
   unset FORGEJO_REVIEWER  # keep the run hermetic: no ambient reviewer to notify
   export ISSUE_NUMBER=42 FORGEJO_REPO=acme/x AGENT_HOME="$AGENT_HOME" \
-         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token" \
+         GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
   bash "$SCRIPT" "SEC-FINDING-XYZ: unauthorized access" >/dev/null 2>&1
 )
 RC=$?
@@ -94,7 +107,7 @@ eq "agent-block.sh exits 0 on a clean run" "0" "$RC"
 
 [ -s "$BODY_PATCH_CAP" ] || { echo "  x no body PATCH captured at all -- aborting remaining checks"; FAIL=$((FAIL + 1)); }
 
-NEW_BODY=$(jq -r '.body // empty' "$BODY_PATCH_CAP" 2>/dev/null)
+NEW_BODY=$(jq -r '.description // empty' "$BODY_PATCH_CAP" 2>/dev/null)
 has "issue body PATCH preserves the original text" "$NEW_BODY" "Original issue text: do the thing."
 has "issue body PATCH carries the block findings" "$NEW_BODY" "SEC-FINDING-XYZ: unauthorized access"
 
@@ -103,8 +116,10 @@ has "the comment still carries the findings too" "$COMMENT_BODY" "SEC-FINDING-XY
 has "the comment's instruction matches the real mechanism (body, not a dead-end)" \
   "$COMMENT_BODY" "issue description above"
 
-eq "Status/Blocked label was applied" "1" "$(jq -r '.labels[0]' "$LABEL_CAP" 2>/dev/null)"
-eq "the bot was unassigned" "[]" "$(jq -c '.assignees' "$ASSIGN_CAP" 2>/dev/null)"
+# Asserts the label NAME now, not an opaque numeric id: GitLab takes names,
+# which makes this check strictly more meaningful than it was.
+eq "Status/Blocked label was applied" "Status/Blocked" "$(jq -r '.add_labels' "$LABEL_CAP" 2>/dev/null)"
+eq "the bot was unassigned" "[]" "$(jq -c '.assignee_ids' "$ASSIGN_CAP" 2>/dev/null)"
 
 # The acceptance test that matters: replay bin/tick.sh's own extraction +
 # prompt-building shape (ISSUE_BODY=$(jq -r '.body // ""' <<<"$WINNER");
@@ -133,10 +148,11 @@ export LABEL_CAP="$TMP/label-probe.json"
 (
   unset FORGEJO_REVIEWER
   export ISSUE_NUMBER=42 FORGEJO_REPO=acme/x AGENT_HOME="$AGENT_HOME" \
-         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token" \
+         GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
   bash "$SCRIPT" "waiting on igor#537 to land" issue-open "joshtronic/igor#537" >/dev/null 2>&1
 )
-PROBE_BODY=$(jq -r '.body // empty' "$BODY_PATCH_CAP" 2>/dev/null)
+PROBE_BODY=$(jq -r '.description // empty' "$BODY_PATCH_CAP" 2>/dev/null)
 has "probe: body carries the probe block"        "$PROBE_BODY" "<!-- probe"
 has "probe: body carries the recorded kind"       "$PROBE_BODY" "kind: issue-open"
 has "probe: body carries the recorded ref"        "$PROBE_BODY" "ref: joshtronic/igor#537"
@@ -161,10 +177,11 @@ export BODY_PATCH_CAP="$TMP/body-patch-operator.json"
 (
   unset FORGEJO_REVIEWER
   export ISSUE_NUMBER=42 FORGEJO_REPO=acme/x AGENT_HOME="$AGENT_HOME" \
-         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token" \
+         GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
   bash "$SCRIPT" "the operator needs to pick an approach" operator >/dev/null 2>&1
 )
-OP_BODY=$(jq -r '.body // empty' "$BODY_PATCH_CAP" 2>/dev/null)
+OP_BODY=$(jq -r '.description // empty' "$BODY_PATCH_CAP" 2>/dev/null)
 has "operator probe: body carries kind: operator" "$OP_BODY" "kind: operator"
 
 # igor#555: the security gate's no-verdict/gate-error path has no external
@@ -176,10 +193,11 @@ export BODY_PATCH_CAP="$TMP/body-patch-transient.json"
 (
   unset FORGEJO_REVIEWER
   export ISSUE_NUMBER=42 FORGEJO_REPO=acme/x AGENT_HOME="$AGENT_HOME" \
-         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token" \
+         GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
   bash "$SCRIPT" "the security gate produced no verdict" transient >/dev/null 2>&1
 )
-TRANSIENT_BODY=$(jq -r '.body // empty' "$BODY_PATCH_CAP" 2>/dev/null)
+TRANSIENT_BODY=$(jq -r '.description // empty' "$BODY_PATCH_CAP" 2>/dev/null)
 has "transient probe: body carries kind: transient" "$TRANSIENT_BODY" "kind: transient"
 eq "transient probe: parses back as kind transient" "transient" \
    "$(blockprobe_parse_kind "$TRANSIENT_BODY")"
@@ -191,12 +209,13 @@ BADKIND_ERR="$TMP/badkind-stderr.txt"
 (
   unset FORGEJO_REVIEWER
   export ISSUE_NUMBER=42 FORGEJO_REPO=acme/x AGENT_HOME="$AGENT_HOME" \
-         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token" \
+         GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
   bash "$SCRIPT" "some reason" made-up-kind "joshtronic/igor#537" >/dev/null 2>"$BADKIND_ERR"
 )
 RC_BADKIND=$?
 eq "bad kind: still exits 0 (block still lands)" "0" "$RC_BADKIND"
-BADKIND_BODY=$(jq -r '.body // empty' "$BODY_PATCH_CAP" 2>/dev/null)
+BADKIND_BODY=$(jq -r '.description // empty' "$BODY_PATCH_CAP" 2>/dev/null)
 lacks_probe=$(case "$BADKIND_BODY" in *"<!-- probe"*) echo present ;; *) echo absent ;; esac)
 eq "bad kind: no probe block recorded" "absent" "$lacks_probe"
 has "bad kind: warns on stderr" "$(cat "$BADKIND_ERR")" "unrecognized probe kind"
@@ -208,10 +227,11 @@ NOREF_ERR="$TMP/noref-stderr.txt"
 (
   unset FORGEJO_REVIEWER
   export ISSUE_NUMBER=42 FORGEJO_REPO=acme/x AGENT_HOME="$AGENT_HOME" \
-         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token" \
+         GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
   bash "$SCRIPT" "some reason" issue-open >/dev/null 2>"$NOREF_ERR"
 )
-NOREF_BODY=$(jq -r '.body // empty' "$BODY_PATCH_CAP" 2>/dev/null)
+NOREF_BODY=$(jq -r '.description // empty' "$BODY_PATCH_CAP" 2>/dev/null)
 lacks_probe2=$(case "$NOREF_BODY" in *"<!-- probe"*) echo present ;; *) echo absent ;; esac)
 eq "no ref: no probe block recorded" "absent" "$lacks_probe2"
 has "no ref: warns on stderr" "$(cat "$NOREF_ERR")" "needs a ref"
@@ -233,7 +253,8 @@ FAIL_ERR="$TMP/stderr2.txt"
 (
   unset FORGEJO_REVIEWER
   export ISSUE_NUMBER=42 FORGEJO_REPO=acme/x AGENT_HOME="$AGENT_HOME" \
-         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+         FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token" \
+         GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
   bash "$SCRIPT" "SEC-FINDING-XYZ: unauthorized access" >/dev/null 2>"$FAIL_ERR"
 )
 RC2=$?
@@ -250,10 +271,10 @@ has "append failure -> the comment still carries the findings" \
 eq "append failure -> the comment does not claim the body was updated" "false" \
   "$(grep -q 'issue description above' <<<"$COMMENT2" && echo true || echo false)"
 
-eq "append failure -> Status/Blocked is still applied" "1" \
-  "$(jq -r '.labels[0]' "$LABEL_CAP" 2>/dev/null)"
+eq "append failure -> Status/Blocked is still applied" "Status/Blocked" \
+  "$(jq -r '.add_labels' "$LABEL_CAP" 2>/dev/null)"
 eq "append failure -> the bot is still unassigned" "[]" \
-  "$(jq -c '.assignees' "$ASSIGN_CAP" 2>/dev/null)"
+  "$(jq -c '.assignee_ids' "$ASSIGN_CAP" 2>/dev/null)"
 
 if [ "$FAIL" -eq 0 ]; then echo "test-agent-block: all checks passed"; exit 0; fi
 echo "test-agent-block: $FAIL check(s) FAILED"

@@ -33,8 +33,8 @@ if [ -f "$AGENT_HOME/.env" ]; then
   set +a
 fi
 
-# shellcheck source=lib/forgejo.sh
-. "$AGENT_HOME/lib/forgejo.sh" 2>/dev/null || {
+# shellcheck source=lib/gitlab.sh
+. "$AGENT_HOME/lib/gitlab.sh" 2>/dev/null || {
   echo "doctor: cannot source lib/forgejo.sh from $AGENT_HOME/lib/" >&2
   exit 1
 }

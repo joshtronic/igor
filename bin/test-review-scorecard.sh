@@ -30,10 +30,15 @@ REVIEW_HEADER=$(grep -n 'Review —.*automated' "$HERE/bin/tick.sh" | head -1 \
   | sed -E 's/^[0-9]+: *comment="//; s/\\`/`/g')
 REVIEW_HEADER=${REVIEW_HEADER/'${verdict}'/APPROVE}
 
-FIXTURE_PULLS=$(jq -n -c '[{number: 1, merged: true, merged_at: "2026-01-01T00:00:00Z"},
-                           {number: 2, merged: true, merged_at: "2026-01-02T00:00:00Z"}]')
+# GitLab-shaped fixtures. _gl_mr_shim derives .number from .iid and .merged
+# from (.state == "merged"), so a Forgejo-shaped record (number/merged) passes
+# through unshimmed and the scorecard sees no merged PRs at all.
+FIXTURE_PULLS=$(jq -n -c '[{iid: 1, state: "merged", merged_at: "2026-01-01T00:00:00Z"},
+                           {iid: 2, state: "merged", merged_at: "2026-01-02T00:00:00Z"}]')
+# Likewise notes: forgejo_pr_comments maps .author.username -> .user.login and
+# drops anything with system==true, so the fixture must carry both fields.
 FIXTURE_COMMENTS=$(jq -n -c --arg h "$REVIEW_HEADER" \
-  '[{user: {login: "igor"}, created_at: "2026-01-01T00:00:00Z",
+  '[{author: {username: "igor"}, system: false, created_at: "2026-01-01T00:00:00Z",
      body: ($h + "\n\nCI for `abc1234`: **success**\n\nLooks good.")}]')
 
 # FAIL_PRS is the space-separated list of PR numbers whose comment fetch should
@@ -42,11 +47,14 @@ FIXTURE_COMMENTS=$(jq -n -c --arg h "$REVIEW_HEADER" \
 curl() {
   local arg url='' n
   for arg in "$@"; do case "$arg" in http*) url="$arg" ;; esac; done
+  # GitLab paths: merge_requests rather than pulls, notes rather than comments,
+  # and state=all (GitLab makes `merged` its own state, so state=closed alone
+  # would return only REJECTED MRs and the scorecard would see zero merges).
   case "$url" in
-    *"/pulls?state=closed"*"page=1"*) printf '%s' "$FIXTURE_PULLS" ;;
-    *"/pulls?state=closed"*) printf '%s' '[]' ;;
-    *"/comments"*)
-      n=${url##*/issues/}; n=${n%%/comments*}
+    *"/merge_requests?state=all"*"page=1"*) printf '%s' "$FIXTURE_PULLS" ;;
+    *"/merge_requests?state=all"*) printf '%s' '[]' ;;
+    *"/notes"*)
+      n=${url##*/merge_requests/}; n=${n%%/notes*}
       case " ${FAIL_PRS:-} " in *" $n "*) return 22 ;; esac
       printf '%s' "$FIXTURE_COMMENTS" ;;
     *) return 22 ;;
@@ -55,6 +63,10 @@ curl() {
 export -f curl
 export FIXTURE_PULLS FIXTURE_COMMENTS
 export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
+# lib/gitlab.sh is the live adapter since the GitLab cutover and fail-fasts
+# on its own env, so the suite must set both: the FORGEJO_* names above are
+# still read by the code under test via the compat aliases.
+export GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
 
 echo "== both threads readable: every merged PR is scored =="
 export FAIL_PRS=""

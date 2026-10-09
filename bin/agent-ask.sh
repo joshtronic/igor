@@ -56,7 +56,7 @@ BODY="${3:?usage: agent-ask.sh <owner/repo> \"<title>\" \"<body>\"}"
 : "${BOT_USER:?BOT_USER not set -- are you being run from a tick?}"
 
 # shellcheck source=../lib/forgejo.sh
-. "$AGENT_HOME/lib/forgejo.sh"
+. "$AGENT_HOME/lib/gitlab.sh"
 
 QUESTION_MARKER='<!-- agent:question -->'
 

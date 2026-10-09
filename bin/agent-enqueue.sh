@@ -90,7 +90,7 @@ fi
 : "${BOT_USER:?BOT_USER not set -- are you being run from a tick?}"
 
 # shellcheck source=../lib/forgejo.sh
-. "$AGENT_HOME/lib/forgejo.sh"
+. "$AGENT_HOME/lib/gitlab.sh"
 
 ENQUEUE_MARKER='<!-- agent:enqueue -->'
 
