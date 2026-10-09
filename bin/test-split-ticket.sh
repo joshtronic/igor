@@ -8,11 +8,10 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../lib/split-ticket.sh
 . "$HERE/../lib/split-ticket.sh"
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 
 FAIL=0
-eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
-has() { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
-lacks() { case "$2" in *"$3"*) printf '  x %s: [%s] still has [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; *) printf '  + %s\n' "$1" ;; esac; }
 
 echo "== SPLIT_TICKET_MARKER_FILE: alongside PR_BODY.md's convention =="
 eq "marker lives under .agent/" ".agent/SPLIT_TICKET" "$SPLIT_TICKET_MARKER_FILE"

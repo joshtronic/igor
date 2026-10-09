@@ -13,12 +13,12 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=../lib/adjudication.sh
 . "$HERE/lib/adjudication.sh"
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 
 FAIL=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
-eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
-has() { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1: [${2:0:120}] lacks [$3]" ;; esac; }
 
 WT=$(mktemp -d); trap 'rm -rf "$WT"' EXIT
 mkdir -p "$WT/.agent"

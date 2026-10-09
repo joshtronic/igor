@@ -10,15 +10,15 @@ command -v jq >/dev/null 2>&1 || { echo "test-shipreport: jq absent -- skipping"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../lib/ship-report.sh
 . "$HERE/../lib/ship-report.sh"
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 export AGENT_STATE_DIR="$TMP"
 
 FAIL=0
-eq()  { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
 ok()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  + %s\n' "$d"; else printf '  x %s (expected rc0)\n' "$d"; FAIL=$((FAIL + 1)); fi; }
 no()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (expected rc!=0)\n' "$d"; FAIL=$((FAIL + 1)); else printf '  + %s\n' "$d"; fi; }
-has() { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
 
 echo "== shipreport_build: bucketing + gate tag =="
 ITEMS='[
