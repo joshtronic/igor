@@ -17,6 +17,8 @@ done
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../lib/security-gate.sh
 . "$HERE/../lib/security-gate.sh"
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 
 TMP="$(mktemp -d)" || { echo "test-security-gate: mktemp unavailable -- skipping"; exit 0; }
 trap 'rm -rf "$TMP"' EXIT
@@ -25,10 +27,6 @@ mkdir -p "$AGENT_STATE_DIR"
 WT="$TMP/worktree"; mkdir -p "$WT"
 
 FAIL=0
-eq()   { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
-has()  { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "${2:0:200}" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
-lacks(){ case "$2" in *"$3"*) printf '  x %s: [%s] still has [%s]\n' "$1" "${2:0:200}" "$3"; FAIL=$((FAIL + 1)) ;; *) printf '  + %s\n' "$1" ;; esac; }
-
 LOGGED=""
 log() { LOGGED="${LOGGED}$*"$'\n'; }
 

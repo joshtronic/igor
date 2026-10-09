@@ -14,6 +14,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 export GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
 # shellcheck source=../lib/gitlab.sh
 . "$HERE/../lib/gitlab.sh"
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 
 # Sections below stub _gl_paged wholesale. Keep a copy of the real one under
 # another name so a later section can restore it rather than losing it for the
@@ -24,8 +26,6 @@ _restore_paged() { eval "$(declare -f _real_gl_paged | sed '1s/^_real_gl_paged/_
 FAIL=0
 ok() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  + %s\n' "$d"; else printf '  x %s (expected rc0)\n' "$d"; FAIL=$((FAIL + 1)); fi; }
 no() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (expected rc!=0)\n' "$d"; FAIL=$((FAIL + 1)); else printf '  + %s\n' "$d"; fi; }
-eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
-has() { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
 
 echo "== required-and-explicit env (no optional-with-default knobs) =="
 # A clean shell sourcing lib/gitlab.sh without GITLAB_TOKEN must fail fast and

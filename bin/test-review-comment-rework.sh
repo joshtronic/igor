@@ -21,13 +21,12 @@ command -v jq >/dev/null 2>&1 || { echo "test-review-comment-rework: jq absent -
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 TICK="$HERE/bin/tick.sh"
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 
 FAIL=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
-eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
-has() { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1: [$2] lacks [$3]" ;; esac; }
-lacks() { case "$2" in *"$3"*) bad "$1: [$2] should lack [$3]" ;; *) ok "$1" ;; esac; }
 
 # Lift the real functions rather than reimplementing them -- a hand-rolled
 # copy would happily agree with a routing decision the shipping code doesn't

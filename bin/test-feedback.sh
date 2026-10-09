@@ -23,6 +23,8 @@ export GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
 . "$HERE/../lib/context-source.sh"
 # shellcheck source=../lib/feedback.sh
 . "$HERE/../lib/feedback.sh"
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 export AGENT_STATE_DIR="$TMP"; STATE="$TMP/discretionary-state.json"
@@ -30,8 +32,6 @@ export AGENT_STATE_DIR="$TMP"; STATE="$TMP/discretionary-state.json"
 FAIL=0
 ok() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  + %s\n' "$d"; else printf '  x %s (rc0 expected)\n' "$d"; FAIL=$((FAIL + 1)); fi; }
 no() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (rc!=0 expected)\n' "$d"; FAIL=$((FAIL + 1)); else printf '  + %s\n' "$d"; fi; }
-eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
-has() { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
 
 echo "== CSV parse (quoted commas + the real Google-Form header) =="
 CSV=$(printf '%s\n%s\n' \

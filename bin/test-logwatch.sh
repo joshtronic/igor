@@ -22,14 +22,14 @@ command -v jq >/dev/null 2>&1 || { echo "test-logwatch: jq not installed -- skip
 
 # shellcheck source=lib/logwatch.sh
 . "$HERE/lib/logwatch.sh"
+# shellcheck source=lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 
 FAIL=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
 yes() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d (rc0 expected)"; fi; }
 no()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$d (rc!=0 expected)"; else ok "$d"; fi; }
-eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
-has()    { case "$2" in *"$3"*) ok "$1";; *) bad "$1: missing [$3]";; esac; }
 hasnt()  { case "$2" in *"$3"*) bad "$1: unexpected [$3]";; *) ok "$1";; esac; }
 
 TMP="$(mktemp -d)"
