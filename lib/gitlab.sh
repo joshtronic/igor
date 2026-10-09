@@ -259,7 +259,10 @@ _gl_issue_shim() {
           number: .iid,
           body: (.description // ""),
           user: { login: (.author.username // "") },
-          labels: [ (.labels // [])[] | {name: .} ]
+          labels: [ (.labels // [])[] | {name: .} ],
+          repository: {
+            full_name: ((.references.full // "") | sub("[#!].*$"; ""))
+          }
         }
       else . end;
     if type == "array" then [ .[] | one ] else one end'
@@ -347,6 +350,20 @@ forgejo_log_time() {
 #   .number    <- .iid
 #   .body      <- .description
 #   .user.login<- .author.username
+#   .repository.full_name <- .references.full, with the trailing ref stripped
+#     ("sherver/igor#8" -> "sherver/igor"). Note GitLab numbers ISSUES with '#'
+#     and MERGE REQUESTS with '!', so both separators are stripped -- splitting
+#     on '#' alone silently leaves "sherver/igor!2" for every MR. GitLab's CROSS-PROJECT endpoints
+#     (/issues, /merge_requests with scope=assigned_to_me) return no project
+#     path at all -- only a numeric project_id -- where Forgejo's search
+#     endpoint carried a whole .repository object. Three call sites read
+#     .repository.full_name off those results (bin/tick.sh:4020 recovery sweep,
+#     :4130 and :4143 PR-review pickup) and got null, which took the harness
+#     down for ~9h: the sweep logged "null#8 orphaned", then
+#     forgejo_comment null 8 404'd, curl exited 22, and errexit killed the tick
+#     BEFORE the unassign that would have cleared the orphan -- so every
+#     subsequent tick repeated it. Populating it in the shim fixes all three
+#     readers at once; fixing tick.sh would have left the other two.
 #   .head.ref  <- .source_branch        .head.sha <- .sha
 #   .base.ref  <- .target_branch
 #   .merged    <- (.state == "merged")  -- GitLab makes merged its own state,
@@ -365,7 +382,10 @@ _gl_mr_shim() {
         merged: (.state == "merged"),
         state: (if .state == "opened" then "open"
                 elif .state == "merged" then "closed"
-                else (.state // "") end)
+                else (.state // "") end),
+        repository: {
+          full_name: ((.references.full // "") | sub("[#!].*$"; ""))
+        }
       };
     if type == "array" then [ .[] | one ] else one end'
 }
