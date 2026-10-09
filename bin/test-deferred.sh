@@ -7,14 +7,14 @@ set -uo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=../lib/deferred.sh
 . "$HERE/lib/deferred.sh"
+# shellcheck source=../lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 
 for t in jq sed; do
   command -v "$t" >/dev/null 2>&1 || { echo "test-deferred: $t unavailable -- skipping"; exit 0; }
 done
 
 FAIL=0
-eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
-has() { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
 
 GATE='some intro text
 <!-- gate

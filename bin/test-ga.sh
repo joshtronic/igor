@@ -22,6 +22,8 @@ log() { :; }   # tick.sh provides log() at runtime; no-op here
 . "$HERE/lib/ga.sh"
 # shellcheck source=lib/seo-analysis.sh
 . "$HERE/lib/seo-analysis.sh"
+# shellcheck source=lib/testlib.sh
+. "$HERE/lib/testlib.sh"
 
 # ga_access_token is delegated to lib/google-auth.sh (not sourced here) --
 # stub it directly so ga_property_for_domain / ga_run_report can run
@@ -31,8 +33,6 @@ ga_access_token() { printf 'fake-token'; }
 FAIL=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
-eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected [$2] got [$3]"; fi; }
-has()    { case "$2" in *"$3"*) ok "$1";; *) bad "$1: missing [$3]";; esac; }
 hasnt()  { case "$2" in *"$3"*) bad "$1: unexpected [$3]";; *) ok "$1";; esac; }
 no() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$d (rc!=0 expected)"; else ok "$d"; fi; }
 

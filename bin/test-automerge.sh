@@ -22,6 +22,8 @@ export FORGEJO_URL="https://example.invalid" FORGEJO_TOKEN="test-token"
 . "$HERE/../lib/dossier.sh"
 # shellcheck source=../lib/automerge.sh
 . "$HERE/../lib/automerge.sh"
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 
 # Sections below stub automerge_url_status wholesale. Keep a copy of the real
 # one under another name so the self-repo carve-out can be exercised for real,
@@ -44,8 +46,6 @@ STATE="$TMP/discretionary-state.json"
 FAIL=0
 ok() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  + %s\n' "$d"; else printf '  x %s (expected rc0)\n' "$d"; FAIL=$((FAIL + 1)); fi; }
 no() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (expected rc!=0)\n' "$d"; FAIL=$((FAIL + 1)); else printf '  + %s\n' "$d"; fi; }
-eq() { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
-has() { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
 
 echo "== AUTOMERGE_SELF_REPO: required-and-explicit, no default (igor#558) =="
 # A clean shell sourcing lib/automerge.sh without AUTOMERGE_SELF_REPO set must

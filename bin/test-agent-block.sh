@@ -26,10 +26,10 @@ SCRIPT="$HERE/agent-block.sh"
 # a subshell re-exported.
 # shellcheck source=../lib/blockprobe.sh
 . "$AGENT_HOME/lib/blockprobe.sh"
+# shellcheck source=../lib/testlib.sh
+. "$AGENT_HOME/lib/testlib.sh"
 
 FAIL=0
-eq()  { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
-has() { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 # Exported (not just set): agent-block.sh runs as a CHILD bash process below,
