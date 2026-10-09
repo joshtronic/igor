@@ -12,12 +12,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/../lib/context-source.sh"
 # shellcheck source=../lib/worker-doc.sh
 . "$HERE/../lib/worker-doc.sh"
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 
 FAIL=0
 ok() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  + %s\n' "$d"; else printf '  x %s (rc0 expected)\n' "$d"; FAIL=$((FAIL + 1)); fi; }
 no() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (rc!=0 expected)\n' "$d"; FAIL=$((FAIL + 1)); else printf '  + %s\n' "$d"; fi; }
-eq() { local d="$1" want="$2" got="$3"; if [ "$want" = "$got" ]; then printf '  + %s\n' "$d"; else printf '  x %s (want %q got %q)\n' "$d" "$want" "$got"; FAIL=$((FAIL + 1)); fi; }
-has() { local d="$1" needle="$2" hay="$3"; case "$hay" in *"$needle"*) printf '  + %s\n' "$d" ;; *) printf '  x %s (%q not in %q)\n' "$d" "$needle" "$hay"; FAIL=$((FAIL + 1)) ;; esac; }
 
 TMPROOT="$(mktemp -d)"
 trap 'rm -rf "$TMPROOT"' EXIT
@@ -27,7 +27,7 @@ DEST="$TMPROOT/worker-doc"
 echo "== unseeded cache -> the in-repo AGENTS.md, named as a fallback =="
 ok "selection succeeds" worker_doc_select "$DEST"
 eq "document is the in-repo AGENTS.md" "AGENTS.md" "$WORKER_DOC"
-has "label says it is the fallback" "fallback" "$WORKER_DOC_LABEL"
+has "label says it is the fallback" "$WORKER_DOC_LABEL" "fallback"
 ok "nothing written to the destination" [ ! -s "$DEST" ]
 
 echo "== seeded cache -> the sourced worker-contract body =="
@@ -39,7 +39,7 @@ printf '%s\n' "$WANT" > "$GEN/worker-contract.md"
 ok "selection succeeds" worker_doc_select "$DEST"
 eq "document is the destination file, not AGENTS.md" "$DEST" "$WORKER_DOC"
 eq "destination holds the sourced body verbatim" "$WANT" "$(cat "$DEST")"
-has "label names the sourced document" "sourced worker-contract" "$WORKER_DOC_LABEL"
+has "label names the sourced document" "$WORKER_DOC_LABEL" "sourced worker-contract"
 
 echo "== seeded cache but worker-contract unservable -> explicit failure, no empty document =="
 rm -f "$GEN/worker-contract.md"
