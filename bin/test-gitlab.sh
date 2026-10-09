@@ -54,6 +54,24 @@ eq "object: labels become {name} objects"  "Agent"   "$(jq -r '.labels[0].name' 
 SHA=$(printf '[%s,%s]' "$ISSUE" "$ISSUE" | _gl_issue_shim)
 eq "array: both entries shimmed, not passed through" "7 7" "$(jq -r '[.[].number]|join(" ")' <<<"$SHA")"
 
+echo "== shims populate repository.full_name (the ~9h outage of 2026-10-09) =="
+# bin/tick.sh reads .repository.full_name off the CROSS-PROJECT assigned-issue
+# and assigned-MR results (recovery sweep at :4020, PR-review pickup at :4130
+# and :4143). GitLab returns no project path on those endpoints -- only a
+# numeric project_id -- so without this the sweep saw "null#8", the follow-up
+# API call 404'd, curl exited 22, and errexit killed the tick BEFORE the
+# unassign that clears the orphan. Every later tick repeated it forever.
+REFI='{"iid":8,"title":"t","description":"d","author":{"username":"igorbot"},"labels":[],"references":{"short":"#8","relative":"#8","full":"sherver/igor#8"}}'
+eq "issue: full_name from references.full" "sherver/igor" "$(printf '%s' "$REFI" | _gl_issue_shim | jq -r '.repository.full_name')"
+eq "issue: array form too"                 "sherver/igor" "$(printf '[%s]' "$REFI" | _gl_issue_shim | jq -r '.[0].repository.full_name')"
+eq "issue: absent references -> empty, NOT null" "" "$(printf '%s' '{"iid":9,"description":"","author":{"username":"u"},"labels":[]}' | _gl_issue_shim | jq -r '.repository.full_name')"
+REFM='{"iid":2,"state":"opened","source_branch":"agent/8-x","target_branch":"master","sha":"abc","description":"d","author":{"username":"igorbot"},"references":{"full":"sherver/igor!2"}}'
+eq "MR: full_name from references.full"    "sherver/igor" "$(printf '%s' "$REFM" | _gl_mr_shim | jq -r '.repository.full_name')"
+eq "MR: array form too"                    "sherver/igor" "$(printf '[%s]' "$REFM" | _gl_mr_shim | jq -r '.[0].repository.full_name')"
+# A project path can itself contain no '#', but a subgroup path contains '/' --
+# split on '#' only, so nested groups survive.
+eq "nested group path survives" "sherver/sub/deep" "$(printf '%s' '{"iid":1,"description":"","author":{"username":"u"},"labels":[],"references":{"full":"sherver/sub/deep#1"}}' | _gl_issue_shim | jq -r '.repository.full_name')"
+
 echo "== MR shim: GitLab's merged state folded back to Forgejo's closed+merged pair =="
 mrshim() { printf '%s' "$1" | _gl_mr_shim; }
 eq "opened -> open, merged false"  "open false"   "$(mrshim '{"iid":3,"state":"opened","source_branch":"agent/1","target_branch":"master","sha":"abc","description":"d","author":{"username":"igorbot"}}' | jq -r '"\(.state) \(.merged)"')"
