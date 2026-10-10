@@ -103,6 +103,7 @@ review_build_prompt() { printf 'prompt'; }
 review_rework_rounds() { echo 0; }
 reviewer_effort() { echo high; }
 forgejo_comment() { COMMENT_POSTED=1; return 0; }
+forgejo_pr_comment() { forgejo_comment "$@"; }
 forgejo_log_time() { return 0; }
 review_apply_verdict() { :; }
 

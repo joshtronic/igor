@@ -143,6 +143,7 @@ forgejo_comment() {
   printf '%s\n' "$3" >> "$PR_COMMENTS_LOG"
   return 0
 }
+forgejo_pr_comment() { forgejo_comment "$@"; }
 forgejo_pr_has_comment_containing() {
   local n
   n=$(grep -cF -- "$4" "$PR_COMMENTS_LOG" 2>/dev/null) || n=0

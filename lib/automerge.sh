@@ -780,7 +780,7 @@ _deploy_clear() {
 _deploy_alert() {
   local repo="$1" pr="$2" sha="$3" url="$4" why="$5" recipients subject body
   log "deploy: ALERT ${repo}#${pr} ${sha:0:8}: ${why}"
-  forgejo_comment "$repo" "$pr" \
+  forgejo_pr_comment "$repo" "$pr" \
     "⚠️ **Auto-merge deploy did NOT verify.** ${why}. Merge commit \`${sha:0:8}\`, URL ${url}. Phase 1 is alert-only (no auto-revert) -- needs eyes." \
     2>/dev/null || true
   recipients=$(recipients_with_primary "${ALERT_RECIPIENTS:-}")
@@ -876,7 +876,7 @@ do_deploy_barrier() {
   fi
 
   log "deploy: ${repo}#${pr} verified healthy (CI green, ${detail}) -- resuming work"
-  forgejo_comment "$repo" "$pr" \
+  forgejo_pr_comment "$repo" "$pr" \
     "🚀 **Auto-merge deploy verified.** CI green and the live build is the merged commit — ${detail}. Merge commit \`${sha:0:8}\`. (Posted by the harness deploy barrier; no action needed.)" \
     2>/dev/null || log "warning: deploy: confirm-comment failed on ${repo}#${pr}"
   _deploy_clear; return 1
