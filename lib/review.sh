@@ -696,7 +696,7 @@ review_adjudication_scan() {
       [ -z "$pr_num" ] && continue
       if review_adjudication_pending "$repo_full" "$pr_num" "$bot" "$reviewer" >/dev/null; then
         log "PR-review: ${repo_full}#${pr_num} -- human adjudication marker from ${reviewer}, reassigning to ${bot}"
-        forgejo_assign "$repo_full" "$pr_num" "$bot" 2>/dev/null \
+        forgejo_pr_assign "$repo_full" "$pr_num" "$bot" 2>/dev/null \
           || log "warning: review: could not reassign ${repo_full}#${pr_num} for adjudication pickup"
       fi
     done < <(jq -r '.[].number' <<<"$prs" 2>/dev/null)

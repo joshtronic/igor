@@ -319,6 +319,35 @@ forgejo_unassign_all() {
   _gl PUT "/projects/$(_gl_proj "$repo")/issues/${number}" '{"assignee_ids": []}' >/dev/null
 }
 
+# forgejo_pr_assign / forgejo_pr_unassign_all -- assignee writes on a MERGE
+# REQUEST.
+#
+# Third instance of the same root cause as forgejo_pr_comment: Forgejo made a
+# PR literally an issue and one endpoint served both, GitLab keeps them in
+# SEPARATE iid spaces, and these target /issues/:iid.
+#
+# This one did real damage before it was caught. review_route_into_rework
+# assigns the bot to the MR it is reworking; with the issues endpoint that
+# assigned ISSUE #6 ("pour from a verified Distillery tag") instead of MR !6.
+# The recovery sweep then correctly saw an issue assigned to the bot with no
+# work in flight, declared it orphaned, commented "Previous tick was
+# interrupted" on it and unassigned it -- once per rework round. The issue was
+# never being worked at all.
+#
+# Any caller holding a PR/MR number must use these.
+forgejo_pr_assign() {
+  local repo="$1" number="$2" user="$3" uid
+  uid=$(_gl_user_id "$user")
+  [ -n "$uid" ] || { log "gitlab: cannot resolve user [$user] to assign" >&2; return 1; }
+  _gl PUT "/projects/$(_gl_proj "$repo")/merge_requests/${number}" \
+    "$(jq -n --argjson u "$uid" '{assignee_ids: [$u]}')" >/dev/null
+}
+
+forgejo_pr_unassign_all() {
+  local repo="$1" number="$2"
+  _gl PUT "/projects/$(_gl_proj "$repo")/merge_requests/${number}" '{"assignee_ids": []}' >/dev/null
+}
+
 forgejo_comment() {
   local repo="$1" number="$2" body="$3"
   _gl POST "/projects/$(_gl_proj "$repo")/issues/${number}/notes" \

@@ -884,6 +884,7 @@ echo "== review_adjudication_scan: reassigns a qualifying PR, reuses Signal 2 ==
 
 ASSIGNED=""
 forgejo_assign() { ASSIGNED="${ASSIGNED}$1#$2->$3;"; }
+forgejo_pr_assign() { forgejo_assign "$@"; }
 forgejo_list_open_bot_prs() { jq -n '[{number: 7, title: "t", head: "h"}]'; }
 forgejo_pr_comments() {
   jq -n '[{user:{login:"joshtronic"}, created_at:"2026-09-01T00:00:00Z",
