@@ -80,6 +80,33 @@ eq "closed -> closed, merged false" "closed false" "$(mrshim '{"iid":5,"state":"
 eq "head.ref <- source_branch"     "agent/1"      "$(mrshim '{"iid":3,"state":"opened","source_branch":"agent/1","target_branch":"master","sha":"abc","description":"d","author":{"username":"igorbot"}}' | jq -r '.head.ref')"
 eq "base.ref <- target_branch"     "master"       "$(mrshim '{"iid":3,"state":"opened","source_branch":"agent/1","target_branch":"master","sha":"abc","description":"d","author":{"username":"igorbot"}}' | jq -r '.base.ref')"
 
+echo "== shim: .mergeable and .html_url (automerge gated on fields GitLab lacks) =="
+# automerge_mergeable gates on `.mergeable == true`. GitLab has no such
+# boolean -- it reports detailed_merge_status. Without the mapping the field was
+# ABSENT, so `.mergeable == true` was false for every MR and automerge logged
+# "not cleanly mergeable -- skipping" forever on MRs GitLab itself reported as
+# can_be_merged. Two APPROVEd posts sat unmergeable on that.
+m() { printf '%s' "$1" | _gl_mr_shim; }
+eq "detailed=mergeable -> true" "true" \
+  "$(m '{"iid":1,"state":"opened","source_branch":"a","target_branch":"master","sha":"s","description":"","author":{"username":"u"},"detailed_merge_status":"mergeable"}' | jq -r '.mergeable')"
+eq "detailed=conflict -> false" "false" \
+  "$(m '{"iid":1,"state":"opened","source_branch":"a","target_branch":"master","sha":"s","description":"","author":{"username":"u"},"detailed_merge_status":"conflict"}' | jq -r '.mergeable')"
+# "checking" means GitLab has not finished computing it. The honest answer is
+# "not yet", and the next tick re-reads -- NOT an optimistic true.
+eq "detailed=checking -> false, never optimistic" "false" \
+  "$(m '{"iid":1,"state":"opened","source_branch":"a","target_branch":"master","sha":"s","description":"","author":{"username":"u"},"detailed_merge_status":"checking"}' | jq -r '.mergeable')"
+eq "detailed=ci_still_running -> false" "false" \
+  "$(m '{"iid":1,"state":"opened","source_branch":"a","target_branch":"master","sha":"s","description":"","author":{"username":"u"},"detailed_merge_status":"ci_still_running"}' | jq -r '.mergeable')"
+# Legacy fallback for an instance predating detailed_merge_status.
+eq "no detailed, merge_status=can_be_merged -> true" "true" \
+  "$(m '{"iid":1,"state":"opened","source_branch":"a","target_branch":"master","sha":"s","description":"","author":{"username":"u"},"merge_status":"can_be_merged"}' | jq -r '.mergeable')"
+eq "neither field -> false (unknown is not mergeable)" "false" \
+  "$(m '{"iid":1,"state":"opened","source_branch":"a","target_branch":"master","sha":"s","description":"","author":{"username":"u"}}' | jq -r '.mergeable')"
+eq "html_url aliases web_url" "https://gitlab.invalid/x/-/merge_requests/1" \
+  "$(m '{"iid":1,"state":"opened","source_branch":"a","target_branch":"master","sha":"s","description":"","author":{"username":"u"},"web_url":"https://gitlab.invalid/x/-/merge_requests/1"}' | jq -r '.html_url')"
+eq "issue shim gets html_url too" "https://gitlab.invalid/x/-/issues/9" \
+  "$(printf '%s' '{"iid":9,"description":"","author":{"username":"u"},"labels":[],"web_url":"https://gitlab.invalid/x/-/issues/9"}' | _gl_issue_shim | jq -r '.html_url')"
+
 echo "== find_claimable: the intake gate. Must fail CLOSED. =="
 # Four issues: claimable; blocked; assigned to a third party; assigned solely
 # to the reviewer (still claimable); and one WITHOUT the Agent label, to prove
