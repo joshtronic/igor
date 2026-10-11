@@ -325,6 +325,24 @@ forgejo_comment() {
     "$(jq -n --arg b "$body" '{body: $b}')" >/dev/null
 }
 
+# forgejo_pr_comment <repo> <mr_iid> <body> -- comment on a MERGE REQUEST.
+#
+# This exists because GitLab keeps issues and merge requests in SEPARATE iid
+# spaces, where Forgejo made a PR literally an issue and one endpoint served
+# both. forgejo_comment targets /issues/:iid/notes; calling it with an MR iid
+# either 404s (no issue with that number) or -- far worse -- posts the comment
+# onto an UNRELATED ISSUE that happens to share the number. sherver/igor has
+# both an issue #4 and an MR !4, so a review verdict for the MR would have
+# landed on the issue.
+#
+# Callers that hold a PR/MR number must use this. See the sweep in the commit
+# that introduced it for the 14 sites that did.
+forgejo_pr_comment() {
+  local repo="$1" number="$2" body="$3"
+  _gl POST "/projects/$(_gl_proj "$repo")/merge_requests/${number}/notes" \
+    "$(jq -n --arg b "$body" '{body: $b}')" >/dev/null
+}
+
 # Log time spent on an issue/MR. GitLab has a real endpoint for this (unlike
 # the `/spend` quick-action-in-a-note workaround), and it takes a HUMAN
 # duration string, not seconds -- so the caller's seconds are rendered as

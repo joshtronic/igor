@@ -31,8 +31,9 @@ drifts the first time someone adds an operation.
 | `forgejo_set_issue_body` | replace an issue's body outright |
 | `forgejo_assign` | set an issue/PR's sole assignee |
 | `forgejo_unassign_all` | clear an issue/PR's assignees |
-| `forgejo_comment` | post a comment on an issue/PR |
-| `forgejo_log_time` | log time spent against an issue/PR |
+| `forgejo_comment` | post a comment on an ISSUE |
+| `forgejo_pr_comment` | post a comment on a PULL REQUEST / MERGE REQUEST |
+| `forgejo_log_time` | log time spent against an issue (4th arg selects merge_requests) |
 | `forgejo_open_issue` | create an issue |
 | `forgejo_open_issue_assigned` | create an issue with an assignee and labels in one call |
 | `forgejo_reopen_issue` | reopen a closed issue |

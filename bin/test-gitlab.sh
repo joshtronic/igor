@@ -111,6 +111,36 @@ eq "past the window -> 0"             "0"   "$(forgejo_claim_quiet_seconds_remai
 eq "unparseable timestamp fails OPEN" "0"   "$(forgejo_claim_quiet_seconds_remaining "not-a-date" 1 2>/dev/null)"
 eq "EMPTY timestamp fails OPEN (not 'now')" "0" "$(forgejo_claim_quiet_seconds_remaining "" 1 2>/dev/null)"
 
+echo "== issues and MRs are SEPARATE iid spaces -- comments must not cross =="
+# On Forgejo a PR IS an issue and one endpoint served both. On GitLab the iid
+# spaces are separate, so forgejo_comment with an MR iid either 404s or posts
+# onto an UNRELATED ISSUE sharing the number. sherver/igor has both an issue #4
+# and an MR !4, so a review verdict would have landed on the issue.
+CAPPATH=""
+_gl() { CAPPATH="$2"; printf '{}'; }
+forgejo_comment acme/x 4 "body"
+case "$CAPPATH" in */issues/4/notes) printf '  + %s
+' "forgejo_comment targets /issues/:iid/notes" ;;
+  *) printf '  x %s: got [%s]\n' "forgejo_comment should target issues" "$CAPPATH"; FAIL=$((FAIL+1)) ;; esac
+forgejo_pr_comment acme/x 4 "body"
+case "$CAPPATH" in */merge_requests/4/notes) printf '  + %s
+' "forgejo_pr_comment targets /merge_requests/:iid/notes" ;;
+  *) printf '  x %s: got [%s]\n' "forgejo_pr_comment should target merge_requests" "$CAPPATH"; FAIL=$((FAIL+1)) ;; esac
+case "$CAPPATH" in */issues/*) printf '  x %s\n' "forgejo_pr_comment must NEVER touch an issue path"; FAIL=$((FAIL+1)) ;;
+  *) printf '  + %s
+' "forgejo_pr_comment never touches an issue path" ;; esac
+# log_time has the same split; default stays issues, MR callers pass the kind.
+forgejo_log_time acme/x 4 60
+case "$CAPPATH" in */issues/4/add_spent_time) printf '  + %s
+' "log_time defaults to issues" ;;
+  *) printf '  x %s: got [%s]\n' "log_time default" "$CAPPATH"; FAIL=$((FAIL+1)) ;; esac
+forgejo_log_time acme/x 4 60 merge_requests
+case "$CAPPATH" in */merge_requests/4/add_spent_time) printf '  + %s
+' "log_time honours an explicit merge_requests kind" ;;
+  *) printf '  x %s: got [%s]\n' "log_time kind" "$CAPPATH"; FAIL=$((FAIL+1)) ;; esac
+unset -f _gl
+. "$HERE/../lib/gitlab.sh" 2>/dev/null
+
 echo "== labels: add MUST use add_labels=, never labels= (silently drops the rest) =="
 CAPTURED=""
 _gl() { CAPTURED="$3"; printf '{}'; }

@@ -81,6 +81,7 @@ AUTOMERGE_WILL_TAKE=1   # 1 = false (do not auto-merge) by default
 automerge_will_take() { echo "automerge_will_take $*" >> "$CALLLOG"; return "$AUTOMERGE_WILL_TAKE"; }
 forgejo_request_review() { echo "forgejo_request_review $*" >> "$CALLLOG"; return 0; }
 forgejo_comment() { echo "forgejo_comment $*" >> "$CALLLOG"; return 0; }
+forgejo_pr_comment() { forgejo_comment "$@"; }
 forgejo_assign() { echo "forgejo_assign $*" >> "$CALLLOG"; return 0; }
 MAINTENANCE_VALIDATED=0  # 0 = true by default
 maintenance_repo_validated() { echo "maintenance_repo_validated $*" >> "$CALLLOG"; return "$MAINTENANCE_VALIDATED"; }

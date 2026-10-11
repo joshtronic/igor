@@ -371,6 +371,17 @@ forgejo_comment() {
     "$(jq -n --arg b "$body" '{body: $b}')" >/dev/null
 }
 
+# forgejo_pr_comment <repo> <pr> <body> -- comment on a pull request.
+#
+# On Forgejo a PR IS an issue and they share one number space, so this is
+# forgejo_comment. It exists as a separate name because GitLab keeps them in
+# separate iid spaces and cannot share one endpoint -- see lib/gitlab.sh's
+# copy. Keeping both adapters to the same contract means call sites do not
+# care which forge they are talking to.
+forgejo_pr_comment() {
+  forgejo_comment "$@"
+}
+
 # Log time spent on an issue/PR (Forgejo's built-in time tracking).
 # Number works for both issues and PRs -- they share the number space.
 # Best-effort: warns and returns non-zero if the repo has time tracking

@@ -275,7 +275,7 @@ _landed_alert() {
     *)             what="the landed-verification check" ;;
   esac
   log "landed: ALERT ${repo}#${pr} merged ${sha:0:8} but ${what} still shows ${observed:-none} after ${LANDED_GRACE_TICKS} ticks"
-  forgejo_comment "$repo" "$pr" \
+  forgejo_pr_comment "$repo" "$pr" \
     "⚠️ **Merge landed but did not verify.** ${what} still shows \`${observed:-none}\`, not the merged commit \`${sha:0:8}\`, after ${LANDED_GRACE_TICKS} ticks. No auto-revert -- needs eyes." \
     2>/dev/null || true
   recipients=$(recipients_with_primary "${ALERT_RECIPIENTS:-}")

@@ -3637,10 +3637,13 @@ ${review_body}
 <sub>Independent review by the harness on \`${AGENT_MODEL_REVIEW}\` (effort: ${rev_effort}). The human reviewer is requested once Igor has reviewed; a human still merges.</sub>
 <!-- review sha=${target_sha} verdict=${verdict} ci=${ci} -->"
 
-  if forgejo_comment "$target_repo" "$target_num" "$comment"; then
+  if forgejo_pr_comment "$target_repo" "$target_num" "$comment"; then
     review_record "$key" "$target_sha" "$verdict" "$ci" "$(date +%s)" "$patch_id"
     review_clear_timeout_streak "$key"
-    forgejo_log_time "$target_repo" "$target_num" "$elapsed" 2>/dev/null \
+    # merge_requests, not the default issues: GitLab keeps the two in separate
+    # iid spaces, so logging against issues/<mr_iid> either 404s or lands on an
+    # unrelated issue -- the same hazard as forgejo_pr_comment.
+    forgejo_log_time "$target_repo" "$target_num" "$elapsed" merge_requests 2>/dev/null \
       || log "warning: review: could not log time on ${key}"
     log "review: ${key} head ${target_sha:0:8} -> ${verdict} (ci=${ci}, ${elapsed}s)"
     local rc_rounds
@@ -4173,7 +4176,7 @@ if [ -n "$REVIEW_PR" ]; then
     RC_CRASHES=$(review_rework_crashes "$REVIEW_KEY")
     if [ "$RC_CRASHES" -ge "$REWORK_CRASH_CAP" ]; then
       log "PR-review: ${REVIEW_KEY} rework crashed ${RC_CRASHES}x without completing -- escalating to ${FORGEJO_REVIEWER}, not re-attempting"
-      forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+      forgejo_pr_comment "$PR_REPO" "$PR_NUMBER" \
         "Igor's automated rework has crashed ${RC_CRASHES} times on this PR without producing a result -- most likely the in-worktree test run is taking the tick down. Handing this to you rather than loop on it." 2>/dev/null \
         || log "warning: rework-crash escalation comment failed on ${REVIEW_KEY}"
       forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
@@ -4604,7 +4607,7 @@ EOF
       PR_BODY_FIX=$(pr_body_ensure_closes "$PR_BODY_FIX" "$(review_closed_issue_number "$PR_BODY")")
       if forgejo_edit_pr "$PR_REPO" "$PR_NUMBER" --body "$PR_BODY_FIX"; then
         log "PR-review: applied a PR-body correction from .agent/pr_body_correction.md"
-        forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+        forgejo_pr_comment "$PR_REPO" "$PR_NUMBER" \
           "$(pr_body_correction_comment)" 2>/dev/null \
           || log "warning: PR-body-correction confirmation comment failed on ${PR_REPO}#${PR_NUMBER}"
       else
@@ -4619,7 +4622,7 @@ EOF
       # commits) on the PR so the ticket tells its own story, paired with the
       # review comments that log model+effort+verdict. One comment per round
       # reads as the journey: review -> rework -> review -> ...
-      forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+      forgejo_pr_comment "$PR_REPO" "$PR_NUMBER" \
 "### 🔧 Rework — round ${PR_REWORK_ROUND} _(automated)_
 
 Addressed the review on \`${AGENT_MODEL_REVIEW}\` at **effort ${PR_REWORK_EFFORT}** — ${PR_NEW} new commit(s).
@@ -4637,7 +4640,7 @@ Addressed the review on \`${AGENT_MODEL_REVIEW}\` at **effort ${PR_REWORK_EFFORT
       PR_MARKERS=$(list_conflict_marker_violations "$PR_HEAD")
       if [ -n "$PR_MARKERS" ]; then
         log "PR-review: committed conflict markers detected, refusing push and bouncing back to $FORGEJO_REVIEWER"
-        forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+        forgejo_pr_comment "$PR_REPO" "$PR_NUMBER" \
           "The agent refused to push revisions: the new commits still contain unresolved conflict markers:
 
 $(printf '%s\n' "$PR_MARKERS" | sed 's/^/    /')
@@ -4656,7 +4659,7 @@ Review requested so a human can resolve the conflict or re-trigger the agent." 2
       if [ -n "$PR_OFFLIMITS" ]; then
         log "PR-review: off-limits files modified, refusing push and bouncing back to $FORGEJO_REVIEWER"
         log "off-limits paths touched: $(echo "$PR_OFFLIMITS" | tr '\n' ' ')"
-        forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+        forgejo_pr_comment "$PR_REPO" "$PR_NUMBER" \
           "The agent refused to push revisions: the new commits modify CI workflow files, which are off-limits. Paths touched:
 
   - ${PR_OFFLIMITS//$'\n'/$'\n'  - }
@@ -4679,7 +4682,7 @@ Review requested so a human can review/discard." 2>/dev/null \
       PR_CHANGED=$(cd "$PR_WORKTREE" && scope_gate_changed_lines "origin/${PR_BASE}")
       if [ "$PR_CHANGED" -gt "$SCOPE_GATE_MAX_LINES" ]; then
         log "PR-review: rework pushed the branch to ${PR_CHANGED} non-test lines (over ${SCOPE_GATE_MAX_LINES}), refusing push and bouncing back to $FORGEJO_REVIEWER"
-        forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+        forgejo_pr_comment "$PR_REPO" "$PR_NUMBER" \
           "The agent refused to push this round's revisions: rework grew the branch to **${PR_CHANGED} non-test changed lines**, over the runaway-diff guard (${SCOPE_GATE_MAX_LINES}, excluding test files, lockfiles, and \`dist\`/\`build\`). This did not fit at PR-open either, or it grew past the limit across rework rounds.
 
 Split the remaining scope into a follow-up issue and land only what fits, or trim this round's changes, then request review again." 2>/dev/null \
@@ -4701,7 +4704,7 @@ Split the remaining scope into a follow-up issue and land only what fits, or tri
         :
       else
         log "PR-review: security review flagged the revisions, refusing push and bouncing back to $FORGEJO_REVIEWER"
-        forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+        forgejo_pr_comment "$PR_REPO" "$PR_NUMBER" \
           "The agent refused to push revisions: the harness security review flagged a material issue:
 
 ${PR_SEC_FINDINGS}
@@ -4744,7 +4747,7 @@ Review requested so a human can review/discard." 2>/dev/null \
         # re-raised next round; what changes is that the human reading the
         # thread can see it was answered.
         if PR_DISMISSED=$(adjudication_read "$PR_WORKTREE"); then
-          forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+          forgejo_pr_comment "$PR_REPO" "$PR_NUMBER" \
             "$(adjudication_comment "$PR_DISMISSED" false)" 2>/dev/null \
             || log "warning: dismissal comment failed on ${PR_REPO}#${PR_NUMBER}"
           log "$(adjudication_log_line "$PR_REPO" "$PR_NUMBER" false)"
@@ -4773,13 +4776,13 @@ Review requested so a human can review/discard." 2>/dev/null \
       #   dismissals absent  -> STUCK. Unchanged behaviour: escalate.
       PR_DISMISSED=$(adjudication_read "$PR_WORKTREE") || PR_DISMISSED=""
       if [ -n "$PR_DISMISSED" ]; then
-        forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+        forgejo_pr_comment "$PR_REPO" "$PR_NUMBER" \
           "$(adjudication_comment "$PR_DISMISSED" true)" 2>/dev/null \
           || log "warning: dismissal comment failed on ${PR_REPO}#${PR_NUMBER}"
         log "$(adjudication_log_line "$PR_REPO" "$PR_NUMBER" true)"
       else
         log "PR-review: no commits made -- requesting review from $FORGEJO_REVIEWER with a note"
-        forgejo_comment "$PR_REPO" "$PR_NUMBER" \
+        forgejo_pr_comment "$PR_REPO" "$PR_NUMBER" \
           "The agent reopened this PR after reassignment but didn't make any new commits. Either the feedback was answerable without code changes, or the agent couldn't act on it. Review requested so a human can close the loop." 2>/dev/null \
           || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
       fi
@@ -4801,7 +4804,7 @@ Review requested so a human can review/discard." 2>/dev/null \
       fi
     fi
 
-    if forgejo_log_time "$PR_REPO" "$PR_NUMBER" "$PR_ELAPSED"; then
+    if forgejo_log_time "$PR_REPO" "$PR_NUMBER" "$PR_ELAPSED" merge_requests; then
       log "time logged: ${PR_ELAPSED}s on ${PR_REPO}#${PR_NUMBER}"
     else
       log "warning: could not log time on ${PR_REPO}#${PR_NUMBER}"
