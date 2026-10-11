@@ -59,7 +59,7 @@ needsyou_item() {
 # verdict from before it checkpointed, which would otherwise read as "escalated
 # to you" while Igor is in fact still working on it.
 needsyou_pr_numbers() {
-  jq -r --arg wip "${CHECKPOINT_WIP_PREFIX:-WIP: }" '
+  jq -r --arg wip "${CHECKPOINT_WIP_PREFIX:-Draft: }" '
       .[]? | select((.title // "") | startswith($wip) | not) | .number // empty
     ' <<<"$(_needsyou_arr "${1:-}")" 2>/dev/null || true
 }

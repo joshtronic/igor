@@ -25,10 +25,22 @@
 # A checkpoint PR is a draft the review/merge loops must skip and the claim loop
 # must resume. Two markers carry that state on the PR itself -- no extra state
 # file, so it survives a state reset and is visible to a human on the PR:
-#   - a "WIP: " title prefix (also recognized by Forgejo/Gitea as a draft, which
-#     blocks its merge button as a bonus), and
+#   - a "Draft: " title prefix, which the forge also reads as a draft and so
+#     refuses to merge -- the harness's own skip is the primary guard, this is
+#     the second belt -- and
 #   - a checkpoint counter in the body: <!-- agent-checkpoints=N -->
-CHECKPOINT_WIP_PREFIX='WIP: '
+#
+# Was "WIP: " until the GitLab cutover. GitLab removed "WIP:" as a draft marker
+# in 14.0 and honours only "Draft:", so under the old prefix every checkpoint MR
+# read as fully MERGEABLE -- the harness still skipped it by title, but the
+# forge-level block was gone, and on igor.bot (where the bot may merge) a human
+# or a future code path could land half-finished work. Forgejo/Gitea recognise
+# "Draft:" too, so this is not a GitLab-only choice.
+#
+# lib/automerge.sh and lib/needsyou.sh carry a literal fallback for this value
+# for when they run without this file sourced. Change all three together --
+# bin/test-checkpoint.sh asserts they agree.
+CHECKPOINT_WIP_PREFIX='Draft: '
 CHECKPOINT_COUNT_TAG='agent-checkpoints'
 # After this many checkpoints without finishing, stop resuming and escalate: the
 # task is too big for the loop and needs a human to split it. Guards the loop

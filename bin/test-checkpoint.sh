@@ -67,14 +67,28 @@ eq "decision: turn cap + stash, reconcile failed -> discard" "discard"    "$(che
 eq "decision: turn cap, no stash, reconciled flag ignored"   "checkpoint" "$(checkpoint_decision 1 1 0 1)"
 
 echo "== WIP title round-trip =="
-ok    "is_wip: a WIP title"                       checkpoint_is_wip "WIP: feat: thing"
+ok    "is_wip: a WIP title"                       checkpoint_is_wip "Draft: feat: thing"
 no    "is_wip: a plain title"                     checkpoint_is_wip "feat: thing"
-eq    "wip_title: adds the prefix"                "WIP: feat: thing" "$(checkpoint_wip_title 'feat: thing')"
-eq    "wip_title: idempotent (no double prefix)"  "WIP: feat: thing" "$(checkpoint_wip_title 'WIP: feat: thing')"
-eq    "strip_wip: removes the prefix"             "feat: thing"      "$(checkpoint_strip_wip 'WIP: feat: thing')"
+eq    "wip_title: adds the prefix"                "Draft: feat: thing" "$(checkpoint_wip_title 'feat: thing')"
+eq    "wip_title: idempotent (no double prefix)"  "Draft: feat: thing" "$(checkpoint_wip_title 'Draft: feat: thing')"
+eq    "strip_wip: removes the prefix"             "feat: thing"      "$(checkpoint_strip_wip 'Draft: feat: thing')"
 eq    "strip_wip: no-op on a plain title"         "feat: thing"      "$(checkpoint_strip_wip 'feat: thing')"
 # strip then re-add is stable
-eq    "wip round-trip is stable" "WIP: feat: x" "$(checkpoint_wip_title "$(checkpoint_strip_wip 'WIP: feat: x')")"
+eq    "wip round-trip is stable" "Draft: feat: x" "$(checkpoint_wip_title "$(checkpoint_strip_wip 'Draft: feat: x')")"
+
+# The prefix is the forge's DRAFT marker, not just a harness convention: GitLab
+# honours "Draft:" and dropped "WIP:" in 14.0, so the old value made every
+# checkpoint MR read as mergeable. "WIP: " must no longer count.
+no    "is_wip: the retired 'WIP: ' prefix is not a checkpoint" checkpoint_is_wip "WIP: feat: thing"
+
+# lib/automerge.sh and lib/needsyou.sh carry a literal fallback for when they run
+# without lib/checkpoint.sh sourced. automerge's copy is the safety exclusion --
+# if it drifts, checkpoint MRs stop being excluded from merge -- so all three
+# copies must agree.
+for f in automerge needsyou; do
+  fb=$(grep -oE 'CHECKPOINT_WIP_PREFIX:-[^}]*\}' "$HERE/../lib/$f.sh" | head -1 | sed -E 's/^CHECKPOINT_WIP_PREFIX:-//; s/\}$//')
+  eq "lib/$f.sh fallback matches CHECKPOINT_WIP_PREFIX" "$CHECKPOINT_WIP_PREFIX" "$fb"
+done
 
 echo "== body checkpoint counter =="
 BODY_PLAIN=$'Closes #351\n\nDoes the thing.'
@@ -227,7 +241,7 @@ export GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
 echo "== forgejo_bot_prs_for_issue: title field + the gate/resume filters =="
 _fj() { cat <<'JSON'
 [
- {"number":10,"state":"open","title":"WIP: fix the thing","user":{"login":"igor"},"body":"wip\n\nCloses #351"},
+ {"number":10,"state":"open","title":"Draft: fix the thing","user":{"login":"igor"},"body":"wip\n\nCloses #351"},
  {"number":11,"state":"open","title":"feat: other","user":{"login":"igor"},"body":"Closes #351"},
  {"number":12,"state":"closed","title":"old","user":{"login":"igor"},"merged":false,"body":"Closes #351"},
  {"number":13,"state":"open","title":"not the bot","user":{"login":"human"},"body":"Closes #351"}
@@ -236,7 +250,7 @@ JSON
 }
 HIST=$(forgejo_bot_prs_for_issue acme/x 351 igor)
 eq  "bot_prs: only the bot's PRs referencing #351 (3 of 4)" "3" "$(jq 'length' <<<"$HIST")"
-has "bot_prs: entries carry the title field"                "$(jq -r '.[0].title' <<<"$HIST")" "WIP: fix the thing"
+has "bot_prs: entries carry the title field"                "$(jq -r '.[0].title' <<<"$HIST")" "Draft: fix the thing"
 # discovery gate's EXACT filter (tick.sh): open AND not-WIP -> in flight -> skip
 GATE=$(jq --arg wip "$CHECKPOINT_WIP_PREFIX" '[.[]|select(.state=="open" and ((.title//"")|startswith($wip)|not))]|length' <<<"$HIST")
 eq  "gate: only the real open PR (#11) blocks the claim, not the WIP" "1" "$GATE"
