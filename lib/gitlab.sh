@@ -477,8 +477,7 @@ forgejo_get_branch() {
 # the walk that decides whether an approval still covers a head that moved only
 # by merging the base in) reads `.parents | length` and `.parents[1:][].sha`;
 # unshimmed, every commit read as having ZERO parents, so the walk always
-# concluded "new content" and an approval never survived a base merge. Fails
-# closed, so nothing merged wrongly -- the walk just never worked.
+# concluded "new content" and an approval never survived a base merge.
 forgejo_get_commit() {
   local repo="$1" sha="$2"
   _gl GET "/projects/$(_gl_proj "$repo")/repository/commits/${sha}" \
@@ -608,8 +607,7 @@ forgejo_pr_reviews() {
         # thread, author = whoever acted. Left in, each one synthesizes a COMMENT
         # review, and because the actionable check reads the LATEST non-bot
         # review, a human retitling or reassigning the MR silently buried their
-        # own earlier unresolved change request. Found by a live sweep: one real
-        # thread on the scratch MR, four system ones alongside it.
+        # own earlier unresolved change request.
         | select(($first.system // false) == false)
         | ($first.resolvable // false) as $resolvable
         | ([ $notes[] | select((.resolvable // false) and (.resolved // false)) ] | length > 0) as $resolved
@@ -1395,19 +1393,27 @@ forgejo_open_issue() {
 # feedback_resolve_labels) actually produces. An empty array omits labels.
 #
 # GitLab's issue-create takes label NAMES, not ids, so the ids are resolved
-# against the project's label list first. An earlier version of this function
-# assumed names and would have posted the literal string "[123, 456]" -- which
-# GitLab splits on commas and CREATES as two junk labels named "[123" and
-# "456]". Caught by a caller-field audit before the feedback path first ran.
-# An id that does not resolve is dropped rather than failing the whole call;
-# the issue still opens, unlabelled, which is what the caller logs either way.
+# against the project's label list first. Handing GitLab the raw array would
+# post the literal string "[123, 456]", which it splits on the comma and CREATES
+# as two junk labels named "[123" and "456]".
+#
+# An id that does not resolve is dropped rather than failing the whole call: the
+# issue still opens, just without that label. Both that and a caller still on
+# the pre-cutover name-string contract leave a log line, since either one
+# otherwise produces a silently unlabelled issue.
 forgejo_open_issue_assigned() {
-  local repo="$1" title="$2" body="$3" assignee="$4" label_ids="${5:-[]}" payload uid names=""
+  local repo="$1" title="$2" body="$3" assignee="$4" label_ids="${5:-[]}" payload uid all picked names=""
   uid=$(_gl_user_id "$assignee")
   if jq -e 'type == "array" and length > 0' >/dev/null 2>&1 <<<"$label_ids"; then
-    names=$(_gl GET "/projects/$(_gl_proj "$repo")/labels?per_page=100" 2>/dev/null \
-      | jq -r --argjson want "$label_ids" \
-          '[ .[] | select(.id as $i | $want | index($i)) | .name ] | join(",")' 2>/dev/null) || names=""
+    all=$(_gl_paged "/projects/$(_gl_proj "$repo")/labels" 2>/dev/null) || all='[]'
+    jq -e 'type == "array"' >/dev/null 2>&1 <<<"$all" || all='[]'
+    picked=$(jq -c --argjson want "$label_ids" \
+      '[ .[] | select(.id as $i | $want | index($i)) | .name ]' <<<"$all" 2>/dev/null) || picked='[]'
+    names=$(jq -r 'join(",")' <<<"$picked")
+    [ "$(jq 'length' <<<"$picked")" = "$(jq 'length' <<<"$label_ids")" ] \
+      || log "gitlab: ${repo} label ids ${label_ids} resolved to ${picked} -- unresolved ids dropped"
+  elif ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$label_ids"; then
+    log "gitlab: open_issue_assigned wants a JSON array of label ids, got [${label_ids}] -- issue opens unlabelled"
   fi
   payload=$(jq -n --arg t "$title" --arg b "$body" --arg l "$names" --arg u "${uid:-}" '
     {title:$t, description:$b}

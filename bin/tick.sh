@@ -5223,8 +5223,8 @@ fi
 # lib/checkpoint.sh.
 IS_RESUME=0; RESUME_PR=""; CHECKPOINT_N=0; RESUME_SPLIT=""
 CP_HISTORY=$(forgejo_bot_prs_for_issue "$FORGEJO_REPO" "$ISSUE_NUMBER" "$BOT_USER" 2>/dev/null || echo '[]')
-RESUME_PR=$(jq -r --arg wip "$CHECKPOINT_WIP_PREFIX" \
-  '[.[] | select(.state == "open" and ((.title // "") | startswith($wip)))] | first | .number // empty' \
+RESUME_PR=$(jq -r --arg wip "$CHECKPOINT_WIP_PREFIX" --arg wipold "$CHECKPOINT_WIP_PREFIX_LEGACY" \
+  '[.[] | select(.state == "open" and ((.title // "") | startswith($wip) or startswith($wipold)))] | first | .number // empty' \
   <<<"$CP_HISTORY" 2>/dev/null || echo "")
 if [ -n "$RESUME_PR" ]; then
   IS_RESUME=1
@@ -5550,7 +5550,7 @@ if { [ "$DISPOSITION" = "checkpoint" ] || { [ "$DISPOSITION" = "discard" ] && [ 
     if [ -f .agent/PR_BODY.md ]; then
       CP_BODY=$(cat .agent/PR_BODY.md)
     else
-      CP_BODY="Work-in-progress checkpoint. The agent hit its per-tick turn limit and snapshotted its progress here; it resumes automatically on the next tick. This PR is a draft (\`WIP:\`) -- the review and merge loops leave it alone until it's finished."
+      CP_BODY="Work-in-progress checkpoint. The agent hit its per-tick turn limit and snapshotted its progress here; it resumes automatically on the next tick. This PR is a draft (\`${CHECKPOINT_WIP_PREFIX% }\`) -- the review and merge loops leave it alone until it's finished."
     fi
     CP_BODY=$(pr_body_finalize_closing "$CP_BODY" "$ISSUE_NUMBER")
     CP_BODY=$(checkpoint_set_count "$CP_BODY" "$NEXT_N")

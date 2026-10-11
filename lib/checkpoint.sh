@@ -30,17 +30,25 @@
 #     the second belt -- and
 #   - a checkpoint counter in the body: <!-- agent-checkpoints=N -->
 #
-# Was "WIP: " until the GitLab cutover. GitLab removed "WIP:" as a draft marker
-# in 14.0 and honours only "Draft:", so under the old prefix every checkpoint MR
-# read as fully MERGEABLE -- the harness still skipped it by title, but the
-# forge-level block was gone, and on igor.bot (where the bot may merge) a human
-# or a future code path could land half-finished work. Forgejo/Gitea recognise
-# "Draft:" too, so this is not a GitLab-only choice.
+# GitLab removed "WIP:" as a draft marker in 14.0 and honours only "Draft:", so
+# under the old prefix every checkpoint MR read as fully MERGEABLE -- the
+# harness still skipped it by title, but the forge-level block was gone, and on
+# igor.bot (where the bot may merge) a human or a future code path could land
+# half-finished work. Forgejo/Gitea recognise "Draft:" too, so this is not a
+# GitLab-only choice.
 #
 # lib/automerge.sh and lib/needsyou.sh carry a literal fallback for this value
 # for when they run without this file sourced. Change all three together --
 # bin/test-checkpoint.sh asserts they agree.
 CHECKPOINT_WIP_PREFIX='Draft: '
+# The prefix WRITTEN is "Draft: ", but every READ must also accept the old one:
+# a checkpoint PR open across the cutover keeps the title it was opened with, and
+# losing recognition flips all three of its gates the wrong way at once --
+# discovery reads it as in-flight instead of resumable (the issue stalls, with no
+# log line saying why), automerge stops excluding it from merge, and needsyou
+# reports it as the human's turn mid-task. Remove this once no open bot PR on any
+# repo carries it; re-marking a legacy title migrates it (checkpoint_wip_title).
+CHECKPOINT_WIP_PREFIX_LEGACY='WIP: '
 CHECKPOINT_COUNT_TAG='agent-checkpoints'
 # After this many checkpoints without finishing, stop resuming and escalate: the
 # task is too big for the loop and needs a human to split it. Guards the loop
@@ -102,7 +110,10 @@ checkpoint_decision() {
 # checkpoint_is_wip <pr_title> -- rc 0 if the title marks a live checkpoint the
 # review/merge loops must skip and the claim loop must resume.
 checkpoint_is_wip() {
-  case "$1" in "$CHECKPOINT_WIP_PREFIX"*) return 0 ;; *) return 1 ;; esac
+  case "$1" in
+    "$CHECKPOINT_WIP_PREFIX"* | "$CHECKPOINT_WIP_PREFIX_LEGACY"*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # checkpoint_count_non_wip <pr_json_array> -- how many entries are NOT WIP
@@ -110,21 +121,22 @@ checkpoint_is_wip() {
 # count means a real PR already covers the issue (skip it), while a WIP draft
 # alone falls through to the resume path.
 checkpoint_count_non_wip() {
-  jq --arg wip "$CHECKPOINT_WIP_PREFIX" \
-    '[.[] | select((.title // "") | startswith($wip) | not)] | length' <<<"$1"
+  jq --arg wip "$CHECKPOINT_WIP_PREFIX" --arg wipold "$CHECKPOINT_WIP_PREFIX_LEGACY" \
+    '[.[] | select((.title // "") | startswith($wip) or startswith($wipold) | not)] | length' <<<"$1"
 }
 
 # checkpoint_strip_wip <pr_title> -- the title with the WIP prefix removed
-# (idempotent: a title without the prefix is returned unchanged).
+# (idempotent: a title without either prefix is returned unchanged).
 checkpoint_strip_wip() {
-  printf '%s' "${1#"$CHECKPOINT_WIP_PREFIX"}"
+  local t="${1#"$CHECKPOINT_WIP_PREFIX"}"
+  printf '%s' "${t#"$CHECKPOINT_WIP_PREFIX_LEGACY"}"
 }
 
-# checkpoint_wip_title <pr_title> -- the title carrying the WIP prefix exactly
-# once (safe to call on an already-WIP title).
+# checkpoint_wip_title <pr_title> -- the title carrying the current WIP prefix
+# exactly once. Safe to call on an already-marked title, and a legacy-prefixed
+# one is MIGRATED rather than double-marked.
 checkpoint_wip_title() {
-  if checkpoint_is_wip "$1"; then printf '%s' "$1"
-  else printf '%s%s' "$CHECKPOINT_WIP_PREFIX" "$1"; fi
+  printf '%s%s' "$CHECKPOINT_WIP_PREFIX" "$(checkpoint_strip_wip "$1")"
 }
 
 # checkpoint_read_count <pr_body> -- the checkpoint counter parsed from the body

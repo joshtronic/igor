@@ -350,23 +350,33 @@ echo "== open_issue_assigned: numeric label IDS, resolved to names =="
 # feedback_resolve_labels hands over [ids]. GitLab issue-create takes NAMES, and
 # a raw "[12, 34]" would be split on the comma and CREATED as two junk labels.
 POSTED="$(mktemp)"
+# The label list goes through _gl_paged, so page 1 answers and page 2 is empty --
+# a stub that answered every page would spin to the page cap and resolve nothing.
 _gl() {
   case "$1 $2" in
     "GET /users"*)              printf '[{"id":7}]' ;;
-    "GET /projects/"*"/labels"*) printf '[{"id":12,"name":"Kind/Bug"},{"id":34,"name":"Priority/High"},{"id":56,"name":"Other"}]' ;;
+    "GET /projects/"*"/labels"*"page=1"*) printf '[{"id":12,"name":"Kind/Bug"},{"id":34,"name":"Priority/High"},{"id":56,"name":"Other"}]' ;;
+    "GET /projects/"*"/labels"*) printf '[]' ;;
     "POST /projects/"*"/issues") printf '%s' "$3" >"$POSTED"; printf '{"iid":9,"description":"","author":{"username":"igorbot"},"labels":[]}' ;;
   esac
 }
 _GL_UID_CACHE=()
 forgejo_open_issue_assigned acme/x "t" "b" someone '[12,34]' >/dev/null
 eq "label ids resolved to a name list" "Kind/Bug,Priority/High" "$(jq -r .labels "$POSTED")"
-case "$(jq -r .labels "$POSTED")" in *"["*|*"]"*) printf '  x %s\n' "no bracket fragments posted as label names"; FAIL=$((FAIL+1)) ;;
-  *) printf '  + %s\n' "no bracket fragments posted as label names" ;; esac
 forgejo_open_issue_assigned acme/x "t" "b" someone '[]' >/dev/null
 eq "empty id list omits labels entirely" "false" "$(jq 'has("labels")' "$POSTED")"
-forgejo_open_issue_assigned acme/x "t" "b" someone '[999]' >/dev/null
+forgejo_open_issue_assigned acme/x "t" "b" someone '[999]' >/dev/null 2>/dev/null
 eq "an unknown id is dropped, issue still opens" "false" "$(jq 'has("labels")' "$POSTED")"
+has "an unresolved id leaves a log line" \
+  "$(forgejo_open_issue_assigned acme/x "t" "b" someone '[999]' 2>&1 >/dev/null)" "unresolved ids dropped"
+# A caller still on the pre-cutover comma-separated-NAMES contract gets an
+# unlabelled issue -- which must not be silent.
+has "a non-array label argument is called out" \
+  "$(forgejo_open_issue_assigned acme/x "t" "b" someone 'Kind/Bug' 2>&1 >/dev/null)" "wants a JSON array of label ids"
+eq "and that issue opens unlabelled, not with junk labels" "false" "$(jq 'has("labels")' "$POSTED")"
 rm -f "$POSTED"; unset -f _gl
+# `unset -f _gl` removes the function outright -- bash does not stack definitions
+# -- so re-source to put the real _gl back for the blocks below.
 . "$HERE/../lib/gitlab.sh" 2>/dev/null
 
 echo "== bot_prs_for_issue: merged folds to closed+merged, so rejection counting stays honest =="

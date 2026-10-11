@@ -54,13 +54,15 @@ needsyou_item() {
 # number -- which is how the first cut of the scan classified nothing at all
 # across the whole fleet. do_automerge_tick pulls .number out the same way.
 #
-# Drafts are dropped for the same reason the rework loop is: a WIP: checkpoint
-# PR is Igor mid-task, not the operator's turn. It can also still carry the
-# verdict from before it checkpointed, which would otherwise read as "escalated
-# to you" while Igor is in fact still working on it.
+# Drafts are dropped for the same reason the rework loop is: a checkpoint PR is
+# Igor mid-task, not the operator's turn. It can also still carry the verdict
+# from before it checkpointed, which would otherwise read as "escalated to you"
+# while Igor is in fact still working on it. Both the current and the legacy
+# prefix count -- see lib/checkpoint.sh.
 needsyou_pr_numbers() {
-  jq -r --arg wip "${CHECKPOINT_WIP_PREFIX:-Draft: }" '
-      .[]? | select((.title // "") | startswith($wip) | not) | .number // empty
+  jq -r --arg wip "${CHECKPOINT_WIP_PREFIX:-Draft: }" \
+        --arg wipold "${CHECKPOINT_WIP_PREFIX_LEGACY:-WIP: }" '
+      .[]? | select((.title // "") | startswith($wip) or startswith($wipold) | not) | .number // empty
     ' <<<"$(_needsyou_arr "${1:-}")" 2>/dev/null || true
 }
 

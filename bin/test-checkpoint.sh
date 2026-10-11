@@ -76,18 +76,24 @@ eq    "strip_wip: no-op on a plain title"         "feat: thing"      "$(checkpoi
 # strip then re-add is stable
 eq    "wip round-trip is stable" "Draft: feat: x" "$(checkpoint_wip_title "$(checkpoint_strip_wip 'Draft: feat: x')")"
 
-# The prefix is the forge's DRAFT marker, not just a harness convention: GitLab
-# honours "Draft:" and dropped "WIP:" in 14.0, so the old value made every
-# checkpoint MR read as mergeable. "WIP: " must no longer count.
-no    "is_wip: the retired 'WIP: ' prefix is not a checkpoint" checkpoint_is_wip "WIP: feat: thing"
+# Legacy migration: checkpoint PRs opened before the cutover carry "WIP: ".
+# The READ side must still recognize them or they fall out of all three gates at
+# once -- discovery stops resuming them, automerge stops excluding them, and
+# needsyou starts calling them the human's turn.
+ok    "is_wip: the legacy 'WIP: ' prefix is still a checkpoint" checkpoint_is_wip "WIP: feat: thing"
+eq    "strip_wip: removes the legacy prefix too"  "feat: thing"        "$(checkpoint_strip_wip 'WIP: feat: thing')"
+# Re-marking a legacy title MIGRATES it rather than stacking a second prefix.
+eq    "wip_title: migrates a legacy title"        "Draft: feat: thing" "$(checkpoint_wip_title 'WIP: feat: thing')"
 
-# lib/automerge.sh and lib/needsyou.sh carry a literal fallback for when they run
-# without lib/checkpoint.sh sourced. automerge's copy is the safety exclusion --
-# if it drifts, checkpoint MRs stop being excluded from merge -- so all three
-# copies must agree.
+# lib/automerge.sh and lib/needsyou.sh carry literal fallbacks for both prefixes,
+# for when they run without lib/checkpoint.sh sourced. automerge's copy is the
+# safety exclusion -- if it drifts, checkpoint MRs stop being excluded from merge
+# -- so every copy must agree.
 for f in automerge needsyou; do
-  fb=$(grep -oE 'CHECKPOINT_WIP_PREFIX:-[^}]*\}' "$HERE/../lib/$f.sh" | head -1 | sed -E 's/^CHECKPOINT_WIP_PREFIX:-//; s/\}$//')
-  eq "lib/$f.sh fallback matches CHECKPOINT_WIP_PREFIX" "$CHECKPOINT_WIP_PREFIX" "$fb"
+  for v in CHECKPOINT_WIP_PREFIX CHECKPOINT_WIP_PREFIX_LEGACY; do
+    fb=$(grep -oE "${v}:-[^}]*\}" "$HERE/../lib/$f.sh" | head -1 | sed -E "s/^${v}:-//; s/\}$//")
+    eq "lib/$f.sh fallback matches $v" "${!v}" "$fb"
+  done
 done
 
 echo "== body checkpoint counter =="
@@ -252,11 +258,21 @@ HIST=$(forgejo_bot_prs_for_issue acme/x 351 igor)
 eq  "bot_prs: only the bot's PRs referencing #351 (3 of 4)" "3" "$(jq 'length' <<<"$HIST")"
 has "bot_prs: entries carry the title field"                "$(jq -r '.[0].title' <<<"$HIST")" "Draft: fix the thing"
 # discovery gate's EXACT filter (tick.sh): open AND not-WIP -> in flight -> skip
-GATE=$(jq --arg wip "$CHECKPOINT_WIP_PREFIX" '[.[]|select(.state=="open" and ((.title//"")|startswith($wip)|not))]|length' <<<"$HIST")
+GATE_F='[.[]|select(.state=="open" and ((.title//"")|startswith($wip)or startswith($wipold)|not))]'
+RESUME_F='[.[]|select(.state=="open" and ((.title//"")|startswith($wip)or startswith($wipold)))]|first|.number//empty'
+# shellcheck disable=SC2016  # $wip/$wipold are jq args, not shell vars
+GATE=$(jq --arg wip "$CHECKPOINT_WIP_PREFIX" --arg wipold "$CHECKPOINT_WIP_PREFIX_LEGACY" "${GATE_F}|length" <<<"$HIST")
 eq  "gate: only the real open PR (#11) blocks the claim, not the WIP" "1" "$GATE"
 # resume detector's EXACT filter (tick.sh): open AND WIP -> resume this PR
-RESUME=$(jq -r --arg wip "$CHECKPOINT_WIP_PREFIX" '[.[]|select(.state=="open" and ((.title//"")|startswith($wip)))]|first|.number//empty' <<<"$HIST")
+RESUME=$(jq -r --arg wip "$CHECKPOINT_WIP_PREFIX" --arg wipold "$CHECKPOINT_WIP_PREFIX_LEGACY" "$RESUME_F" <<<"$HIST")
 eq  "resume: locates the open WIP checkpoint PR (#10)" "10" "$RESUME"
+# Same two filters against a LEGACY-titled checkpoint: it must still be resumed
+# and must still not read as in-flight, or it stalls with nothing logging why.
+LEGACY='[{"number":7,"state":"open","title":"WIP: pre-cutover checkpoint","body":"Closes #351"}]'
+eq  "gate: a legacy WIP checkpoint does not block the claim" "0" \
+  "$(jq --arg wip "$CHECKPOINT_WIP_PREFIX" --arg wipold "$CHECKPOINT_WIP_PREFIX_LEGACY" "${GATE_F}|length" <<<"$LEGACY")"
+eq  "resume: locates a legacy WIP checkpoint PR (#7)" "7" \
+  "$(jq -r --arg wip "$CHECKPOINT_WIP_PREFIX" --arg wipold "$CHECKPOINT_WIP_PREFIX_LEGACY" "$RESUME_F" <<<"$LEGACY")"
 
 echo "== forgejo_edit_pr: PATCH payload (counter bump / WIP drop) =="
 _fj() { printf '%s' "$1" >"$TMP/m"; printf '%s' "$2" >"$TMP/p"; printf '%s' "$3" >"$TMP/b"; }
