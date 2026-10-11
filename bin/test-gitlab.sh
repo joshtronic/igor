@@ -355,7 +355,7 @@ POSTED="$(mktemp)"
 _gl() {
   case "$1 $2" in
     "GET /users"*)              printf '[{"id":7}]' ;;
-    "GET /projects/"*"/labels"*"page=1"*) printf '[{"id":12,"name":"Kind/Bug"},{"id":34,"name":"Priority/High"},{"id":56,"name":"Other"}]' ;;
+    "GET /projects/"*"/labels"*"page=1"*) printf '[{"id":12,"name":"Kind/Bug"},{"id":34,"name":"Priority/High"},{"id":56,"name":"Other"},{"id":78,"name":"Kind/Bug, Really"}]' ;;
     "GET /projects/"*"/labels"*) printf '[]' ;;
     "POST /projects/"*"/issues") printf '%s' "$3" >"$POSTED"; printf '{"iid":9,"description":"","author":{"username":"igorbot"},"labels":[]}' ;;
   esac
@@ -363,12 +363,25 @@ _gl() {
 _GL_UID_CACHE=()
 forgejo_open_issue_assigned acme/x "t" "b" someone '[12,34]' >/dev/null
 eq "label ids resolved to a name list" "Kind/Bug,Priority/High" "$(jq -r .labels "$POSTED")"
+# A repeated id resolves to the single name it names, so the drop check has to
+# compare against the DEDUPED ids -- otherwise it warns about a label that
+# resolved perfectly well.
+eq "duplicate ids resolve once, with nothing logged" "" \
+  "$(forgejo_open_issue_assigned acme/x "t" "b" someone '[12,12]' 2>&1 >/dev/null)"
+eq "and the deduped name still lands" "Kind/Bug" "$(jq -r .labels "$POSTED")"
+# A name carrying a comma cannot ride a comma-separated field: GitLab would
+# split it and CREATE the fragments as new labels, which is the junk-label
+# failure this resolution exists to prevent. Dropped, like an unresolved id.
+forgejo_open_issue_assigned acme/x "t" "b" someone '[12,78]' >/dev/null 2>/dev/null
+eq "a comma in a name is dropped, the rest still land" "Kind/Bug" "$(jq -r .labels "$POSTED")"
+has "and the comma drop is logged" \
+  "$(forgejo_open_issue_assigned acme/x "t" "b" someone '[12,78]' 2>&1 >/dev/null)" "comma-bearing"
 forgejo_open_issue_assigned acme/x "t" "b" someone '[]' >/dev/null
 eq "empty id list omits labels entirely" "false" "$(jq 'has("labels")' "$POSTED")"
 forgejo_open_issue_assigned acme/x "t" "b" someone '[999]' >/dev/null 2>/dev/null
 eq "an unknown id is dropped, issue still opens" "false" "$(jq 'has("labels")' "$POSTED")"
 has "an unresolved id leaves a log line" \
-  "$(forgejo_open_issue_assigned acme/x "t" "b" someone '[999]' 2>&1 >/dev/null)" "unresolved ids dropped"
+  "$(forgejo_open_issue_assigned acme/x "t" "b" someone '[999]' 2>&1 >/dev/null)" "ids dropped"
 # A caller still on the pre-cutover comma-separated-NAMES contract gets an
 # unlabelled issue -- which must not be silent.
 has "a non-array label argument is called out" \
@@ -376,8 +389,9 @@ has "a non-array label argument is called out" \
 eq "and that issue opens unlabelled, not with junk labels" "false" "$(jq 'has("labels")' "$POSTED")"
 rm -f "$POSTED"; unset -f _gl
 # `unset -f _gl` removes the function outright -- bash does not stack definitions
-# -- so re-source to put the real _gl back for the blocks below.
-. "$HERE/../lib/gitlab.sh" 2>/dev/null
+# -- so re-source to put the real _gl back for the blocks below. Unredirected: a
+# syntax break in the library must surface here, not as a baffling failure below.
+. "$HERE/../lib/gitlab.sh"
 
 echo "== bot_prs_for_issue: merged folds to closed+merged, so rejection counting stays honest =="
 _gl_paged() { cat <<'JSON'

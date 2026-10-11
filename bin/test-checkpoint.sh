@@ -257,20 +257,22 @@ JSON
 HIST=$(forgejo_bot_prs_for_issue acme/x 351 igor)
 eq  "bot_prs: only the bot's PRs referencing #351 (3 of 4)" "3" "$(jq 'length' <<<"$HIST")"
 has "bot_prs: entries carry the title field"                "$(jq -r '.[0].title' <<<"$HIST")" "Draft: fix the thing"
-# discovery gate's EXACT filter (tick.sh): open AND not-WIP -> in flight -> skip
-GATE_F='[.[]|select(.state=="open" and ((.title//"")|startswith($wip)or startswith($wipold)|not))]'
-RESUME_F='[.[]|select(.state=="open" and ((.title//"")|startswith($wip)or startswith($wipold)))]|first|.number//empty'
+# The discovery gate counts the open covering PRs that are NOT checkpoints
+# (tick.sh runs this on already-open-filtered input, via the helper -- not an
+# inline copy of the filter, which is what test-claim-guard.sh greps for).
+OPEN=$(jq -c '[.[]|select(.state=="open")]' <<<"$HIST")
+eq  "gate: only the real open PR (#11) blocks the claim, not the draft" "1" \
+  "$(checkpoint_count_non_wip "$OPEN")"
+# resume detector's EXACT filter (tick.sh): open AND a draft prefix -> resume it
 # shellcheck disable=SC2016  # $wip/$wipold are jq args, not shell vars
-GATE=$(jq --arg wip "$CHECKPOINT_WIP_PREFIX" --arg wipold "$CHECKPOINT_WIP_PREFIX_LEGACY" "${GATE_F}|length" <<<"$HIST")
-eq  "gate: only the real open PR (#11) blocks the claim, not the WIP" "1" "$GATE"
-# resume detector's EXACT filter (tick.sh): open AND WIP -> resume this PR
+RESUME_F='[.[]|select(.state=="open" and ((.title//"")|startswith($wip)or startswith($wipold)))]|first|.number//empty'
 RESUME=$(jq -r --arg wip "$CHECKPOINT_WIP_PREFIX" --arg wipold "$CHECKPOINT_WIP_PREFIX_LEGACY" "$RESUME_F" <<<"$HIST")
-eq  "resume: locates the open WIP checkpoint PR (#10)" "10" "$RESUME"
-# Same two filters against a LEGACY-titled checkpoint: it must still be resumed
-# and must still not read as in-flight, or it stalls with nothing logging why.
+eq  "resume: locates the open checkpoint PR (#10)" "10" "$RESUME"
+# Both gates against a LEGACY-titled checkpoint: it must still be resumed and
+# must still not read as in-flight, or it stalls with nothing logging why.
 LEGACY='[{"number":7,"state":"open","title":"WIP: pre-cutover checkpoint","body":"Closes #351"}]'
 eq  "gate: a legacy WIP checkpoint does not block the claim" "0" \
-  "$(jq --arg wip "$CHECKPOINT_WIP_PREFIX" --arg wipold "$CHECKPOINT_WIP_PREFIX_LEGACY" "${GATE_F}|length" <<<"$LEGACY")"
+  "$(checkpoint_count_non_wip "$LEGACY")"
 eq  "resume: locates a legacy WIP checkpoint PR (#7)" "7" \
   "$(jq -r --arg wip "$CHECKPOINT_WIP_PREFIX" --arg wipold "$CHECKPOINT_WIP_PREFIX_LEGACY" "$RESUME_F" <<<"$LEGACY")"
 

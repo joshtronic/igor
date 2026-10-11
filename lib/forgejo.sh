@@ -835,7 +835,8 @@ forgejo_list_labels() {
 # Used by discovery to gate claimable issues:
 #   - any OPEN, non-WIP entry -> issue is in flight, skip
 #   - an OPEN, WIP entry (turn-cap checkpoint draft) -> RESUME, don't skip
-#     (the title carries checkpoint.sh's CHECKPOINT_WIP_PREFIX, "Draft: ")
+#     (the title carries checkpoint.sh's CHECKPOINT_WIP_PREFIX, or the legacy
+#     prefix beside it -- checkpoint_is_wip is the one place that decides)
 #   - 2+ state="closed", merged=false  -> 2 rejected attempts,
 #     block with Status/Blocked instead of re-trying
 # The `title` is returned so callers can tell a WIP checkpoint from a real PR.

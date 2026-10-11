@@ -1398,9 +1398,11 @@ forgejo_open_issue() {
 # as two junk labels named "[123" and "456]".
 #
 # An id that does not resolve is dropped rather than failing the whole call: the
-# issue still opens, just without that label. Both that and a caller still on
-# the pre-cutover name-string contract leave a log line, since either one
-# otherwise produces a silently unlabelled issue.
+# issue still opens, just without that label. So is a name carrying a comma --
+# it cannot ride a comma-separated field, and sending it anyway would split it
+# into fragments GitLab CREATES as labels, the same junk-label failure. Both
+# drops, and a caller still on the pre-cutover name-string contract, leave a log
+# line, since each one otherwise produces a silently (or wrongly) labelled issue.
 forgejo_open_issue_assigned() {
   local repo="$1" title="$2" body="$3" assignee="$4" label_ids="${5:-[]}" payload uid all picked names=""
   uid=$(_gl_user_id "$assignee")
@@ -1408,10 +1410,13 @@ forgejo_open_issue_assigned() {
     all=$(_gl_paged "/projects/$(_gl_proj "$repo")/labels" 2>/dev/null) || all='[]'
     jq -e 'type == "array"' >/dev/null 2>&1 <<<"$all" || all='[]'
     picked=$(jq -c --argjson want "$label_ids" \
-      '[ .[] | select(.id as $i | $want | index($i)) | .name ]' <<<"$all" 2>/dev/null) || picked='[]'
+      '[ .[] | select(.id as $i | $want | index($i)) | .name | select(index(",") | not) ]' \
+      <<<"$all" 2>/dev/null) || picked='[]'
     names=$(jq -r 'join(",")' <<<"$picked")
-    [ "$(jq 'length' <<<"$picked")" = "$(jq 'length' <<<"$label_ids")" ] \
-      || log "gitlab: ${repo} label ids ${label_ids} resolved to ${picked} -- unresolved ids dropped"
+    # Against the DEDUPED ids: a repeated id resolves to one name, so comparing
+    # the raw length would report a drop that never happened.
+    [ "$(jq 'length' <<<"$picked")" = "$(jq 'unique | length' <<<"$label_ids")" ] \
+      || log "gitlab: ${repo} label ids ${label_ids} resolved to ${picked} -- unresolved or comma-bearing ids dropped"
   elif ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$label_ids"; then
     log "gitlab: open_issue_assigned wants a JSON array of label ids, got [${label_ids}] -- issue opens unlabelled"
   fi
