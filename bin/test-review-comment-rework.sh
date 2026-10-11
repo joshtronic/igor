@@ -83,12 +83,14 @@ forgejo_request_review() { echo "forgejo_request_review $*" >> "$CALLLOG"; retur
 forgejo_comment() { echo "forgejo_comment $*" >> "$CALLLOG"; return 0; }
 forgejo_pr_comment() { forgejo_comment "$@"; }
 forgejo_assign() { echo "forgejo_assign $*" >> "$CALLLOG"; return 0; }
+forgejo_pr_assign() { forgejo_assign "$@"; }
 MAINTENANCE_VALIDATED=0  # 0 = true by default
 maintenance_repo_validated() { echo "maintenance_repo_validated $*" >> "$CALLLOG"; return "$MAINTENANCE_VALIDATED"; }
 review_reset_rework() { echo "review_reset_rework $*" >> "$CALLLOG"; }
 review_set_rework_rounds() { echo "review_set_rework_rounds $*" >> "$CALLLOG"; }
 review_set_pending_rc_body() { echo "review_set_pending_rc_body $*" >> "$CALLLOG"; }
 forgejo_unassign_all() { echo "forgejo_unassign_all $*" >> "$CALLLOG"; return 0; }
+forgejo_pr_unassign_all() { forgejo_unassign_all "$@"; }
 # The real ones live in lib/adjudication.sh (covered by test-adjudication.sh);
 # here they only have to distinguish "the agent dismissed something" from "it
 # came back empty-handed".

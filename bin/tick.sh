@@ -3348,7 +3348,7 @@ review_route_into_rework() {
   if [ "$repo_validated" = "false" ]; then
     log "review: ${key} ${verdict} on unvalidated repo -- requesting human instead of rework"
     if [ -n "${FORGEJO_REVIEWER:-}" ]; then
-      forgejo_comment "$repo" "$number" \
+      forgejo_pr_comment "$repo" "$number" \
         "${repo} is not in the validated set (no CI / not validated), so autonomous rework cannot be CI-verified. Handing to you." 2>/dev/null \
         || log "warning: review: unvalidated-repo comment failed on ${key}"
       review_request_human "$repo" "$number" "unvalidated repo"
@@ -3356,7 +3356,7 @@ review_route_into_rework() {
   elif [ "$rc_rounds" -ge 3 ]; then
     log "review: ${key} ${verdict} rework_rounds=${rc_rounds} >= 3 -- escalating to human"
     if [ -n "${FORGEJO_REVIEWER:-}" ]; then
-      forgejo_comment "$repo" "$number" \
+      forgejo_pr_comment "$repo" "$number" \
         "Igor's ${verdict} review did not converge after ${rc_rounds} rework rounds -- handing this to you." 2>/dev/null \
         || log "warning: review: escalation comment failed on ${key}"
       review_request_human "$repo" "$number" "escalation after ${rc_rounds} rework rounds"
@@ -3366,7 +3366,7 @@ review_route_into_rework() {
     new_rounds=$(( rc_rounds + 1 ))
     review_set_rework_rounds "$key" "$new_rounds"
     review_set_pending_rc_body "$key" "$review_body"
-    forgejo_assign "$repo" "$number" "$BOT_USER" 2>/dev/null \
+    forgejo_pr_assign "$repo" "$number" "$BOT_USER" 2>/dev/null \
       || log "warning: review: bot assignment failed on ${key} (rework round ${new_rounds})"
     log "review: ${key} ${verdict} -> rework round ${new_rounds}/3, bot assigned"
   fi
@@ -3429,7 +3429,7 @@ review_note_timeout_failure() {
     # Not gated on FORGEJO_REVIEWER: review_request_human self-gates on it, and
     # gating the comment too would leave a repo with no configured reviewer
     # with nothing but a journal line.
-    forgejo_comment "$repo" "$number" \
+    forgejo_pr_comment "$repo" "$number" \
       "Igor's shadow review has timed out ${streak} times in a row on this head (\`${sha:0:8}\`) without producing a verdict. Backing off from re-reviewing it for a while so it stops crowding out the rest of the fleet -- if this keeps happening on new commits too, the diff may need a human look directly.
 
 ${marker}" 2>/dev/null \
@@ -4179,8 +4179,8 @@ if [ -n "$REVIEW_PR" ]; then
       forgejo_pr_comment "$PR_REPO" "$PR_NUMBER" \
         "Igor's automated rework has crashed ${RC_CRASHES} times on this PR without producing a result -- most likely the in-worktree test run is taking the tick down. Handing this to you rather than loop on it." 2>/dev/null \
         || log "warning: rework-crash escalation comment failed on ${REVIEW_KEY}"
-      forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
-      forgejo_assign "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
+      forgejo_pr_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
+      forgejo_pr_assign "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
       review_set_rework_crashes "$REVIEW_KEY" 0
       exit 0
     fi
@@ -4647,7 +4647,7 @@ $(printf '%s\n' "$PR_MARKERS" | sed 's/^/    /')
 
 Review requested so a human can resolve the conflict or re-trigger the agent." 2>/dev/null \
           || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
-        forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
+        forgejo_pr_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
         forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
         (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || true
         exit 0
@@ -4666,7 +4666,7 @@ Review requested so a human can resolve the conflict or re-trigger the agent." 2
 
 Review requested so a human can review/discard." 2>/dev/null \
           || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
-        forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
+        forgejo_pr_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
         forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
         (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || true
         exit 0
@@ -4687,7 +4687,7 @@ Review requested so a human can review/discard." 2>/dev/null \
 
 Split the remaining scope into a follow-up issue and land only what fits, or trim this round's changes, then request review again." 2>/dev/null \
           || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
-        forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
+        forgejo_pr_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
         forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
         (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || true
         exit 0
@@ -4711,7 +4711,7 @@ ${PR_SEC_FINDINGS}
 
 Review requested so a human can review/discard." 2>/dev/null \
           || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
-        forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
+        forgejo_pr_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null || true
         forgejo_request_review "$PR_REPO" "$PR_NUMBER" "$FORGEJO_REVIEWER" 2>/dev/null || true
         (cd "$PR_REPO_PATH" && git worktree remove --force "$PR_WORKTREE") 2>/dev/null || true
         exit 0
@@ -4728,7 +4728,7 @@ Review requested so a human can review/discard." 2>/dev/null \
       # now-current remote head. (A push is in an `if` condition, so set -e does
       # not abort on the rejection.)
       if git push origin "$PR_HEAD"; then
-        forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
+        forgejo_pr_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
           || log "warning: unassign failed on ${PR_REPO}#${PR_NUMBER}"
         # Partial adjudication: some findings fixed, others dismissed. This sits
         # ABOVE the binding/non-binding split on purpose -- the promise the
@@ -4786,7 +4786,7 @@ Review requested so a human can review/discard." 2>/dev/null \
           "The agent reopened this PR after reassignment but didn't make any new commits. Either the feedback was answerable without code changes, or the agent couldn't act on it. Review requested so a human can close the loop." 2>/dev/null \
           || log "warning: comment failed on ${PR_REPO}#${PR_NUMBER}"
       fi
-      forgejo_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
+      forgejo_pr_unassign_all "$PR_REPO" "$PR_NUMBER" 2>/dev/null \
         || log "warning: unassign failed on ${PR_REPO}#${PR_NUMBER}"
       if [ -n "$BINDING_RC_BODY" ]; then
         # Either way the pending body is cleared and the human is next: a

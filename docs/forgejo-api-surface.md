@@ -29,8 +29,10 @@ drifts the first time someone adds an operation.
 | `forgejo_get_issue` | fetch one issue |
 | `forgejo_append_issue_body` | read an issue, then replace its body (read-modify-write) |
 | `forgejo_set_issue_body` | replace an issue's body outright |
-| `forgejo_assign` | set an issue/PR's sole assignee |
-| `forgejo_unassign_all` | clear an issue/PR's assignees |
+| `forgejo_assign` | set an ISSUE's sole assignee |
+| `forgejo_pr_assign` | set a PULL REQUEST / MERGE REQUEST's sole assignee |
+| `forgejo_unassign_all` | clear an ISSUE's assignees |
+| `forgejo_pr_unassign_all` | clear a PULL REQUEST / MERGE REQUEST's assignees |
 | `forgejo_comment` | post a comment on an ISSUE |
 | `forgejo_pr_comment` | post a comment on a PULL REQUEST / MERGE REQUEST |
 | `forgejo_log_time` | log time spent against an issue (4th arg selects merge_requests) |

@@ -365,6 +365,13 @@ forgejo_request_review() {
   return 1
 }
 
+# forgejo_pr_assign / forgejo_pr_unassign_all -- on Forgejo a PR IS an issue
+# and they share one number space, so these are the issue versions. They exist
+# as separate names because GitLab cannot share the endpoint; keeping both
+# adapters to one contract means call sites stay forge-agnostic.
+forgejo_pr_assign() { forgejo_assign "$@"; }
+forgejo_pr_unassign_all() { forgejo_unassign_all "$@"; }
+
 forgejo_comment() {
   local repo="$1" number="$2" body="$3"
   _fj POST "/repos/${repo}/issues/${number}/comments" \
