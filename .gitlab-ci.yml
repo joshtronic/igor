@@ -36,9 +36,14 @@ check-sync:
     AUTOMERGE_SELF_REPO: "sherver/igor"
     DISTILLERY_REPO: "sherver/distillery"
   before_script:
-    # jq is what the Forgejo job installed. git comes with the image's
-    # dependencies on Debian but is not guaranteed, and several suites shell
-    # out to it; install it explicitly rather than relying on the base image.
-    - apt-get update -qq && apt-get install -y -qq jq git
+    # CHECK_SYNC_STRICT=1 turns a missing-tool SKIP into a failure (igor#527),
+    # so every tool any suite probes for has to be present or the gate fails
+    # without anything actually being wrong. On a bare debian:trixie the first
+    # run skipped three suites:
+    #   curl    -> test-bot-identity, test-email-argmax
+    #   python3 -> test-feedback
+    # jq and git are what the rest need. Adding a tool here is cheaper than
+    # relaxing STRICT, which is what makes the skip visible in the first place.
+    - apt-get update -qq && apt-get install -y -qq jq git curl python3
   script:
     - bin/check-sync.sh
