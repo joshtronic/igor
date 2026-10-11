@@ -262,7 +262,8 @@ _gl_issue_shim() {
           labels: [ (.labels // [])[] | {name: .} ],
           repository: {
             full_name: ((.references.full // "") | sub("[#!].*$"; ""))
-          }
+          },
+          html_url: (.web_url // "")
         }
       else . end;
     if type == "array" then [ .[] | one ] else one end'
@@ -432,7 +433,29 @@ _gl_mr_shim() {
                 else (.state // "") end),
         repository: {
           full_name: ((.references.full // "") | sub("[#!].*$"; ""))
-        }
+        },
+        # automerge_mergeable (lib/automerge.sh) gates on `.mergeable == true`.
+        # GitLab has no such boolean -- it reports detailed_merge_status, which
+        # is "mergeable" only when the MR is genuinely ready and otherwise names
+        # the reason ("checking", "ci_still_running", "conflict", ...). Mapping
+        # it here is what makes the gate work: without this the field was simply
+        # ABSENT, `.mergeable == true` was false for every MR, and automerge
+        # logged "not cleanly mergeable -- skipping" forever on MRs GitLab
+        # itself reported as can_be_merged.
+        #
+        # "checking" deliberately maps to false: GitLab has not finished
+        # computing it, so the honest answer is "not known yet" and the next
+        # tick re-reads. merge_status is the legacy fallback for an instance
+        # that predates detailed_merge_status.
+        mergeable: (
+          if (.detailed_merge_status // "") != "" then
+            (.detailed_merge_status == "mergeable")
+          else
+            ((.merge_status // "") == "can_be_merged")
+          end
+        ),
+        # GitLab calls it web_url; two callers read .html_url for a link.
+        html_url: (.web_url // "")
       };
     if type == "array" then [ .[] | one ] else one end'
 }
