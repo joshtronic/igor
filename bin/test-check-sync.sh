@@ -9,10 +9,10 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 
 FAIL=0
-eq() { local d="$1" want="$2" got="$3"; if [ "$want" = "$got" ]; then printf '  + %s\n' "$d"; else printf '  x %s (want %q got %q)\n' "$d" "$want" "$got"; FAIL=$((FAIL + 1)); fi; }
-has() { local d="$1" needle="$2" hay="$3"; case "$hay" in *"$needle"*) printf '  + %s\n' "$d" ;; *) printf '  x %s (%q not found in output)\n' "$d" "$needle"; FAIL=$((FAIL + 1)) ;; esac; }
 
 TMPROOT="$(mktemp -d)"
 trap 'rm -rf "$TMPROOT"' EXIT
@@ -58,11 +58,11 @@ SUITE
 
 out=$(bash "$HOME_A/bin/check-sync.sh" 2>&1); rc=$?
 eq "exits 1" "1" "$rc"
-has "prints the summary heading" "== FAILURES ==" "$out"
-has "a failing suite emits an 'x' line at all" "x bin/test-aaa-boom.sh failed" "$out"
-has "later suites still run -- a failure is not fail-fast" "+ bin/test-zzz-noise.sh passed" "$out"
-has "and the reason survives a 20-line tail" "x bin/test-aaa-boom.sh failed" "$(tail -n 20 <<<"$out")"
-has "no suites skipped here -- the summary says so" "0 suite(s) skipped for missing tools" "$out"
+has "prints the summary heading" "$out" "== FAILURES =="
+has "a failing suite emits an 'x' line at all" "$out" "x bin/test-aaa-boom.sh failed"
+has "later suites still run -- a failure is not fail-fast" "$out" "+ bin/test-zzz-noise.sh passed"
+has "and the reason survives a 20-line tail" "$(tail -n 20 <<<"$out")" "x bin/test-aaa-boom.sh failed"
+has "no suites skipped here -- the summary says so" "$out" "0 suite(s) skipped for missing tools"
 
 echo "== a missing-tool skip is counted in the summary, not read as a pass (igor#523) =="
 HOME_C="$(make_home skip-suite)"
@@ -79,8 +79,8 @@ SUITE
 out=$(bash "$HOME_C/bin/check-sync.sh" 2>&1); rc=$?
 eq "a skip alone does not fail the run" "0" "$rc"
 has "the skip is reported distinctly, not folded into an ordinary pass" \
-  "! bin/test-aaa-needs-jq.sh skipped (test-aaa-needs-jq: jq absent -- skipping)" "$out"
-has "the summary counts it" "1 suite(s) skipped for missing tools" "$out"
+  "$out" "! bin/test-aaa-needs-jq.sh skipped (test-aaa-needs-jq: jq absent -- skipping)"
+has "the summary counts it" "$out" "1 suite(s) skipped for missing tools"
 
 echo "== CHECK_SYNC_STRICT turns a missing-tool skip into a failure (igor#527) =="
 HOME_D="$(make_home strict-skip)"
@@ -93,8 +93,8 @@ SUITE
 out=$(CHECK_SYNC_STRICT=1 bash "$HOME_D/bin/check-sync.sh" 2>&1); rc=$?
 eq "a skip fails the run under strict mode" "1" "$rc"
 has "the strict reason lands in the summary" \
-  "x 1 suite(s) skipped for missing tools under CHECK_SYNC_STRICT" "$out"
-has "the plain skip count still prints" "1 suite(s) skipped for missing tools" "$out"
+  "$out" "x 1 suite(s) skipped for missing tools under CHECK_SYNC_STRICT"
+has "the plain skip count still prints" "$out" "1 suite(s) skipped for missing tools"
 
 echo "== CHECK_SYNC_STRICT with nothing skipped stays green =="
 HOME_E="$(make_home strict-no-skip)"
@@ -105,7 +105,7 @@ SUITE
 
 out=$(CHECK_SYNC_STRICT=1 bash "$HOME_E/bin/check-sync.sh" 2>&1); rc=$?
 eq "no skips, strict mode does not fail the run" "0" "$rc"
-has "the summary still says zero skipped" "0 suite(s) skipped for missing tools" "$out"
+has "the summary still says zero skipped" "$out" "0 suite(s) skipped for missing tools"
 
 echo "== a nonzero exit with no 'x' lines keeps its status and says so =="
 # Abort check_sync before any check can print: mktemp succeeds once (the
@@ -124,8 +124,8 @@ out=$(FAKE_MKTEMP_STATE="$TMPROOT/mktemp-called" \
       PATH="$TMPROOT/fakebin:$PATH" \
       bash "$HOME_B/bin/check-sync.sh" 2>&1); rc=$?
 eq "the real failure status survives, not rewritten to 1" "3" "$rc"
-has "still prints the summary heading" "== FAILURES ==" "$out"
-has "and explains the empty summary" "no 'x' lines" "$out"
+has "still prints the summary heading" "$out" "== FAILURES =="
+has "and explains the empty summary" "$out" "no 'x' lines"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "test-check-sync: all passed"

@@ -18,12 +18,12 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/ideation-pipeline.sh"
+# shellcheck source=../lib/testlib.sh
+. "$HERE/../lib/testlib.sh"
 
 FAIL=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
-eq()  { local d="$1" want="$2" got="$3"; if [ "$want" = "$got" ]; then ok "$d"; else bad "$d (want $(printf '%q' "$want") got $(printf '%q' "$got"))"; fi; }
-has() { local d="$1" needle="$2" hay="$3"; case "$hay" in *"$needle"*) ok "$d" ;; *) bad "$d (missing $(printf '%q' "$needle"))" ;; esac; }
 
 src=$(sed -n '/^ground_named_entities() {$/,/^}$/p' "$SCRIPT")
 [ -z "$src" ] && { bad "could not extract ground_named_entities() from bin/ideation-pipeline.sh"; exit 1; }
@@ -42,7 +42,7 @@ OPERATOR_HANDLE="alovelace"
 echo "== the operator identity lands in the system prompt =="
 ground_named_entities "a draft" "some sources" >/dev/null
 SYS=$(cat "$CAPTURE")
-has "OPERATOR_NAME substituted" "- The author: Ada, alovelace." "$SYS"
+has "OPERATOR_NAME substituted" "$SYS" "- The author: Ada, alovelace."
 eq "no placeholder survives" "0" "$(grep -c '__OPERATOR_' "$CAPTURE")"
 
 echo "== the prompt body stays literal (quoted heredoc) =="
@@ -52,8 +52,8 @@ OPERATOR_NAME='$HOME'
 OPERATOR_HANDLE='`id`'
 ground_named_entities "a draft" "some sources" >/dev/null
 SYS=$(cat "$CAPTURE")
-has "\$-bearing name passed through verbatim" '- The author: $HOME, `id`.' "$SYS"
-has "instructions after the identity line survive" "Output ONLY a bare list" "$SYS"
+has "\$-bearing name passed through verbatim" "$SYS" '- The author: $HOME, `id`.'
+has "instructions after the identity line survive" "$SYS" "Output ONLY a bare list"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
