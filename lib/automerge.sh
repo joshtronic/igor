@@ -1061,8 +1061,8 @@ do_automerge_tick() {
       else
         log "automerge: ${key} up-to-date check inconclusive -- skipping this tick"
       fi
-      # WIP checkpoint drafts are excluded up front (a human won't approve one,
-      # and Forgejo blocks the merge, but never even consider them).
+      # Checkpoint drafts are excluded up front: a human won't approve one, and
+      # the forge-level draft block is only a second belt (lib/checkpoint.sh).
     done < <(jq -r --arg wip "${CHECKPOINT_WIP_PREFIX:-Draft: }" --arg wipold "${CHECKPOINT_WIP_PREFIX_LEGACY:-WIP: }" '.[]? | select((.title // "") | startswith($wip) or startswith($wipold) | not) | .number // empty' <<<"$prs")
     # VALIDATED_REPOS_JSON is a NEWLINE-DELIMITED STREAM of repo objects (one per
     # line), NOT a JSON array -- built that way in tick.sh and consumed the same
