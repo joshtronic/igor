@@ -1,0 +1,44 @@
+# Ported from .forgejo/workflows/lint.yml.
+#
+# One job: bin/check-sync.sh, which is this repo's whole CI gate -- it verifies
+# the worker-contract <-> tick.sh outcome sets agree, that the agent-*.sh
+# helpers the contract names exist and are executable, and then runs every
+# bin/test-*.sh. CHECK_SYNC_STRICT=1 matches the Forgejo job.
+#
+# Runs on GitLab's shared runners; no self-hosted runner required.
+#
+# Forgejo ran this on BOTH pull_request and push. Here it runs on merge
+# requests and on master pushes, which is the same coverage expressed as rules.
+#
+# The env block is the one real difference. The suites source lib/gitlab.sh and
+# lib/automerge.sh, which fail fast at source time without their own variables
+# (`: "${GITLAB_URL:?...}"`). They are set to inert placeholders rather than
+# real credentials: every suite stubs curl, so nothing here should ever reach
+# the network, and a CI job that CAN reach the API is a job that can mutate
+# live state if a stub is ever missed. If a suite starts failing because it
+# wanted a real token, that is a bug in the suite, not a missing secret.
+
+stages:
+  - validate
+
+check-sync:
+  stage: validate
+  image: debian:trixie
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "master"
+  variables:
+    CHECK_SYNC_STRICT: "1"
+    GITLAB_URL: "https://gitlab.invalid"
+    GITLAB_TOKEN: "ci-placeholder-not-a-real-token"
+    FORGEJO_URL: "https://forgejo.invalid"
+    FORGEJO_TOKEN: "ci-placeholder-not-a-real-token"
+    AUTOMERGE_SELF_REPO: "sherver/igor"
+    DISTILLERY_REPO: "sherver/distillery"
+  before_script:
+    # jq is what the Forgejo job installed. git comes with the image's
+    # dependencies on Debian but is not guaranteed, and several suites shell
+    # out to it; install it explicitly rather than relying on the base image.
+    - apt-get update -qq && apt-get install -y -qq jq git
+  script:
+    - bin/check-sync.sh
