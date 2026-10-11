@@ -25,6 +25,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 FAIL=0
 ok() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  + %s\n' "$d"; else printf '  x %s (rc0 expected)\n' "$d"; FAIL=$((FAIL + 1)); fi; }
 no() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (rc!=0 expected)\n' "$d"; FAIL=$((FAIL + 1)); else printf '  + %s\n' "$d"; fi; }
+# Value assertions, not just exit codes. Added with the GitLab CI checks below:
+# those need to assert WHICH paths rc_ci_configs returns, not merely that it
+# succeeded. Worth knowing why they are defined here rather than assumed -- a
+# first draft called eq/has without defining them, bash said "command not
+# found", that does not touch FAIL, and the suite printed "all passed" having
+# tested nothing.
+eq()  { if [ "$2" = "$3" ]; then printf '  + %s\n' "$1"; else printf '  x %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)); fi; }
+has() { case "$2" in *"$3"*) printf '  + %s\n' "$1" ;; *) printf '  x %s: [%s] lacks [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL + 1)) ;; esac; }
 
 TMPROOT="$(mktemp -d)"
 trap 'rm -rf "$TMPROOT"' EXIT
@@ -141,6 +149,46 @@ f="$(new_fixture)"; mkdir -p "$f/src"; : >"$f/src/index.js"; commit_fixture "$f"
 no "no workflow dir -> fails"                          check_ci_workflow
 f="$(new_fixture)"; mkdir -p "$f/.forgejo/workflows"; printf '%s' "$NO_VERIFY" >"$f/.forgejo/workflows/label.yml"; commit_fixture "$f"
 no "pull_request but no verify step -> fails"         check_ci_workflow
+
+echo "== check_ci_workflow: GitLab's .gitlab-ci.yml counts too =="
+# The GitLab cutover replaced .forgejo/workflows with a single root
+# .gitlab-ci.yml, and the scan only knew the Forgejo layout -- so both
+# sherver/igor and sherver/igor.bot silently dropped out of validation
+# ("not ready for agentic work"). A repo that fails this gate is excluded from
+# review, automerge AND the grind, so the fleet went idle with every MR
+# unreviewed. These pin the GitLab form so that cannot recur.
+GL_CI=$'stages:\n  - validate\nvalidate:\n  image: node:24\n  rules:\n    - if: $CI_PIPELINE_SOURCE == "merge_request_event"\n  script:\n    - npm ci\n    - npm test'
+GL_DEPLOY_ONLY=$'stages:\n  - deploy\ndeploy:\n  rules:\n    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "master"\n  script:\n    - rsync -avz _site/ host:/var/www'
+GL_NO_VERIFY=$'stages:\n  - validate\nlabel:\n  rules:\n    - if: $CI_PIPELINE_SOURCE == "merge_request_event"\n  script:\n    - echo hello'
+
+f="$(new_fixture)"; printf '%s' "$GL_CI" >"$f/.gitlab-ci.yml"; commit_fixture "$f"
+ok "merge_request_event + a verify step passes"            check_ci_workflow
+f="$(new_fixture)"; printf '%s' "$GL_DEPLOY_ONLY" >"$f/.gitlab-ci.yml"; commit_fixture "$f"
+no "deploy-only .gitlab-ci.yml (push:master + rsync) fails" check_ci_workflow
+f="$(new_fixture)"; printf '%s' "$GL_NO_VERIFY" >"$f/.gitlab-ci.yml"; commit_fixture "$f"
+no "merge_request_event but no verify step fails"           check_ci_workflow
+
+# rc_ci_configs must find both layouts, and neither must shadow the other.
+f="$(new_fixture)"; printf '%s' "$GL_CI" >"$f/.gitlab-ci.yml"; commit_fixture "$f"
+eq "rc_ci_configs finds the root .gitlab-ci.yml" ".gitlab-ci.yml" "$(rc_ci_configs | tr '\n' ' ' | sed 's/ $//')"
+f="$(new_fixture)"; mkdir -p "$f/.forgejo/workflows"
+printf '%s' "$PR_CI" >"$f/.forgejo/workflows/ci.yml"; printf '%s' "$GL_CI" >"$f/.gitlab-ci.yml"
+commit_fixture "$f"
+eq "rc_ci_configs finds BOTH layouts when both exist" \
+   ".forgejo/workflows/ci.yml .gitlab-ci.yml" "$(rc_ci_configs | sort | tr '\n' ' ' | sed 's/ $//')"
+
+# The trigger predicate is vendor-neutral by design.
+ok "rc_runs_on_pr accepts Forgejo's pull_request"        rc_runs_on_pr "$PR_CI"
+ok "rc_runs_on_pr accepts GitLab's merge_request_event"  rc_runs_on_pr "$GL_CI"
+no "rc_runs_on_pr rejects a push-only config"            rc_runs_on_pr "$GL_DEPLOY_ONLY"
+
+echo "== language CI coverage reads .gitlab-ci.yml too =="
+# rc_pr_workflow_content feeds the per-language advisory; if it only knew the
+# Forgejo layout, every GitLab repo would report its language as uncovered.
+f="$(new_fixture)"; mkdir -p "$f/src"; : >"$f/src/index.js"
+printf '{"name":"x"}' >"$f/package.json"
+printf '%s' "$GL_CI" >"$f/.gitlab-ci.yml"; commit_fixture "$f"
+has "node coverage seen via .gitlab-ci.yml" "$(rc_pr_workflow_content)" "npm test"
 
 echo "== check_claude_md / check_readme =="
 f="$(new_fixture)"; : >"$f/CLAUDE.md"; : >"$f/README.md"; commit_fixture "$f"
