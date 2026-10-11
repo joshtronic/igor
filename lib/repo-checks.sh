@@ -280,25 +280,59 @@ rc_lang_present() {
   esac
 }
 
-# rc_pr_workflow_content -- concatenated content of every workflow file
-# (.forgejo/workflows, .gitea/workflows) that triggers on pull_request.
-# Mirrors check_ci_workflow's file scan but without the verify-keyword
-# filter -- per-language coverage is judged against the union of everything
-# that actually runs, not just the files that already look CI-shaped.
-rc_pr_workflow_content() {
-  local dir f content listing
+# rc_ci_configs -- every CI config file in the repo, as "<path>" lines, across
+# both forges' conventions:
+#   Forgejo/Gitea: .forgejo/workflows/*.yml, .gitea/workflows/*.yml (a DIRECTORY
+#                  of workflow files)
+#   GitLab:        .gitlab-ci.yml (a SINGLE file at the repo root)
+#
+# The GitLab form is why this exists. After the cutover both sherver/igor and
+# sherver/igor.bot dropped out of validation entirely -- "not ready for agentic
+# work" -- because the only scan was for .forgejo/workflows, so removing it in
+# favour of .gitlab-ci.yml read as "this repo has no CI". A repo that fails the
+# gate is excluded from review, automerge AND the grind, so the whole fleet went
+# idle while every MR sat unreviewed. The checks were right; they just only knew
+# one forge.
+rc_ci_configs() {
+  local dir f listing
   for dir in .forgejo/workflows .gitea/workflows; do
     listing=$(rc_dir_list "$dir")
     [ -n "$listing" ] || continue
     while IFS= read -r f; do
       [ -z "$f" ] && continue
       [[ "$f" =~ \.ya?ml$ ]] || continue
-      content=$(rc_file_read "${dir}/${f}")
-      [ -n "$content" ] || continue
-      grep -q 'pull_request' <<<"$content" || continue
-      printf '%s\n' "$content"
+      printf '%s/%s\n' "$dir" "$f"
     done <<<"$listing"
   done
+  # A single root file, not a directory listing -- probe it directly.
+  [ -n "$(rc_file_read .gitlab-ci.yml)" ] && printf '%s\n' '.gitlab-ci.yml'
+  return 0
+}
+
+# rc_runs_on_pr <content> -- does this CI config trigger on a proposed change?
+# Forgejo/Gitea spell it `on: pull_request`; GitLab spells it
+# `merge_request_event` in a job's `rules:`. Either counts -- the gate asks
+# whether a change is verified BEFORE it lands, not which vendor's keyword
+# expresses that.
+rc_runs_on_pr() {
+  grep -qE 'pull_request|merge_request_event' <<<"$1"
+}
+
+# rc_pr_workflow_content -- concatenated content of every workflow file
+# (both forges' conventions -- see rc_ci_configs) that triggers on a
+# proposed change (pull_request or merge_request_event).
+# Mirrors check_ci_workflow's file scan but without the verify-keyword
+# filter -- per-language coverage is judged against the union of everything
+# that actually runs, not just the files that already look CI-shaped.
+rc_pr_workflow_content() {
+  local path content
+  while IFS= read -r path; do
+    [ -z "$path" ] && continue
+    content=$(rc_file_read "$path")
+    [ -n "$content" ] || continue
+    rc_runs_on_pr "$content" || continue
+    printf '%s\n' "$content"
+  done < <(rc_ci_configs)
 }
 
 # Installing a toolchain is not running it. `apt-get install python3` or
@@ -360,20 +394,15 @@ check_ci_workflow() {
   # A REAL CI workflow must run ON pull_request AND actually verify the change
   # (a build/test/lint step) -- a deploy-only workflow (push:master + rsync)
   # doesn't. Read each workflow file and require BOTH signals.
-  local dir f content listing
-  for dir in .forgejo/workflows .gitea/workflows; do
-    listing=$(rc_dir_list "$dir")
-    [ -n "$listing" ] || continue
-    while IFS= read -r f; do
-      [ -z "$f" ] && continue
-      [[ "$f" =~ \.ya?ml$ ]] || continue
-      content=$(rc_file_read "${dir}/${f}")
-      [ -n "$content" ] || continue
-      grep -q 'pull_request' <<<"$content" || continue
-      grep -qiE 'test|lint|build|dry-?run|eleventy|pytest|cargo|go test|npm (ci|run|test)|markdownlint|shellcheck' \
-        <<<"$content" && return 0
-    done <<<"$listing"
-  done
+  local path content
+  while IFS= read -r path; do
+    [ -z "$path" ] && continue
+    content=$(rc_file_read "$path")
+    [ -n "$content" ] || continue
+    rc_runs_on_pr "$content" || continue
+    grep -qiE 'test|lint|build|dry-?run|eleventy|pytest|cargo|go test|npm (ci|run|test)|markdownlint|shellcheck|check-sync' \
+      <<<"$content" && return 0
+  done < <(rc_ci_configs)
   return 1
 }
 
@@ -446,7 +475,7 @@ validate_repo_local() {
   # with the bot token).
   check_ci_workflow
   _gate $? "Validate action present (runs on \`pull_request\` and verifies the change)" \
-    "add a Forgejo Actions workflow at \`.forgejo/workflows/<name>.yml\` that runs on \`pull_request\` and executes a real check (lint / test / build / typecheck)"
+    "add CI that runs on a proposed change and executes a real check (lint / test / build / typecheck): \`.gitlab-ci.yml\` with a job gated on \`merge_request_event\`, or \`.forgejo/workflows/<name>.yml\` triggered by \`pull_request\`"
 
   check_test_signal
   _gate $? "Test signal present (a real way to verify a change)" \

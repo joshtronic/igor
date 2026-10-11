@@ -32,14 +32,18 @@ if [ $# -ne 1 ]; then
   exit 2
 fi
 
-# Same SSH clone URL the harness uses (bin/tick.sh:ssh_clone_url).
+# The same clone URL the harness uses. Delegates to gl_clone_url (lib/gitlab.sh,
+# sourced above) rather than re-deriving one: this file used to carry its own
+# SSH copy built from FORGEJO_HOST, and after the GitLab cutover that produced
+# git@gitlab.com:<repo>.git -- SSH, for which the service account has no key.
+# Every invocation failed with "could not clone <repo> -- check bot access",
+# which reads like a permissions problem and is not one.
+#
+# Keeping a second implementation of this is what let the two drift apart, so
+# there is only one now; the wrapper stays only because the call sites below
+# name it.
 ssh_clone_url() {
-  local repo="$1"
-  if [[ "${FORGEJO_HOST:-}" == *:* ]]; then
-    echo "ssh://git@${FORGEJO_HOST}/${repo}.git"
-  else
-    echo "git@${FORGEJO_HOST}:${repo}.git"
-  fi
+  gl_clone_url "$1"
 }
 
 # FLEET_LANG_GAPS -- one "repo: lang1, lang2" line per repo audited this run
