@@ -67,14 +67,34 @@ eq "decision: turn cap + stash, reconcile failed -> discard" "discard"    "$(che
 eq "decision: turn cap, no stash, reconciled flag ignored"   "checkpoint" "$(checkpoint_decision 1 1 0 1)"
 
 echo "== WIP title round-trip =="
-ok    "is_wip: a WIP title"                       checkpoint_is_wip "WIP: feat: thing"
+ok    "is_wip: a WIP title"                       checkpoint_is_wip "Draft: feat: thing"
 no    "is_wip: a plain title"                     checkpoint_is_wip "feat: thing"
-eq    "wip_title: adds the prefix"                "WIP: feat: thing" "$(checkpoint_wip_title 'feat: thing')"
-eq    "wip_title: idempotent (no double prefix)"  "WIP: feat: thing" "$(checkpoint_wip_title 'WIP: feat: thing')"
-eq    "strip_wip: removes the prefix"             "feat: thing"      "$(checkpoint_strip_wip 'WIP: feat: thing')"
+eq    "wip_title: adds the prefix"                "Draft: feat: thing" "$(checkpoint_wip_title 'feat: thing')"
+eq    "wip_title: idempotent (no double prefix)"  "Draft: feat: thing" "$(checkpoint_wip_title 'Draft: feat: thing')"
+eq    "strip_wip: removes the prefix"             "feat: thing"      "$(checkpoint_strip_wip 'Draft: feat: thing')"
 eq    "strip_wip: no-op on a plain title"         "feat: thing"      "$(checkpoint_strip_wip 'feat: thing')"
 # strip then re-add is stable
-eq    "wip round-trip is stable" "WIP: feat: x" "$(checkpoint_wip_title "$(checkpoint_strip_wip 'WIP: feat: x')")"
+eq    "wip round-trip is stable" "Draft: feat: x" "$(checkpoint_wip_title "$(checkpoint_strip_wip 'Draft: feat: x')")"
+
+# Legacy migration: checkpoint PRs opened before the cutover carry "WIP: ".
+# The READ side must still recognize them or they fall out of all three gates at
+# once -- discovery stops resuming them, automerge stops excluding them, and
+# needsyou starts calling them the human's turn.
+ok    "is_wip: the legacy 'WIP: ' prefix is still a checkpoint" checkpoint_is_wip "WIP: feat: thing"
+eq    "strip_wip: removes the legacy prefix too"  "feat: thing"        "$(checkpoint_strip_wip 'WIP: feat: thing')"
+# Re-marking a legacy title MIGRATES it rather than stacking a second prefix.
+eq    "wip_title: migrates a legacy title"        "Draft: feat: thing" "$(checkpoint_wip_title 'WIP: feat: thing')"
+
+# lib/automerge.sh and lib/needsyou.sh carry literal fallbacks for both prefixes,
+# for when they run without lib/checkpoint.sh sourced. automerge's copy is the
+# safety exclusion -- if it drifts, checkpoint MRs stop being excluded from merge
+# -- so every copy must agree.
+for f in automerge needsyou; do
+  for v in CHECKPOINT_WIP_PREFIX CHECKPOINT_WIP_PREFIX_LEGACY; do
+    fb=$(grep -oE "${v}:-[^}]*\}" "$HERE/../lib/$f.sh" | head -1 | sed -E "s/^${v}:-//; s/\}$//")
+    eq "lib/$f.sh fallback matches $v" "${!v}" "$fb"
+  done
+done
 
 echo "== body checkpoint counter =="
 BODY_PLAIN=$'Closes #351\n\nDoes the thing.'
@@ -227,7 +247,7 @@ export GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
 echo "== forgejo_bot_prs_for_issue: title field + the gate/resume filters =="
 _fj() { cat <<'JSON'
 [
- {"number":10,"state":"open","title":"WIP: fix the thing","user":{"login":"igor"},"body":"wip\n\nCloses #351"},
+ {"number":10,"state":"open","title":"Draft: fix the thing","user":{"login":"igor"},"body":"wip\n\nCloses #351"},
  {"number":11,"state":"open","title":"feat: other","user":{"login":"igor"},"body":"Closes #351"},
  {"number":12,"state":"closed","title":"old","user":{"login":"igor"},"merged":false,"body":"Closes #351"},
  {"number":13,"state":"open","title":"not the bot","user":{"login":"human"},"body":"Closes #351"}
@@ -236,13 +256,25 @@ JSON
 }
 HIST=$(forgejo_bot_prs_for_issue acme/x 351 igor)
 eq  "bot_prs: only the bot's PRs referencing #351 (3 of 4)" "3" "$(jq 'length' <<<"$HIST")"
-has "bot_prs: entries carry the title field"                "$(jq -r '.[0].title' <<<"$HIST")" "WIP: fix the thing"
-# discovery gate's EXACT filter (tick.sh): open AND not-WIP -> in flight -> skip
-GATE=$(jq --arg wip "$CHECKPOINT_WIP_PREFIX" '[.[]|select(.state=="open" and ((.title//"")|startswith($wip)|not))]|length' <<<"$HIST")
-eq  "gate: only the real open PR (#11) blocks the claim, not the WIP" "1" "$GATE"
-# resume detector's EXACT filter (tick.sh): open AND WIP -> resume this PR
-RESUME=$(jq -r --arg wip "$CHECKPOINT_WIP_PREFIX" '[.[]|select(.state=="open" and ((.title//"")|startswith($wip)))]|first|.number//empty' <<<"$HIST")
-eq  "resume: locates the open WIP checkpoint PR (#10)" "10" "$RESUME"
+has "bot_prs: entries carry the title field"                "$(jq -r '.[0].title' <<<"$HIST")" "Draft: fix the thing"
+# The discovery gate counts the open covering PRs that are NOT checkpoints
+# (tick.sh runs this on already-open-filtered input, via the helper -- not an
+# inline copy of the filter, which is what test-claim-guard.sh greps for).
+OPEN=$(jq -c '[.[]|select(.state=="open")]' <<<"$HIST")
+eq  "gate: only the real open PR (#11) blocks the claim, not the draft" "1" \
+  "$(checkpoint_count_non_wip "$OPEN")"
+# resume detector's EXACT filter (tick.sh): open AND a draft prefix -> resume it
+# shellcheck disable=SC2016  # $wip/$wipold are jq args, not shell vars
+RESUME_F='[.[]|select(.state=="open" and ((.title//"")|startswith($wip)or startswith($wipold)))]|first|.number//empty'
+RESUME=$(jq -r --arg wip "$CHECKPOINT_WIP_PREFIX" --arg wipold "$CHECKPOINT_WIP_PREFIX_LEGACY" "$RESUME_F" <<<"$HIST")
+eq  "resume: locates the open checkpoint PR (#10)" "10" "$RESUME"
+# Both gates against a LEGACY-titled checkpoint: it must still be resumed and
+# must still not read as in-flight, or it stalls with nothing logging why.
+LEGACY='[{"number":7,"state":"open","title":"WIP: pre-cutover checkpoint","body":"Closes #351"}]'
+eq  "gate: a legacy WIP checkpoint does not block the claim" "0" \
+  "$(checkpoint_count_non_wip "$LEGACY")"
+eq  "resume: locates a legacy WIP checkpoint PR (#7)" "7" \
+  "$(jq -r --arg wip "$CHECKPOINT_WIP_PREFIX" --arg wipold "$CHECKPOINT_WIP_PREFIX_LEGACY" "$RESUME_F" <<<"$LEGACY")"
 
 echo "== forgejo_edit_pr: PATCH payload (counter bump / WIP drop) =="
 _fj() { printf '%s' "$1" >"$TMP/m"; printf '%s' "$2" >"$TMP/p"; printf '%s' "$3" >"$TMP/b"; }

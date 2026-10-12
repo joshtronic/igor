@@ -258,6 +258,29 @@ eval '_gl() { printf ""; }'
 eq "empty API bodies -> empty array, no crash" "0" "$(forgejo_pr_reviews acme/x 1 | jq 'length' 2>/dev/null)"
 unset -f _gl
 
+echo "== system threads are not reviews (live sweep, 2026-10-11) =="
+# A human opens a change-request thread, then retitles the MR. GitLab records
+# the retitle as its own SYSTEM discussion thread, newer than the request. If
+# that counts as a COMMENT review, it becomes the "latest" and buries the
+# change request -- the bot never sees it was asked for changes.
+# The review-contract section above unsets its _gl stub when it finishes, so
+# reinstate it here; without it this block silently hits the real network.
+_gl() {
+  case "$2" in
+    */approvals)    printf '%s' "$APPROVALS_FIXTURE" ;;
+    */discussions*) printf '%s' "$DISCUSSIONS_FIXTURE" ;;
+    *)              printf '{"sha":"HEADSHA"}' ;;
+  esac
+}
+_mk_reviews '{"approved_by":[],"updated_at":"2026-01-01T00:00:00Z"}' \
+  '[{"notes":[{"resolvable":true,"resolved":false,"author":{"username":"joshtronic"},"created_at":"2026-02-01T00:00:00Z","position":{"head_sha":"HEADSHA"}}]},
+    {"notes":[{"system":true,"resolvable":false,"author":{"username":"joshtronic"},"created_at":"2026-02-02T00:00:00Z","body":"changed title from x to y"}]},
+    {"notes":[{"system":true,"resolvable":false,"author":{"username":"joshtronic"},"created_at":"2026-02-03T00:00:00Z","body":"assigned to @igorbot"}]}]'
+eq "system threads produce no review entries" "1" "$(forgejo_pr_reviews acme/x 1 | jq 'length')"
+eq "a later system note does not bury the change request" "REQUEST_CHANGES" \
+  "$(forgejo_pr_actionable_request_changes acme/x 1 igorbot | jq -r '.state')"
+unset -f _gl
+
 echo "== CI state fold =="
 eq "success"              "success" "$(_gl_map_ci_state success)"
 eq "skipped counts green" "success" "$(_gl_map_ci_state skipped)"
@@ -312,6 +335,63 @@ _gl() { printf '{"message":"403 Forbidden"}'; }
 no "pr_files: non-changes payload is nonzero" forgejo_pr_files acme/x 1
 eq "pr_files: and emits nothing" "" "$(forgejo_pr_files acme/x 1 2>/dev/null)"
 unset -f _gl
+
+echo "== get_commit: GitLab parent_ids shimmed to Forgejo .parents[].sha =="
+# The approval walk in lib/automerge.sh reads `.parents | length`. Unshimmed,
+# GitLab's bare parent_ids array meant every commit had ZERO parents.
+_gl() { printf '%s' '{"id":"MERGE","parent_ids":["P1","P2"],"title":"Merge branch x"}'; }
+GC=$(forgejo_get_commit acme/x MERGE)
+eq "get_commit: .sha <- .id"            "MERGE"  "$(jq -r .sha <<<"$GC")"
+eq "get_commit: two parents"            "2"      "$(jq '.parents|length' <<<"$GC")"
+eq "get_commit: second parent sha"      "P2"     "$(jq -r '.parents[1].sha' <<<"$GC")"
+unset -f _gl
+
+echo "== open_issue_assigned: numeric label IDS, resolved to names =="
+# feedback_resolve_labels hands over [ids]. GitLab issue-create takes NAMES, and
+# a raw "[12, 34]" would be split on the comma and CREATED as two junk labels.
+POSTED="$(mktemp)"
+# The label list goes through _gl_paged, so page 1 answers and page 2 is empty --
+# a stub that answered every page would spin to the page cap and resolve nothing.
+_gl() {
+  case "$1 $2" in
+    "GET /users"*)              printf '[{"id":7}]' ;;
+    "GET /projects/"*"/labels"*"page=1"*) printf '[{"id":12,"name":"Kind/Bug"},{"id":34,"name":"Priority/High"},{"id":56,"name":"Other"},{"id":78,"name":"Kind/Bug, Really"}]' ;;
+    "GET /projects/"*"/labels"*) printf '[]' ;;
+    "POST /projects/"*"/issues") printf '%s' "$3" >"$POSTED"; printf '{"iid":9,"description":"","author":{"username":"igorbot"},"labels":[]}' ;;
+  esac
+}
+_GL_UID_CACHE=()
+forgejo_open_issue_assigned acme/x "t" "b" someone '[12,34]' >/dev/null
+eq "label ids resolved to a name list" "Kind/Bug,Priority/High" "$(jq -r .labels "$POSTED")"
+# A repeated id resolves to the single name it names, so the drop check has to
+# compare against the DEDUPED ids -- otherwise it warns about a label that
+# resolved perfectly well.
+eq "duplicate ids resolve once, with nothing logged" "" \
+  "$(forgejo_open_issue_assigned acme/x "t" "b" someone '[12,12]' 2>&1 >/dev/null)"
+eq "and the deduped name still lands" "Kind/Bug" "$(jq -r .labels "$POSTED")"
+# A name carrying a comma cannot ride a comma-separated field: GitLab would
+# split it and CREATE the fragments as new labels, which is the junk-label
+# failure this resolution exists to prevent. Dropped, like an unresolved id.
+forgejo_open_issue_assigned acme/x "t" "b" someone '[12,78]' >/dev/null 2>/dev/null
+eq "a comma in a name is dropped, the rest still land" "Kind/Bug" "$(jq -r .labels "$POSTED")"
+has "and the comma drop is logged" \
+  "$(forgejo_open_issue_assigned acme/x "t" "b" someone '[12,78]' 2>&1 >/dev/null)" "comma-bearing"
+forgejo_open_issue_assigned acme/x "t" "b" someone '[]' >/dev/null
+eq "empty id list omits labels entirely" "false" "$(jq 'has("labels")' "$POSTED")"
+forgejo_open_issue_assigned acme/x "t" "b" someone '[999]' >/dev/null 2>/dev/null
+eq "an unknown id is dropped, issue still opens" "false" "$(jq 'has("labels")' "$POSTED")"
+has "an unresolved id leaves a log line" \
+  "$(forgejo_open_issue_assigned acme/x "t" "b" someone '[999]' 2>&1 >/dev/null)" "ids dropped"
+# A caller still on the pre-cutover comma-separated-NAMES contract gets an
+# unlabelled issue -- which must not be silent.
+has "a non-array label argument is called out" \
+  "$(forgejo_open_issue_assigned acme/x "t" "b" someone 'Kind/Bug' 2>&1 >/dev/null)" "wants a JSON array of label ids"
+eq "and that issue opens unlabelled, not with junk labels" "false" "$(jq 'has("labels")' "$POSTED")"
+rm -f "$POSTED"; unset -f _gl
+# `unset -f _gl` removes the function outright -- bash does not stack definitions
+# -- so re-source to put the real _gl back for the blocks below. Unredirected: a
+# syntax break in the library must surface here, not as a baffling failure below.
+. "$HERE/../lib/gitlab.sh"
 
 echo "== bot_prs_for_issue: merged folds to closed+merged, so rejection counting stays honest =="
 _gl_paged() { cat <<'JSON'

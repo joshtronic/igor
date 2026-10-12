@@ -106,12 +106,16 @@ respective tools on the host; install or skip.
   or a turn cap left with a stash that pop couldn't reconcile -> the
   ship-safety discard, relaxed per igor#411 so a stash alone no longer vetoes
   an otherwise-recoverable checkpoint). A `checkpoint` commits the in-progress
-  work and publishes it as a **draft (`WIP:` title) PR** that the review +
+  work and publishes it as a **draft (`Draft:` title) PR** that the review +
   merge loops SKIP and the discovery/claim gate RESUMES (carving the next
   worktree from that branch, with a "continue,
   don't restart" directive to Claude) -- so the issue stays claimable and picks
-  up where it left off. Natural completion (`exit 0`) drops the `WIP:` prefix,
-  marking the PR ready -> shadow review. Guardrails: a **resume budget**
+  up where it left off. Natural completion (`exit 0`) drops the `Draft:`
+  prefix, marking the PR ready -> shadow review. The prefix was `WIP:` until
+  the GitLab cutover (GitLab honours only `Draft:` since 14.0); the READ side
+  still accepts `WIP:` so a checkpoint PR open across the change keeps being
+  resumed, excluded from merge, and left out of the needs-you scan.
+  Guardrails: a **resume budget**
   (`CHECKPOINT_MAX`, tracked as `<!-- agent-checkpoints=N -->` in the PR body)
   caps how many times one issue may checkpoint before it's escalated to the
   human with `Status/Blocked` ("too big -- split it"), so a non-converging task

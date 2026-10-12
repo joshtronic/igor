@@ -472,9 +472,18 @@ forgejo_get_branch() {
     | jq -c 'if type=="object" then . + {commit: {id: (.commit.id // "")}} else . end'
 }
 
+# Shimmed to the Forgejo shape: `.sha` and `.parents[].sha`. GitLab returns
+# `.id` and a bare `parent_ids` array instead. The one caller (lib/automerge.sh,
+# the walk that decides whether an approval still covers a head that moved only
+# by merging the base in) reads `.parents | length` and `.parents[1:][].sha`;
+# unshimmed, every commit read as having ZERO parents, so the walk always
+# concluded "new content" and an approval never survived a base merge.
 forgejo_get_commit() {
   local repo="$1" sha="$2"
-  _gl GET "/projects/$(_gl_proj "$repo")/repository/commits/${sha}"
+  _gl GET "/projects/$(_gl_proj "$repo")/repository/commits/${sha}" \
+    | jq -c 'if type == "object" and has("id") then
+               . + { sha: .id, parents: [ (.parent_ids // [])[] | {sha: .} ] }
+             else . end'
 }
 
 # Compare two refs: commits <to> has that <from> doesn't. GitLab's compare
@@ -592,6 +601,14 @@ forgejo_pr_reviews() {
         | ($t.notes // []) as $notes
         | ($notes[0] // {}) as $first
         | select(($notes | length) > 0)
+        # SYSTEM threads are not reviews. GitLab records every state change on
+        # an MR -- "changed the description", "requested review from @x",
+        # "added 1m of time spent", "assigned to @y" -- as its own discussion
+        # thread, author = whoever acted. Left in, each one synthesizes a COMMENT
+        # review, and because the actionable check reads the LATEST non-bot
+        # review, a human retitling or reassigning the MR silently buried their
+        # own earlier unresolved change request.
+        | select(($first.system // false) == false)
         | ($first.resolvable // false) as $resolvable
         | ([ $notes[] | select((.resolvable // false) and (.resolved // false)) ] | length > 0) as $resolved
         | ($first.position.head_sha // "") as $tsha
@@ -1371,14 +1388,39 @@ forgejo_open_issue() {
 }
 
 # Open an issue with an assignee and (optionally) labels set at creation, in
-# one POST. <labels> is a COMMA-SEPARATED NAME LIST, not the JSON array of
-# numeric ids the Forgejo version took -- GitLab has no label ids. An empty
-# value omits the field. Callers passing the old `[]` get the empty behavior.
+# one POST. <label_ids_json> is a JSON array of numeric label IDs -- the same
+# contract as lib/forgejo.sh, which is what the caller (lib/feedback.sh's
+# feedback_resolve_labels) actually produces. An empty array omits labels.
+#
+# GitLab's issue-create takes label NAMES, not ids, so the ids are resolved
+# against the project's label list first. Handing GitLab the raw array would
+# post the literal string "[123, 456]", which it splits on the comma and CREATES
+# as two junk labels named "[123" and "456]".
+#
+# An id that does not resolve is dropped rather than failing the whole call: the
+# issue still opens, just without that label. So is a name carrying a comma --
+# it cannot ride a comma-separated field, and sending it anyway would split it
+# into fragments GitLab CREATES as labels, the same junk-label failure. Both
+# drops, and a caller still on the pre-cutover name-string contract, leave a log
+# line, since each one otherwise produces a silently (or wrongly) labelled issue.
 forgejo_open_issue_assigned() {
-  local repo="$1" title="$2" body="$3" assignee="$4" labels="${5:-}" payload uid
+  local repo="$1" title="$2" body="$3" assignee="$4" label_ids="${5:-[]}" payload uid all picked names=""
   uid=$(_gl_user_id "$assignee")
-  case "$labels" in '[]'|'') labels='' ;; esac
-  payload=$(jq -n --arg t "$title" --arg b "$body" --arg l "$labels" --arg u "${uid:-}" '
+  if jq -e 'type == "array" and length > 0' >/dev/null 2>&1 <<<"$label_ids"; then
+    all=$(_gl_paged "/projects/$(_gl_proj "$repo")/labels" 2>/dev/null) || all='[]'
+    jq -e 'type == "array"' >/dev/null 2>&1 <<<"$all" || all='[]'
+    picked=$(jq -c --argjson want "$label_ids" \
+      '[ .[] | select(.id as $i | $want | index($i)) | .name | select(index(",") | not) ]' \
+      <<<"$all" 2>/dev/null) || picked='[]'
+    names=$(jq -r 'join(",")' <<<"$picked")
+    # Against the DEDUPED ids: a repeated id resolves to one name, so comparing
+    # the raw length would report a drop that never happened.
+    [ "$(jq 'length' <<<"$picked")" = "$(jq 'unique | length' <<<"$label_ids")" ] \
+      || log "gitlab: ${repo} label ids ${label_ids} resolved to ${picked} -- unresolved or comma-bearing ids dropped"
+  elif ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$label_ids"; then
+    log "gitlab: open_issue_assigned wants a JSON array of label ids, got [${label_ids}] -- issue opens unlabelled"
+  fi
+  payload=$(jq -n --arg t "$title" --arg b "$body" --arg l "$names" --arg u "${uid:-}" '
     {title:$t, description:$b}
     + (if $u != "" then {assignee_ids: [($u | tonumber)]} else {} end)
     + (if $l != "" then {labels: $l} else {} end)')

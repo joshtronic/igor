@@ -127,7 +127,7 @@ PULLS='[
   },
   {
     "number": 12,
-    "title": "WIP: issue #7 checkpoint -- half a thing",
+    "title": "Draft: issue #7 checkpoint -- half a thing",
     "head": "agent/7"
   }
 ]'
@@ -135,11 +135,11 @@ eq "pulls JSON yields bare numbers, not JSON fragments" "449" "$(needsyou_pr_num
 eq "an empty list yields nothing" "" "$(needsyou_pr_numbers '[]')"
 eq "garbage yields nothing rather than fragments" "" "$(needsyou_pr_numbers 'not json')"
 eq "an empty argument yields nothing" "" "$(needsyou_pr_numbers '')"
-# A WIP: checkpoint PR is Igor mid-task, exactly like the rework loop -- and it
+# A Draft: checkpoint PR is Igor mid-task, exactly like the rework loop -- and it
 # can carry a stale verdict from before it checkpointed, which would otherwise
 # read as "escalated to you" while Igor is still working.
-eq "a WIP: checkpoint PR is Igor's turn, not yours" "" \
-  "$(needsyou_pr_numbers '[{"number":12,"title":"WIP: issue #7 checkpoint"}]')"
+eq "a Draft: checkpoint PR is Igor's turn, not yours" "" \
+  "$(needsyou_pr_numbers '[{"number":12,"title":"Draft: issue #7 checkpoint"}]')"
 eq "two ready PRs both come through" "1
 2" "$(needsyou_pr_numbers '[{"number":1,"title":"a"},{"number":2,"title":"b"}]')"
 
@@ -206,7 +206,7 @@ BOT_USER=igor
 # issue -- both the operator's. acme/blog: no bot PRs, and an issue that is
 # merely Agent-labelled -- neither is.
 PULLS_SITE='[{"number":7,"title":"feat: a thing","head":"agent/7"},
-             {"number":8,"title":"WIP: issue #8 checkpoint","head":"agent/8"}]'
+             {"number":8,"title":"Draft: issue #8 checkpoint","head":"agent/8"}]'
 forgejo_list_open_bot_prs() {
   case "$1" in
     acme/site) printf '%s' "$PULLS_SITE" ;;
