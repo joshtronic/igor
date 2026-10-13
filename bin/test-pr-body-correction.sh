@@ -62,6 +62,13 @@ echo "== the confirmation comment =="
 COMMENT=$(pr_body_correction_comment)
 has "it says the description was corrected" "$COMMENT" "description"
 has "it says this was automated" "$COMMENT" "automated"
+# igor#13: the old wording claimed a reviewer finding drove every correction,
+# but the harness applies one whenever the agent writes the file, whether or
+# not a finding asked for it.
+case "$COMMENT" in
+  *"A reviewer finding said"*) bad "it does not claim a reviewer finding drove the correction" ;;
+  *)                           ok  "it does not claim a reviewer finding drove the correction" ;;
+esac
 
 echo "== the harness's own 'Closes #N' guarantee survives a correction =="
 # The agent is told to write a FULL replacement body, so it can drop the

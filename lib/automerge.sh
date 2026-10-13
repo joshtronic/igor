@@ -1034,17 +1034,20 @@ do_automerge_tick() {
         if sha=$(automerge_do_merge "$repo" "$pr"); then
           automerge_block_clear "$sf" "$key"
           [ -n "$sha" ] || sha="$head"   # fall back to the head if the merge SHA didn't come back
+          # shadow_only=1 means no human ever approved this head -- crediting
+          # FORGEJO_REVIEWER here would misstate who signed off (igor#13).
+          local approver; [ "$shadow_only" = "1" ] && approver="Igor's review" || approver="${FORGEJO_REVIEWER}"
           if [ -n "$url" ]; then
             _deploy_record "$repo" "$pr" "$sha" "$url"
-            log "automerge: merged ${key} (approved by ${FORGEJO_REVIEWER}, CI green) -- watching deploy ${sha:0:8}"
+            log "automerge: merged ${key} (approved by ${approver}, CI green) -- watching deploy ${sha:0:8}"
           elif landed_applies "$repo"; then
             # igor#512, genericized igor#538: a url-less repo whose dossier
             # declares a `landed-kind` gets a host-state landed-watch instead
             # of a deploy/smoke watch -- see lib/landed.sh.
             landed_record "$repo" "$pr" "$sha"
-            log "automerge: merged ${key} (approved by ${FORGEJO_REVIEWER}, CI green) -- no live URL, watching landed-verification ${sha:0:8}"
+            log "automerge: merged ${key} (approved by ${approver}, CI green) -- no live URL, watching landed-verification ${sha:0:8}"
           else
-            log "automerge: merged ${key} (approved by ${FORGEJO_REVIEWER}, CI green) -- no live URL, skipping deploy watch"
+            log "automerge: merged ${key} (approved by ${approver}, CI green) -- no live URL, skipping deploy watch"
           fi
           return 0
         else
