@@ -55,5 +55,5 @@ pr_body_correction_read() {
 # is patched, so the thread records that it happened and why, without
 # quoting the (possibly long) new body back into the conversation.
 pr_body_correction_comment() {
-  printf '### ✏️ PR description corrected _(automated)_\n\nA reviewer finding said the description no longer matched the diff. The agent supplied a corrected body and the harness applied it directly -- see the PR description above for the current text.\n'
+  printf '### ✏️ PR description corrected _(automated)_\n\nThe agent supplied a corrected description and the harness applied it -- see the description above for the current text.\n'
 }

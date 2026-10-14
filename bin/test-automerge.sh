@@ -632,9 +632,17 @@ forgejo_pr_files() { printf '[{"filename":"x.txt","additions":1,"deletions":1}]'
 
 # Default (shadow-gated) repo: the shadow verdict APPROVE is the gate.
 echo '{"review":{"acme/site#7":{"verdict":"APPROVE","sha":"headsha7"}}}' > "$STATE"
-ok "automerge: default repo + shadow APPROVE -> merges (rc0)"  do_automerge_tick
+AUTOMERGE_OUT=$(do_automerge_tick 2>&1); AUTOMERGE_RC=$?
+eq "automerge: default repo + shadow APPROVE -> merges (rc0)" "0" "$AUTOMERGE_RC"
 eq "automerge: recorded deploy repo"       "acme/site" "$(jq -r '.deploy.repo // ""' "$STATE")"
 eq "automerge: recorded merge sha"         "mergesha7" "$(jq -r '.deploy.sha // ""' "$STATE")"
+# igor#13: no human ever approved this head (shadow-only path) -- the merge
+# log must not credit FORGEJO_REVIEWER for a review they never gave.
+has "automerge: shadow-only merge log credits Igor's review" "$AUTOMERGE_OUT" "approved by Igor's review"
+case "$AUTOMERGE_OUT" in
+  *"approved by ${FORGEJO_REVIEWER}"*) bad "automerge: shadow-only merge log does not credit \$FORGEJO_REVIEWER" ;;
+  *)                                   ok  "automerge: shadow-only merge log does not credit \$FORGEJO_REVIEWER" ;;
+esac
 
 # APPROVE-only: a shadow COMMENT (no affirmative sign-off) routes to human, no merge.
 echo '{"review":{"acme/site#7":{"verdict":"COMMENT"}}}' > "$STATE"
@@ -656,8 +664,11 @@ eq "automerge: stale-APPROVE records nothing" ""      "$(jq -r '.deploy.repo // 
 # -> merges (a human can merge any repo by approving). This is the #59/#61 case.
 automerge_approved_by() { return 0; }        # human approved
 echo '{"review":{"acme/site#7":{"verdict":"COMMENT"}}}' > "$STATE"
-ok "automerge: human APPROVED overrides a shadow COMMENT -> merges"  do_automerge_tick
+AUTOMERGE_OUT=$(do_automerge_tick 2>&1); AUTOMERGE_RC=$?
+eq "automerge: human APPROVED overrides a shadow COMMENT -> merges" "0" "$AUTOMERGE_RC"
 eq "automerge: human-override recorded deploy" "acme/site" "$(jq -r '.deploy.repo // ""' "$STATE")"
+# igor#13: a real human approval -> the log still credits $FORGEJO_REVIEWER.
+has "automerge: human-approved merge log credits \$FORGEJO_REVIEWER" "$AUTOMERGE_OUT" "approved by ${FORGEJO_REVIEWER}"
 # ... but a shadow REQUEST_CHANGES blocks even a human approve (overriding a
 # flagged problem is a deliberate MANUAL merge, not an auto-merge).
 echo '{"review":{"acme/site#7":{"verdict":"REQUEST_CHANGES"}}}' > "$STATE"
