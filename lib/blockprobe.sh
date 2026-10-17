@@ -476,7 +476,7 @@ do_blockprobe_tick() {
           ;;
       esac
       if [ "$kind" = "operator" ]; then
-        log "blockprobe: ${repo}#${n} blocked on an operator decision -- never auto-requeued"
+        log_on_change "blockprobe:${repo}#${n}" "blockprobe: ${repo}#${n} blocked on an operator decision -- never auto-requeued"
         continue
       fi
 

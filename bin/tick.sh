@@ -187,7 +187,7 @@ export TICK_PID=$$
 # tick BEFORE the check below runs, bypassing this diagnostic (igor#346).
 BOT_USER=$(forgejo_resolve_bot_user) || BOT_USER=""
 [ -n "$BOT_USER" ] || {
-  echo "agent: failed to resolve bot user from $FORGEJO_URL/api/v1/user" >&2
+  echo "agent: failed to resolve bot user from the forge API" >&2
   exit 3
 }
 
@@ -347,6 +347,26 @@ if ! flock -n 200; then
 fi
 
 log() { printf '[agent] %s\n' "$*" >&2; }
+
+# log_on_change <key> <message> -- log() only when message differs from the
+# last message logged under key. Heartbeat lines ("no work this week --
+# continuing") repeat unchanged almost every tick and bury real events in the
+# journal (igor#16); a changed message (new date, new count, a different
+# blocked issue) still logs immediately. Last text per key persists under
+# AGENT_STATE_DIR so the dedup survives across ticks, not just within one.
+log_on_change() {
+  local key="$1" message="$2"
+  local dir="$AGENT_STATE_DIR/log-on-change"
+  # Keys like "blockprobe:acme/x#13" carry a repo full name's "/" -- collapse
+  # it so the key stays a single path component instead of implying a
+  # subdirectory mkdir -p never creates.
+  local file="$dir/${key//\//_}"
+  mkdir -p "$dir"
+  if [ ! -f "$file" ] || [ "$(cat "$file" 2>/dev/null)" != "$message" ]; then
+    log "$message"
+    printf '%s' "$message" > "$file"
+  fi
+}
 
 # Dead-man's-switch heartbeat (check A) -- unconditional, every tick that
 # gets this far (i.e. actually holds the lock). No-op when
@@ -1503,7 +1523,7 @@ do_maintenance_tick() {
   done <<<"$ANALYSIS_REPOS_JSON"
 
   if [ "${#eligible[@]}" -eq 0 ]; then
-    log "maintenance: no repos eligible this week -- continuing"
+    log_on_change "maintenance" "maintenance: no repos eligible this week -- continuing"
     return 1
   fi
 
@@ -2060,7 +2080,7 @@ do_seo_tick() {
     if seo_eligible "$d"; then target="$d"; break; fi
   done <<<"$domains"
   if [ -z "$target" ]; then
-    log "seo: all domains analyzed this month -- continuing"
+    log_on_change "seo" "seo: all domains analyzed this month -- continuing"
     return 1
   fi
 
@@ -2378,7 +2398,7 @@ do_sports_tick() {
   fi
 
   if sports_sent_today; then
-    log "sports: digest already sent today -- continuing"
+    log_on_change "sports" "sports: digest already sent today -- continuing"
     return 1
   fi
 
@@ -2991,7 +3011,7 @@ do_logwatch_tick() {
   # from a chronic -- and treating every blip as a defect is what turned
   # this pass into the fleet's work generator (igor#432).
   if logwatch_done_today; then
-    log "logwatch: today's pass already ran (reviewed $(logwatch_window_day)) -- continuing"
+    log_on_change "logwatch" "logwatch: today's pass already ran (reviewed $(logwatch_window_day)) -- continuing"
     return 1
   fi
 
@@ -3866,7 +3886,7 @@ while IFS= read -r repo_line; do
     VAL_NOTREADY=$((VAL_NOTREADY + 1))
   fi
 done < <(jq -c '.[]' <<<"$ALL_REPOS")
-log "validation: ${VAL_PASS} pass, ${VAL_CACHED} cached, ${VAL_NOTREADY} not-ready, ${VAL_INDET} indeterminate"
+log_on_change "validation" "validation: ${VAL_PASS} pass, ${VAL_CACHED} cached, ${VAL_NOTREADY} not-ready, ${VAL_INDET} indeterminate"
 
 # -- Auto-merge on approve (needs the validated set, just built above; non-model
 # -- API only). Merges a human-approved bot PR on an opt-in repo and stamps the

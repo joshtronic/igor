@@ -24,6 +24,11 @@ export GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
 
 command -v jq >/dev/null 2>&1 || { echo "test-blockprobe: jq unavailable -- skipping"; exit 0; }
 
+# log_on_change is normally defined by tick.sh (bin/tick.sh); stub it here so
+# the operator-decision scenario below, which calls it directly, routes
+# through whatever log() a scenario has stubbed rather than erroring out.
+log_on_change() { log "$2"; }
+
 FAIL=0
 
 # _issues_payload <number> <body> -- one fake issues-list response, JSON

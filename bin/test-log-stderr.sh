@@ -75,6 +75,45 @@ else
   esac
 fi
 
+echo "== log_on_change: logs on first use, silent on an identical repeat, logs again on change (igor#16) =="
+# log_on_change lives in bin/tick.sh (it needs AGENT_STATE_DIR + log), so lift
+# the function out and drive it with a stub log -- same idiom bin/test-cascade.sh
+# uses for cascade_run.
+LOC_SRC=$(sed -n '/^log_on_change() {$/,/^}$/p' "$HERE/bin/tick.sh")
+if [ -z "$LOC_SRC" ]; then
+  bad "could not extract log_on_change() from bin/tick.sh"
+else
+  eval "$LOC_SRC"
+  LOC_TMP=$(mktemp -d); trap 'rm -rf "$LOC_TMP" "${STUB:-}"' EXIT
+  AGENT_STATE_DIR="$LOC_TMP"
+  LOGGED=""
+  log() { LOGGED="$LOGGED|$*"; }
+
+  log_on_change "k" "first message"
+  eq "first call logs" "|first message" "$LOGGED"
+
+  LOGGED=""
+  log_on_change "k" "first message"
+  eq "identical repeat stays silent" "" "$LOGGED"
+
+  LOGGED=""
+  log_on_change "k" "second message"
+  eq "a changed message logs again" "|second message" "$LOGGED"
+
+  LOGGED=""
+  log_on_change "other-key" "first message"
+  eq "a different key logs even if the text matches another key's last message" \
+    "|first message" "$LOGGED"
+
+  # blockprobe's call site keys on "blockprobe:<owner>/<repo>#<n>" -- the "/"
+  # from a repo full name must not be read as a path separator and imply a
+  # subdirectory mkdir -p never creates (igor#16 follow-up).
+  LOGGED=""
+  log_on_change "blockprobe:acme/x#13" "slash in key"
+  eq "a key containing a slash still logs, not an mkdir failure" \
+    "|slash in key" "$LOGGED"
+fi
+
 if [ "$FAIL" -eq 0 ]; then
   echo "test-log-stderr: all checks passed"
 else
