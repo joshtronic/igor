@@ -357,13 +357,17 @@ eq "a generated lockfile with a real diff is still counted" "2" "$(jq -r '.[0].a
 has "and its hunk reaches the reviewer" "$(forgejo_pr_diff acme/x 1)" "+new"
 unset -f _gl
 
-# too_large:true -- GitLab withheld the diff entirely. pr_files must refuse to
-# answer (the risk gate reads "unknown", not "0 lines"); pr_diff must still
-# print the rest of the diff plus a marker line naming what it can't show.
+# too_large:true with collapsed:false -- GitLab withheld the diff entirely.
+# pr_files must refuse to answer (the risk gate reads "unknown", not "0
+# lines"); pr_diff must still print the rest of the diff plus a marker line
+# naming what it can't show. The flags are deliberately split across this
+# fixture and the two below so each clause of the withheld predicate is pinned
+# on its own: with both set true here, dropping either clause left every
+# assertion green.
 _gl() { case "$2" in
   *"/diffs"*page=1*) printf '%s' '[
     {"old_path":"a.sh","new_path":"a.sh","new_file":false,"deleted_file":false,"renamed_file":false,"too_large":false,"collapsed":false,"diff":"+++ b/a.sh\n@@ -0,0 +1 @@\n+hi\n"},
-    {"old_path":"huge.bin","new_path":"huge.bin","new_file":false,"deleted_file":false,"renamed_file":false,"too_large":true,"collapsed":true,"diff":""}
+    {"old_path":"huge.bin","new_path":"huge.bin","new_file":false,"deleted_file":false,"renamed_file":false,"too_large":true,"collapsed":false,"diff":""}
   ]' ;;
   *"/diffs"*) printf '[]' ;;
 esac
@@ -372,6 +376,32 @@ no "too_large entry makes pr_files refuse to answer" forgejo_pr_files acme/x 1
 eq "and emits nothing" "" "$(forgejo_pr_files acme/x 1 2>/dev/null)"
 has "pr_diff still prints the rest" "$(forgejo_pr_diff acme/x 1)" "+hi"
 has "pr_diff flags the withheld file" "$(forgejo_pr_diff acme/x 1)" "diff withheld by GitLab (too large): huge.bin"
+unset -f _gl
+
+# collapsed:true with an EMPTY diff and too_large:false -- the shape the live
+# API actually produces for an oversized file (a 115KB package-lock.json added
+# in one commit reads exactly this way), so it is the clause that carries the
+# weight in practice.
+_gl() { case "$2" in
+  *"/diffs"*page=1*) printf '%s' '[{"old_path":"package-lock.json","new_path":"package-lock.json","new_file":false,"deleted_file":false,"renamed_file":false,"generated_file":true,"too_large":false,"collapsed":true,"diff":""}]' ;;
+  *"/diffs"*) printf '[]' ;;
+esac
+}
+no "collapsed with an empty diff makes pr_files refuse to answer" forgejo_pr_files acme/x 1
+has "pr_diff flags it withheld" "$(forgejo_pr_diff acme/x 1)" "diff withheld by GitLab (too large): package-lock.json"
+unset -f _gl
+
+# collapsed:true but the diff IS present -- nothing was withheld, so this must
+# count normally. Failing closed here would escalate ordinary MRs to a human.
+_gl() { case "$2" in
+  *"/diffs"*page=1*) printf '%s' '[{"old_path":"c.sh","new_path":"c.sh","new_file":false,"deleted_file":false,"renamed_file":false,"too_large":false,"collapsed":true,"diff":"--- a/c.sh\n+++ b/c.sh\n@@ -1 +1 @@\n-old\n+new\n"}]' ;;
+  *"/diffs"*) printf '[]' ;;
+esac
+}
+ok "collapsed with a diff present does not fail closed" forgejo_pr_files acme/x 1
+PF=$(forgejo_pr_files acme/x 1)
+eq "and its lines are counted"   "1"        "$(jq -r '.[0].additions' <<<"$PF")"
+has "and its hunk reaches the reviewer" "$(forgejo_pr_diff acme/x 1)" "+new"
 unset -f _gl
 
 # A pure rename (or mode change) with an empty diff and NEITHER too_large nor

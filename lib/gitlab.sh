@@ -928,6 +928,14 @@ forgejo_open_prs() {
 # the undercount this function exists to prevent, so the gate has to read
 # "unknown" instead. A legitimately empty diff (a pure rename or mode change,
 # neither too_large nor collapsed) stays a real 0.
+#
+# Both flags are really there: a live /diffs entry carries `too_large` and
+# `collapsed` as populated booleans (checked on gitlab.com, 2026-10-16), so the
+# `// false` defaults are belt, not the actual source of the value -- and a
+# genuinely withheld file does set one. A 115KB package-lock.json added in a
+# single commit reads `collapsed:true` with an empty `diff` and
+# `too_large:false`, which is why the clause is `collapsed AND empty` rather
+# than either flag alone.
 forgejo_pr_files() {
   local repo="$1" number="$2" resp
   resp=$(_gl_paged "/projects/$(_gl_proj "$repo")/merge_requests/${number}/diffs") || return 1
