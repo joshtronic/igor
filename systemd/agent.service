@@ -1,5 +1,5 @@
 [Unit]
-Description=Agent -- one tick: claim and work one Forgejo issue across known projects
+Description=Agent -- one tick: claim and work one GitLab issue across known projects
 After=network-online.target
 Wants=network-online.target
 
