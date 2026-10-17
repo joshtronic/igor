@@ -405,6 +405,46 @@ BURSTS=$(printf '%s\n%s\n%s\n%s\n' \
   "$(mk_line 0)" "$(mk_line 30)" "$(mk_line 10800)" "$(mk_line 10830)")
 eq "2 bursts hours apart -> below the bar" "" "$(logwatch_recurring "$BURSTS")"
 
+echo "== the positional join the incident grouping rests on =="
+# _logwatch_smell_timestamped pairs the Nth signature with the Nth raw line,
+# so _logwatch_normalize_stream must be 1:1 -- including on input that
+# normalizes to empty, which is where a filtering sed would lose a line and
+# shift every timestamp after it.
+PARITY_IN=$(printf '%s\n%s\n%s\n' \
+  'Jul 25 00:00:00 h systemd[805]: ' \
+  'Jul 25 00:00:01 h systemd[805]: agent.service: Failed with result.' \
+  'not a syslog line at all')
+eq "normalization emits exactly one line per input line" "3" \
+  "$(printf '%s\n' "$PARITY_IN" | _logwatch_normalize_stream | wc -l | tr -d ' ')"
+
+# Two signatures interleaved, with verdicts that a one-line misalignment would
+# SWAP: A is a 3-occurrence burst inside a minute (one incident, below the
+# bar), B is 3 occurrences hours apart (three incidents, above it). Offset the
+# join by one and A inherits B's spread while B gets A's burst.
+mk_b() { printf '%s h systemd[805]: agent.service: Start request repeated too quickly, Failed.' "$(ts_at "$1")"; }
+MIXED=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+  "$(mk_line 0)" "$(mk_b 0)" "$(mk_line 30)" "$(mk_b 10800)" "$(mk_line 60)" "$(mk_b 21600)")
+MIXED_OUT=$(logwatch_recurring "$MIXED")
+has "the spread signature clears the bar" "$MIXED_OUT" "Start request repeated too quickly"
+hasnt "the interleaved burst does not" "$MIXED_OUT" "Failed with result"
+
+echo "== an unparseable timestamp format falls back, it does not go quiet =="
+# journalctl's default `short` format is what bin/tick.sh collects, but `-o
+# cat` (and `-o short-unix`) emit a prefix `date -d` rejects outright, which
+# drops EVERY occurrence. The bar then falls back to raw occurrence counting
+# rather than reporting a silent, healthy-looking day.
+UNTIMED=$(printf '%s\n%s\n%s\n%s\n' \
+  'systemd[805]: agent.service: Failed with result Z.' \
+  'systemd[805]: agent.service: Failed with result Z.' \
+  'systemd[805]: agent.service: Failed with result Z.' \
+  'systemd[805]: agent.service: Failed with result Z.')
+eq "no occurrence carries a parseable timestamp" "" \
+  "$(_logwatch_smell_timestamped "$UNTIMED")"
+has "yet the signature still reaches the bar" \
+  "$(logwatch_recurring "$UNTIMED")" "Failed with result"
+eq "and it is not also counted as a transient" "0" \
+  "$(logwatch_distinct_transients "$UNTIMED")"
+
 if [ "$FAIL" -eq 0 ]; then
   echo "test-logwatch: all checks passed"
 else

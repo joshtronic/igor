@@ -363,6 +363,12 @@ LOGWATCH_SMELL='Failed with result|Main process exited|Traceback|command not fou
 # (timestamp, host, `unit[pid]:`), then flattens hex-ish tokens and digit runs
 # -- pids, epochs, durations, byte counts and shas all differ between
 # occurrences of the SAME failure.
+#
+# Nothing here but `s///` substitutions, so the stream is 1:1 -- exactly one
+# output line per input line, including input that collapses to empty. Keep it
+# that way: _logwatch_smell_timestamped joins this output against the raw lines
+# POSITIONALLY and a dropped or added line would misattribute every timestamp
+# after it. test-logwatch.sh asserts the parity.
 _logwatch_normalize_stream() {
   sed -E \
     -e 's/^[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} [^ ]+ //' \
@@ -380,7 +386,7 @@ logwatch_normalize_line() {
 }
 
 # _logwatch_smell_signatures <journal> -- every failure-smell signature in the
-# journal, one per line, unsorted.
+# journal, one per line, unsorted. Used by the untimed fallback below.
 _logwatch_smell_signatures() {
   _logwatch_smell_lines "$1" \
     | _logwatch_normalize_stream \
@@ -416,6 +422,15 @@ _logwatch_smell_lines() {
 # occurrence, unsorted. `date -d` runs once per matching line, not once per
 # journal line -- matching lines are already the filtered minority, unlike
 # the whole-journal normalization pass which has to stay a single stream.
+#
+# The 15-char prefix is journalctl's DEFAULT `short` format ("Oct 16 02:11:33"),
+# which is what bin/tick.sh collects -- it passes no `-o`. An occurrence whose
+# prefix doesn't parse is dropped here; when that happens to EVERY occurrence
+# (`-o cat` and `-o short-unix` both produce prefixes `date -d` rejects
+# outright) the caller falls back rather than reporting an empty day.
+#
+# The paste join is POSITIONAL: it pairs the Nth signature with the Nth raw
+# line, which holds because _logwatch_normalize_stream is 1:1 (see there).
 _logwatch_smell_timestamped() {
   local journal="$1" raw sig line ts epoch
   raw=$(_logwatch_smell_lines "$journal")
@@ -431,6 +446,21 @@ _logwatch_smell_timestamped() {
     done
 }
 
+# _logwatch_signature_counts <journal> <min> -- the pre-igor#17 RAW-occurrence
+# bar, emitted in the same shape as the incident grouping below. Reached only
+# when smell lines are present but not one of them carried a parseable
+# timestamp, i.e. the journal format changed under us. A gate that goes silent
+# on a format change is worse than one that over-reports a burst: a burst
+# ticket gets closed, a quiet gate looks like a healthy day forever. So the
+# format assumption fails back to the old bar instead of to nothing.
+_logwatch_signature_counts() {
+  local journal="$1" min="$2" sigs
+  sigs=$(_logwatch_smell_signatures "$journal")
+  [ -z "$sigs" ] && return 0
+  printf '%s\n' "$sigs" | sort | uniq -c \
+    | awk -v m="$min" '{ c=$1; $1=""; sub(/^ /,""); printf "%d\t%d\t%s\n", c, (c+0 >= m+0) ? 1 : 0, $0 }'
+}
+
 # _logwatch_signature_incidents <journal> <min> -- "<count>\t<meets>\t<signature>"
 # per distinct signature, where <count> is the raw occurrence count and
 # <meets> is 1 when the signature clears the incident bar described above,
@@ -440,7 +470,10 @@ _logwatch_signature_incidents() {
   local journal="$1" min="$2"
   local timestamped
   timestamped=$(_logwatch_smell_timestamped "$journal")
-  [ -z "$timestamped" ] && return 0
+  if [ -z "$timestamped" ]; then
+    _logwatch_signature_counts "$journal" "$min"
+    return 0
+  fi
   sort -t $'\t' -k2,2 -k1,1n <<<"$timestamped" \
     | awk -F'\t' -v min="$min" -v gap="$LOGWATCH_INCIDENT_GAP_SECS" -v sustained="$LOGWATCH_INCIDENT_SUSTAINED_SECS" '
       function flush() {
