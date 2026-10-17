@@ -375,6 +375,36 @@ has "but a real 'timed out' IS counted" \
   "$(logwatch_recurring 'Jul 25 01:00:00 h tick.sh[1]: [agent] deploy barrier timed out waiting for sha' 1)" \
   "timed out"
 
+echo "== incident grouping: count incidents, not lines (igor#17) =="
+# igor#14: a single GitLab API blip produced 4 failed agent.service starts
+# all between 02:11 and 02:12 -- one incident, counted as four recurrences.
+# The bar must group occurrences into incidents (a >=15min gap starts a new
+# one) and only then compare against LOGWATCH_MIN_OCCURRENCES, with a
+# sustained-failure escape hatch (any single incident >=60min) so a failure
+# repeating every minute for hours still clears the bar.
+base_epoch=$(date -d "Jul 25 00:00:00" +%s)
+ts_at() { date -d "@$((base_epoch + $1))" +"%b %d %H:%M:%S"; }
+mk_line() { printf '%s h systemd[805]: agent.service: Failed with result %s.' "$(ts_at "$1")" "'exit-code'"; }
+
+BURST=$(printf '%s\n%s\n%s\n%s\n' \
+  "$(mk_line 0)" "$(mk_line 30)" "$(mk_line 60)" "$(mk_line 90)")
+eq "4 occurrences within 2 minutes -> below the bar" "" "$(logwatch_recurring "$BURST")"
+
+SPACED=$(printf '%s\n%s\n%s\n' \
+  "$(mk_line 0)" "$(mk_line 10800)" "$(mk_line 21600)")
+has "3 occurrences hours apart -> above the bar" "$(logwatch_recurring "$SPACED")" "Failed with result"
+
+SUSTAINED=""
+for m in $(seq 0 120); do
+  SUSTAINED+="$(mk_line $((m * 60)))"$'\n'
+done
+has "an occurrence every minute for 2 hours -> above the bar (sustained)" \
+  "$(logwatch_recurring "$SUSTAINED")" "Failed with result"
+
+BURSTS=$(printf '%s\n%s\n%s\n%s\n' \
+  "$(mk_line 0)" "$(mk_line 30)" "$(mk_line 10800)" "$(mk_line 10830)")
+eq "2 bursts hours apart -> below the bar" "" "$(logwatch_recurring "$BURSTS")"
+
 if [ "$FAIL" -eq 0 ]; then
   echo "test-logwatch: all checks passed"
 else

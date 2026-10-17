@@ -380,30 +380,115 @@ logwatch_normalize_line() {
 }
 
 # _logwatch_smell_signatures <journal> -- every failure-smell signature in the
-# journal, one per line, unsorted. Four processes for the whole journal
-# regardless of its size.
+# journal, one per line, unsorted.
 _logwatch_smell_signatures() {
-  printf '%s\n' "$1" \
-    | grep -E "$LOGWATCH_SOURCE" \
-    | grep -E "$LOGWATCH_SMELL" \
+  _logwatch_smell_lines "$1" \
     | _logwatch_normalize_stream \
     | grep -v '^$' || true
 }
 
+# -- Incidents, not lines (igor#17) --------------------------------
+#
+# igor#14: a single GitLab API blip produced 4 failed agent.service starts,
+# all between 02:11 and 02:12, each recovered by the very next tick -- one
+# incident, counted as four recurrences. Raw occurrence counting cannot tell
+# a burst from a chronic when the lines arrive close together, so the bar
+# groups a signature's occurrences into incidents first: a gap of 15 minutes
+# or more between consecutive occurrences starts a new incident. A signature
+# clears the bar when it has >= LOGWATCH_MIN_OCCURRENCES incidents, OR any
+# single incident spans 60 minutes or more (so a failure repeating every
+# minute for hours -- one long incident -- still surfaces). Both numbers are
+# hardcoded, same convention as LOGWATCH_MIN_OCCURRENCES.
+LOGWATCH_INCIDENT_GAP_SECS=900
+LOGWATCH_INCIDENT_SUSTAINED_SECS=3600
+
+# _logwatch_smell_lines <journal> -- raw (unnormalized) lines matching the
+# trusted-source + failure-smell filters, one per line. Shared by the
+# signature grouping below and by the incident timestamp extraction, so both
+# apply the exact same filter.
+_logwatch_smell_lines() {
+  printf '%s\n' "$1" \
+    | grep -E "$LOGWATCH_SOURCE" \
+    | grep -E "$LOGWATCH_SMELL" || true
+}
+
+# _logwatch_smell_timestamped <journal> -- "<epoch>\t<signature>" per matching
+# occurrence, unsorted. `date -d` runs once per matching line, not once per
+# journal line -- matching lines are already the filtered minority, unlike
+# the whole-journal normalization pass which has to stay a single stream.
+_logwatch_smell_timestamped() {
+  local journal="$1" raw sig line ts epoch
+  raw=$(_logwatch_smell_lines "$journal")
+  [ -z "$raw" ] && return 0
+  paste -d '\t' \
+    <(printf '%s\n' "$raw" | _logwatch_normalize_stream) \
+    <(printf '%s\n' "$raw") \
+  | while IFS=$'\t' read -r sig line; do
+      [ -z "$sig" ] && continue
+      ts="${line:0:15}"
+      epoch=$(date -d "$ts" +%s 2>/dev/null) || continue
+      printf '%s\t%s\n' "$epoch" "$sig"
+    done
+}
+
+# _logwatch_signature_incidents <journal> <min> -- "<count>\t<meets>\t<signature>"
+# per distinct signature, where <count> is the raw occurrence count and
+# <meets> is 1 when the signature clears the incident bar described above,
+# 0 otherwise. Shared core for logwatch_recurring and
+# logwatch_distinct_transients so both judge a signature the same way.
+_logwatch_signature_incidents() {
+  local journal="$1" min="$2"
+  local timestamped
+  timestamped=$(_logwatch_smell_timestamped "$journal")
+  [ -z "$timestamped" ] && return 0
+  sort -t $'\t' -k2,2 -k1,1n <<<"$timestamped" \
+    | awk -F'\t' -v min="$min" -v gap="$LOGWATCH_INCIDENT_GAP_SECS" -v sustained="$LOGWATCH_INCIDENT_SUSTAINED_SECS" '
+      function flush() {
+        if (n == 0) return
+        incidents = 1
+        start = times[1]
+        prev = times[1]
+        maxspan = 0
+        for (i = 2; i <= n; i++) {
+          if (times[i] - prev >= gap) {
+            span = prev - start
+            if (span > maxspan) maxspan = span
+            incidents++
+            start = times[i]
+          }
+          prev = times[i]
+        }
+        span = prev - start
+        if (span > maxspan) maxspan = span
+        meets = (incidents >= min + 0 || maxspan >= sustained + 0) ? 1 : 0
+        printf "%d\t%d\t%s\n", n, meets, cur
+      }
+      {
+        if ($2 != cur) { flush(); cur = $2; n = 0; delete times }
+        n++
+        times[n] = $1
+      }
+      END { flush() }
+    '
+}
+
 # logwatch_recurring <journal> [min_occurrences]
 # The heart of the gate. Keeps only failure-smell lines from trusted sources,
-# groups them by signature, and prints one row per signature that met the bar:
+# groups them into incidents per signature (see above), and prints one row
+# per signature that met the bar:
 #
 #   <count>\t<signature>
 #
-# Signatures below the bar are omitted entirely -- they become the digest line
-# the caller logs, not a ticket. Prints nothing when nothing recurred, which is
-# the expected common case on a healthy day.
+# <count> is the raw occurrence count, carried through for the ticket body --
+# the bar itself is judged on incidents, not this number. Signatures below
+# the bar are omitted entirely -- they become the digest line the caller
+# logs, not a ticket. Prints nothing when nothing recurred, which is the
+# expected common case on a healthy day.
 logwatch_recurring() {
   local journal="$1" min="${2:-$LOGWATCH_MIN_OCCURRENCES}"
-  _logwatch_smell_signatures "$journal" \
-    | sort | uniq -c | sort -rn \
-    | awk -v m="$min" '{ c=$1; $1=""; sub(/^ /,""); if (c+0 >= m+0) printf "%d\t%s\n", c, $0 }'
+  _logwatch_signature_incidents "$journal" "$min" \
+    | awk -F'\t' '$2 == 1 { print $1"\t"$3 }' \
+    | sort -t $'\t' -k1,1rn
 }
 
 # logwatch_distinct_transients <journal> [min_occurrences]
@@ -412,9 +497,8 @@ logwatch_recurring() {
 # and "the pass never ran" must not look alike.
 logwatch_distinct_transients() {
   local journal="$1" min="${2:-$LOGWATCH_MIN_OCCURRENCES}"
-  _logwatch_smell_signatures "$journal" \
-    | sort | uniq -c \
-    | awk -v m="$min" '{ if ($1+0 < m+0) n++ } END { print n+0 }'
+  _logwatch_signature_incidents "$journal" "$min" \
+    | awk -F'\t' '$2 == 0 { n++ } END { print n+0 }'
 }
 
 # logwatch_samples <journal> <signature> [max]
