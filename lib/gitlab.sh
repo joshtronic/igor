@@ -913,45 +913,73 @@ forgejo_open_prs() {
 # JSON array of {filename, status, additions, deletions}. Used by the post
 # cooldown and by the auto-merge risk gate to bound an unattended merge.
 #
-# GitLab reports changes as a list of diff hunks with new_file/deleted_file/
+# Reads /diffs, not /changes (igor#15): /changes COLLAPSES some files --
+# generated_file (lockfiles) plus anything over GitLab's size/collapse limits
+# -- and returns them with an empty `diff`, which this function would then
+# count as 0 lines. /diffs is paginated, hence _gl_paged.
+#
+# GitLab reports diffs as a list of hunks with new_file/deleted_file/
 # renamed_file booleans and no line counts -- so status is reconstructed from
 # the flags, and additions/deletions are COUNTED off the diff text. That
 # counting is load-bearing: the risk gate sizes a merge by changed lines, and
 # returning 0 would let an arbitrarily large MR through. Nonzero with NO
-# output when the list can't be read, so the gate reads "unknown", not "small".
+# output when the list can't be read OR GitLab withheld any entry's diff
+# (too_large, or collapsed with no diff) -- a 0 for a withheld file is exactly
+# the undercount this function exists to prevent, so the gate has to read
+# "unknown" instead. A legitimately empty diff (a pure rename or mode change,
+# neither too_large nor collapsed) stays a real 0.
+#
+# Both flags are really there: a live /diffs entry carries `too_large` and
+# `collapsed` as populated booleans (checked on gitlab.com, 2026-10-16), so the
+# `// false` defaults are belt, not the actual source of the value -- and a
+# genuinely withheld file does set one. A 115KB package-lock.json added in a
+# single commit reads `collapsed:true` with an empty `diff` and
+# `too_large:false`, which is why the clause is `collapsed AND empty` rather
+# than either flag alone.
 forgejo_pr_files() {
   local repo="$1" number="$2" resp
-  resp=$(_gl GET "/projects/$(_gl_proj "$repo")/merge_requests/${number}/changes") || return 1
+  resp=$(_gl_paged "/projects/$(_gl_proj "$repo")/merge_requests/${number}/diffs") || return 1
   jq -ce '
-      if (type != "object") or (has("changes") | not) then empty else
-      [ (.changes // [])[]
-        | (.diff // "") as $d
-        | {
-            filename: (.new_path // .old_path // ""),
-            status: (if (.new_file // false) then "added"
-                     elif (.deleted_file // false) then "removed"
-                     elif (.renamed_file // false) then "renamed"
-                     else "modified" end),
-            additions: ([ $d | split("\n")[] | select(startswith("+") and (startswith("+++") | not)) ] | length),
-            deletions: ([ $d | split("\n")[] | select(startswith("-") and (startswith("---") | not)) ] | length)
-          } ]
-      end' <<<"$resp" 2>/dev/null || return 1
+      if type != "array" then error("not-an-array") else
+      if any(.[]; (.too_large // false) or ((.collapsed // false) and ((.diff // "") == ""))) then
+        error("diff withheld by GitLab")
+      else
+        [ .[]
+          | (.diff // "") as $d
+          | {
+              filename: (.new_path // .old_path // ""),
+              status: (if (.new_file // false) then "added"
+                       elif (.deleted_file // false) then "removed"
+                       elif (.renamed_file // false) then "renamed"
+                       else "modified" end),
+              additions: ([ $d | split("\n")[] | select(startswith("+") and (startswith("+++") | not)) ] | length),
+              deletions: ([ $d | split("\n")[] | select(startswith("-") and (startswith("---") | not)) ] | length)
+            } ]
+      end end' <<<"$resp" 2>/dev/null || return 1
 }
 
 # Raw unified diff for an MR, as text (NOT JSON -- the caller feeds it
 # straight to a model). GitLab has no `.diff` API route equivalent to
-# Forgejo's, so it is reassembled from the per-file hunks the changes
-# endpoint returns, with the `--- / +++` headers git would have emitted.
-# Big diffs are the caller's problem to cap (the shadow reviewer head -c's it).
+# Forgejo's, so it is reassembled from the per-file hunks the paginated
+# /diffs endpoint returns (igor#15 -- not /changes, which collapses some
+# files), with the `--- / +++` headers git would have emitted. An entry
+# GitLab withheld (too_large, or collapsed with no diff) is reported as a
+# marker line instead of silently vanishing, so the reviewer reading this
+# text knows it is not seeing everything. Big diffs are otherwise the
+# caller's problem to cap (the shadow reviewer head -c's it).
 forgejo_pr_diff() {
   local repo="$1" number="$2" resp
-  resp=$(_gl GET "/projects/$(_gl_proj "$repo")/merge_requests/${number}/changes") || return 1
+  resp=$(_gl_paged "/projects/$(_gl_proj "$repo")/merge_requests/${number}/diffs") || return 1
   jq -r '
-      (.changes // [])[]
-      | "diff --git a/\(.old_path // .new_path) b/\(.new_path // .old_path)\n"
-        + "--- a/\(.old_path // .new_path)\n"
-        + "+++ b/\(.new_path // .old_path)\n"
-        + (.diff // "")' <<<"$resp" 2>/dev/null
+      .[]
+      | if (.too_large // false) or ((.collapsed // false) and ((.diff // "") == ""))
+        then "# diff withheld by GitLab (too large): \(.new_path // .old_path)"
+        else
+          "diff --git a/\(.old_path // .new_path) b/\(.new_path // .old_path)\n"
+          + "--- a/\(.old_path // .new_path)\n"
+          + "+++ b/\(.new_path // .old_path)\n"
+          + (.diff // "")
+        end' <<<"$resp" 2>/dev/null
 }
 
 # iid of the open MR with the given source branch, or empty if none. Used to

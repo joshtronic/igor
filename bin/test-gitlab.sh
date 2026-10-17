@@ -311,15 +311,22 @@ _gl() { case "$2" in */statuses*) printf '[]' ;; *) printf '{}' ;; esac; }
 eq "no statuses at all -> empty (unknown, not green)" "" "$(forgejo_commit_status acme/x abc)"
 unset -f _gl
 
-echo "== pr_files: additions/deletions are COUNTED (0 would let any MR past the risk gate) =="
-_gl() { cat <<'JSON'
-{"changes":[
+echo "== pr_files/pr_diff: read /diffs, not /changes (igor#15 -- /changes collapses lockfiles and big diffs) =="
+# /diffs is paginated (_gl_paged), so a stub must terminate page 2 with [].
+_gl() { case "$2" in
+  *"/diffs"*page=1*) cat <<'JSON'
+[
  {"old_path":"a.sh","new_path":"a.sh","new_file":false,"deleted_file":false,"renamed_file":false,
+  "too_large":false,"collapsed":false,
   "diff":"--- a/a.sh\n+++ b/a.sh\n@@ -1 +1,2 @@\n-old line\n+new line\n+another\n"},
  {"old_path":"b.sh","new_path":"b.sh","new_file":true,"deleted_file":false,"renamed_file":false,
+  "too_large":false,"collapsed":false,
   "diff":"+++ b/b.sh\n@@ -0,0 +1 @@\n+brand new\n"}
-]}
+]
 JSON
+    ;;
+  *"/diffs"*) printf '[]' ;;
+esac
 }
 PF=$(forgejo_pr_files acme/x 1)
 eq "two files"                   "2"        "$(jq 'length' <<<"$PF")"
@@ -329,11 +336,96 @@ eq "new_file -> added"           "added"    "$(jq -r '.[1].status' <<<"$PF")"
 eq "otherwise -> modified"       "modified" "$(jq -r '.[0].status' <<<"$PF")"
 has "pr_diff reassembles a git header" "$(forgejo_pr_diff acme/x 1)" "diff --git a/a.sh b/a.sh"
 unset -f _gl
-# A payload that isn't a changes object must be "unknown" (nonzero, no output),
+# A payload that isn't an array at all must be "unknown" (nonzero, no output),
 # never an empty-but-successful list the gate would read as "small".
 _gl() { printf '{"message":"403 Forbidden"}'; }
-no "pr_files: non-changes payload is nonzero" forgejo_pr_files acme/x 1
+no "pr_files: non-array payload is nonzero" forgejo_pr_files acme/x 1
 eq "pr_files: and emits nothing" "" "$(forgejo_pr_files acme/x 1 2>/dev/null)"
+unset -f _gl
+
+echo "== pr_files/pr_diff: fail closed on anything GitLab still withholds =="
+# A generated lockfile with a NON-empty diff (the common case -- GitLab marks
+# it generated_file but still ships the hunks on /diffs) must be fully counted
+# and fully visible, same as any other file.
+_gl() { case "$2" in
+  *"/diffs"*page=1*) printf '%s' '[{"old_path":"package-lock.json","new_path":"package-lock.json","new_file":false,"deleted_file":false,"renamed_file":false,"generated_file":true,"too_large":false,"collapsed":false,"diff":"--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1,2 +1,3 @@\n-old\n+new\n+added\n"}]' ;;
+  *"/diffs"*) printf '[]' ;;
+esac
+}
+PF=$(forgejo_pr_files acme/x 1)
+eq "a generated lockfile with a real diff is still counted" "2" "$(jq -r '.[0].additions' <<<"$PF")"
+has "and its hunk reaches the reviewer" "$(forgejo_pr_diff acme/x 1)" "+new"
+unset -f _gl
+
+# too_large:true with collapsed:false -- GitLab withheld the diff entirely.
+# pr_files must refuse to answer (the risk gate reads "unknown", not "0
+# lines"); pr_diff must still print the rest of the diff plus a marker line
+# naming what it can't show. The flags are deliberately split across this
+# fixture and the two below so each clause of the withheld predicate is pinned
+# on its own: with both set true here, dropping either clause left every
+# assertion green.
+_gl() { case "$2" in
+  *"/diffs"*page=1*) printf '%s' '[
+    {"old_path":"a.sh","new_path":"a.sh","new_file":false,"deleted_file":false,"renamed_file":false,"too_large":false,"collapsed":false,"diff":"+++ b/a.sh\n@@ -0,0 +1 @@\n+hi\n"},
+    {"old_path":"huge.bin","new_path":"huge.bin","new_file":false,"deleted_file":false,"renamed_file":false,"too_large":true,"collapsed":false,"diff":""}
+  ]' ;;
+  *"/diffs"*) printf '[]' ;;
+esac
+}
+no "too_large entry makes pr_files refuse to answer" forgejo_pr_files acme/x 1
+eq "and emits nothing" "" "$(forgejo_pr_files acme/x 1 2>/dev/null)"
+has "pr_diff still prints the rest" "$(forgejo_pr_diff acme/x 1)" "+hi"
+has "pr_diff flags the withheld file" "$(forgejo_pr_diff acme/x 1)" "diff withheld by GitLab (too large): huge.bin"
+unset -f _gl
+
+# collapsed:true with an EMPTY diff and too_large:false -- the shape the live
+# API actually produces for an oversized file (a 115KB package-lock.json added
+# in one commit reads exactly this way), so it is the clause that carries the
+# weight in practice.
+_gl() { case "$2" in
+  *"/diffs"*page=1*) printf '%s' '[{"old_path":"package-lock.json","new_path":"package-lock.json","new_file":false,"deleted_file":false,"renamed_file":false,"generated_file":true,"too_large":false,"collapsed":true,"diff":""}]' ;;
+  *"/diffs"*) printf '[]' ;;
+esac
+}
+no "collapsed with an empty diff makes pr_files refuse to answer" forgejo_pr_files acme/x 1
+has "pr_diff flags it withheld" "$(forgejo_pr_diff acme/x 1)" "diff withheld by GitLab (too large): package-lock.json"
+unset -f _gl
+
+# collapsed:true but the diff IS present -- nothing was withheld, so this must
+# count normally. Failing closed here would escalate ordinary MRs to a human.
+_gl() { case "$2" in
+  *"/diffs"*page=1*) printf '%s' '[{"old_path":"c.sh","new_path":"c.sh","new_file":false,"deleted_file":false,"renamed_file":false,"too_large":false,"collapsed":true,"diff":"--- a/c.sh\n+++ b/c.sh\n@@ -1 +1 @@\n-old\n+new\n"}]' ;;
+  *"/diffs"*) printf '[]' ;;
+esac
+}
+ok "collapsed with a diff present does not fail closed" forgejo_pr_files acme/x 1
+PF=$(forgejo_pr_files acme/x 1)
+eq "and its lines are counted"   "1"        "$(jq -r '.[0].additions' <<<"$PF")"
+has "and its hunk reaches the reviewer" "$(forgejo_pr_diff acme/x 1)" "+new"
+unset -f _gl
+
+# A pure rename (or mode change) with an empty diff and NEITHER too_large nor
+# collapsed is legitimate -- it must count 0 lines, not fail closed.
+_gl() { case "$2" in
+  *"/diffs"*page=1*) printf '[{"old_path":"old.sh","new_path":"new.sh","new_file":false,"deleted_file":false,"renamed_file":true,"too_large":false,"collapsed":false,"diff":""}]' ;;
+  *"/diffs"*) printf '[]' ;;
+esac
+}
+ok "a pure rename with an empty diff does not fail closed" forgejo_pr_files acme/x 1
+PF=$(forgejo_pr_files acme/x 1)
+eq "and counts 0 lines"          "0"        "$(jq -r '.[0].additions' <<<"$PF")"
+eq "status is renamed"           "renamed"  "$(jq -r '.[0].status' <<<"$PF")"
+unset -f _gl
+
+# A two-page /diffs response must be read to the end, not just page 1.
+_gl() { case "$2" in
+  *"/diffs"*page=1*) printf '%s' '[{"old_path":"f1.sh","new_path":"f1.sh","new_file":false,"deleted_file":false,"renamed_file":false,"too_large":false,"collapsed":false,"diff":"+++ b/f1.sh\n@@ -0,0 +1 @@\n+one\n"}]' ;;
+  *"/diffs"*page=2*) printf '%s' '[{"old_path":"f2.sh","new_path":"f2.sh","new_file":false,"deleted_file":false,"renamed_file":false,"too_large":false,"collapsed":false,"diff":"+++ b/f2.sh\n@@ -0,0 +1 @@\n+two\n"}]' ;;
+  *"/diffs"*) printf '[]' ;;
+esac
+}
+PF=$(forgejo_pr_files acme/x 1)
+eq "two-page /diffs response is fully read" "2" "$(jq 'length' <<<"$PF")"
 unset -f _gl
 
 echo "== get_commit: GitLab parent_ids shimmed to Forgejo .parents[].sha =="
