@@ -47,3 +47,36 @@ check-sync:
     - apt-get update -qq && apt-get install -y -qq jq git curl python3
   script:
     - bin/check-sync.sh
+
+# A 2026-10-16 gitleaks v8.24.0 scan of this repo's full history found no real
+# secrets, so this only needs to catch NEW commits going forward -- it scans
+# the commit range being added, never the whole history or working tree
+# (a `gitleaks dir` scan would re-flag that history every run).
+secret-scan:
+  stage: validate
+  image:
+    name: zricethezav/gitleaks:v8.24.0
+    entrypoint: [""]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "master"
+  script:
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - |
+      if [ "$CI_PIPELINE_SOURCE" = "merge_request_event" ]; then
+        BASE_SHA="$CI_MERGE_REQUEST_DIFF_BASE_SHA"
+        RANGE="$CI_MERGE_REQUEST_DIFF_BASE_SHA..$CI_COMMIT_SHA"
+      elif [ "$CI_COMMIT_BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+        BASE_SHA=""
+        RANGE="$CI_COMMIT_SHA"
+      else
+        BASE_SHA="$CI_COMMIT_BEFORE_SHA"
+        RANGE="$CI_COMMIT_BEFORE_SHA..$CI_COMMIT_SHA"
+      fi
+      # GitLab's default clone is shallow; deepen only if the range's base
+      # commit isn't present, rather than fetching full history every run.
+      if [ -n "$BASE_SHA" ] && ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+        git fetch --unshallow 2>/dev/null || git fetch --deepen=1000
+      fi
+      echo "Scanning range: $RANGE"
+      gitleaks git --log-opts="$RANGE" --redact --no-banner .
