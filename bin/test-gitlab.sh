@@ -579,11 +579,17 @@ unset -f _gl
 echo "== _gl: paces on RateLimit-Remaining/-Reset, retries 429 via Retry-After (igor#26) =="
 # `unset -f _gl` above removed the function outright (bash doesn't stack
 # definitions), so re-source to get the real _gl back -- this section tests
-# it directly, doubling curl itself rather than _gl.
+# it directly, doubling curl itself rather than _gl. AGENT_STATE_DIR is
+# redirected FIRST and exported: the pacing counters are persisted there, so
+# without this the suite would both read production's counters (and sleep off
+# a real window) and leave its own fixtures behind for the next tick.
+RLSTATE="$(mktemp -d)"
+export AGENT_STATE_DIR="$RLSTATE"
 . "$HERE/../lib/gitlab.sh"
 
 SLEEPLOG="$(mktemp)"; : >"$SLEEPLOG"
 sleep() { printf '%s\n' "$1" >>"$SLEEPLOG"; }
+_rl_clear() { rm -f "$(_gl_rl_state_file)"; : >"$SLEEPLOG"; }
 
 # Finds the file path passed to curl's -D flag, the same way the curl double
 # in bin/test-request.sh does, so a stub can hand back rate-limit headers.
@@ -594,7 +600,7 @@ _curl_header_arg() {
   done
 }
 
-_GL_RL_REMAINING=""; _GL_RL_RESET=""
+_rl_clear
 curl() {
   local hdr; hdr=$(_curl_header_arg "$@")
   [ -n "$hdr" ] && printf 'RateLimit-Remaining: 80\r\nRateLimit-Reset: 9999999999\r\n' >"$hdr"
@@ -605,8 +611,14 @@ eq "remaining well above the floor: body returned" '{"ok":true}' "$OUT"
 eq "remaining well above the floor: no sleep"      "0" "$(wc -l <"$SLEEPLOG" | tr -d ' ')"
 unset -f curl
 
-: >"$SLEEPLOG"
-_GL_RL_REMAINING=""; _GL_RL_RESET=""
+# Both calls go through a COMMAND SUBSTITUTION, because that is how every real
+# caller invokes _gl -- it writes the body to stdout, so the body has to be
+# captured (`batch=$(_gl GET ...)` in _gl_paged, the hot paging loop igor#26
+# measured) or piped. Each of those is a subshell, which is the whole point:
+# counters kept in a shell variable die with it and the next request never
+# paces. Calling `_gl GET /a >/dev/null` here instead would pass against an
+# implementation that is a no-op in production.
+_rl_clear
 RESET=$(($(date +%s) + 30))
 CALLS="$(mktemp)"; : >"$CALLS"
 curl() {
@@ -620,8 +632,10 @@ curl() {
     printf '{"second":true}\n200'
   fi
 }
-_gl GET "/a" >/dev/null
-_gl GET "/b" >/dev/null
+FIRST=$(_gl GET "/a")
+SECOND=$(_gl GET "/b")
+eq "captured-body calls: first body returned"  '{"first":true}'  "$FIRST"
+eq "captured-body calls: second body returned" '{"second":true}' "$SECOND"
 eq "remaining below the floor: exactly one pacing sleep before the next call" \
   "1" "$(wc -l <"$SLEEPLOG" | tr -d ' ')"
 SLEPT=$(tail -1 "$SLEEPLOG")
@@ -632,8 +646,43 @@ esac
 rm -f "$CALLS"
 unset -f curl
 
-: >"$SLEEPLOG"
-_GL_RL_REMAINING=""; _GL_RL_RESET=""
+# The budget is per-TOKEN, and a tick runs several bin/agent-*.sh processes
+# that each source lib/gitlab.sh fresh -- the scenario igor#26 actually
+# measured. A fresh process with no in-memory history must still pace off what
+# the previous one saw. Run under `set -euo pipefail`, the way every real
+# caller runs, so the -e hazards in the new helpers are covered here too.
+_rl_clear
+printf '3 %s\n' "$(($(date +%s) + 30))" >"$RLSTATE/gitlab-ratelimit"
+CHILD="$(mktemp)"
+cat >"$CHILD" <<'CHILDEOF'
+set -euo pipefail
+sleep() { printf '%s\n' "$1" >>"$SLEEPLOG"; }
+curl() {
+  local i j hdr=""
+  for ((i = 1; i <= $#; i++)); do
+    [ "${!i}" = "-D" ] && { j=$((i + 1)); hdr="${!j}"; }
+  done
+  [ -n "$hdr" ] && printf 'RateLimit-Remaining: 90\r\nRateLimit-Reset: 9999999999\r\n' >"$hdr"
+  printf '{"child":true}\n200'
+}
+. "$LIBGL"
+BODY=$(_gl GET "/fresh")
+[ "$BODY" = '{"child":true}' ] || exit 3
+CHILDEOF
+SLEEPLOG="$SLEEPLOG" LIBGL="$HERE/../lib/gitlab.sh" AGENT_STATE_DIR="$RLSTATE" \
+  GITLAB_URL="$GITLAB_URL" GITLAB_TOKEN="$GITLAB_TOKEN" bash "$CHILD"
+eq "a fresh PROCESS paces off the persisted counters" "1" "$(wc -l <"$SLEEPLOG" | tr -d ' ')"
+rm -f "$CHILD"
+
+# A bogus or far-future reset must not wedge the tick for the lifetime of the
+# universe -- the sleep is capped at the length of GitLab's own window.
+_rl_clear
+printf '1 9999999999\n' >"$RLSTATE/gitlab-ratelimit"
+_gl_rl_pace
+eq "a far-future RateLimit-Reset is capped, not slept off literally" \
+  "$GITLAB_RATELIMIT_MAX_SLEEP" "$(cat "$SLEEPLOG")"
+
+_rl_clear
 CALLS="$(mktemp)"; : >"$CALLS"
 curl() {
   printf 'x' >>"$CALLS"
@@ -652,8 +701,38 @@ eq "429 with Retry-After: slept exactly that, not a fixed backoff" "4" "$(cat "$
 eq "429 with Retry-After: exactly two curl calls"     "2" "$(wc -c <"$CALLS" | tr -d ' ')"
 rm -f "$CALLS"
 unset -f curl
+
+# Exhausting the attempt budget ON a 429 must FAIL. `rc` holds the last curl
+# exit, which a 429 leaves at 0 (the request reached the server and got an
+# answer), so the fallthrough used to `return 0` with nothing on stdout --
+# which every caller reads as a successful empty response. Getting there needs
+# a retryable transport blip in the middle, otherwise rc is still nonzero.
+_rl_clear
+CALLS="$(mktemp)"; : >"$CALLS"
+curl() {
+  printf 'x' >>"$CALLS"
+  local n; n=$(wc -c <"$CALLS" | tr -d ' ')
+  [ "$n" -eq 2 ] && return 28
+  printf '\n429'
+}
+no "429 then a transport blip then 429: fails rather than rc0 with an empty body" \
+  _gl GET "/mixed"
+eq "...having spent the whole attempt budget" "3" "$(wc -c <"$CALLS" | tr -d ' ')"
+rm -f "$CALLS"
+unset -f curl
+
+# A non-numeric status (curl answering something unexpected) must fail closed.
+# `[ "$http_code" -ge 400 ]` alone exits 2 on garbage, which reads as "not an
+# error" and falls through to printing the body with rc 0.
+_rl_clear
+curl() { printf '{"ok":true}\nnotastatus'; }
+no "a non-numeric http_code fails closed" _gl GET "/garbage"
+unset -f curl
+
 rm -f "$SLEEPLOG"
-unset -f _curl_header_arg sleep
+rm -rf "$RLSTATE"
+unset AGENT_STATE_DIR
+unset -f _curl_header_arg _rl_clear sleep
 
 if [ "$FAIL" -eq 0 ]; then echo "test-gitlab: all checks passed"; exit 0
 else echo "test-gitlab: $FAIL check(s) failed"; exit 1; fi

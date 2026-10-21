@@ -32,6 +32,10 @@ SCRIPT="$HERE/agent-block.sh"
 FAIL=0
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+# _gl persists its rate-limit counters under AGENT_STATE_DIR and reads them
+# before every request, so without this the suite would pace against
+# production's counters and sleep off a real GitLab window mid-test.
+export AGENT_STATE_DIR="$TMP"
 # Exported (not just set): agent-block.sh runs as a CHILD bash process below,
 # and an exported function carries only its own source text -- variables it
 # references are resolved in the callee's environment at call time, not
