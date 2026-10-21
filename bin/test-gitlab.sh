@@ -576,5 +576,84 @@ _gl() { printf 'not json'; }
 no "unparseable page -> nonzero" _gl_paged "/x"
 unset -f _gl
 
+echo "== _gl: paces on RateLimit-Remaining/-Reset, retries 429 via Retry-After (igor#26) =="
+# `unset -f _gl` above removed the function outright (bash doesn't stack
+# definitions), so re-source to get the real _gl back -- this section tests
+# it directly, doubling curl itself rather than _gl.
+. "$HERE/../lib/gitlab.sh"
+
+SLEEPLOG="$(mktemp)"; : >"$SLEEPLOG"
+sleep() { printf '%s\n' "$1" >>"$SLEEPLOG"; }
+
+# Finds the file path passed to curl's -D flag, the same way the curl double
+# in bin/test-request.sh does, so a stub can hand back rate-limit headers.
+_curl_header_arg() {
+  local i j
+  for ((i = 1; i <= $#; i++)); do
+    if [ "${!i}" = "-D" ]; then j=$((i + 1)); printf '%s' "${!j}"; return 0; fi
+  done
+}
+
+_GL_RL_REMAINING=""; _GL_RL_RESET=""
+curl() {
+  local hdr; hdr=$(_curl_header_arg "$@")
+  [ -n "$hdr" ] && printf 'RateLimit-Remaining: 80\r\nRateLimit-Reset: 9999999999\r\n' >"$hdr"
+  printf '{"ok":true}\n200'
+}
+OUT=$(_gl GET "/high")
+eq "remaining well above the floor: body returned" '{"ok":true}' "$OUT"
+eq "remaining well above the floor: no sleep"      "0" "$(wc -l <"$SLEEPLOG" | tr -d ' ')"
+unset -f curl
+
+: >"$SLEEPLOG"
+_GL_RL_REMAINING=""; _GL_RL_RESET=""
+RESET=$(($(date +%s) + 30))
+CALLS="$(mktemp)"; : >"$CALLS"
+curl() {
+  printf 'x' >>"$CALLS"
+  local hdr n; hdr=$(_curl_header_arg "$@"); n=$(wc -c <"$CALLS" | tr -d ' ')
+  if [ "$n" -eq 1 ]; then
+    [ -n "$hdr" ] && printf 'RateLimit-Remaining: 5\r\nRateLimit-Reset: %s\r\n' "$RESET" >"$hdr"
+    printf '{"first":true}\n200'
+  else
+    [ -n "$hdr" ] && printf 'RateLimit-Remaining: 80\r\nRateLimit-Reset: 9999999999\r\n' >"$hdr"
+    printf '{"second":true}\n200'
+  fi
+}
+_gl GET "/a" >/dev/null
+_gl GET "/b" >/dev/null
+eq "remaining below the floor: exactly one pacing sleep before the next call" \
+  "1" "$(wc -l <"$SLEEPLOG" | tr -d ' ')"
+SLEPT=$(tail -1 "$SLEEPLOG")
+case "$SLEPT" in
+  2[5-9]|30) printf '  + %s\n' "remaining below the floor: slept close to the reset delta (${SLEPT}s)" ;;
+  *) printf '  x %s: got %ss\n' "remaining below the floor: slept close to the reset delta" "$SLEPT"; FAIL=$((FAIL + 1)) ;;
+esac
+rm -f "$CALLS"
+unset -f curl
+
+: >"$SLEEPLOG"
+_GL_RL_REMAINING=""; _GL_RL_RESET=""
+CALLS="$(mktemp)"; : >"$CALLS"
+curl() {
+  printf 'x' >>"$CALLS"
+  local hdr n; hdr=$(_curl_header_arg "$@"); n=$(wc -c <"$CALLS" | tr -d ' ')
+  if [ "$n" -eq 1 ]; then
+    [ -n "$hdr" ] && printf 'Retry-After: 4\r\n' >"$hdr"
+    printf '\n429'
+  else
+    [ -n "$hdr" ] && printf 'RateLimit-Remaining: 90\r\n' >"$hdr"
+    printf '{"ok":true}\n200'
+  fi
+}
+OUT=$(_gl GET "/retried")
+eq "429 with Retry-After: body from the retry"        '{"ok":true}' "$OUT"
+eq "429 with Retry-After: slept exactly that, not a fixed backoff" "4" "$(cat "$SLEEPLOG")"
+eq "429 with Retry-After: exactly two curl calls"     "2" "$(wc -c <"$CALLS" | tr -d ' ')"
+rm -f "$CALLS"
+unset -f curl
+rm -f "$SLEEPLOG"
+unset -f _curl_header_arg sleep
+
 if [ "$FAIL" -eq 0 ]; then echo "test-gitlab: all checks passed"; exit 0
 else echo "test-gitlab: $FAIL check(s) failed"; exit 1; fi

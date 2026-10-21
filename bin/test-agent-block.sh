@@ -65,20 +65,24 @@ curl() {
   #   unassign      -> PUT with assignee_ids= (numeric, not logins)
   # All three writes land on the SAME path and method, so they are told apart by
   # payload rather than by URL the way the Forgejo stub could.
+  # _gl now reads headers via -D and the status via -w '\n%{http_code}', so
+  # every answer below must carry a trailing "\n200" -- a bare body (the old
+  # `curl -sf` contract) would be misread as an empty body plus a garbage
+  # status code.
   case "$url" in
-    */issues/42/notes)    printf '%s' "$data" >"$COMMENT_CAP"; printf '{}' ;;
-    */users\?username=*)  printf '[{"id":7,"username":"igorbot"}]' ;;
-    */labels*)            printf '[{"id":1,"name":"Status/Blocked"}]' ;;
+    */issues/42/notes)    printf '%s' "$data" >"$COMMENT_CAP"; printf '{}\n200' ;;
+    */users\?username=*)  printf '[{"id":7,"username":"igorbot"}]\n200' ;;
+    */labels*)            printf '[{"id":1,"name":"Status/Blocked"}]\n200' ;;
     */issues/42)
       case "$method" in
-        GET) [ -n "${ISSUE_GET_FAIL:-}" ] && return 22; printf '%s' "$ISSUE_FIXTURE" ;;
+        GET) [ -n "${ISSUE_GET_FAIL:-}" ] && return 22; printf '%s\n200' "$ISSUE_FIXTURE" ;;
         PUT)
           case "$data" in
             *'"add_labels"'*)    printf '%s' "$data" >"$LABEL_CAP" ;;
             *'"description"'*)   printf '%s' "$data" >"$BODY_PATCH_CAP" ;;
             *'"assignee_ids"'*)  printf '%s' "$data" >"$ASSIGN_CAP" ;;
           esac
-          printf '{}'
+          printf '{}\n200'
           ;;
       esac
       ;;
