@@ -298,6 +298,111 @@ eq "the WIP-only case still calls forgejo_unassign_all (resume path preserved)" 
 eq "the orphan case still comments + unassigns + cleans up the worktree" "true" \
   "$(printf '%s\n' "$RECOVERY_BLOCK" | grep -q 'orphaned, re-queueing' && printf '%s\n' "$RECOVERY_BLOCK" | grep -q 'git worktree remove' && echo true || echo false)"
 
+# ---------------------------------------------------------------------------
+# igor#25: a rate-limited (429) or otherwise-failed PR lookup must not be
+# read as "no PR exists" -- that is what let the recovery sweep re-queue (and
+# discovery re-claim) an issue that was actually in flight, and crashed the
+# tick when the write that followed also failed (exit 22 under set -e).
+# These run the EXACT inline script text extracted from bin/tick.sh above
+# (not a reimplementation) in an isolated `bash` process with the same
+# `set -euo pipefail` tick.sh itself runs under, so a crash in the real code
+# surfaces here exactly as it would mid-tick.
+# ---------------------------------------------------------------------------
+run_recovery_block() {
+  # $1: path to a stub file defining forgejo_my_assigned / forgejo_bot_prs_for_issue /
+  # forgejo_comment / forgejo_unassign_all for the scenario under test.
+  local stub="$1" harness="$TMPROOT/recovery-harness.sh"
+  {
+    echo 'set -euo pipefail'
+    printf '. "%s/../lib/checkpoint.sh"\n' "$HERE"
+    echo 'BOT_USER="igor"'
+    echo 'AGENT_STATE_DIR="/tmp/igor-test-recovery-nonexistent"'
+    echo 'repo_path_for() { printf "/nonexistent-repo-path-%s" "$1"; }'
+    echo 'worktree_key() { printf "%s-%s" "$1" "$2"; }'
+    echo 'cleanup_agent_branches() { :; }'
+    printf '%s\n' 'log() { printf "[log] %s\n" "$1"; }'
+    cat "$stub"
+    printf '%s\n' "$RECOVERY_BLOCK"
+    echo 'echo RECOVERY_BLOCK_COMPLETED'
+  } >"$harness"
+  bash "$harness"
+}
+
+echo "== recovery sweep: a failed PR lookup is not read as \"no PR exists\" (igor#25) =="
+STUB1="$TMPROOT/stub1.sh"; CALLLOG1="$TMPROOT/calls1.log"; : >"$CALLLOG1"
+cat >"$STUB1" <<EOF
+CALLLOG="$CALLLOG1"
+forgejo_my_assigned() { printf '%s' '[{"repository":{"full_name":"acme/x"},"number":490}]'; }
+forgejo_bot_prs_for_issue() { return 1; }
+forgejo_comment() { printf 'comment %s\n' "\$*" >>"\$CALLLOG"; }
+forgejo_unassign_all() { printf 'unassign %s\n' "\$*" >>"\$CALLLOG"; }
+EOF
+OUT1=$(run_recovery_block "$STUB1"); RC1=$?
+eq "a failed lookup does not crash the sweep" "0" "$RC1"
+eq "...and the sweep still reaches the end (continues past the orphan)" "true" \
+  "$(grep -q 'RECOVERY_BLOCK_COMPLETED' <<<"$OUT1" && echo true || echo false)"
+eq "...logging a warning naming the repo#num" "true" \
+  "$(grep -q 'warning.*acme/x#490' <<<"$OUT1" && echo true || echo false)"
+eq "no comment or unassign happens on a failed lookup" "true" \
+  "$([ ! -s "$CALLLOG1" ] && echo true || echo false)"
+
+echo "== recovery sweep: a failing forgejo_comment does not crash the tick (case c) (igor#25) =="
+STUB3="$TMPROOT/stub3.sh"; CALLLOG3="$TMPROOT/calls3.log"; : >"$CALLLOG3"
+cat >"$STUB3" <<EOF
+CALLLOG="$CALLLOG3"
+forgejo_my_assigned() { printf '%s' '[{"repository":{"full_name":"acme/x"},"number":490}]'; }
+forgejo_bot_prs_for_issue() { printf '%s' '[]'; }
+forgejo_comment() { printf 'comment-attempted\n' >>"\$CALLLOG"; return 1; }
+forgejo_unassign_all() { printf 'unassign %s\n' "\$*" >>"\$CALLLOG"; }
+EOF
+OUT3=$(run_recovery_block "$STUB3"); RC3=$?
+eq "a failing forgejo_comment does not crash the tick" "0" "$RC3"
+eq "...and the sweep still reaches the end" "true" \
+  "$(grep -q 'RECOVERY_BLOCK_COMPLETED' <<<"$OUT3" && echo true || echo false)"
+eq "...still unassigning the true orphan despite the comment failure" "true" \
+  "$(grep -q unassign "$CALLLOG3" && echo true || echo false)"
+
+echo "== discovery: a failed open-PR listing skips claiming from that repo (igor#25) =="
+DISC_ANCHOR=$(grep -n 'scanning \$REPO_COUNT validated repo(s) for claimable work' "$TICK" | head -1 | cut -d: -f1)
+DISC_START=$(awk -v start="$DISC_ANCHOR" 'NR>=start && /^while IFS= read -r repo_line; do$/ {print NR; exit}' "$TICK")
+DISC_END=$(awk -v start="$DISC_START" 'NR>start && /^done <<<"\$VALIDATED_REPOS_JSON"$/ {print NR; exit}' "$TICK")
+DISCOVERY_BLOCK=$(sed -n "${DISC_START},${DISC_END}p" "$TICK")
+
+run_discovery_block() {
+  local stub="$1" harness="$TMPROOT/discovery-harness.sh"
+  {
+    echo 'set -euo pipefail'
+    printf '. "%s/../lib/forgejo.sh"\n' "$HERE"
+    printf '. "%s/../lib/checkpoint.sh"\n' "$HERE"
+    echo 'BOT_USER="igor"'
+    printf '%s\n' 'log() { printf "[log] %s\n" "$1"; }'
+    echo 'repo_path_for() { printf "/nonexistent-repo-path-%s" "$1"; }'
+    printf 'VALIDATED_REPOS_JSON=%s\n' "'{\"full_name\":\"acme/x\",\"default_branch\":\"master\"}'"
+    echo 'WINNER=""; WINNER_REPO=""; WINNER_PR_BASE=""; WINNER_CREATED=""'
+    cat "$stub"
+    printf '%s\n' "$DISCOVERY_BLOCK"
+    echo 'echo "WINNER=[${WINNER}]"'
+  } >"$harness"
+  bash "$harness"
+}
+
+STUB2="$TMPROOT/stub2.sh"
+cat >"$STUB2" <<'EOF'
+forgejo_find_claimable() { printf '%s' '[{"number":5,"created_at":"2020-01-01T00:00:00Z","updated_at":"2020-01-01T00:00:00Z","title":"t"}]'; }
+forgejo_claim_quiet_seconds_remaining() { printf '0'; }
+forgejo_open_prs() { return 1; }
+forgejo_bot_prs_for_issue() { printf '%s' '[]'; }
+forgejo_append_issue_body() { :; }
+forgejo_add_label() { :; }
+forgejo_assign() { :; }
+forgejo_comment() { :; }
+EOF
+OUT2=$(run_discovery_block "$STUB2")
+eq "a failed open-PR listing is not claimed from (igor#25)" "true" \
+  "$(grep -q 'WINNER=\[\]' <<<"$OUT2" && echo true || echo false)"
+eq "...and logs a warning naming the repo" "true" \
+  "$(grep -q 'warning.*acme/x' <<<"$OUT2" && echo true || echo false)"
+
 echo "== ship path: opening/finalizing a PR no longer clears the issue assignment (igor#496 amendment) =="
 PR_OUTCOME_LINE=$(grep -n 'log "outcome: PR (' "$TICK" | head -1 | cut -d: -f1)
 NOOP_ELSE_LINE=$(awk -v start="$PR_OUTCOME_LINE" 'NR>start && /^else$/ {print NR; exit}' "$TICK")
