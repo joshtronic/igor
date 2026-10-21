@@ -4006,7 +4006,10 @@ if [ "$ORPHAN_COUNT" -gt 0 ]; then
     O_REPO=$(jq -r '.repo' <<<"$line")
     O_NUM=$(jq -r '.num' <<<"$line")
 
-    O_PR_HISTORY=$(forgejo_bot_prs_for_issue "$O_REPO" "$O_NUM" "$BOT_USER" 2>/dev/null || echo '[]')
+    if ! O_PR_HISTORY=$(forgejo_bot_prs_for_issue "$O_REPO" "$O_NUM" "$BOT_USER" 2>/dev/null); then
+      log "warning: could not list PRs for ${O_REPO}#${O_NUM} -- skipping this orphan this tick (lookup failed, not re-queueing)"
+      continue
+    fi
     O_OPEN_PRS=$(jq -c '[.[] | select(.state == "open")]' <<<"$O_PR_HISTORY")
     O_OPEN_TOTAL=$(jq 'length' <<<"$O_OPEN_PRS")
     O_OPEN_NONWIP=$(checkpoint_count_non_wip "$O_OPEN_PRS")
@@ -4029,8 +4032,10 @@ if [ "$ORPHAN_COUNT" -gt 0 ]; then
     # Case (c): true orphan -> re-queue.
     log "recovery: ${O_REPO}#${O_NUM} orphaned, re-queueing"
     forgejo_comment "$O_REPO" "$O_NUM" \
-      "Previous tick was interrupted before completion. Re-queueing -- the next tick will pick this up."
-    forgejo_unassign_all "$O_REPO" "$O_NUM"
+      "Previous tick was interrupted before completion. Re-queueing -- the next tick will pick this up." \
+      || log "warning: could not comment on ${O_REPO}#${O_NUM} while re-queueing (continuing)"
+    forgejo_unassign_all "$O_REPO" "$O_NUM" \
+      || log "warning: could not unassign ${O_REPO}#${O_NUM} while re-queueing (continuing)"
 
     O_LOCAL=$(repo_path_for "$O_REPO")
     O_WT="$AGENT_STATE_DIR/worktrees/$(worktree_key "$O_REPO" "$O_NUM")"
@@ -5118,8 +5123,8 @@ while IFS= read -r repo_line; do
   # The open-PR listing is repo-scoped and issue-independent, so it is fetched
   # once here rather than per candidate.
   R_OPEN_PRS=$(forgejo_open_prs "$R_NAME" 2>/dev/null) || {
-    R_OPEN_PRS='[]'
-    log "warning: could not list open PRs on ${R_NAME} -- in-flight check degraded to \"nothing covering\" this tick"
+    log "warning: could not list open PRs on ${R_NAME} -- skipping this repo for claiming this tick"
+    continue
   }
   REPO_CONTENDER=""
   while read -r candidate; do
