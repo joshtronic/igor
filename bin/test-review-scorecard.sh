@@ -19,6 +19,15 @@ command -v jq >/dev/null 2>&1 || { echo "test-review-scorecard: jq absent -- ski
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 
+# Doubling curl means the REAL `_gl` runs, and it reads its persisted
+# rate-limit counters from AGENT_STATE_DIR before every request -- so without
+# redirecting that, this suite would pace against production's counters and
+# sleep off a real GitLab window mid-test (measured: 12 x
+# GITLAB_RATELIMIT_MAX_SLEEP against a throttled state file). Exported, not
+# merely set: the script under test runs as a CHILD bash process.
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+export AGENT_STATE_DIR="$TMP"
+
 FAIL=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
@@ -80,7 +89,7 @@ eq "both PRs scored" "PRs scored (had automated review artifacts): 2 of 2 merged
 eq "nothing excluded, so no excluded line" "" "$(grep -F 'could not be fetched' <<<"$OUT")"
 
 echo "== one thread unreadable: excluded and said so, not silently dropped =="
-ERRFILE=$(mktemp); trap 'rm -f "$ERRFILE"' EXIT
+ERRFILE="$TMP/err"
 export FAIL_PRS="2"
 OUT=$("$HERE/bin/review-scorecard.sh" acme/x 2>"$ERRFILE")
 ERR=$(cat "$ERRFILE")

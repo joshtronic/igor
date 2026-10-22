@@ -12,6 +12,14 @@ command -v jq >/dev/null 2>&1 || { echo "test-gitlab: jq absent -- skipping"; ex
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export GITLAB_URL="https://gitlab.invalid" GITLAB_TOKEN="test-token"
+# _gl persists its rate-limit counters under AGENT_STATE_DIR and reads them
+# before every request. Redirected at the TOP of the file rather than beside
+# the pacing section that needs it: "no real state" is a property of the whole
+# suite, and any section that reaches the real `_gl` -- today or after a later
+# edit -- would otherwise read production's counters and sleep off a real
+# GitLab window. Exported, so child processes and subshells see it too.
+RLSTATE="$(mktemp -d)"
+export AGENT_STATE_DIR="$RLSTATE"
 # shellcheck source=../lib/gitlab.sh
 . "$HERE/../lib/gitlab.sh"
 # shellcheck source=../lib/testlib.sh
@@ -579,12 +587,8 @@ unset -f _gl
 echo "== _gl: paces on RateLimit-Remaining/-Reset, retries 429 via Retry-After (igor#26) =="
 # `unset -f _gl` above removed the function outright (bash doesn't stack
 # definitions), so re-source to get the real _gl back -- this section tests
-# it directly, doubling curl itself rather than _gl. AGENT_STATE_DIR is
-# redirected FIRST and exported: the pacing counters are persisted there, so
-# without this the suite would both read production's counters (and sleep off
-# a real window) and leave its own fixtures behind for the next tick.
-RLSTATE="$(mktemp -d)"
-export AGENT_STATE_DIR="$RLSTATE"
+# it directly, doubling curl itself rather than _gl. The counters it paces off
+# live in $RLSTATE, redirected at the top of the file.
 . "$HERE/../lib/gitlab.sh"
 
 SLEEPLOG="$(mktemp)"; : >"$SLEEPLOG"
@@ -719,6 +723,22 @@ no "429 then a transport blip then 429: fails rather than rc0 with an empty body
   _gl GET "/mixed"
 eq "...having spent the whole attempt budget" "3" "$(wc -c <"$CALLS" | tr -d ' ')"
 rm -f "$CALLS"
+unset -f curl
+
+# Moving off `curl -sf` moved the body extraction off `$( )`, which stripped
+# every trailing newline, onto `${out%$'\n'*}`, which strips only the one that
+# `-w '\n%{http_code}'` added. A body that itself ends in a newline would then
+# come back with one MORE line than curl sent -- a byte-stream divergence from
+# the `_fj` contract this wrapper claims to share.
+_rl_clear
+curl() {
+  local hdr; hdr=$(_curl_header_arg "$@")
+  [ -n "$hdr" ] && printf 'RateLimit-Remaining: 90\r\n' >"$hdr"
+  printf '{"ok":true}\n\n200'
+}
+eq "a body ending in a newline is handed back newline-TERMINATED, not doubled" \
+  "1" "$(_gl GET "/trailing" | wc -l | tr -d ' ')"
+eq "and its content survives intact" '{"ok":true}' "$(_gl GET "/trailing")"
 unset -f curl
 
 # A non-numeric status (curl answering something unexpected) must fail closed.

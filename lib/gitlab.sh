@@ -159,7 +159,10 @@ _gl_rl_update() {
   [[ "$reset" =~ ^[0-9]+$ ]] || return 0
   file="$(_gl_rl_state_file)"
   mkdir -p "$(dirname "$file")" 2>/dev/null || return 0
-  tmp="$file.$$.tmp"
+  # $BASHPID, not $$: inside a command substitution $$ is still the PARENT
+  # shell's pid, and every real caller runs _gl in a subshell -- so two
+  # concurrent ones would pick the same temp name and race.
+  tmp="$file.$BASHPID.tmp"
   if printf '%s %s\n' "$remaining" "$reset" >"$tmp" 2>/dev/null; then
     mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp"
   else
@@ -279,6 +282,12 @@ _gl() {
 
     http_code="${out##*$'\n'}"
     resp_body="${out%$'\n'*}"
+    # `-w '\n%{http_code}'` contributes exactly one of the newlines stripped
+    # above; any left are the body's own. `curl -sf` handed its body through
+    # `$( )`, which collapsed all of them, and the single terminator was then
+    # re-added by the printf below -- so collapse them here too, or a body
+    # ending in a newline comes back one line longer than curl sent it.
+    while [ "${resp_body: -1}" = $'\n' ]; do resp_body="${resp_body%$'\n'}"; done
     _gl_rl_update "$header_tmp"
 
     if [ "$http_code" = "429" ]; then
