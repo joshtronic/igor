@@ -85,6 +85,130 @@ GITLAB_RETRY_COUNT=2
 GITLAB_RETRY_DELAY=1
 GITLAB_RETRY_CURL_CODES='7 28 35 52 56'
 
+# igorbot shares GitLab.com's Free-plan 100-req/min-per-user budget with every
+# other consumer of the same token (igor#26: a single tick burned the budget
+# in 20s and every other consumer, including the stonks deploy fetch, got
+# 429'd too). Pace off the RateLimit-* response headers so this process keeps
+# headroom for the others instead of running the budget to zero itself.
+# Hardcoded floor, no env knob -- one operator.
+GITLAB_RATELIMIT_FLOOR=20
+# GitLab's budget window is a minute, so no honest wait exceeds that. Cap every
+# rate-limit sleep: a bogus or far-future RateLimit-Reset/Retry-After would
+# otherwise wedge the tick indefinitely, and the budget refills on its own
+# schedule whatever the header claimed. Same reasoning as
+# REQUEST_MAX_RETRY_AFTER in lib/request.sh.
+GITLAB_RATELIMIT_MAX_SLEEP=60
+
+# -- `set -e` and the helpers below ----------------------------------------
+#
+# Every caller of lib/gitlab.sh runs under `set -euo pipefail` (bin/tick.sh,
+# bin/agent-*.sh), and these helpers are called as BARE STATEMENTS. A function
+# whose last executed command failed returns nonzero, and a bare call to it
+# aborts the caller -- even when that same failure is exempt from -e inside the
+# function body (a `cond && action` whose cond is false, a `grep` with no
+# match). So each one ends in an explicit `return 0` or `|| true` wherever a
+# false condition is a legitimate outcome rather than an error. Removing one of
+# those is not a cleanup; it is a crash in production.
+
+# _gl_rl_header <header-dump-file> <name> -- last matching header value,
+# trimmed, or empty. Last match wins (curl -D appends on redirects/retries
+# within one invocation; a later line is the newer answer). `|| true` per the
+# note above: grep exits 1 on no match.
+_gl_rl_header() {
+  grep -i "^${2}:" "$1" 2>/dev/null | tail -1 | cut -d: -f2- | tr -d '\r' | sed 's/^ *//' || true
+}
+
+# The counters are shared state, not per-process state, and that is load-
+# bearing for requirement 1 of igor#26. _gl writes the response body to
+# stdout, so every caller that needs the body either captures it
+# (`batch=$(_gl GET ...)` in _gl_paged, the hot paging loop igor#26 measured)
+# or pipes it to jq -- both run _gl in a SUBSHELL, and a counter kept in a
+# shell variable dies with it, so the next request would pace against nothing.
+# A tick also runs several bin/agent-*.sh processes against the same per-user
+# budget, which no in-memory value can span either. Hence a file: one line,
+# "<remaining> <reset>".
+_gl_rl_state_file() {
+  printf '%s/gitlab-ratelimit' "${AGENT_STATE_DIR:-$HOME/.local/state/agent}"
+}
+
+# _gl_rl_read -- "<remaining> <reset>" as last seen, or empty when the file is
+# absent, unreadable, or not a pair of integers. A past reset is returned
+# as-is: it means the window has already rolled, and _gl_rl_sleep_until
+# no-ops on it, which is the right answer without a staleness rule of its own.
+_gl_rl_read() {
+  local file remaining reset
+  file="$(_gl_rl_state_file)"
+  [ -f "$file" ] || return 0
+  read -r remaining reset <"$file" 2>/dev/null || return 0
+  [[ "$remaining" =~ ^[0-9]+$ ]] && [[ "$reset" =~ ^[0-9]+$ ]] || return 0
+  printf '%s %s' "$remaining" "$reset"
+}
+
+# _gl_rl_update <header-dump-file> -- record RateLimit-Remaining/-Reset for
+# the next request -- this process's or another's -- to pace against. Both
+# headers or neither: a response carrying only one of them leaves the file
+# alone rather than clobbering a good pair with half of one (GitLab always
+# sends them together). Write-then-rename, so a concurrent reader sees the old
+# pair or the new one and never half a line, and best-effort throughout: an
+# unwritable state dir degrades to no pacing, never to a failed request.
+_gl_rl_update() {
+  local remaining reset file tmp
+  remaining=$(_gl_rl_header "$1" "ratelimit-remaining")
+  reset=$(_gl_rl_header "$1" "ratelimit-reset")
+  [[ "$remaining" =~ ^[0-9]+$ ]] || return 0
+  [[ "$reset" =~ ^[0-9]+$ ]] || return 0
+  file="$(_gl_rl_state_file)"
+  mkdir -p "$(dirname "$file")" 2>/dev/null || return 0
+  # $BASHPID, not $$: inside a command substitution $$ is still the PARENT
+  # shell's pid, and every real caller runs _gl in a subshell -- so two
+  # concurrent ones would pick the same temp name and race.
+  tmp="$file.$BASHPID.tmp"
+  if printf '%s %s\n' "$remaining" "$reset" >"$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp"
+  else
+    rm -f "$tmp"
+  fi
+  return 0
+}
+
+# _gl_rl_sleep_until <epoch-seconds> -- sleep off the remainder of the window,
+# capped and never negative (a stale/past reset is a no-op, not a negative
+# sleep arg). An empty or non-numeric target is "nothing to wait for", which
+# is why callers can hand it an unparsed value directly.
+_gl_rl_sleep_until() {
+  local target="$1" delta
+  [[ "$target" =~ ^[0-9]+$ ]] || return 0
+  delta=$((target - $(date +%s)))
+  [ "$delta" -gt "$GITLAB_RATELIMIT_MAX_SLEEP" ] && delta="$GITLAB_RATELIMIT_MAX_SLEEP"
+  [ "$delta" -gt 0 ] && sleep "$delta"
+  return 0
+}
+
+# _gl_rl_pace -- called before every request. Once the last-seen remaining
+# count drops below the floor, hold off until the window resets rather than
+# spending the last few requests ourselves and 429ing every other consumer of
+# the same token.
+_gl_rl_pace() {
+  local pair
+  pair="$(_gl_rl_read)"
+  [ -n "$pair" ] || return 0
+  [ "${pair%% *}" -lt "$GITLAB_RATELIMIT_FLOOR" ] || return 0
+  _gl_rl_sleep_until "${pair##* }"
+  return 0
+}
+
+# _gl_rl_retry_after <header-dump-file> -- Retry-After in seconds, capped, or
+# empty when absent/non-numeric (GitLab sends a plain integer, never an
+# HTTP-date).
+_gl_rl_retry_after() {
+  local raw
+  raw=$(_gl_rl_header "$1" "retry-after")
+  [[ "$raw" =~ ^[0-9]+$ ]] || return 0
+  [ "$raw" -gt "$GITLAB_RATELIMIT_MAX_SLEEP" ] && raw="$GITLAB_RATELIMIT_MAX_SLEEP"
+  printf '%s' "$raw"
+  return 0
+}
+
 # _gl_proj <owner/name> -- URL-encode a project path for use as :id. Only the
 # slash needs encoding for the paths this harness uses; doing it with a
 # parameter expansion rather than jq keeps it usable in hot loops.
@@ -101,34 +225,109 @@ _gl_path() {
 
 # _gl <METHOD> <path> [json-body] -- the request wrapper. Same contract as
 # lib/forgejo.sh's _fj: buffered (so a retryable attempt can't emit a partial
-# body), re-emits the trailing newline curl produced, stays empty on a 204,
-# and logs ONLY the exhausted-transport case (an HTTP status is an answer and
-# would be pure noise -- a 404 for an absent agent.json is the common path).
+# body), newline-terminated, stays empty on a 204, and logs ONLY the
+# exhausted-transport/429 case (an ordinary HTTP status is an answer and would
+# be pure noise -- a 404 for an absent agent.json is the common path).
+# Paces on RateLimit-Remaining/-Reset before every attempt and
+# retries a 429 (never a server fault -- the request was rejected before it
+# reached a handler, so it is always safe to retry regardless of method)
+# honouring Retry-After, falling back to RateLimit-Reset when that header is
+# absent. No longer `curl -f`: that discarded headers along with the body, and
+# pacing needs them even on a non-2xx.
 _gl() {
   local method="$1" path="$2" body="${3:-}"
-  local attempts=1
+  local transport_attempts=1
   case "$method" in
-    GET|HEAD) attempts=$((GITLAB_RETRY_COUNT + 1)) ;;
+    GET|HEAD) transport_attempts=$((GITLAB_RETRY_COUNT + 1)) ;;
   esac
+  local rl_attempts=$((GITLAB_RETRY_COUNT + 1))
+  local max_attempts=$transport_attempts
+  [ "$rl_attempts" -gt "$max_attempts" ] && max_attempts=$rl_attempts
+
   local -a extra=()
   if [ -n "$body" ]; then
     extra=(-H "Content-Type: application/json" -d "$body")
   fi
-  local attempt out rc=0
-  for ((attempt = 1; attempt <= attempts; attempt++)); do
-    if out=$(curl -sf --connect-timeout "$GITLAB_CONNECT_TIMEOUT" --max-time "$GITLAB_MAX_TIME" -X "$method" \
+
+  local header_tmp
+  header_tmp=$(mktemp) || {
+    log "gitlab: ${method} ${path} -- mktemp failed, cannot capture headers" >&2
+    return 1
+  }
+  trap 'rm -f "$header_tmp"; trap - RETURN' RETURN
+
+  local attempt=0 transport_tries=0 rl_tries=0
+  local out rc http_code resp_body retry_after
+  while [ "$attempt" -lt "$max_attempts" ]; do
+    attempt=$((attempt + 1))
+    _gl_rl_pace
+    : >"$header_tmp"
+    if out=$(curl -s -D "$header_tmp" -w '\n%{http_code}' \
+        --connect-timeout "$GITLAB_CONNECT_TIMEOUT" --max-time "$GITLAB_MAX_TIME" -X "$method" \
         -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
         "${extra[@]+"${extra[@]}"}" \
         "$GITLAB_URL/api/v4${path}"); then
-      [ -n "$out" ] && printf '%s\n' "$out"
-      return 0
+      rc=0
     else
       rc=$?
     fi
-    [[ " $GITLAB_RETRY_CURL_CODES " == *" $rc "* ]] || return "$rc"
-    [ "$attempt" -lt "$attempts" ] && sleep "$GITLAB_RETRY_DELAY"
+
+    if [ "$rc" -ne 0 ]; then
+      transport_tries=$((transport_tries + 1))
+      [[ " $GITLAB_RETRY_CURL_CODES " == *" $rc "* ]] || return "$rc"
+      [ "$transport_tries" -lt "$transport_attempts" ] || break
+      sleep "$GITLAB_RETRY_DELAY"
+      continue
+    fi
+
+    http_code="${out##*$'\n'}"
+    resp_body="${out%$'\n'*}"
+    # `-w '\n%{http_code}'` contributes exactly one of the newlines stripped
+    # above; any left are the body's own. `curl -sf` handed its body through
+    # `$( )`, which collapsed all of them, and the single terminator was then
+    # re-added by the printf below -- so collapse them here too, or a body
+    # ending in a newline comes back one line longer than curl sent it.
+    while [ "${resp_body: -1}" = $'\n' ]; do resp_body="${resp_body%$'\n'}"; done
+    _gl_rl_update "$header_tmp"
+
+    if [ "$http_code" = "429" ]; then
+      rl_tries=$((rl_tries + 1))
+      if [ "$rl_tries" -ge "$rl_attempts" ]; then
+        log "gitlab: ${method} ${path} -- exhausted 429 retries" >&2
+        return 22
+      fi
+      retry_after=$(_gl_rl_retry_after "$header_tmp")
+      if [ -n "$retry_after" ]; then
+        sleep "$retry_after"
+      else
+        # This 429's OWN reset header, not the persisted pair: that one may
+        # predate the rejection, and _gl_rl_sleep_until validates it anyway.
+        _gl_rl_sleep_until "$(_gl_rl_header "$header_tmp" "ratelimit-reset")"
+      fi
+      continue
+    fi
+
+    # The numeric guard fails CLOSED. `[ "$http_code" -ge 400 ]` on a
+    # non-numeric status exits 2, which reads as "not an error" and falls
+    # through to printing the body with rc 0.
+    if ! [[ "$http_code" =~ ^[0-9]+$ ]] || [ "$http_code" -ge 400 ]; then
+      return 22
+    fi
+
+    [ -n "$resp_body" ] && printf '%s\n' "$resp_body"
+    return 0
   done
-  log "gitlab: ${method} ${path} failed after ${attempts} attempt(s) (curl exit ${rc})" >&2
+  # Falling out of the loop is always a failure, but `rc` need not say so: it
+  # holds the LAST curl exit, and a 429 leaves that at 0 (the request reached
+  # the server and got an answer). A run that spends its budget ending on a
+  # 429 -- reachable for a GET as 429, retryable transport blip, 429 -- would
+  # otherwise return 0 with nothing on stdout, which every caller reads as a
+  # successful empty response.
+  if [ "$rc" -eq 0 ]; then
+    log "gitlab: ${method} ${path} -- no usable response after ${attempt} attempt(s)" >&2
+    return 22
+  fi
+  log "gitlab: ${method} ${path} failed after ${attempt} attempt(s) (curl exit ${rc})" >&2
   return "$rc"
 }
 

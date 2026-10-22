@@ -19,6 +19,15 @@ command -v jq >/dev/null 2>&1 || { echo "test-review-scorecard: jq absent -- ski
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 
+# Doubling curl means the REAL `_gl` runs, and it reads its persisted
+# rate-limit counters from AGENT_STATE_DIR before every request -- so without
+# redirecting that, this suite would pace against production's counters and
+# sleep off a real GitLab window mid-test (measured: 12 x
+# GITLAB_RATELIMIT_MAX_SLEEP against a throttled state file). Exported, not
+# merely set: the script under test runs as a CHILD bash process.
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+export AGENT_STATE_DIR="$TMP"
+
 FAIL=0
 ok()  { printf '  + %s\n' "$1"; }
 bad() { printf '  x %s\n' "$1"; FAIL=$((FAIL + 1)); }
@@ -41,9 +50,13 @@ FIXTURE_COMMENTS=$(jq -n -c --arg h "$REVIEW_HEADER" \
   '[{author: {username: "igor"}, system: false, created_at: "2026-01-01T00:00:00Z",
      body: ($h + "\n\nCI for `abc1234`: **success**\n\nLooks good.")}]')
 
+# _gl reads the status via -w '\n%{http_code}', so every answer below carries a
+# trailing "\n<code>" -- a bare body is read as a garbage status code, which
+# now fails closed rather than being waved through as a 2xx.
+#
 # FAIL_PRS is the space-separated list of PR numbers whose comment fetch should
-# answer HTTP >= 400. `-sf` makes that curl exit 22, which _fj deliberately does
-# not retry -- so the failure path costs no sleeps.
+# answer HTTP >= 400. _gl deliberately does not retry an HTTP answer -- so the
+# failure path costs no sleeps.
 curl() {
   local arg url='' n
   for arg in "$@"; do case "$arg" in http*) url="$arg" ;; esac; done
@@ -51,13 +64,13 @@ curl() {
   # and state=all (GitLab makes `merged` its own state, so state=closed alone
   # would return only REJECTED MRs and the scorecard would see zero merges).
   case "$url" in
-    *"/merge_requests?state=all"*"page=1"*) printf '%s' "$FIXTURE_PULLS" ;;
-    *"/merge_requests?state=all"*) printf '%s' '[]' ;;
+    *"/merge_requests?state=all"*"page=1"*) printf '%s\n200' "$FIXTURE_PULLS" ;;
+    *"/merge_requests?state=all"*) printf '%s\n200' '[]' ;;
     *"/notes"*)
       n=${url##*/merge_requests/}; n=${n%%/notes*}
-      case " ${FAIL_PRS:-} " in *" $n "*) return 22 ;; esac
-      printf '%s' "$FIXTURE_COMMENTS" ;;
-    *) return 22 ;;
+      case " ${FAIL_PRS:-} " in *" $n "*) printf '\n500'; return 0 ;; esac
+      printf '%s\n200' "$FIXTURE_COMMENTS" ;;
+    *) printf '\n404' ;;
   esac
 }
 export -f curl
@@ -76,7 +89,7 @@ eq "both PRs scored" "PRs scored (had automated review artifacts): 2 of 2 merged
 eq "nothing excluded, so no excluded line" "" "$(grep -F 'could not be fetched' <<<"$OUT")"
 
 echo "== one thread unreadable: excluded and said so, not silently dropped =="
-ERRFILE=$(mktemp); trap 'rm -f "$ERRFILE"' EXIT
+ERRFILE="$TMP/err"
 export FAIL_PRS="2"
 OUT=$("$HERE/bin/review-scorecard.sh" acme/x 2>"$ERRFILE")
 ERR=$(cat "$ERRFILE")
