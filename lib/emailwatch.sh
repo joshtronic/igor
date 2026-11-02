@@ -34,6 +34,14 @@ if ! declare -F log >/dev/null; then
   log() { printf '[agent] %s\n' "$*" >&2; }
 fi
 
+# Keeps this module sourceable standalone (tests) without a second copy of
+# the helper's body: a copy would quietly outlive any later fix to the real
+# one, and the tests are what prove that behavior.
+if ! declare -F yesterday_date >/dev/null; then
+  # shellcheck source=datetime.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/datetime.sh"
+fi
+
 # Defers to bin/tick.sh's own definition when sourced there, so enumeration
 # and do_emailwatch_tick's parseability guard can never read different files;
 # the literal is the standalone-test fallback, same pattern as log above.
@@ -48,9 +56,8 @@ _emailwatch_state_file() {
 # emailwatch_window_day -- the day under review: yesterday, whole and closed.
 # Same discipline as logwatch_window_day -- a partial day can't be judged
 # "the email never went out" while there's still time left for it to.
-# Portable (GNU then BSD date, matching the rest of tick.sh).
 emailwatch_window_day() {
-  date -d '-1 days' +%F 2>/dev/null || date -v-1d +%F
+  yesterday_date
 }
 
 # emailwatch_done_today -- true once today's pass has already reviewed

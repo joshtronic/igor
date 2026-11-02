@@ -445,6 +445,49 @@ has "yet the signature still reaches the bar" \
 eq "and it is not also counted as a transient" "0" \
   "$(logwatch_distinct_transients "$UNTIMED")"
 
+echo "== logwatch_window_day: survives the DST fall-back day (igor#34) =="
+# logwatch_window_day() is a one-liner in bin/tick.sh, not lib/logwatch.sh --
+# pull its current definition out and eval it, so this test fails loudly if
+# the call site ever reverts to a now-relative `date -d yesterday`/`-1 days`
+# form instead of the shared noon-anchored lib/datetime.sh helper.
+# A miss is a failure, not a skip: a reformat that splits the one-liner across
+# two lines would otherwise silence this whole matrix while still reporting
+# green. Failing says "update the grep, or move the function into
+# lib/logwatch.sh" out loud.
+WINDOW_DAY_LINE="$(grep '^logwatch_window_day() {' "$HERE/bin/tick.sh")"
+if [ -z "$WINDOW_DAY_LINE" ]; then
+  echo "  x logwatch_window_day() is no longer a one-liner in bin/tick.sh -- DST matrix not run"
+  FAIL=$((FAIL + 1))
+else
+  # shellcheck source=lib/datetime.sh
+  . "$HERE/lib/datetime.sh"
+  eval "$WINDOW_DAY_LINE"
+  TZ_SAVED="${TZ-}"
+  export TZ=America/Chicago
+  MOCK_TODAY=""
+  date() {
+    if [ "$1" = "+%F" ] && [ "$#" -eq 1 ] && [ -n "$MOCK_TODAY" ]; then
+      printf '%s\n' "$MOCK_TODAY"
+    else
+      command date "$@"
+    fi
+  }
+  MOCK_TODAY="2026-11-01"
+  eq "2026-11-01 (25h fall-back day) resolves to the day before, not itself" \
+    "2026-10-31" "$(logwatch_window_day)"
+  MOCK_TODAY="2026-11-02"
+  eq "the day after fall-back resolves to fall-back day itself" \
+    "2026-11-01" "$(logwatch_window_day)"
+  MOCK_TODAY="2026-03-08"
+  eq "2026-03-08 (23h spring-forward day) resolves to the day before" \
+    "2026-03-07" "$(logwatch_window_day)"
+  MOCK_TODAY="2026-06-15"
+  eq "an ordinary day resolves to the day before" \
+    "2026-06-14" "$(logwatch_window_day)"
+  unset -f date
+  if [ -n "$TZ_SAVED" ]; then export TZ="$TZ_SAVED"; else unset TZ; fi
+fi
+
 if [ "$FAIL" -eq 0 ]; then
   echo "test-logwatch: all checks passed"
 else

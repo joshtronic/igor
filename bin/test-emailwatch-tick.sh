@@ -22,6 +22,8 @@ command -v jq >/dev/null 2>&1 || { echo "test-emailwatch-tick: jq absent -- skip
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 TICK="$HERE/bin/tick.sh"
 
+# shellcheck source=../lib/datetime.sh
+. "$HERE/lib/datetime.sh"
 # shellcheck source=../lib/emailwatch.sh
 . "$HERE/lib/emailwatch.sh"
 # shellcheck source=../lib/testlib.sh
@@ -115,7 +117,7 @@ reset_state() {
 JOURNAL_FIXTURE=""
 journalctl() { printf '%s\n' "$JOURNAL_FIXTURE"; }
 
-YEST=$(date -d '-1 days' +%F 2>/dev/null || date -v-1d +%F)
+YEST=$(yesterday_date)
 
 echo "== each emailwatch opt-in gate names the same env vars as the sender's own gate =="
 # Drift either way is a defect: a gate stricter than the sender's files a
