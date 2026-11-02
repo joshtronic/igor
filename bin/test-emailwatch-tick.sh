@@ -22,6 +22,8 @@ command -v jq >/dev/null 2>&1 || { echo "test-emailwatch-tick: jq absent -- skip
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 TICK="$HERE/bin/tick.sh"
 
+# shellcheck source=../lib/datetime.sh
+. "$HERE/lib/datetime.sh"
 # shellcheck source=../lib/emailwatch.sh
 . "$HERE/lib/emailwatch.sh"
 # shellcheck source=../lib/testlib.sh

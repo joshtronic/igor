@@ -15,6 +15,13 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../lib/emailwatch.sh
 . "$HERE/../lib/emailwatch.sh"
 
+# Every later day-stamp assertion compares against $YEST, captured once under
+# the runner's own TZ, so the DST matrix below must hand the zone back when
+# it is done or those assertions compare two different calendars (a UTC
+# runner late on a Chicago evening read 2026-11-01 vs 2026-10-31).
+TZ_SAVED="${TZ-}"
+restore_tz() { if [ -n "$TZ_SAVED" ]; then export TZ="$TZ_SAVED"; else unset TZ; fi; }
+
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 export AGENT_STATE_DIR="$TMP"
 SF="$TMP/discretionary-state.json"
@@ -55,6 +62,7 @@ MOCK_TODAY="2026-06-15"
 eq "an ordinary day resolves to the day before" \
   "2026-06-14" "$(emailwatch_window_day)"
 unset -f date
+restore_tz
 
 echo "== done-today round trip (mirrors logwatch's day-stamp) =="
 rm -f "$SF"

@@ -450,13 +450,19 @@ echo "== logwatch_window_day: survives the DST fall-back day (igor#34) =="
 # pull its current definition out and eval it, so this test fails loudly if
 # the call site ever reverts to a now-relative `date -d yesterday`/`-1 days`
 # form instead of the shared noon-anchored lib/datetime.sh helper.
+# A miss is a failure, not a skip: a reformat that splits the one-liner across
+# two lines would otherwise silence this whole matrix while still reporting
+# green. Failing says "update the grep, or move the function into
+# lib/logwatch.sh" out loud.
 WINDOW_DAY_LINE="$(grep '^logwatch_window_day() {' "$HERE/bin/tick.sh")"
 if [ -z "$WINDOW_DAY_LINE" ]; then
-  echo "test-logwatch: could not find logwatch_window_day() in bin/tick.sh -- skipping"
+  echo "  x logwatch_window_day() is no longer a one-liner in bin/tick.sh -- DST matrix not run"
+  FAIL=$((FAIL + 1))
 else
   # shellcheck source=lib/datetime.sh
   . "$HERE/lib/datetime.sh"
   eval "$WINDOW_DAY_LINE"
+  TZ_SAVED="${TZ-}"
   export TZ=America/Chicago
   MOCK_TODAY=""
   date() {
@@ -479,6 +485,7 @@ else
   eq "an ordinary day resolves to the day before" \
     "2026-06-14" "$(logwatch_window_day)"
   unset -f date
+  if [ -n "$TZ_SAVED" ]; then export TZ="$TZ_SAVED"; else unset TZ; fi
 fi
 
 if [ "$FAIL" -eq 0 ]; then

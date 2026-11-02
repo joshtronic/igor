@@ -34,12 +34,12 @@ if ! declare -F log >/dev/null; then
   log() { printf '[agent] %s\n' "$*" >&2; }
 fi
 
-# Fallback yesterday_date (lib/datetime.sh), same pattern as log above --
-# this module must stay sourceable standalone.
+# Keeps this module sourceable standalone (tests) without a second copy of
+# the helper's body: a copy would quietly outlive any later fix to the real
+# one, and the tests are what prove that behavior.
 if ! declare -F yesterday_date >/dev/null; then
-  yesterday_date() {
-    date -d "$(date +%F) 12:00 yesterday" +%F 2>/dev/null || date -v-1d -v12H +%F
-  }
+  # shellcheck source=datetime.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/datetime.sh"
 fi
 
 # Defers to bin/tick.sh's own definition when sourced there, so enumeration
