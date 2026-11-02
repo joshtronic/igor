@@ -87,6 +87,8 @@ unset env_file_hint
 
 # -- Library ----------------------------------------------------
 
+# shellcheck source=lib/datetime.sh
+. "$AGENT_HOME/lib/datetime.sh"
 # shellcheck source=lib/gitlab.sh
 . "$AGENT_HOME/lib/gitlab.sh"
 # shellcheck source=lib/context-source.sh
@@ -2422,9 +2424,8 @@ do_sports_tick() {
   # subject line must name the same day, and a tick that straddles midnight
   # would otherwise file the ledger under a date its own subject disagrees
   # with, aging every story a day early.
-  # Portable across GNU (Linux server) and BSD (macOS dev) date.
   local ydash ycompact today
-  ydash=$(date -d "-1 days" +%F 2>/dev/null || date -v-1d +%F 2>/dev/null)
+  ydash=$(yesterday_date)
   ycompact=${ydash//-/}
   today=$(date +%Y-%m-%d)
 
@@ -2708,7 +2709,7 @@ LOGWATCH_MARKER='<!-- agent:logwatch -->'
 # The day under review: yesterday, whole and closed. Never today -- a partial
 # day cannot be counted against a recurrence bar without under-reporting
 # everything that had not happened yet when the pass ran.
-logwatch_window_day() { date -d 'yesterday' +%Y-%m-%d; }
+logwatch_window_day() { yesterday_date; }
 
 logwatch_done_today() {
   local state_file

@@ -445,6 +445,42 @@ has "yet the signature still reaches the bar" \
 eq "and it is not also counted as a transient" "0" \
   "$(logwatch_distinct_transients "$UNTIMED")"
 
+echo "== logwatch_window_day: survives the DST fall-back day (igor#34) =="
+# logwatch_window_day() is a one-liner in bin/tick.sh, not lib/logwatch.sh --
+# pull its current definition out and eval it, so this test fails loudly if
+# the call site ever reverts to a now-relative `date -d yesterday`/`-1 days`
+# form instead of the shared noon-anchored lib/datetime.sh helper.
+WINDOW_DAY_LINE="$(grep '^logwatch_window_day() {' "$HERE/bin/tick.sh")"
+if [ -z "$WINDOW_DAY_LINE" ]; then
+  echo "test-logwatch: could not find logwatch_window_day() in bin/tick.sh -- skipping"
+else
+  # shellcheck source=lib/datetime.sh
+  . "$HERE/lib/datetime.sh"
+  eval "$WINDOW_DAY_LINE"
+  export TZ=America/Chicago
+  MOCK_TODAY=""
+  date() {
+    if [ "$1" = "+%F" ] && [ "$#" -eq 1 ] && [ -n "$MOCK_TODAY" ]; then
+      printf '%s\n' "$MOCK_TODAY"
+    else
+      command date "$@"
+    fi
+  }
+  MOCK_TODAY="2026-11-01"
+  eq "2026-11-01 (25h fall-back day) resolves to the day before, not itself" \
+    "2026-10-31" "$(logwatch_window_day)"
+  MOCK_TODAY="2026-11-02"
+  eq "the day after fall-back resolves to fall-back day itself" \
+    "2026-11-01" "$(logwatch_window_day)"
+  MOCK_TODAY="2026-03-08"
+  eq "2026-03-08 (23h spring-forward day) resolves to the day before" \
+    "2026-03-07" "$(logwatch_window_day)"
+  MOCK_TODAY="2026-06-15"
+  eq "an ordinary day resolves to the day before" \
+    "2026-06-14" "$(logwatch_window_day)"
+  unset -f date
+fi
+
 if [ "$FAIL" -eq 0 ]; then
   echo "test-logwatch: all checks passed"
 else

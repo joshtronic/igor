@@ -115,7 +115,7 @@ reset_state() {
 JOURNAL_FIXTURE=""
 journalctl() { printf '%s\n' "$JOURNAL_FIXTURE"; }
 
-YEST=$(date -d '-1 days' +%F 2>/dev/null || date -v-1d +%F)
+YEST=$(yesterday_date)
 
 echo "== each emailwatch opt-in gate names the same env vars as the sender's own gate =="
 # Drift either way is a defect: a gate stricter than the sender's files a

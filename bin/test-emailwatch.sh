@@ -10,6 +10,8 @@ set -uo pipefail
 command -v jq >/dev/null 2>&1 || { echo "test-emailwatch: jq absent -- skipping"; exit 0; }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=../lib/datetime.sh
+. "$HERE/../lib/datetime.sh"
 # shellcheck source=../lib/emailwatch.sh
 . "$HERE/../lib/emailwatch.sh"
 
@@ -23,8 +25,36 @@ ok()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  + %s\n' "$d
 no()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then printf '  x %s (expected rc!=0)\n' "$d"; FAIL=$((FAIL + 1)); else printf '  + %s\n' "$d"; fi; }
 
 echo "== emailwatch_window_day: yesterday, not today =="
-YEST=$(date -d '-1 days' +%F 2>/dev/null || date -v-1d +%F)
+YEST=$(yesterday_date)
 eq "window day is yesterday" "$YEST" "$(emailwatch_window_day)"
+
+echo "== emailwatch_window_day: survives the DST fall-back day (igor#34) =="
+# date -d '-1 days' means now-minus-24h, which lands back on the fall-back
+# day itself when it's run late in the evening of the 25-hour day. Fake the
+# bare `date +%F` call yesterday_date makes to find "today," so the real
+# -d-based subtraction runs for each scenario under a fixed TZ.
+export TZ=America/Chicago
+MOCK_TODAY=""
+date() {
+  if [ "$1" = "+%F" ] && [ "$#" -eq 1 ] && [ -n "$MOCK_TODAY" ]; then
+    printf '%s\n' "$MOCK_TODAY"
+  else
+    command date "$@"
+  fi
+}
+MOCK_TODAY="2026-11-01"
+eq "2026-11-01 (25h fall-back day) resolves to the day before, not itself" \
+  "2026-10-31" "$(emailwatch_window_day)"
+MOCK_TODAY="2026-11-02"
+eq "the day after fall-back resolves to fall-back day itself" \
+  "2026-11-01" "$(emailwatch_window_day)"
+MOCK_TODAY="2026-03-08"
+eq "2026-03-08 (23h spring-forward day) resolves to the day before" \
+  "2026-03-07" "$(emailwatch_window_day)"
+MOCK_TODAY="2026-06-15"
+eq "an ordinary day resolves to the day before" \
+  "2026-06-14" "$(emailwatch_window_day)"
+unset -f date
 
 echo "== done-today round trip (mirrors logwatch's day-stamp) =="
 rm -f "$SF"
